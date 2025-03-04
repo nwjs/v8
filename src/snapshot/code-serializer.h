@@ -62,7 +62,7 @@ class CodeSerializer : public Serializer {
   struct OffThreadDeserializeData {
    public:
     bool HasResult() const { return !maybe_result.is_null(); }
-    Handle<Script> GetOnlyScript(LocalHeap* heap);
+    DirectHandle<Script> GetOnlyScript(LocalHeap* heap);
 
    private:
     friend class CodeSerializer;
@@ -89,7 +89,7 @@ class CodeSerializer : public Serializer {
   StartDeserializeOffThread(LocalIsolate* isolate,
                             AlignedCachedData* cached_data);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<SharedFunctionInfo>
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<SharedFunctionInfo>
   FinishOffThreadDeserialize(
       Isolate* isolate, OffThreadDeserializeData&& data,
       AlignedCachedData* cached_data, DirectHandle<String> source,
@@ -153,6 +153,7 @@ class SerializedCodeData : public SerializedData {
   base::Vector<const uint8_t> Payload() const;
 
   static uint32_t SourceHash(DirectHandle<String> source,
+                             DirectHandle<FixedArray> wrapped_arguments,
                              ScriptOriginOptions origin_options);
 
  private:

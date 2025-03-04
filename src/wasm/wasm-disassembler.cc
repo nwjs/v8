@@ -1027,7 +1027,7 @@ void ModuleDisassembler::PrintModule(Indentation indentation, size_t max_mb) {
         WasmEnabledFeatures::All(), wire_bytes_.module_bytes(),
         ModuleOrigin::kWasmOrigin, &unused_detected_features);
     decoder.consume_bytes(elem.elements_wire_bytes_offset);
-    for (size_t i = 0; i < elem.element_count; i++) {
+    for (size_t j = 0; j < elem.element_count; j++) {
       ConstantExpression entry = decoder.consume_element_segment_entry(
           const_cast<WasmModule*>(module_), elem);
       PrintInitExpression(entry, elem.type);
@@ -1154,22 +1154,22 @@ void ModuleDisassembler::PrintGlobal(const WasmGlobal& global) {
 void ModuleDisassembler::PrintInitExpression(const ConstantExpression& init,
                                              ValueType expected_type) {
   switch (init.kind()) {
-    case ConstantExpression::kEmpty:
+    case ConstantExpression::Kind::kEmpty:
       break;
-    case ConstantExpression::kI32Const:
+    case ConstantExpression::Kind::kI32Const:
       out_ << " (i32.const " << init.i32_value() << ")";
       break;
-    case ConstantExpression::kRefNull:
+    case ConstantExpression::Kind::kRefNull:
       out_ << " (ref.null ";
       names_->PrintHeapType(out_, HeapType(init.repr()));
       out_ << ")";
       break;
-    case ConstantExpression::kRefFunc:
+    case ConstantExpression::Kind::kRefFunc:
       out_ << " (ref.func ";
       names_->PrintFunctionName(out_, init.index(), NamesProvider::kDevTools);
       out_ << ")";
       break;
-    case ConstantExpression::kWireBytesRef:
+    case ConstantExpression::Kind::kWireBytesRef:
       WireBytesRef ref = init.wire_bytes_ref();
       const uint8_t* start = start_ + ref.offset();
       const uint8_t* end = start_ + ref.end_offset();

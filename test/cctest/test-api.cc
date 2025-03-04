@@ -3009,8 +3009,8 @@ THREADED_TEST(FunctionPrototype) {
 bool internal_field_check_called = false;
 void OnInternalFieldCheck(const char* location, const char* message) {
   internal_field_check_called = true;
-  exit(strcmp(location, "v8::Value::Cast") +
-       strcmp(message, "Data is not a Value"));
+  v8::base::OS::ExitProcess(strcmp(location, "v8::Value::Cast") +
+                            strcmp(message, "Data is not a Value"));
 }
 
 // The fatal error handler would call exit() so this should not be run in
@@ -4445,8 +4445,8 @@ TEST(TwoPassPhantomCallbacks) {
     i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
         CcTest::heap());
     i::heap::InvokeMajorGC(CcTest::heap());
+    EmptyMessageQueues(isolate);
   }
-  EmptyMessageQueues(isolate);
 }
 
 
@@ -4469,8 +4469,8 @@ TEST(TwoPassPhantomCallbacksNestedGc) {
     i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
         CcTest::heap());
     i::heap::InvokeMajorGC(CcTest::heap());
+    EmptyMessageQueues(isolate);
   }
-  EmptyMessageQueues(isolate);
 }
 
 // The string creation API methods forbid executing JS code while they are
@@ -11389,7 +11389,7 @@ THREADED_TEST(CrossEval) {
   try_catch.Reset();
 
   // Check that global variables in the other environment are visible
-  // when evaluting code.
+  // when evaluating code.
   CHECK(other->Global()
             ->Set(other.local(), v8_str("bis"), v8_num(1234))
             .FromJust());
@@ -13758,21 +13758,24 @@ TEST(DontLeakGlobalObjects) {
     { v8::HandleScope scope(CcTest::isolate());
       LocalContext context;
     }
-    CcTest::isolate()->ContextDisposedNotification();
+    CcTest::isolate()->ContextDisposedNotification(
+        v8::ContextDependants::kSomeDependants);
     CheckSurvivingGlobalObjectsCount(0);
 
     { v8::HandleScope scope(CcTest::isolate());
       LocalContext context;
       v8_compile("Date")->Run(context.local()).ToLocalChecked();
     }
-    CcTest::isolate()->ContextDisposedNotification();
+    CcTest::isolate()->ContextDisposedNotification(
+        v8::ContextDependants::kSomeDependants);
     CheckSurvivingGlobalObjectsCount(0);
 
     { v8::HandleScope scope(CcTest::isolate());
       LocalContext context;
       v8_compile("/aaa/")->Run(context.local()).ToLocalChecked();
     }
-    CcTest::isolate()->ContextDisposedNotification();
+    CcTest::isolate()->ContextDisposedNotification(
+        v8::ContextDependants::kSomeDependants);
     CheckSurvivingGlobalObjectsCount(0);
 
     { v8::HandleScope scope(CcTest::isolate());
@@ -13781,7 +13784,8 @@ TEST(DontLeakGlobalObjects) {
       LocalContext context(&extensions);
       v8_compile("gc();")->Run(context.local()).ToLocalChecked();
     }
-    CcTest::isolate()->ContextDisposedNotification();
+    CcTest::isolate()->ContextDisposedNotification(
+        v8::ContextDependants::kSomeDependants);
     CheckSurvivingGlobalObjectsCount(0);
   }
 }
@@ -13949,8 +13953,8 @@ TEST(NoGlobalHandlesOrphaningDueToWeakCallback) {
     i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
         CcTest::heap());
     i::heap::InvokeMajorGC(CcTest::heap());
+    EmptyMessageQueues(isolate);
   }
-  EmptyMessageQueues(isolate);
 }
 
 THREADED_TEST(CheckForCrossContextObjectLiterals) {
@@ -17607,7 +17611,7 @@ TEST(Regress528) {
     CompileRun(source_simple);
     context->Exit();
   }
-  isolate->ContextDisposedNotification();
+  isolate->ContextDisposedNotification(v8::ContextDependants::kSomeDependants);
   for (gc_count = 1; gc_count < 10; gc_count++) {
     other_context->Enter();
     CompileRun(source_simple);
@@ -17629,7 +17633,7 @@ TEST(Regress528) {
     CompileRun(source_eval);
     context->Exit();
   }
-  isolate->ContextDisposedNotification();
+  isolate->ContextDisposedNotification(v8::ContextDependants::kSomeDependants);
   for (gc_count = 1; gc_count < 10; gc_count++) {
     other_context->Enter();
     CompileRun(source_eval);
@@ -17656,7 +17660,7 @@ TEST(Regress528) {
     CHECK_EQ(1, message->GetLineNumber(context).FromJust());
     context->Exit();
   }
-  isolate->ContextDisposedNotification();
+  isolate->ContextDisposedNotification(v8::ContextDependants::kSomeDependants);
   for (gc_count = 1; gc_count < 10; gc_count++) {
     other_context->Enter();
     CompileRun(source_exception);
@@ -17667,7 +17671,7 @@ TEST(Regress528) {
   CHECK_GE(2, gc_count);
   CHECK_EQ(1, GetGlobalObjectsCount());
 
-  isolate->ContextDisposedNotification();
+  isolate->ContextDisposedNotification(v8::ContextDependants::kSomeDependants);
 }
 
 
@@ -18375,7 +18379,7 @@ TEST(ContainsOnlyOneByte) {
     // Base assumptions.
     string = cons_strings[i];
     CHECK(string->IsOneByte() && string->ContainsOnlyOneByte());
-    // Test left and right concatentation.
+    // Test left and right concatenation.
     string = String::Concat(isolate, two_byte, cons_strings[i]);
     CHECK(!string->IsOneByte() && string->ContainsOnlyOneByte());
     string = String::Concat(isolate, cons_strings[i], two_byte);
@@ -22449,7 +22453,7 @@ TEST(EventLogging) {
         i::NestedTimedHistogramScope scope3(&histogram);
         CHECK_EQ(++count, event_count);
         i::PauseNestedTimedHistogramScope scope4(&histogram);
-        // The outer timer scope is just paused, no event is emited yet.
+        // The outer timer scope is just paused, no event is emitted yet.
         CHECK_EQ(count, event_count);
         {
           CHECK_EQ(count, event_count);
@@ -22469,7 +22473,7 @@ TEST(EventLogging) {
       CHECK_EQ(v8::LogEventStatus::kEnd, last_event_status);
       CHECK_EQ(++count, event_count);
       i::PauseNestedTimedHistogramScope scope6(&histogram);
-      // The outer timer scope is just paused, no event is emited yet.
+      // The outer timer scope is just paused, no event is emitted yet.
       CHECK_EQ(count, event_count);
       {
         i::PauseNestedTimedHistogramScope scope7(&histogram);
@@ -24479,7 +24483,7 @@ TEST(SyntheticModuleSetExports) {
       module->SetSyntheticModuleExport(isolate, foo_string, bar_string);
   CHECK(set_export_result.FromJust());
 
-  // After setting the export the Cell should still have the same idenitity.
+  // After setting the export the Cell should still have the same identity.
   CHECK_EQ(exports->Lookup(v8::Utils::OpenDirectHandle(*foo_string)),
            *foo_cell);
 
@@ -26378,7 +26382,7 @@ TEST(CorrectEnteredContext) {
 }
 
 // For testing only, the host-defined options are provided entirely by the host
-// and have an abritrary length. Use this constant here for testing that we get
+// and have an arbitrary length. Use this constant here for testing that we get
 // the correct value during the tests.
 const int kCustomHostDefinedOptionsLengthForTesting = 7;
 
@@ -26919,6 +26923,8 @@ enum class AtomicsWaitCallbackAction {
 
 class StopAtomicsWaitThread;
 
+START_ALLOW_USE_DEPRECATED()
+
 struct AtomicsWaitCallbackInfo {
   v8::Isolate* isolate;
   v8::Isolate::AtomicsWaitWakeHandle* wake_handle;
@@ -27136,10 +27142,13 @@ TEST(AtomicsWaitCallback) {
   AtomicsWaitCallbackCommon(isolate, CompileRun(init), 4, 4);
 }
 
+END_ALLOW_USE_DEPRECATED()
+
 #if V8_ENABLE_WEBASSEMBLY
 namespace v8::internal::wasm {
 
 TEST(WasmCodeFlushingOnMemoryPressure) {
+  i::v8_flags.flush_liftoff_code = true;
   WasmRunner<int32_t> r(TestExecutionTier::kLiftoff);
   r.Build({WASM_I32_ADD(WASM_I32V_1(11), WASM_I32V_1(44))});
   CHECK_EQ(55, r.Call());
@@ -29809,87 +29818,6 @@ TEST(FastApiCallsFromWasm) {
   CallAndCheckFromWasm();
 }
 #endif
-#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
-namespace {
-static Trivial* UnwrapTrivialObject(Local<Object> object) {
-  i::Address addr = i::ValueHelper::ValueAsAddress(*object);
-  auto instance_type = i::Internals::GetInstanceType(addr);
-  bool is_valid =
-      (v8::base::IsInRange(instance_type, i::Internals::kFirstJSApiObjectType,
-                           i::Internals::kLastJSApiObjectType) ||
-       instance_type == i::Internals::kJSSpecialApiObjectType);
-  if (!is_valid) {
-    return nullptr;
-  }
-  Trivial* wrapped = static_cast<Trivial*>(
-      object->GetAlignedPointerFromInternalField(kV8WrapperObjectIndex));
-  CHECK_NOT_NULL(wrapped);
-  return wrapped;
-}
-
-void FastCallback2JSArray(v8::Local<v8::Object> receiver, int arg0,
-                          v8::Local<v8::Array> arg1) {
-  Trivial* self = UnwrapTrivialObject(receiver);
-  CHECK_NOT_NULL(self);
-  CHECK_EQ(arg0, arg1->Length());
-  self->set_x(arg0);
-}
-
-void FastCallback3SwappedParams(v8::Local<v8::Object> receiver,
-                                v8::Local<v8::Array> arg0, int arg1) {}
-
-void FastCallback4Scalar(v8::Local<v8::Object> receiver, int arg0, float arg1) {
-}
-
-void FastCallback5DifferentArity(v8::Local<v8::Object> receiver, int arg0,
-                                 v8::Local<v8::Array> arg1, float arg2) {}
-
-}  // namespace
-#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
-
-START_ALLOW_USE_DEPRECATED()
-TEST(FastApiOverloadResolution) {
-#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
-  if (i::v8_flags.jitless) return;
-  if (i::v8_flags.disable_optimizing_compilers) return;
-
-  i::v8_flags.turbofan = true;
-  i::v8_flags.turbo_fast_api_calls = true;
-  i::v8_flags.allow_natives_syntax = true;
-  // Disable --always_turbofan, otherwise we haven't generated the necessary
-  // feedback to go down the "best optimization" path for the fast call.
-  i::v8_flags.always_turbofan = false;
-  i::FlagList::EnforceFlagImplications();
-
-  v8::CFunction js_array_callback =
-      v8::CFunctionBuilder().Fn(FastCallback2JSArray).Build();
-
-  v8::CFunction swapped_params_callback =
-      v8::CFunctionBuilder().Fn(FastCallback3SwappedParams).Build();
-
-  // Check that difference in > 1 position is not possible.
-  CHECK_EQ(v8::CFunction::OverloadResolution::kImpossible,
-           js_array_callback.GetOverloadResolution(&swapped_params_callback));
-
-  v8::CFunction scalar_callback =
-      v8::CFunctionBuilder().Fn(FastCallback4Scalar).Build();
-
-  // Check that resolving when there is a scalar at the difference position
-  // is not possible.
-  CHECK_EQ(v8::CFunction::OverloadResolution::kImpossible,
-           js_array_callback.GetOverloadResolution(&scalar_callback));
-
-  v8::CFunction diff_arity_callback =
-      v8::CFunctionBuilder().Fn(FastCallback5DifferentArity).Build();
-
-  // Check that overload resolution between different number of arguments
-  // is possible.
-  CHECK_EQ(v8::CFunction::OverloadResolution::kAtCompileTime,
-           js_array_callback.GetOverloadResolution(&diff_arity_callback));
-
-#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
-}
-END_ALLOW_USE_DEPRECATED()
 
 TEST(Recorder_GetContext) {
   using v8::Context;
@@ -30426,7 +30354,7 @@ TEST(WasmAbortStreamingAfterContextDisposal) {
 
     wasm_streaming =
         i::wasm::StartStreamingForTesting(i_isolate, std::move(resolver));
-    isolate->ContextDisposedNotification(false);
+    isolate->ContextDisposedNotification(v8::ContextDependants::kNoDependants);
   }
 
   wasm_streaming->Abort({});

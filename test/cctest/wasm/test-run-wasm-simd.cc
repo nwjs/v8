@@ -2496,6 +2496,8 @@ void RunShuffleOpTest(TestExecutionTier execution_tier, WasmOpcode simd_op,
 
 #define SHUFFLE_LIST(V)  \
   V(S128Identity)        \
+  V(S64x2UnzipLeft)      \
+  V(S64x2UnzipRight)     \
   V(S32x4Dup)            \
   V(S32x4ZipLeft)        \
   V(S32x4ZipRight)       \
@@ -2543,6 +2545,10 @@ using ShuffleMap = std::map<ShuffleKey, const Shuffle>;
 ShuffleMap test_shuffles = {
     {kS128Identity,
      {{16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}}},
+    {kS64x2UnzipLeft,
+     {{0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23}}},
+    {kS64x2UnzipRight,
+     {{8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 26, 27, 28, 29, 30, 31}}},
     {kS32x4Dup,
      {{16, 17, 18, 19, 16, 17, 18, 19, 16, 17, 18, 19, 16, 17, 18, 19}}},
     {kS32x4ZipLeft, {{0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23}}},
@@ -4809,7 +4815,6 @@ TEST(RunWasmTurbofan_LoadStoreExtract2Revec) {
 }
 
 TEST(RunWasmTurbofan_LoadStoreOOBRevec) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t, int32_t, int32_t> r(TestExecutionTier::kTurbofan);
@@ -4936,7 +4941,6 @@ TEST(RunWasmTurbofan_F32x4ShuffleForSplatRevec) {
 }
 
 TEST(RunWasmTurbofan_ShuffleVpshufd) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
@@ -4986,7 +4990,6 @@ TEST(RunWasmTurbofan_ShuffleVpshufd) {
 }
 
 TEST(RunWasmTurbofan_I8x32ShuffleShufps) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
@@ -5037,7 +5040,6 @@ TEST(RunWasmTurbofan_I8x32ShuffleShufps) {
 }
 
 TEST(RunWasmTurbofan_I8x32ShuffleS32x8UnpackLow) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
@@ -5090,7 +5092,6 @@ TEST(RunWasmTurbofan_I8x32ShuffleS32x8UnpackLow) {
 }
 
 TEST(RunWasmTurbofan_I8x32ShuffleS32x8UnpackHigh) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
@@ -5143,7 +5144,6 @@ TEST(RunWasmTurbofan_I8x32ShuffleS32x8UnpackHigh) {
 }
 
 TEST(RunWasmTurbofan_ShuffleToS256Load8x8U) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int8_t> r(TestExecutionTier::kTurbofan);
@@ -5261,9 +5261,9 @@ void RunLoadSplatRevecTest(WasmOpcode op, WasmOpcode bin_op,
     BUILD_LOADSPLAT(WASM_LOCAL_GET, 0)
 
     // Load splats load sizeof(T) bytes.
-    for (uint32_t offset = kWasmPageSize - (sizeof(T) - 1);
-         offset < kWasmPageSize; ++offset) {
-      CHECK_TRAP(r.Call(offset));
+    for (uint32_t load_offset = kWasmPageSize - (sizeof(T) - 1);
+         load_offset < kWasmPageSize; ++load_offset) {
+      CHECK_TRAP(r.Call(load_offset));
     }
   }
 #undef BUILD_RUN
@@ -5348,9 +5348,9 @@ void RunLoadExtendRevecTest(WasmOpcode op) {
     BUILD_LOADEXTEND(WASM_LOCAL_GET, 0)
 
     // Load extends load 8 bytes, so should trap from -7.
-    for (uint32_t offset = kWasmPageSize - 7; offset < kWasmPageSize;
-         ++offset) {
-      CHECK_TRAP(r.Call(offset));
+    for (uint32_t load_offset = kWasmPageSize - 7; load_offset < kWasmPageSize;
+         ++load_offset) {
+      CHECK_TRAP(r.Call(load_offset));
     }
   }
 }
@@ -5608,7 +5608,6 @@ TEST(RunWasmTurbofan_Phi) {
 }
 
 TEST(RunWasmTurbofan_ForcePackIdenticalLoad) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
@@ -5648,7 +5647,6 @@ TEST(RunWasmTurbofan_ForcePackIdenticalLoad) {
 }
 
 TEST(RunWasmTurbofan_ForcePackLoadsAtSameAddr) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
@@ -5688,7 +5686,6 @@ TEST(RunWasmTurbofan_ForcePackLoadsAtSameAddr) {
 }
 
 TEST(RunWasmTurbofan_ForcePackInContinuousLoad) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
@@ -5735,7 +5732,6 @@ TEST(RunWasmTurbofan_ForcePackInContinuousLoad) {
 }
 
 TEST(RunWasmTurbofan_ForcePackIncontinuousLoadsReversed) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
@@ -5825,7 +5821,6 @@ TEST(RunWasmTurbofan_RevecReduce) {
 }
 
 TEST(RunWasmTurbofan_ForcePackLoadSplat) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   // Use Load32Splat for the force packing test.
@@ -5873,7 +5868,6 @@ TEST(RunWasmTurbofan_ForcePackLoadSplat) {
 }
 
 TEST(RunWasmTurbofan_ForcePackLoadExtend) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   // Use load32x2_s for the force packing test.
@@ -5997,7 +5991,6 @@ TEST(RunWasmTurbofan_ForcePackLoadExtend) {
 }
 
 TEST(RunWasmTurbofan_ForcePackI16x16ConvertI8x16) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t, int32_t, int32_t> r(TestExecutionTier::kTurbofan);
@@ -6048,7 +6041,6 @@ TEST(RunWasmTurbofan_ForcePackI16x16ConvertI8x16) {
 }
 
 TEST(RunWasmTurbofan_ForcePackI16x16ConvertI8x16ExpectFail) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t, int32_t, int32_t> r(TestExecutionTier::kTurbofan);
@@ -6091,7 +6083,6 @@ TEST(RunWasmTurbofan_ForcePackI16x16ConvertI8x16ExpectFail) {
 }
 
 TEST(RunWasmTurbofan_ForcePackInternalI16x16ConvertI8x16) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t, int32_t, int32_t> r(TestExecutionTier::kTurbofan);
@@ -6155,7 +6146,6 @@ TEST(RunWasmTurbofan_ForcePackInternalI16x16ConvertI8x16) {
 }
 
 TEST(RunWasmTurbofan_ForcePackLoadZero) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   // Use load32_zero for the force packing test.
@@ -6248,7 +6238,6 @@ TEST(RunWasmTurbofan_ForcePackLoadZero) {
 
 template <bool inputs_swapped = false>
 void RunForcePackF32x4ReplaceLaneIntersectTest() {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t, int32_t, int32_t> r(TestExecutionTier::kTurbofan);
@@ -6328,7 +6317,6 @@ TEST(RunWasmTurbofan_ForcePackF32x4ReplaceLaneIntersect2) {
 }
 
 TEST(RunWasmTurbofan_IntersectPackNodeMerge1) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t, int32_t, int32_t> r(TestExecutionTier::kTurbofan);
@@ -6403,7 +6391,6 @@ TEST(RunWasmTurbofan_IntersectPackNodeMerge1) {
 }
 
 TEST(RunWasmTurbofan_IntersectPackNodeMerge2) {
-  SKIP_TEST_IF_NO_TURBOSHAFT;
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   if (!CpuFeatures::IsSupported(AVX2)) return;
   WasmRunner<int32_t, int32_t, int32_t> r(TestExecutionTier::kTurbofan);
@@ -6561,7 +6548,6 @@ TEST(RunWasmTurbofan_I8x32UConvertI16x16) {
                                      convert_sign, param_type, extract_type,   \
                                      convert_type)                             \
   TEST(RunWasmTurbofan_Extend##format##sign##ConvertF32x8##convert_sign) {     \
-    SKIP_TEST_IF_NO_TURBOSHAFT;                                                \
     EXPERIMENTAL_FLAG_SCOPE(revectorize);                                      \
     if (!CpuFeatures::IsSupported(AVX) || !CpuFeatures::IsSupported(AVX2))     \
       return;                                                                  \

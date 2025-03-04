@@ -912,7 +912,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
 #ifndef V8_JITLESS
 #ifndef V8_ENABLE_LEAPTIERING
   // If feedback vector is valid, check for optimized code and update invocation
-  // count. Load the optimization state from the feedback vector and re-use the
+  // count. Load the optimization state from the feedback vector and reuse the
   // register.
   Label flags_need_processing;
   Register flags = ecx;
@@ -1879,7 +1879,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
 #ifdef V8_ENABLE_LEAPTIERING
   __ movd(saved_feedback_vector, feedback_vector);
 #else
-  // Load the optimization state from the feedback vector and re-use the
+  // Load the optimization state from the feedback vector and reuse the
   // register.
   Label flags_need_processing;
   Register flags = ecx;
@@ -1975,7 +1975,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
       // Push the baseline code return address now, as if it had been pushed by
       // the call to this builtin.
       __ PushReturnAddressFrom(return_address, scratch);
-      FrameScope frame_scope(masm, StackFrame::INTERNAL);
+      FrameScope manual_frame_scope(masm, StackFrame::INTERNAL);
       // Save incoming new target or generator
       __ Push(kJavaScriptCallNewTargetRegister);
       __ SmiTag(frame_size);
@@ -2477,10 +2477,10 @@ void Builtins::Generate_CallOrConstructForwardVarargs(MacroAssembler* masm,
 
   __ movd(xmm0, esi);  // Spill the context.
 
-  Register scratch = esi;
-
   // Check if new.target has a [[Construct]] internal method.
   if (mode == CallOrConstructMode::kConstruct) {
+    Register scratch = esi;
+
     Label new_target_constructor, new_target_not_constructor;
     __ JumpIfSmi(edx, &new_target_not_constructor, Label::kNear);
     __ mov(scratch, FieldOperand(edx, HeapObject::kMapOffset));

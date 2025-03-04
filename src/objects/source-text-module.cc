@@ -779,7 +779,7 @@ void SourceTextModule::GatherAvailableAncestors(
   // 2. Return UNUSED.
 }
 
-Handle<JSModuleNamespace> SourceTextModule::GetModuleNamespace(
+DirectHandle<JSModuleNamespace> SourceTextModule::GetModuleNamespace(
     Isolate* isolate, DirectHandle<SourceTextModule> module,
     int module_request) {
   DCHECK_EQ(Cast<ModuleRequest>(
@@ -836,7 +836,7 @@ bool SourceTextModule::MaybeHandleEvaluationException(
 }
 
 // ES#sec-moduleevaluation
-MaybeHandle<Object> SourceTextModule::Evaluate(
+MaybeDirectHandle<Object> SourceTextModule::Evaluate(
     Isolate* isolate, Handle<SourceTextModule> module) {
   CHECK(module->status() == kLinked || module->status() == kEvaluatingAsync ||
         module->status() == kEvaluated);
@@ -847,7 +847,7 @@ MaybeHandle<Object> SourceTextModule::Evaluate(
   unsigned dfs_index = 0;
 
   // 6. Let capability be ! NewPromiseCapability(%Promise%).
-  Handle<JSPromise> capability = isolate->factory()->NewJSPromise();
+  DirectHandle<JSPromise> capability = isolate->factory()->NewJSPromise();
 
   // 7. Set module.[[TopLevelCapability]] to capability.
   module->set_top_level_capability(*capability);
@@ -1125,7 +1125,7 @@ Maybe<bool> SourceTextModule::ExecuteAsyncModule(
   return Just<bool>(true);
 }
 
-MaybeHandle<Object> SourceTextModule::InnerExecuteAsyncModule(
+MaybeDirectHandle<Object> SourceTextModule::InnerExecuteAsyncModule(
     Isolate* isolate, DirectHandle<SourceTextModule> module,
     DirectHandle<JSPromise> capability) {
   // If we have an async module, then it has an associated
@@ -1140,7 +1140,7 @@ MaybeHandle<Object> SourceTextModule::InnerExecuteAsyncModule(
                             Execution::MessageHandling::kKeepPending, nullptr);
 }
 
-MaybeHandle<Object> SourceTextModule::ExecuteModule(
+MaybeDirectHandle<Object> SourceTextModule::ExecuteModule(
     Isolate* isolate, DirectHandle<SourceTextModule> module,
     MaybeDirectHandle<Object>* exception_out) {
   // Synchronous modules have an associated JSGeneratorObject.
@@ -1158,13 +1158,13 @@ MaybeHandle<Object> SourceTextModule::ExecuteModule(
   }
   DCHECK(
       Object::BooleanValue(Cast<JSIteratorResult>(*result)->done(), isolate));
-  return handle(Cast<JSIteratorResult>(*result)->value(), isolate);
+  return direct_handle(Cast<JSIteratorResult>(*result)->value(), isolate);
 }
 
-MaybeHandle<Object> SourceTextModule::InnerModuleEvaluation(
+MaybeDirectHandle<Object> SourceTextModule::InnerModuleEvaluation(
     Isolate* isolate, Handle<SourceTextModule> module,
     ZoneForwardList<Handle<SourceTextModule>>* stack, unsigned* dfs_index) {
-  STACK_CHECK(isolate, MaybeHandle<Object>());
+  STACK_CHECK(isolate, MaybeDirectHandle<Object>());
   int module_status = module->status();
   // InnerModuleEvaluation(module, stack, index)
 
@@ -1181,7 +1181,7 @@ MaybeHandle<Object> SourceTextModule::InnerModuleEvaluation(
     // b. Otherwise return module.[[EvaluationError]].
     // (We throw on isolate and return a MaybeHandle<Object> instead)
     isolate->Throw(module->exception());
-    return MaybeHandle<Object>();
+    return MaybeDirectHandle<Object>();
   }
 
   // 4. Assert: module.[[Status]] is LINKED.
@@ -1279,7 +1279,7 @@ MaybeHandle<Object> SourceTextModule::InnerModuleEvaluation(
         // throw on isolate and return a MaybeHandle<Object>.)
         if (required_module_status == kErrored) {
           isolate->Throw(required_module->exception());
-          return MaybeHandle<Object>();
+          return MaybeDirectHandle<Object>();
         }
       }
       // v. If requiredModule.[[AsyncEvaluation]] is true, then
@@ -1304,7 +1304,7 @@ MaybeHandle<Object> SourceTextModule::InnerModuleEvaluation(
   // Before async modules v8 returned the value result from calling next
   // on the module's implicit iterator. We preserve this behavior for
   // synchronous modules, but return undefined for AsyncModules.
-  Handle<Object> result = isolate->factory()->undefined_value();
+  DirectHandle<Object> result = isolate->factory()->undefined_value();
 
   // 12. If module.[[PendingAsyncDependencies]] > 0 or module.[[HasTLA]] is
   //     true, then
@@ -1325,17 +1325,17 @@ MaybeHandle<Object> SourceTextModule::InnerModuleEvaluation(
     // raise the exception.
     if (!module->HasPendingAsyncDependencies()) {
       MAYBE_RETURN(SourceTextModule::ExecuteAsyncModule(isolate, module),
-                   MaybeHandle<Object>());
+                   MaybeDirectHandle<Object>());
     }
   } else {  // 13. Else,
     // a. Perform ? module.ExecuteModule().
     MaybeDirectHandle<Object> exception;
-    Handle<Object> result;
-    if (!ExecuteModule(isolate, module, &exception).ToHandle(&result)) {
+    DirectHandle<Object> maybe_result;
+    if (!ExecuteModule(isolate, module, &exception).ToHandle(&maybe_result)) {
       if (!isolate->is_execution_terminating()) {
         isolate->Throw(*exception.ToHandleChecked());
       }
-      return result;
+      return maybe_result;
     }
   }
 

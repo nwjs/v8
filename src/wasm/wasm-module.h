@@ -41,6 +41,7 @@ class ErrorThrower;
 class WasmInterpreterRuntime;
 #endif  // V8_ENABLE_DRUMBRAKE
 class WellKnownImportsList;
+class TypeCanonicalizer;
 
 enum class AddressType : uint8_t { kI32, kI64 };
 
@@ -613,7 +614,7 @@ class CallSiteFeedback {
 struct FunctionTypeFeedback {
   // {feedback_vector} is computed from {call_targets} and the instance-specific
   // feedback vector by {TransitiveTypeFeedbackProcessor}.
-  std::vector<CallSiteFeedback> feedback_vector;
+  base::OwnedVector<CallSiteFeedback> feedback_vector;
 
   // {call_targets} has one entry per "call", "call_indirect", and "call_ref" in
   // the function.
@@ -658,7 +659,7 @@ struct TypeFeedbackStorage {
   // - PGO deserializer: writes everything, currently not locked, relies on
   //   being called before multi-threading enters the picture.
   // - Deoptimizer: sets needs_reprocessing_after_deopt.
-  mutable base::SharedMutex mutex;
+  mutable base::SpinningMutex mutex;
 
   WellKnownImportsList well_known_imports;
 
@@ -717,6 +718,8 @@ struct V8_EXPORT_PRIVATE WasmModule {
   // Position and size of the name section (payload only, i.e. without section
   // ID and length).
   WireBytesRef name_section = {0, 0};
+  // Set by the singleton TypeNamesProvider to avoid duplicate work.
+  mutable std::atomic<bool> canonical_typenames_decoded = false;
   // Set to true if this module has wasm-gc types in its type section.
   bool is_wasm_gc = false;
   // Set to true if this module has any shared elements other than memories.
@@ -845,6 +848,9 @@ struct V8_EXPORT_PRIVATE WasmModule {
     V8_ASSUME(index.index < num_types);
     return isorecursive_canonical_type_ids[index.index];
   }
+
+  uint64_t signature_hash(const TypeCanonicalizer*,
+                          uint32_t function_index) const;
 
   bool has_struct(ModuleTypeIndex index) const {
     return index.index < types.size() &&

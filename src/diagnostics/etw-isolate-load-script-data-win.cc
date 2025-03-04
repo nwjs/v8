@@ -26,6 +26,7 @@
 #include "src/diagnostics/etw-isolate-capture-state-monitor-win.h"
 #include "src/diagnostics/etw-isolate-operations-win.h"
 #include "src/diagnostics/etw-jit-metadata-win.h"
+#include "src/diagnostics/etw-jit-win.h"
 #include "src/logging/log.h"
 #include "src/objects/shared-function-info.h"
 #include "src/tasks/cancelable-task.h"
@@ -309,7 +310,7 @@ size_t IsolateLoadScriptData::CurrentEventId() const {
 base::LazyMutex isolates_mutex = LAZY_MUTEX_INITIALIZER;
 base::LazyInstance<IsolateMapType>::type isolate_map =
     LAZY_INSTANCE_INITIALIZER;
-base::LazyInstance<FilterDataType>::type etw_filter_payload =
+base::LazyInstance<FilterDataType>::type etw_filter_payload_glob =
     LAZY_INSTANCE_INITIALIZER;
 
 }  // namespace ETWJITInterface

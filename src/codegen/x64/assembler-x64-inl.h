@@ -227,11 +227,12 @@ int Assembler::deserialization_special_target_size(
   return kSpecialTargetSize;
 }
 
-Handle<Code> Assembler::code_target_object_handle_at(Address pc) {
+DirectHandle<Code> Assembler::code_target_object_handle_at(Address pc) {
   return GetCodeTarget(ReadUnalignedValue<int32_t>(pc));
 }
 
-Handle<HeapObject> Assembler::compressed_embedded_object_handle_at(Address pc) {
+DirectHandle<HeapObject> Assembler::compressed_embedded_object_handle_at(
+    Address pc) {
   return GetEmbeddedObject(ReadUnalignedValue<uint32_t>(pc));
 }
 
@@ -312,7 +313,7 @@ Tagged<HeapObject> RelocInfo::target_object(PtrComprCageBase cage_base) {
   return Cast<HeapObject>(Tagged<Object>(ReadUnalignedValue<Address>(pc_)));
 }
 
-Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
+DirectHandle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCodeTarget(rmode_)) {
     return origin->code_target_object_handle_at(pc_);
@@ -321,7 +322,7 @@ Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
       return origin->compressed_embedded_object_handle_at(pc_);
     }
     DCHECK(IsFullEmbeddedObject(rmode_));
-    return Cast<HeapObject>(ReadUnalignedValue<Handle<Object>>(pc_));
+    return Cast<HeapObject>(ReadUnalignedValue<IndirectHandle<Object>>(pc_));
   }
 }
 

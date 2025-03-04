@@ -160,7 +160,6 @@
 
 // Internalized strings to be allocated early on the read only heap
 #define IMPORTANT_INTERNALIZED_STRING_LIST_GENERATOR(V, _) \
-  V(_, length_string, "length")                            \
   V(_, prototype_string, "prototype")                      \
   V(_, name_string, "name")                                \
   V(_, enumerable_string, "enumerable")                    \
@@ -172,6 +171,7 @@
   INTERNALIZED_STRING_LIST_GENERATOR_INTL(V, _)                               \
   V(_, add_string, "add")                                                     \
   V(_, AggregateError_string, "AggregateError")                               \
+  V(_, alphabet_string, "alphabet")                                           \
   V(_, always_string, "always")                                               \
   V(_, anonymous_string, "anonymous")                                         \
   V(_, apply_string, "apply")                                                 \
@@ -321,6 +321,7 @@
   V(_, jsMemoryRange_string, "jsMemoryRange")                                 \
   V(_, keys_string, "keys")                                                   \
   V(_, largestUnit_string, "largestUnit")                                     \
+  V(_, last_chunk_handling_string, "lastChunkHandling")                       \
   V(_, lastIndex_string, "lastIndex")                                         \
   V(_, let_string, "let")                                                     \
   V(_, line_string, "line")                                                   \
@@ -551,6 +552,7 @@
 // These Names have to be allocated consecutively for fast checks,
 #define INTERNALIZED_STRING_FOR_PROTECTOR_LIST_GENERATOR(V, _) \
   V(_, constructor_string, "constructor")                      \
+  V(_, length_string, "length")                                \
   V(_, next_string, "next")                                    \
   V(_, resolve_string, "resolve")                              \
   V(_, then_string, "then")                                    \

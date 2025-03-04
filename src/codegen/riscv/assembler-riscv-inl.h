@@ -246,7 +246,7 @@ Tagged<HeapObject> RelocInfo::target_object(PtrComprCageBase cage_base) {
   }
 }
 
-Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
+DirectHandle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   if (IsCodeTarget(rmode_)) {
     return Cast<HeapObject>(
         origin->code_target_object_handle_at(pc_, constant_pool_));
@@ -375,8 +375,8 @@ void Assembler::set_target_constant32_at(Address pc, uint32_t target,
   DCHECK(IsLui(*reinterpret_cast<Instr*>(instr0)) &&
          IsAddi(*reinterpret_cast<Instr*>(instr1)));
 #endif
-  int32_t high_20 = ((target + 0x800) >> 12);  // 20 bits
-  int32_t low_12 = target & 0xfff;             // 12 bits
+  int32_t high_20 = (((int32_t)target + 0x800) >> 12);  // 20 bits
+  int32_t low_12 = (int32_t)target << 20 >> 20;         // 12 bits
   instr_at_put(pc, SetHi20Offset(high_20, instr0->InstructionBits()),
                jit_allocation);
   instr_at_put(pc + 1 * kInstrSize,
@@ -407,14 +407,14 @@ void Assembler::set_uint32_constant_at(Address pc, Address constant_pool,
 }
 
 [[nodiscard]] static inline Instr SetHi20Offset(int32_t hi20, Instr instr) {
-  DCHECK(Assembler::IsAuipc(instr) | Assembler::IsLui(instr));
+  DCHECK(Assembler::IsAuipc(instr) || Assembler::IsLui(instr));
   DCHECK(is_int20(hi20));
   instr = (instr & ~kImm31_12Mask) | ((hi20 & kImm19_0Mask) << 12);
   return instr;
 }
 
 [[nodiscard]] static inline Instr SetLo12Offset(int32_t lo12, Instr instr) {
-  DCHECK(Assembler::IsJalr(instr) | Assembler::IsAddi(instr));
+  DCHECK(Assembler::IsJalr(instr) || Assembler::IsAddi(instr));
   DCHECK(is_int12(lo12));
   instr &= ~kImm12Mask;
   int32_t imm12 = lo12 << kImm12Shift;

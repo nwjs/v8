@@ -238,7 +238,7 @@ bool Serializer::SerializeBackReference(Tagged<HeapObject> obj) {
   if (reference == nullptr) return false;
   // Encode the location of an already deserialized object in order to write
   // its location into a later object.  We can encode the location as an
-  // offset fromthe start of the deserialized objects or as an offset
+  // offset from the start of the deserialized objects or as an offset
   // backwards from the current allocation pointer.
   if (reference->is_attached_reference()) {
     if (v8_flags.trace_serializer) {
@@ -878,7 +878,7 @@ SnapshotSpace GetSnapshotSpace(Tagged<HeapObject> object) {
       // until snapshot building probably deserve to be considered 'old'.
       case NEW_SPACE:
       // Large objects (young and old) are encoded as simply 'old' snapshot
-      // obects, as "normal" objects vs large objects is a heap implementation
+      // objects, as "normal" objects vs large objects is a heap implementation
       // detail and isn't relevant to the snapshot.
       case NEW_LO_SPACE:
       case LO_SPACE:
@@ -1073,7 +1073,6 @@ void Serializer::ObjectSerializer::OutputExternalReference(
   DCHECK_LE(target_size, sizeof(target));  // Must fit in Address.
   DCHECK_IMPLIES(sandboxify, V8_ENABLE_SANDBOX_BOOL);
   DCHECK_IMPLIES(sandboxify, tag != kExternalPointerNullTag);
-  DCHECK_NE(tag, kAnyExternalPointerTag);
   ExternalReferenceEncoder::Value encoded_reference;
   bool encoded_successfully;
 
@@ -1122,8 +1121,7 @@ void Serializer::ObjectSerializer::OutputExternalReference(
     sink_->PutUint30(encoded_reference.index(), "reference index");
   }
   if (sandboxify) {
-    sink_->PutUint30(static_cast<uint32_t>(tag >> kExternalPointerTagShift),
-                     "external pointer tag");
+    sink_->PutUint30(tag, "external pointer tag");
   }
 }
 
@@ -1204,7 +1202,7 @@ void Serializer::ObjectSerializer::VisitIndirectPointer(
   // raw data, which will automatically happen if the slot is skipped here.
   if (slot.IsEmpty()) return;
 
-  // If necessary, output any raw data preceeding this slot.
+  // If necessary, output any raw data preceding this slot.
   OutputRawData(slot.address());
 
   // The slot must be properly initialized at this point, so will always contain
@@ -1310,26 +1308,23 @@ void Serializer::ObjectSerializer::VisitJSDispatchTableEntry(
 #endif  // COMPRESS_POINTERS
   bytes_processed_so_far_ += RoundUp(kJSDispatchHandleSize, kTaggedSize);
 
-  uint32_t id;
-  {
-    auto it = serializer_->dispatch_handle_map_.find(handle);
-    if (it == serializer_->dispatch_handle_map_.end()) {
-      id = static_cast<uint32_t>(serializer_->dispatch_handle_map_.size());
-      serializer_->dispatch_handle_map_[handle] = id;
-    } else {
-      id = it->second;
-    }
+  auto it = serializer_->dispatch_handle_map_.find(handle);
+  if (it == serializer_->dispatch_handle_map_.end()) {
+    auto id = static_cast<uint32_t>(serializer_->dispatch_handle_map_.size());
+    serializer_->dispatch_handle_map_[handle] = id;
+    sink_->Put(kAllocateJSDispatchEntry, "AllocateJSDispatchEntry");
+    sink_->PutUint30(jdt->GetParameterCount(handle), "ParameterCount");
+
+    // Currently we cannot see pending objects here, but we may need to support
+    // them in the future. They should already be supported by the deserializer.
+    Handle<Code> code(jdt->GetCode(handle), isolate());
+    CHECK(!serializer_->SerializePendingObject(*code));
+    serializer_->SerializeObject(code, SlotType::kAnySlot);
+  } else {
+    sink_->Put(kJSDispatchEntry, "JSDispatchEntry");
+    sink_->PutUint30(it->second, "EntryID");
   }
 
-  sink_->Put(kAllocateJSDispatchEntry, "AllocateJSDispatchEntry");
-  sink_->PutUint30(id, "EntryID");
-  sink_->PutUint30(jdt->GetParameterCount(handle), "ParameterCount");
-
-  // Currently we cannot see pending objects here, but we may need to support
-  // them in the future. They should already be supported by the deserializer.
-  Handle<Code> code(jdt->GetCode(handle), isolate());
-  CHECK(!serializer_->SerializePendingObject(*code));
-  serializer_->SerializeObject(code, SlotType::kAnySlot);
 #else
   UNREACHABLE();
 #endif  // V8_ENABLE_LEAPTIERING
@@ -1445,11 +1440,12 @@ Serializer::HotObjectsList::~HotObjectsList() {
   heap_->UnregisterStrongRoots(strong_roots_entry_);
 }
 
-Handle<FixedArray> ObjectCacheIndexMap::Values(Isolate* isolate) {
+DirectHandle<FixedArray> ObjectCacheIndexMap::Values(Isolate* isolate) {
   if (size() == 0) {
     return isolate->factory()->empty_fixed_array();
   }
-  Handle<FixedArray> externals = isolate->factory()->NewFixedArray(size());
+  DirectHandle<FixedArray> externals =
+      isolate->factory()->NewFixedArray(size());
   DisallowGarbageCollection no_gc;
   Tagged<FixedArray> raw = *externals;
   IdentityMap<int, base::DefaultAllocationPolicy>::IteratableScope it_scope(

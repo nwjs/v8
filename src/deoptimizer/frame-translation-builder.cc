@@ -205,7 +205,7 @@ void FrameTranslationBuilder::Add(TranslationOpcode opcode, T... operands) {
   ++instruction_index_within_translation_;
 }
 
-Handle<DeoptimizationFrameTranslation>
+DirectHandle<DeoptimizationFrameTranslation>
 FrameTranslationBuilder::ToFrameTranslation(LocalFactory* factory) {
 #ifdef V8_USE_ZLIB
   if (V8_UNLIKELY(v8_flags.turbo_compress_frame_translations)) {
@@ -224,7 +224,7 @@ FrameTranslationBuilder::ToFrameTranslation(LocalFactory* factory) {
     const int translation_array_size =
         static_cast<int>(compressed_data_size) +
         DeoptimizationFrameTranslation::kUncompressedSizeSize;
-    Handle<DeoptimizationFrameTranslation> result =
+    DirectHandle<DeoptimizationFrameTranslation> result =
         factory->NewDeoptimizationFrameTranslation(translation_array_size);
 
     result->set_int(DeoptimizationFrameTranslation::kUncompressedSizeOffset,
@@ -238,7 +238,7 @@ FrameTranslationBuilder::ToFrameTranslation(LocalFactory* factory) {
 #endif
   DCHECK(!v8_flags.turbo_compress_frame_translations);
   FinishPendingInstructionIfNeeded();
-  Handle<DeoptimizationFrameTranslation> result =
+  DirectHandle<DeoptimizationFrameTranslation> result =
       factory->NewDeoptimizationFrameTranslation(SizeInBytes());
   if (SizeInBytes() == 0) return result;
   memcpy(result->begin(), contents_.data(), contents_.size() * sizeof(uint8_t));
@@ -411,6 +411,12 @@ void FrameTranslationBuilder::StoreInt32Register(Register reg) {
   StoreRegister(opcode, reg);
 }
 
+void FrameTranslationBuilder::StoreIntPtrRegister(Register reg) {
+  auto opcode = (kSystemPointerSize == 4) ? TranslationOpcode::INT32_REGISTER
+                                          : TranslationOpcode::INT64_REGISTER;
+  StoreRegister(opcode, reg);
+}
+
 void FrameTranslationBuilder::StoreInt64Register(Register reg) {
   auto opcode = TranslationOpcode::INT64_REGISTER;
   StoreRegister(opcode, reg);
@@ -467,6 +473,12 @@ void FrameTranslationBuilder::StoreStackSlot(int index) {
 
 void FrameTranslationBuilder::StoreInt32StackSlot(int index) {
   auto opcode = TranslationOpcode::INT32_STACK_SLOT;
+  Add(opcode, SignedOperand(index));
+}
+
+void FrameTranslationBuilder::StoreIntPtrStackSlot(int index) {
+  auto opcode = (kSystemPointerSize == 4) ? TranslationOpcode::INT32_STACK_SLOT
+                                          : TranslationOpcode::INT64_STACK_SLOT;
   Add(opcode, SignedOperand(index));
 }
 

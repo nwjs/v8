@@ -38,7 +38,7 @@ void LogExecution(Isolate* isolate, DirectHandle<JSFunction> function) {
   Tagged<SharedFunctionInfo> raw_sfi = *sfi;
   std::string event_name = "first-execution";
   CodeKind kind = function->abstract_code(isolate)->kind(isolate);
-  // Not adding "-interpreter" for tooling backwards compatiblity.
+  // Not adding "-interpreter" for tooling backwards compatibility.
   if (kind != CodeKind::INTERPRETED_FUNCTION) {
     event_name += "-";
     event_name += CodeKindToString(kind);
@@ -566,7 +566,7 @@ RUNTIME_FUNCTION(Runtime_NotifyDeoptimized) {
   }
 
   // Non-OSR'd code is deoptimized unconditionally. If the deoptimization occurs
-  // inside the outermost loop containning a loop that can trigger OSR
+  // inside the outermost loop containing a loop that can trigger OSR
   // compilation, we remove the OSR code, it will avoid hit the out of date OSR
   // code and soon later deoptimization.
   //
@@ -733,7 +733,7 @@ Tagged<Object> CompileOptimizedOSRFromMaglev(Isolate* isolate,
              "concurrent_osr is disabled. function: %s, osr offset: %d]\n",
              function->DebugNameCStr().get(), osr_offset.ToInt());
     }
-    return function->code(isolate);
+    return Smi::zero();
   }
 
   if (V8_UNLIKELY(isolate->EfficiencyModeEnabledForTiering() ||
@@ -810,17 +810,15 @@ RUNTIME_FUNCTION(Runtime_LogOrTraceOptimizedOSREntry) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-static Tagged<Object> CompileGlobalEval(Isolate* isolate,
-                                        Handle<i::Object> source_object,
-                                        Handle<SharedFunctionInfo> outer_info,
-                                        LanguageMode language_mode,
-                                        int eval_scope_info_index,
-                                        int eval_position) {
+static Tagged<Object> CompileGlobalEval(
+    Isolate* isolate, Handle<i::Object> source_object,
+    DirectHandle<SharedFunctionInfo> outer_info, LanguageMode language_mode,
+    int eval_scope_info_index, int eval_position) {
   DirectHandle<NativeContext> native_context = isolate->native_context();
 
   // Check if native context allows code generation from
   // strings. Throw an exception if it doesn't.
-  MaybeHandle<String> source;
+  MaybeDirectHandle<String> source;
   bool unknown_object;
   std::tie(source, unknown_object) = Compiler::ValidateDynamicCompilationSource(
       isolate, native_context, source_object);
@@ -846,12 +844,9 @@ static Tagged<Object> CompileGlobalEval(Isolate* isolate,
   if (!Is<NativeContext>(*context) && v8_flags.reuse_scope_infos) {
     Tagged<WeakFixedArray> array = Cast<Script>(outer_info->script())->infos();
     Tagged<ScopeInfo> stored_info;
-    if (array->get(eval_scope_info_index)
-            .GetHeapObjectIfWeak(isolate, &stored_info)) {
-      CHECK_EQ(stored_info, context->scope_info());
-    } else {
-      array->set(eval_scope_info_index, MakeWeak(context->scope_info()));
-    }
+    CHECK(array->get(eval_scope_info_index)
+              .GetHeapObjectIfWeak(isolate, &stored_info));
+    CHECK_EQ(stored_info, context->scope_info());
   }
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, compiled,
@@ -876,8 +871,8 @@ RUNTIME_FUNCTION(Runtime_ResolvePossiblyDirectEval) {
 
   DCHECK(is_valid_language_mode(args.smi_value_at(3)));
   LanguageMode language_mode = static_cast<LanguageMode>(args.smi_value_at(3));
-  Handle<SharedFunctionInfo> outer_info(args.at<JSFunction>(2)->shared(),
-                                        isolate);
+  DirectHandle<SharedFunctionInfo> outer_info(args.at<JSFunction>(2)->shared(),
+                                              isolate);
   return CompileGlobalEval(isolate, args.at<Object>(1), outer_info,
                            language_mode, args.smi_value_at(4),
                            args.smi_value_at(5));

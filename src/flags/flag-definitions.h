@@ -73,6 +73,8 @@
 #define DEFINE_GENERIC_IMPLICATION(whenflag, statement) \
   if (v8_flags.whenflag) statement;
 
+#define DEFINE_REQUIREMENT(statement) CHECK(statement);
+
 #define DEFINE_NEG_VALUE_IMPLICATION(whenflag, thenflag, value)    \
   changed |= TriggerImplication(!v8_flags.whenflag, "!" #whenflag, \
                                 &v8_flags.thenflag, #thenflag, value, false);
@@ -142,6 +144,10 @@
 
 #ifndef DEFINE_DISABLE_FLAG_IMPLICATION
 #define DEFINE_DISABLE_FLAG_IMPLICATION(whenflag, thenflag)
+#endif
+
+#ifndef DEFINE_REQUIREMENT
+#define DEFINE_REQUIREMENT(statement)
 #endif
 
 #ifndef DEBUG_BOOL
@@ -271,9 +277,10 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
   V(harmony_shadow_realm, "harmony ShadowRealm")                               \
   V(harmony_struct, "harmony structs, shared structs, and shared arrays")
 
-#define JAVASCRIPT_INPROGRESS_FEATURES_BASE(V)                               \
-  V(js_decorators, "decorators")                                             \
-  V(js_source_phase_imports, "source phase imports")
+#define JAVASCRIPT_INPROGRESS_FEATURES_BASE(V)       \
+  V(js_decorators, "decorators")                     \
+  V(js_source_phase_imports, "source phase imports") \
+  V(js_base_64, "Uint8Array to/from base64 and hex")
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_INPROGRESS(V) \
@@ -287,11 +294,10 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
 
 // Features that are complete (but still behind the --harmony flag).
 #define HARMONY_STAGED_BASE(V)
-#define JAVASCRIPT_STAGED_FEATURES_BASE(V)                                   \
-  V(js_explicit_resource_management, "explicit resource management")         \
-  V(js_float16array,                                                         \
-    "Float16Array, Math.f16round, DataView.getFloat16, DataView.setFloat16") \
-  V(js_error_iserror, "Error.isError")
+#define JAVASCRIPT_STAGED_FEATURES_BASE(V)                           \
+  V(js_explicit_resource_management, "explicit resource management") \
+  V(js_float16array,                                                 \
+    "Float16Array, Math.f16round, DataView.getFloat16, DataView.setFloat16")
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_STAGED(V)                    \
@@ -314,7 +320,8 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
   V(js_regexp_duplicate_named_groups, "RegExp duplicate named groups") \
   V(js_regexp_modifiers, "RegExp modifiers")                           \
   V(js_promise_try, "Promise.try")                                     \
-  V(js_atomics_pause, "Atomics.pause")
+  V(js_atomics_pause, "Atomics.pause")                                 \
+  V(js_error_iserror, "Error.isError")
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_SHIPPING(V) HARMONY_SHIPPING_BASE(V)
@@ -485,12 +492,21 @@ DEFINE_BOOL(stress_scavenger_pinning_objects, false,
             "Treat some precise refernces as conservative references to stress "
             "test object pinning in Scavenger")
 DEFINE_IMPLICATION(stress_scavenger_pinning_objects, scavenger_pinning_objects)
+DEFINE_NEG_IMPLICATION(stress_scavenger_pinning_objects, minor_gc_task)
+DEFINE_VALUE_IMPLICATION(stress_scavenger_pinning_objects,
+                         scavenger_max_new_space_capacity_mb, 1u)
 DEFINE_BOOL(stress_scavenger_pinning_objects_random, false,
             "Enables random stressing of object pinning in Scavenger, such "
             "that each GC would randomly pick a subset of the precise "
             "references to treat conservatively")
 DEFINE_IMPLICATION(stress_scavenger_pinning_objects_random,
                    stress_scavenger_pinning_objects)
+
+DEFINE_EXPERIMENTAL_FEATURE(scavenger_precise_pinning_objects,
+                            "Objects reachable from handles during "
+                            "scavenge will be pinned and "
+                            "won't move.")
+DEFINE_IMPLICATION(scavenger_precise_pinning_objects, separate_gc_phases)
 
 #ifdef V8_ENABLE_LOCAL_OFF_STACK_CHECK
 #define V8_ENABLE_LOCAL_OFF_STACK_CHECK_BOOL true
@@ -686,11 +702,10 @@ DEFINE_BOOL(script_context_mutable_heap_number, true,
 
 #if defined(V8_31BIT_SMIS_ON_64BIT_ARCH) || defined(V8_TARGET_ARCH_32_BIT)
 #define SUPPORT_SCRIPT_CONTEXT_MUTABLE_HEAP_INT32
-DEFINE_BOOL(script_context_mutable_heap_int32, false,
+DEFINE_BOOL(script_context_mutable_heap_int32, true,
             "Use mutable heap int32 number in script contexts")
 DEFINE_WEAK_IMPLICATION(script_context_mutable_heap_int32,
                         script_context_mutable_heap_number)
-DEFINE_WEAK_IMPLICATION(future, script_context_mutable_heap_int32)
 #else
 DEFINE_BOOL_READONLY(script_context_mutable_heap_int32, false,
                      "Use mutable heap int32 number in script contexts")
@@ -737,6 +752,12 @@ DEFINE_MAYBE_BOOL(
     battery_saver_mode,
     "Forces battery saver mode on or off, disregarding any dynamic signals. "
     "Battery saver tries to conserve overal cpu cycles spent.")
+
+DEFINE_MAYBE_BOOL(
+    memory_saver_mode,
+    "Forces memory saver mode on or off, disregarding any dynamic signals. "
+    "Memory saver tries to keep memory footprint low at the expense of extra "
+    "cpu cycles.")
 
 // Flags to experiment with the new efficiency mode
 DEFINE_BOOL(efficiency_mode_for_tiering_heuristics, true,
@@ -852,6 +873,7 @@ DEFINE_UINT(minor_ms_max_page_age, 4,
 DEFINE_UINT(minor_ms_max_new_space_capacity_mb, 72,
             "max new space capacity in MBs when using MinorMS. When pointer "
             "compression is disabled, twice the capacity is used.")
+DEFINE_REQUIREMENT(v8_flags.minor_ms_max_new_space_capacity_mb > 0)
 
 #if defined(ANDROID)
 #define DEFAULT_SCAVENGER_MAX_NEW_SPACE_CAPACITY_MB 8
@@ -862,6 +884,7 @@ DEFINE_UINT(scavenger_max_new_space_capacity_mb,
             DEFAULT_SCAVENGER_MAX_NEW_SPACE_CAPACITY_MB,
             "max new space capacity in MBs when using Scavenger. When pointer "
             "compression is disabled, twice the capacity is used.")
+DEFINE_REQUIREMENT(v8_flags.scavenger_max_new_space_capacity_mb > 0)
 #undef DEFAULT_SCAVENGER_MAX_NEW_SPACE_CAPACITY_MB
 
 DEFINE_BOOL(trace_page_promotions, false, "trace page promotion decisions")
@@ -1023,8 +1046,7 @@ DEFINE_BOOL(trace_track_allocation_sites, false,
 DEFINE_BOOL(trace_migration, false, "trace object migration")
 DEFINE_BOOL(trace_generalization, false, "trace map generalization")
 
-DEFINE_BOOL(reuse_scope_infos, false,
-            "reuse scope infos from previous compiles")
+DEFINE_BOOL(reuse_scope_infos, true, "reuse scope infos from previous compiles")
 
 DEFINE_IMPLICATION(fuzzing, reuse_scope_infos)
 
@@ -1476,32 +1498,27 @@ DEFINE_EXPERIMENTAL_FEATURE(
 DEFINE_IMPLICATION(turboshaft_wasm_in_js_inlining, turboshaft)
 DEFINE_IMPLICATION(turboshaft_wasm_in_js_inlining, turbo_inline_js_wasm_calls)
 
-DEFINE_BOOL(turboshaft_instruction_selection, true,
-            "run instruction selection on Turboshaft IR directly")
-
 DEFINE_BOOL(turboshaft_load_elimination, true,
             "enable Turboshaft's low-level load elimination for JS")
 DEFINE_BOOL(turboshaft_loop_peeling, false, "enable Turboshaft's loop peeling")
 DEFINE_BOOL(turboshaft_loop_unrolling, true,
             "enable Turboshaft's loop unrolling")
-DEFINE_BOOL(turboshaft_string_concat_escape_analysis, false,
+DEFINE_BOOL(turboshaft_string_concat_escape_analysis, true,
             "enable Turboshaft's escape analysis for string concatenation")
-// TODO(dmercadier): re-enable behind --future once known bugs have been fixed.
-// DEFINE_WEAK_IMPLICATION(future, turboshaft_string_concat_escape_analysis)
 
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft_typed_optimizations,
                             "enable an additional Turboshaft phase that "
                             "performs optimizations based on type information")
-DEFINE_BOOL(turboshaft_wasm_instruction_selection_staged, true,
-            "run instruction selection on Turboshaft IR directly for wasm, on "
-            "architectures where we are staging the feature")
-DEFINE_EXPERIMENTAL_FEATURE(turboshaft_from_maglev,
-                            "build the Turboshaft graph from Maglev")
+DEFINE_EXPERIMENTAL_FEATURE(turbolev, "use Maglev as a frontend for Turboshaft")
 // inline_api_calls are not supported by the Turboshaft->Maglev translation.
-DEFINE_NEG_IMPLICATION(turboshaft_from_maglev, maglev_inline_api_calls)
+DEFINE_NEG_IMPLICATION(turbolev, maglev_inline_api_calls)
 
 DEFINE_BOOL(turboshaft_csa, true, "run the CSA pipeline with turboshaft")
 DEFINE_IMPLICATION(turboshaft_csa, turboshaft_load_elimination)
+
+DEFINE_EXPERIMENTAL_FEATURE(
+    typed_array_length_loading,
+    "Enable specializing loading the TypedArray length in Maglev / Turbofan")
 
 #if V8_ENABLE_WEBASSEMBLY
 DEFINE_NEG_IMPLICATION(experimental_wasm_shared, liftoff)
@@ -1814,6 +1831,8 @@ DEFINE_INT(wasm_max_initial_code_space_reservation, 0,
            "maximum size of the initial wasm code space reservation (in MB)")
 DEFINE_BOOL(stress_wasm_memory_moving, false,
             "always move non-shared bounds-checked Wasm memory on grow")
+DEFINE_BOOL(flush_liftoff_code, true,
+            "enable flushing liftoff code on memory pressure signal")
 
 DEFINE_SIZE_T(wasm_max_module_size, wasm::kV8MaxWasmModuleSize,
               "maximum allowed size of wasm modules")
@@ -1857,8 +1876,7 @@ DEFINE_BOOL(trace_wasm_revectorize, false, "trace wasm revectorize")
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 #if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64
-// TODO(388290793): Fix trap handling for memory64, or remove it altogether.
-DEFINE_BOOL(wasm_memory64_trap_handling, false,
+DEFINE_BOOL(wasm_memory64_trap_handling, true,
             "Use trap handling for Wasm memory64 bounds checks")
 #else
 DEFINE_BOOL_READONLY(wasm_memory64_trap_handling, false,
@@ -2028,7 +2046,7 @@ DEFINE_BOOL(incremental_marking, true, "use incremental marking")
 DEFINE_BOOL(incremental_marking_bailout_when_ahead_of_schedule, true,
             "bails out of incremental marking when ahead of schedule")
 DEFINE_BOOL(incremental_marking_task, true, "use tasks for incremental marking")
-DEFINE_BOOL(incremental_marking_start_user_visible, false,
+DEFINE_BOOL(incremental_marking_start_user_visible, true,
             "Starts incremental marking with kUserVisible priority.")
 DEFINE_INT(incremental_marking_soft_trigger, 0,
            "threshold for starting incremental marking via a task in percent "
@@ -2043,8 +2061,6 @@ DEFINE_UINT(minor_gc_task_trigger, 80,
             "minor GC task trigger in percent of the current heap limit")
 DEFINE_BOOL(minor_gc_task_with_lower_priority, false,
             "schedules the minor GC task with kUserVisible priority.")
-DEFINE_BOOL(scavenge_separate_stack_scanning, false,
-            "use a separate phase for stack scanning in scavenge")
 DEFINE_BOOL(trace_parallel_scavenge, false, "trace parallel scavenge")
 DEFINE_EXPERIMENTAL_FEATURE(
     cppgc_young_generation,
@@ -2133,6 +2149,12 @@ DEFINE_BOOL(verify_heap_skip_remembered_set, false,
 DEFINE_BOOL_READONLY(verify_heap, false,
                      "verify heap pointers before and after GC")
 #endif
+#if V8_OS_DARWIN
+DEFINE_BOOL(safepoint_bump_qos_class, false,
+            "Bump QOS class for running threads to reach safepoint")
+#endif
+DEFINE_BOOL(memory_reducer_respects_frozen_state, false,
+            "don't schedule another GC when we are frozen")
 DEFINE_BOOL(move_object_start, true, "enable moving of object starts")
 DEFINE_BOOL(memory_reducer, true, "use memory reducer")
 DEFINE_BOOL(memory_reducer_favors_memory, true,
@@ -2896,7 +2918,6 @@ DEFINE_BOOL(freeze_flags_after_init, true,
 DEFINE_BOOL(cet_compatible, V8_CET_SHADOW_STACK_BOOL,
             "Generate Intel CET compatible code")
 DEFINE_NEG_IMPLICATION(cet_compatible, compact_code_space_with_stack)
-DEFINE_NEG_IMPLICATION(cet_compatible, sparkplug)
 
 // mksnapshot.cc
 DEFINE_STRING(embedded_src, nullptr,
@@ -2993,6 +3014,9 @@ DEFINE_SIZE_T(minor_ms_min_lab_size_kb, 0,
 
 DEFINE_BOOL(help, false, "Print usage message, including flags, on console")
 DEFINE_BOOL(print_flag_values, false, "Print all flag values of V8")
+DEFINE_BOOL(print_feature_flags_json, false,
+            "Print JS and Wasm feature flags grouped by in-progress, staged, "
+            "and shipped")
 
 // Slow histograms are also enabled via --dump-counters in d8.
 DEFINE_BOOL(nw_module, false, "Whether the input file is a module")
@@ -3053,7 +3077,6 @@ DEFINE_BOOL_READONLY(enable_slow_asserts, false,
 
 // codegen-ia32.cc / codegen-arm.cc / macro-assembler-*.cc
 DEFINE_BOOL(print_ast, false, "print source AST")
-DEFINE_BOOL(trap_on_abort, false, "replace aborts by breakpoints")
 
 // compiler.cc
 DEFINE_BOOL(print_scopes, false, "print scopes")
@@ -3450,6 +3473,7 @@ DEFINE_IMPLICATION(gdbjit, log)
 #undef DEFINE_DISABLE_FLAG_IMPLICATION
 #undef DEFINE_WEAK_VALUE_IMPLICATION
 #undef DEFINE_GENERIC_IMPLICATION
+#undef DEFINE_REQUIREMENT
 #undef DEFINE_ALIAS_BOOL
 #undef DEFINE_ALIAS_INT
 #undef DEFINE_ALIAS_STRING

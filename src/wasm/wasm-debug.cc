@@ -208,6 +208,7 @@ class DebugInfoImpl {
                                             base::Vector<const int> offsets,
                                             int dead_breakpoint) {
     mutex_.AssertHeld();  // Mutex is held externally.
+    DCHECK(!v8_flags.wasm_jitless);
 
     ForDebugging for_debugging = offsets.size() == 1 && offsets[0] == 0
                                      ? kForStepping
@@ -271,6 +272,7 @@ class DebugInfoImpl {
     if (!result.succeeded()) FATAL("Liftoff compilation failed");
     DCHECK_EQ(generate_debug_sidetable, debug_sidetable != nullptr);
 
+    DCHECK_NULL(result.assumptions);
     WasmCode* new_code =
         native_module_->PublishCode(native_module_->AddCompiledCode(result));
 
@@ -368,6 +370,9 @@ class DebugInfoImpl {
   void UpdateBreakpoints(int func_index, base::Vector<int> breakpoints,
                          Isolate* isolate, StackFrameId stepping_frame,
                          int dead_breakpoint) {
+    // TODO(paolosev@microsoft.com) - Add support for breakpoints in Wasm
+    // interpreter.
+    if (v8_flags.wasm_jitless) return;
     mutex_.AssertHeld();  // Mutex is held externally.
     WasmCode* new_code = RecompileLiftoffWithBreakpoints(
         func_index, breakpoints, dead_breakpoint);
@@ -375,6 +380,9 @@ class DebugInfoImpl {
   }
 
   void FloodWithBreakpoints(WasmFrame* frame, ReturnLocation return_location) {
+    // TODO(paolosev@microsoft.com) - Add support for breakpoints in Wasm
+    // interpreter.
+    if (v8_flags.wasm_jitless) return;
     // 0 is an invalid offset used to indicate flooding.
     constexpr int kFloodingBreakpoints[] = {0};
     DCHECK(frame->wasm_code()->is_liftoff());
@@ -415,6 +423,9 @@ class DebugInfoImpl {
   }
 
   void ClearStepping(WasmFrame* frame) {
+    // TODO(paolosev@microsoft.com) - Add support for breakpoints in Wasm
+    // interpreter.
+    if (v8_flags.wasm_jitless) return;
     WasmCodeRefScope wasm_code_ref_scope;
     base::SpinningMutexGuard guard(&mutex_);
     auto* code = frame->wasm_code();
@@ -644,7 +655,9 @@ class DebugInfoImpl {
           Handle<Object> obj(
               Tagged<Object>(ReadUnalignedValue<Address>(gp_addr(reg.gp()))),
               isolate);
-          return WasmValue(obj, value->type, value->module);
+          // TODO(jkummerow): Consider changing {value->type} to be a
+          // CanonicalValueType.
+          return WasmValue(obj, value->module->canonical_type(value->type));
         } else {
           UNREACHABLE();
         }
@@ -690,7 +703,7 @@ class DebugInfoImpl {
         Handle<Object> obj(
             Tagged<Object>(ReadUnalignedValue<Address>(stack_address)),
             isolate);
-        return WasmValue(obj, value->type, value->module);
+        return WasmValue(obj, value->module->canonical_type(value->type));
       }
       case kI8:
       case kI16:
@@ -1241,7 +1254,7 @@ bool CheckBreakPoint(Isolate* isolate, DirectHandle<BreakPoint> break_point,
   if (break_point->condition()->length() == 0) return true;
 
   HandleScope scope(isolate);
-  Handle<String> condition(break_point->condition(), isolate);
+  DirectHandle<String> condition(break_point->condition(), isolate);
   DirectHandle<Object> result;
   // The Wasm engine doesn't perform any sort of inlining.
   const int inlined_jsframe_index = 0;
@@ -1258,7 +1271,7 @@ bool CheckBreakPoint(Isolate* isolate, DirectHandle<BreakPoint> break_point,
 }  // namespace
 
 // static
-MaybeHandle<FixedArray> WasmScript::CheckBreakPoints(
+MaybeDirectHandle<FixedArray> WasmScript::CheckBreakPoints(
     Isolate* isolate, DirectHandle<Script> script, int position,
     StackFrameId frame_id) {
   if (!script->has_wasm_breakpoint_infos()) return {};
@@ -1285,13 +1298,14 @@ MaybeHandle<FixedArray> WasmScript::CheckBreakPoints(
     }
     // If breakpoint does fire, clear any prior muting behavior.
     isolate->debug()->ClearMutedLocation();
-    Handle<FixedArray> break_points_hit = isolate->factory()->NewFixedArray(1);
+    DirectHandle<FixedArray> break_points_hit =
+        isolate->factory()->NewFixedArray(1);
     break_points_hit->set(0, *break_points);
     return break_points_hit;
   }
 
   auto array = Cast<FixedArray>(break_points);
-  Handle<FixedArray> break_points_hit =
+  DirectHandle<FixedArray> break_points_hit =
       isolate->factory()->NewFixedArray(array->length());
   int break_points_hit_count = 0;
   for (int i = 0; i < array->length(); ++i) {

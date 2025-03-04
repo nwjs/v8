@@ -16,7 +16,7 @@ namespace internal {
 
 namespace {
 
-Handle<JSFinalizationRegistry> ConstructJSFinalizationRegistry(
+DirectHandle<JSFinalizationRegistry> ConstructJSFinalizationRegistry(
     Isolate* isolate) {
   Factory* factory = isolate->factory();
   DirectHandle<String> finalization_registry_name =
@@ -62,11 +62,11 @@ Handle<JSWeakRef> ConstructJSWeakRef(DirectHandle<JSReceiver> target,
   return weak_ref;
 }
 
-Handle<JSObject> CreateKey(const char* key_prop_value, Isolate* isolate) {
+DirectHandle<JSObject> CreateKey(const char* key_prop_value, Isolate* isolate) {
   Factory* factory = isolate->factory();
   DirectHandle<String> key_string =
       factory->NewStringFromStaticChars("key_string");
-  Handle<JSObject> key =
+  DirectHandle<JSObject> key =
       isolate->factory()->NewJSObject(isolate->object_function());
   JSObject::AddProperty(isolate, key, key_string,
                         factory->NewStringFromAsciiChecked(key_prop_value),
@@ -74,7 +74,7 @@ Handle<JSObject> CreateKey(const char* key_prop_value, Isolate* isolate) {
   return key;
 }
 
-Handle<WeakCell> FinalizationRegistryRegister(
+DirectHandle<WeakCell> FinalizationRegistryRegister(
     DirectHandle<JSFinalizationRegistry> finalization_registry,
     DirectHandle<JSObject> target, DirectHandle<Object> held_value,
     DirectHandle<Object> unregister_token, Isolate* isolate) {
@@ -87,15 +87,15 @@ Handle<WeakCell> FinalizationRegistryRegister(
   Execution::Call(isolate, regfunc, finalization_registry, base::VectorOf(args))
       .ToHandleChecked();
   CHECK(IsWeakCell(finalization_registry->active_cells()));
-  Handle<WeakCell> weak_cell =
-      handle(Cast<WeakCell>(finalization_registry->active_cells()), isolate);
+  DirectHandle<WeakCell> weak_cell = direct_handle(
+      Cast<WeakCell>(finalization_registry->active_cells()), isolate);
 #ifdef VERIFY_HEAP
   weak_cell->WeakCellVerify(isolate);
 #endif  // VERIFY_HEAP
   return weak_cell;
 }
 
-Handle<WeakCell> FinalizationRegistryRegister(
+DirectHandle<WeakCell> FinalizationRegistryRegister(
     DirectHandle<JSFinalizationRegistry> finalization_registry,
     DirectHandle<JSObject> target, Isolate* isolate) {
   DirectHandle<Object> undefined =

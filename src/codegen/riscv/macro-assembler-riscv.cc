@@ -128,7 +128,7 @@ static void TailCallOptimizedCodeSlot(MacroAssembler* masm,
 
   // Optimized code is good, get it into the closure and link the closure into
   // the optimized functions list, then tail call the optimized code.
-  // The feedback vector is no longer used, so re-use it as a scratch
+  // The feedback vector is no longer used, so reuse it as a scratch
   // register.
   __ ReplaceClosureCodeWithOptimizedCode(optimized_code_entry, a1);
 
@@ -6351,16 +6351,14 @@ void MacroAssembler::SbxCheck(Condition cc, AbortReason reason, Register rs,
 }
 
 void MacroAssembler::Abort(AbortReason reason) {
-  Label abort_start;
-  bind(&abort_start);
+  ASM_CODE_COMMENT(this);
   if (v8_flags.code_comments) {
-    const char* msg = GetAbortReason(reason);
-    RecordComment("Abort message: ");
-    RecordComment(msg);
+    RecordComment("Abort message:", SourceLocation{});
+    RecordComment(GetAbortReason(reason), SourceLocation{});
   }
 
-  // Avoid emitting call to builtin if requested.
-  if (trap_on_abort()) {
+  // Without debug code, save the code size and just trap.
+  if (!v8_flags.debug_code) {
     ebreak();
     return;
   }
@@ -6376,6 +6374,9 @@ void MacroAssembler::Abort(AbortReason reason) {
     Call(a1);
     return;
   }
+
+  Label abort_start;
+  bind(&abort_start);
 
   Move(a0, Smi::FromInt(static_cast<int>(reason)));
 
@@ -7396,6 +7397,7 @@ void MacroAssembler::JumpJSFunction(Register function_object,
 #ifdef V8_ENABLE_WEBASSEMBLY
 void MacroAssembler::ResolveWasmCodePointer(Register target,
                                             uint64_t signature_hash) {
+  ASM_CODE_COMMENT(this);
   static_assert(!V8_ENABLE_SANDBOX_BOOL);
   ExternalReference global_jump_table =
       ExternalReference::wasm_code_pointer_table();

@@ -36,8 +36,7 @@ namespace v8::internal::wasm::fuzzing {
 namespace {
 
 void CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
-                                              int32_t* max_steps,
-                                              int32_t* nondeterminism) {
+                                              int32_t* max_steps) {
   const WasmModule* module = native_module->module();
   WasmCodeRefScope code_ref_scope;
   CompilationEnv env = CompilationEnv::ForModule(native_module);
@@ -56,7 +55,7 @@ void CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
                                       .set_func_index(func.func_index)
                                       .set_for_debugging(kForDebugging)
                                       .set_max_steps(max_steps)
-                                      .set_nondeterminism(nondeterminism));
+                                      .set_detect_nondeterminism(true));
     if (!result.succeeded()) {
       FATAL(
           "Liftoff compilation failed on a valid module. Run with "
@@ -80,7 +79,7 @@ CompileTimeImports CompileTimeImportsForFuzzing() {
 // nondeterminsm flag that are updated during execution by Liftoff.
 Handle<WasmModuleObject> CompileReferenceModule(
     Isolate* isolate, base::Vector<const uint8_t> wire_bytes,
-    int32_t* max_steps, int32_t* nondeterminism) {
+    int32_t* max_steps) {
   // Create the native module.
   std::shared_ptr<NativeModule> native_module;
   constexpr bool kNoVerifyFunctions = false;
@@ -113,8 +112,7 @@ Handle<WasmModuleObject> CompileReferenceModule(
   InitializeCompilationForTesting(native_module.get());
 
   // Compile all functions with Liftoff.
-  CompileAllFunctionsForReferenceExecution(native_module.get(), max_steps,
-                                           nondeterminism);
+  CompileAllFunctionsForReferenceExecution(native_module.get(), max_steps);
 
   // Create the module object.
   constexpr base::Vector<const char> kNoSourceUrl;
@@ -133,14 +131,16 @@ void ExecuteAgainstReference(Isolate* isolate,
   if (module_object->module()->start_function_index >= 0) return;
 
   int32_t max_steps = max_executed_instructions;
-  int32_t nondeterminism = 0;
 
   HandleScope handle_scope(isolate);  // Avoid leaking handles.
   Zone reference_module_zone(isolate->allocator(), "wasm reference module");
   Handle<WasmModuleObject> module_ref = CompileReferenceModule(
-      isolate, module_object->native_module()->wire_bytes(), &max_steps,
-      &nondeterminism);
+      isolate, module_object->native_module()->wire_bytes(), &max_steps);
   DirectHandle<WasmInstanceObject> instance_ref;
+
+  // Before execution, there should be no dangling nondeterminism registered on
+  // the engine.
+  DCHECK(!WasmEngine::had_nondeterminism());
 
   // Try to instantiate the reference instance, return if it fails.
   {
@@ -198,7 +198,7 @@ void ExecuteAgainstReference(Isolate* isolate,
   if (max_steps < 0) execute = false;
   // If there is nondeterminism, we cannot guarantee the behavior of the test
   // module, and in particular it may not terminate.
-  if (nondeterminism != 0) execute = false;
+  if (WasmEngine::clear_nondeterminism()) execute = false;
   // Similar to max steps reached, also discard modules that need too much
   // memory.
   isolate->heap()->RemoveNearHeapLimitCallback(heap_limit_callback,
@@ -249,6 +249,12 @@ void ExecuteAgainstReference(Isolate* isolate,
   std::unique_ptr<const char[]> exception;
   int32_t result = testing::CallWasmFunctionForTesting(
       isolate, instance, "main", base::VectorOf(compiled_args), &exception);
+
+  // Also the second run can hit nondeterminism which was not hit before (when
+  // growing memory). In that case, do not compare results.
+  // TODO(384781857): Due to nondeterminism, the second run could even not
+  // terminate. If this happens often enough we should do something about this.
+  if (WasmEngine::clear_nondeterminism()) return;
 
   if ((exception_ref != nullptr) != (exception != nullptr)) {
     FATAL("Exception mismatch! Expected: <%s>; got: <%s>",
@@ -332,7 +338,7 @@ void AddDummyTypesToTypeCanonicalizer(Isolate* isolate, Zone* zone) {
       isolate, WasmEnabledFeatures(), CompileTimeImportsForFuzzing(),
       base::VectorOf(wire_bytes));
   CHECK(is_valid);
-  // As the tpyes are reset on each run by the fuzzer, the validation should
+  // As the types are reset on each run by the fuzzer, the validation should
   // have added new types to the TypeCanonicalizer.
   CHECK_GT(GetTypeCanonicalizer()->GetCurrentNumberOfTypes(), type_count);
 }
@@ -371,6 +377,25 @@ void EnableExperimentalWasmFeatures(v8::Isolate* isolate) {
       isolate);
 }
 
+void ResetTypeCanonicalizer(v8::Isolate* isolate, Zone* zone) {
+  v8::internal::Isolate* i_isolate =
+      reinterpret_cast<v8::internal::Isolate*>(isolate);
+
+  // Make sure that there are no NativeModules left referencing the canonical
+  // types. Collecting NativeModules can require two rounds of GC.
+  for (int i = 0; i < 2 && GetWasmEngine()->NativeModuleCount() != 0; i++) {
+    // We need to invoke GC without stack, otherwise the native module may
+    // survive.
+    DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+        i_isolate->heap());
+    isolate->RequestGarbageCollectionForTesting(
+        v8::Isolate::kFullGarbageCollection);
+  }
+  GetTypeCanonicalizer()->EmptyStorageForTesting();
+  TypeCanonicalizer::ClearWasmCanonicalTypesForTesting(i_isolate);
+  AddDummyTypesToTypeCanonicalizer(i_isolate, zone);
+}
+
 void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
                                          bool require_valid) {
   v8_fuzzer::FuzzerSupport* support = v8_fuzzer::FuzzerSupport::Get();
@@ -398,9 +423,7 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
   // Clear recursive groups: The fuzzer creates random types in every run. These
   // are saved as recursive groups as part of the type canonicalizer, but types
   // from previous runs just waste memory.
-  GetTypeCanonicalizer()->EmptyStorageForTesting();
-  TypeCanonicalizer::ClearWasmCanonicalTypesForTesting(i_isolate);
-  AddDummyTypesToTypeCanonicalizer(i_isolate, &zone);
+  ResetTypeCanonicalizer(isolate, &zone);
 
   // Clear any exceptions from a prior run.
   if (i_isolate->has_exception()) {

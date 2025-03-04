@@ -111,9 +111,8 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
 //   representation of the outputs and inputs of this operations.
 // After defining the struct here, you'll also need to integrate it in
 // Turboshaft:
-// - If Foo is not in not lowered before reaching the instruction selector, add
-//   a overload of ProcessOperation for FooOp in recreate-schedule.cc, and
-//   handle Opcode::kFoo in the Turboshaft VisitNode of instruction-selector.cc.
+// - If Foo is not lowered before reaching the instruction selector, handle
+//   Opcode::kFoo in the Turboshaft VisitNode of instruction-selector.cc.
 
 #ifdef V8_INTL_SUPPORT
 #define TURBOSHAFT_INTL_OPERATION_LIST(V) V(StringToCaseIntl)
@@ -268,6 +267,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(StringFromCodePointAt)                      \
   V(StringIndexOf)                              \
   V(StringLength)                               \
+  V(TypedArrayLength)                           \
   V(StringSubstring)                            \
   V(NewConsString)                              \
   V(TransitionAndStoreArrayElement)             \
@@ -275,6 +275,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(TransitionElementsKindOrCheckMap)           \
   V(DebugPrint)                                 \
   V(CheckTurboshaftTypeOf)                      \
+  V(Float16Change)                              \
   V(Word32SignHint)
 
 // These Operations are the lowest level handled by Turboshaft, and are
@@ -1139,8 +1140,8 @@ struct OperationT : Operation {
     size_t end = std::min<size_t>(expected.size(), result->input_count);
     for (size_t i = 0; i < end; ++i) {
       if (expected[i] == MaybeRegisterRepresentation::None()) continue;
-      DCHECK(ValidOpInputRep(*graph, result->inputs()[i],
-                             RegisterRepresentation(expected[i])));
+      ValidateOpInputRep(*graph, result->inputs()[i],
+                         RegisterRepresentation(expected[i]), result);
     }
 #endif
     // If this DCHECK fails, then the number of inputs specified in the
@@ -1291,37 +1292,38 @@ struct FixedArityOperationT : OperationT<Derived> {
   }
 };
 
-#define SUPPORTED_OPERATIONS_LIST(V)                              \
-  V(float32_round_down, Float32RoundDown)                         \
-  V(float64_round_down, Float64RoundDown)                         \
-  V(float32_round_up, Float32RoundUp)                             \
-  V(float64_round_up, Float64RoundUp)                             \
-  V(float32_round_to_zero, Float32RoundTruncate)                  \
-  V(float64_round_to_zero, Float64RoundTruncate)                  \
-  V(float32_round_ties_even, Float32RoundTiesEven)                \
-  V(float64_round_ties_even, Float64RoundTiesEven)                \
-  V(float64_round_ties_away, Float64RoundTiesAway)                \
-  V(int32_div_is_safe, Int32DivIsSafe)                            \
-  V(uint32_div_is_safe, Uint32DivIsSafe)                          \
-  V(word32_shift_is_safe, Word32ShiftIsSafe)                      \
-  V(word32_ctz, Word32Ctz)                                        \
-  V(word64_ctz, Word64Ctz)                                        \
-  V(word64_ctz_lowerable, Word64CtzLowerable)                     \
-  V(word32_popcnt, Word32Popcnt)                                  \
-  V(word64_popcnt, Word64Popcnt)                                  \
-  V(word32_reverse_bits, Word32ReverseBits)                       \
-  V(word64_reverse_bits, Word64ReverseBits)                       \
-  V(float32_select, Float32Select)                                \
-  V(float64_select, Float64Select)                                \
-  V(int32_abs_with_overflow, Int32AbsWithOverflow)                \
-  V(int64_abs_with_overflow, Int64AbsWithOverflow)                \
-  V(word32_rol, Word32Rol)                                        \
-  V(word64_rol, Word64Rol)                                        \
-  V(word64_rol_lowerable, Word64RolLowerable)                     \
-  V(sat_conversion_is_safe, SatConversionIsSafe)                  \
-  V(word32_select, Word32Select)                                  \
-  V(word64_select, Word64Select)                                  \
-  V(float64_to_float16_raw_bits, TruncateFloat64ToFloat16RawBits) \
+#define SUPPORTED_OPERATIONS_LIST(V)                       \
+  V(float32_round_down, Float32RoundDown)                  \
+  V(float64_round_down, Float64RoundDown)                  \
+  V(float32_round_up, Float32RoundUp)                      \
+  V(float64_round_up, Float64RoundUp)                      \
+  V(float32_round_to_zero, Float32RoundTruncate)           \
+  V(float64_round_to_zero, Float64RoundTruncate)           \
+  V(float32_round_ties_even, Float32RoundTiesEven)         \
+  V(float64_round_ties_even, Float64RoundTiesEven)         \
+  V(float64_round_ties_away, Float64RoundTiesAway)         \
+  V(int32_div_is_safe, Int32DivIsSafe)                     \
+  V(uint32_div_is_safe, Uint32DivIsSafe)                   \
+  V(word32_shift_is_safe, Word32ShiftIsSafe)               \
+  V(word32_ctz, Word32Ctz)                                 \
+  V(word64_ctz, Word64Ctz)                                 \
+  V(word64_ctz_lowerable, Word64CtzLowerable)              \
+  V(word32_popcnt, Word32Popcnt)                           \
+  V(word64_popcnt, Word64Popcnt)                           \
+  V(word32_reverse_bits, Word32ReverseBits)                \
+  V(word64_reverse_bits, Word64ReverseBits)                \
+  V(float32_select, Float32Select)                         \
+  V(float64_select, Float64Select)                         \
+  V(int32_abs_with_overflow, Int32AbsWithOverflow)         \
+  V(int64_abs_with_overflow, Int64AbsWithOverflow)         \
+  V(word32_rol, Word32Rol)                                 \
+  V(word64_rol, Word64Rol)                                 \
+  V(word64_rol_lowerable, Word64RolLowerable)              \
+  V(sat_conversion_is_safe, SatConversionIsSafe)           \
+  V(word32_select, Word32Select)                           \
+  V(word64_select, Word64Select)                           \
+  V(float64_to_float16_raw_bits, Float16RawBitsConversion) \
+  V(float16_raw_bits_to_float64, Float16RawBitsConversion) \
   V(float16, Float16)
 
 class V8_EXPORT_PRIVATE SupportedOperations {
@@ -1367,12 +1369,14 @@ base::Vector<const MaybeRegisterRepresentation> MaybeRepVector() {
 }
 
 #if DEBUG
-V8_EXPORT_PRIVATE bool ValidOpInputRep(
+V8_EXPORT_PRIVATE void ValidateOpInputRep(
     const Graph& graph, OpIndex input,
     std::initializer_list<RegisterRepresentation> expected_rep,
+    const Operation* checked_op = nullptr,
     std::optional<size_t> projection_index = {});
-V8_EXPORT_PRIVATE bool ValidOpInputRep(
+V8_EXPORT_PRIVATE void ValidateOpInputRep(
     const Graph& graph, OpIndex input, RegisterRepresentation expected_rep,
+    const Operation* checked_op = nullptr,
     std::optional<size_t> projection_index = {});
 #endif  // DEBUG
 
@@ -1516,11 +1520,11 @@ struct ToNumberOrNumericOp : FixedArityOperationT<3, ToNumberOrNumericOp> {
   }
 
   V<Object> input() const { return Base::input<Object>(0); }
-  OpIndex frame_state() const { return Base::input(1); }
+  V<FrameState> frame_state() const { return Base::input<FrameState>(1); }
   V<Context> context() const { return Base::input<Context>(2); }
 
-  ToNumberOrNumericOp(V<Object> input, OpIndex frame_state, V<Context> context,
-                      Object::Conversion kind,
+  ToNumberOrNumericOp(V<Object> input, V<FrameState> frame_state,
+                      V<Context> context, Object::Conversion kind,
                       LazyDeoptOnThrow lazy_deopt_on_throw)
       : Base(input, frame_state, context),
         kind(kind),
@@ -1749,13 +1753,13 @@ struct Word32PairBinopOp : FixedArityOperationT<4, Word32PairBinopOp> {
                           MaybeRegisterRepresentation::Word32()>();
   }
 
-  OpIndex left_low() const { return input(0); }
-  OpIndex left_high() const { return input(1); }
-  OpIndex right_low() const { return input(2); }
-  OpIndex right_high() const { return input(3); }
+  V<Word32> left_low() const { return input<Word32>(0); }
+  V<Word32> left_high() const { return input<Word32>(1); }
+  V<Word32> right_low() const { return input<Word32>(2); }
+  V<Word32> right_high() const { return input<Word32>(3); }
 
-  Word32PairBinopOp(OpIndex left_low, OpIndex left_high, OpIndex right_low,
-                    OpIndex right_high, Kind kind)
+  Word32PairBinopOp(V<Word32> left_low, V<Word32> left_high,
+                    V<Word32> right_low, V<Word32> right_high, Kind kind)
       : Base(left_low, left_high, right_low, right_high), kind(kind) {}
 
   auto options() const { return std::tuple{kind}; }
@@ -2108,8 +2112,10 @@ struct ComparisonOp : FixedArityOperationT<2, ComparisonOp> {
         input_rep = RegisterRepresentation::Compressed();
       }
 #endif  // V8_COMPRESS_POINTERS
-      DCHECK(ValidOpInputRep(graph, left(), input_rep));
-      DCHECK(ValidOpInputRep(graph, right(), input_rep));
+#ifdef DEBUG
+      ValidateOpInputRep(graph, left(), input_rep);
+      ValidateOpInputRep(graph, right(), input_rep);
+#endif  // DEBUG
       USE(input_rep);
     } else {
       DCHECK_EQ(rep, any_of(RegisterRepresentation::Word32(),
@@ -2142,6 +2148,9 @@ struct ChangeOp : FixedArityOperationT<1, ChangeOp> {
     // convert float64 to float16, then bitcast word32. Used for storing into
     // Float16Array and Math.fround16.
     kJSFloat16TruncateWithBitcast,
+    // bitcast word32 to float16 and convert to float64. Used for loading from
+    // Float16Array and Math.fround16.
+    kJSFloat16ChangeWithBitcast,
     // convert (un)signed integer to floating-point value
     kSignedToFloat,
     kUnsignedToFloat,
@@ -2197,6 +2206,7 @@ struct ChangeOp : FixedArityOperationT<1, ChangeOp> {
       case Kind::kJSFloatTruncate:
         return false;
       case Kind::kJSFloat16TruncateWithBitcast:
+      case Kind::kJSFloat16ChangeWithBitcast:
         return false;
       case Kind::kSignedToFloat:
         if (from == RegisterRepresentation::Word32() &&
@@ -2458,7 +2468,7 @@ struct TaggedBitcastOp : FixedArityOperationT<1, TaggedBitcastOp> {
                          to == RegisterRepresentation::Word64(),
                      Is64());
     } else {
-      // TODO(nicohartmann@): Without implicit trucation, the first case might
+      // TODO(nicohartmann@): Without implicit truncation, the first case might
       // not be correct anymore.
       DCHECK((from.IsWord() && to == RegisterRepresentation::Tagged()) ||
              (from == RegisterRepresentation::Tagged() &&
@@ -2619,7 +2629,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
   }
 
   base::Vector<const MaybeRegisterRepresentation> inputs_rep(
-      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+      ZoneVector<MaybeRegisterRepresentation>&) const {
     return {};
   }
 
@@ -2935,21 +2945,21 @@ struct LoadOp : OperationT<LoadOp> {
     }
 
     constexpr Kind NotLoadEliminable() {
-      Kind kind = *this;
-      kind.load_eliminable = false;
-      return kind;
+      Kind new_kind = *this;
+      new_kind.load_eliminable = false;
+      return new_kind;
     }
 
     constexpr Kind Immutable() const {
-      Kind kind(*this);
-      kind.is_immutable = true;
-      return kind;
+      Kind new_kind(*this);
+      new_kind.is_immutable = true;
+      return new_kind;
     }
 
     constexpr Kind Atomic() const {
-      Kind kind(*this);
-      kind.is_atomic = true;
-      return kind;
+      Kind new_kind(*this);
+      new_kind.is_atomic = true;
+      return new_kind;
     }
 
     bool operator==(const Kind& other) const {
@@ -3504,7 +3514,7 @@ struct AllocateOp : FixedArityOperationT<1, AllocateOp> {
 
 struct DecodeExternalPointerOp
     : FixedArityOperationT<1, DecodeExternalPointerOp> {
-  ExternalPointerTag tag;
+  ExternalPointerTagRange tag_range;
 
   // Accessing external pointers is only safe if the garbage collected pointer
   // keeping the external pointer alive is retained for the length of the
@@ -3522,14 +3532,12 @@ struct DecodeExternalPointerOp
 
   OpIndex handle() const { return input(0); }
 
-  DecodeExternalPointerOp(OpIndex handle, ExternalPointerTag tag)
-      : Base(handle), tag(tag) {}
+  DecodeExternalPointerOp(OpIndex handle, ExternalPointerTagRange tag_range)
+      : Base(handle), tag_range(tag_range) {}
 
-  void Validate(const Graph& graph) const {
-    DCHECK_NE(tag, kExternalPointerNullTag);
-  }
+  void Validate(const Graph& graph) const { DCHECK(!tag_range.IsEmpty()); }
   void PrintOptions(std::ostream& os) const;
-  auto options() const { return std::tuple{tag}; }
+  auto options() const { return std::tuple{tag_range}; }
 };
 
 struct JSStackCheckOp : OperationT<JSStackCheckOp> {
@@ -4531,7 +4539,9 @@ struct ProjectionOp : FixedArityOperationT<1, ProjectionOp> {
       : Base(input), index(index), rep(rep) {}
 
   void Validate(const Graph& graph) const {
-    DCHECK(ValidOpInputRep(graph, input(), rep, index));
+#ifdef DEBUG
+    ValidateOpInputRep(graph, input(), rep, this, index);
+#endif  // DEBUG
   }
   auto options() const { return std::tuple{index, rep}; }
 };
@@ -5512,6 +5522,33 @@ struct StringLengthOp : FixedArityOperationT<1, StringLengthOp> {
   auto options() const { return std::tuple{}; }
 };
 
+struct TypedArrayLengthOp : FixedArityOperationT<1, TypedArrayLengthOp> {
+  ElementsKind elements_kind;
+
+  static constexpr OpEffects effects =
+      // This operation is only triggered for constant-length JSTypedArrays, so
+      // it's pure.
+      OpEffects()
+          // We rely on the input being a JSTypedArray.
+          .CanDependOnChecks();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::WordPtr()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+  }
+
+  V<JSTypedArray> typed_array() const { return Base::input<JSTypedArray>(0); }
+
+  explicit TypedArrayLengthOp(V<JSTypedArray> typed_array,
+                              ElementsKind elements_kind)
+      : Base(typed_array), elements_kind(elements_kind) {}
+
+  auto options() const { return std::tuple{elements_kind}; }
+};
+
 struct StringIndexOfOp : FixedArityOperationT<3, StringIndexOfOp> {
   static constexpr OpEffects effects =
       OpEffects()
@@ -5742,6 +5779,7 @@ inline constexpr RegisterRepresentation RegisterRepresentationForArrayType(
     case kExternalUint16Array:
     case kExternalInt32Array:
     case kExternalUint32Array:
+    case kExternalFloat16Array:
       return RegisterRepresentation::Word32();
     case kExternalFloat32Array:
       return RegisterRepresentation::Float32();
@@ -5750,8 +5788,6 @@ inline constexpr RegisterRepresentation RegisterRepresentationForArrayType(
     case kExternalBigInt64Array:
     case kExternalBigUint64Array:
       return RegisterRepresentation::Word64();
-    case kExternalFloat16Array:
-      UNIMPLEMENTED();
   }
 }
 
@@ -6278,6 +6314,32 @@ struct SameValueOp : FixedArityOperationT<2, SameValueOp> {
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
                                            SameValueOp::Mode mode);
 
+struct Float16ChangeOp : FixedArityOperationT<1, Float16ChangeOp> {
+  static constexpr OpEffects effects = OpEffects();
+
+  enum Kind : uint8_t { kToFloat64, kToFloat16 };
+  Kind kind;
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return kind == kToFloat16 ? RepVector<RegisterRepresentation::Word32()>()
+                              : RepVector<RegisterRepresentation::Float64()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return kind == kToFloat16
+               ? MaybeRepVector<MaybeRegisterRepresentation::Float64()>()
+               : MaybeRepVector<MaybeRegisterRepresentation::Word32()>();
+  }
+
+  Float16ChangeOp(V<Float64OrWord32> input, Kind kind)
+      : Base(input), kind(kind) {}
+
+  V<Float64OrWord32> input() const { return Base::input<Float64OrWord32>(0); }
+
+  auto options() const { return std::tuple{kind}; }
+};
+
 struct Float64SameValueOp : FixedArityOperationT<2, Float64SameValueOp> {
   static constexpr OpEffects effects = OpEffects();
   base::Vector<const RegisterRepresentation> outputs_rep() const {
@@ -6381,7 +6443,6 @@ struct FastApiCallOp : OperationT<FastApiCallOp> {
             return MaybeRegisterRepresentation::None();
         }
       case CTypeInfo::SequenceType::kIsSequence:
-      case CTypeInfo::SequenceType::kIsTypedArray:
         return MaybeRegisterRepresentation::Tagged();
       case CTypeInfo::SequenceType::kIsArrayBuffer:
         UNREACHABLE();
@@ -6639,10 +6700,10 @@ struct SpeculativeNumberBinopOp
 
   OpIndex left() const { return Base::input(0); }
   OpIndex right() const { return Base::input(1); }
-  OpIndex frame_state() const { return Base::input(2); }
+  V<FrameState> frame_state() const { return Base::input<FrameState>(2); }
 
-  SpeculativeNumberBinopOp(OpIndex left, OpIndex right, OpIndex frame_state,
-                           Kind kind)
+  SpeculativeNumberBinopOp(OpIndex left, OpIndex right,
+                           V<FrameState> frame_state, Kind kind)
       : Base(left, right, frame_state), kind(kind) {}
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
@@ -9106,6 +9167,7 @@ constexpr size_t input_count(LoadOp::Kind) { return 0; }
 constexpr size_t input_count(RegisterRepresentation) { return 0; }
 constexpr size_t input_count(MemoryRepresentation) { return 0; }
 constexpr size_t input_count(OpEffects) { return 0; }
+constexpr size_t input_count(ExternalPointerTagRange) { return 0; }
 inline size_t input_count(const ElementsTransition) { return 0; }
 inline size_t input_count(const ElementsTransitionWithMultipleSources) {
   return 0;

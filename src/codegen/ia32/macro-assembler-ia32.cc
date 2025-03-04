@@ -1894,14 +1894,14 @@ void MacroAssembler::AlignStackPointer() {
 }
 
 void MacroAssembler::Abort(AbortReason reason) {
+  ASM_CODE_COMMENT(this);
   if (v8_flags.code_comments) {
-    const char* msg = GetAbortReason(reason);
-    RecordComment("Abort message: ");
-    RecordComment(msg);
+    RecordComment("Abort message:", SourceLocation{});
+    RecordComment(GetAbortReason(reason), SourceLocation{});
   }
 
-  // Avoid emitting call to builtin if requested.
-  if (trap_on_abort()) {
+  // Without debug code, save the code size and just trap.
+  if (!v8_flags.debug_code) {
     int3();
     return;
   }
@@ -2182,6 +2182,7 @@ void MacroAssembler::JumpJSFunction(Register function_object,
 #ifdef V8_ENABLE_WEBASSEMBLY
 
 void MacroAssembler::ResolveWasmCodePointer(Register target) {
+  ASM_CODE_COMMENT(this);
   static_assert(!V8_ENABLE_SANDBOX_BOOL);
   Register scratch = target == eax ? ebx : eax;
   // TODO(sroettger): the load from table[target] is possible with a single

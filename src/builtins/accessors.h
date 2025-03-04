@@ -105,7 +105,7 @@ class Accessors : public AllStatic {
       ACCESSOR_CALLBACK_LIST_GENERATOR(COUNT_ACCESSOR, /* not used */);
 #undef COUNT_ACCESSOR
 
-  static Handle<AccessorInfo> MakeModuleNamespaceEntryInfo(
+  static DirectHandle<AccessorInfo> MakeModuleNamespaceEntryInfo(
       Isolate* isolate, DirectHandle<String> name);
 
   // Accessor function called directly from the runtime system. Returns the
@@ -120,10 +120,10 @@ class Accessors : public AllStatic {
                                       DirectHandle<Name> name,
                                       FieldIndex* field_index);
 
-  static MaybeHandle<Object> ReplaceAccessorWithDataProperty(
+  static MaybeDirectHandle<Object> ReplaceAccessorWithDataProperty(
       Isolate* isolate, DirectHandle<JSAny> receiver,
       DirectHandle<JSObject> holder, DirectHandle<Name> name,
-      Handle<Object> value);
+      DirectHandle<Object> value);
 
   // Create an AccessorInfo. The setter is optional (can be nullptr).
   //
@@ -137,14 +137,14 @@ class Accessors : public AllStatic {
       void (*)(Local<v8::Name> property, Local<v8::Value> value,
                const PropertyCallbackInfo<v8::Boolean>& info);
 
-  V8_EXPORT_PRIVATE static Handle<AccessorInfo> MakeAccessor(
+  V8_EXPORT_PRIVATE static DirectHandle<AccessorInfo> MakeAccessor(
       Isolate* isolate, DirectHandle<Name> name,
       AccessorNameGetterCallback getter,
       AccessorNameBooleanSetterCallback setter);
 
  private:
 #define ACCESSOR_INFO_DECLARATION(_, accessor_name, AccessorName, ...) \
-  static Handle<AccessorInfo> Make##AccessorName##Info(Isolate* isolate);
+  static DirectHandle<AccessorInfo> Make##AccessorName##Info(Isolate* isolate);
   ACCESSOR_INFO_LIST_GENERATOR(ACCESSOR_INFO_DECLARATION, /* not used */)
 #undef ACCESSOR_INFO_DECLARATION
 

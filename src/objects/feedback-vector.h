@@ -199,7 +199,7 @@ class ClosureFeedbackCellArray
   NEVER_READ_ONLY_SPACE
   using Shape = ClosureFeedbackCellArrayShape;
 
-  V8_EXPORT_PRIVATE static Handle<ClosureFeedbackCellArray> New(
+  V8_EXPORT_PRIVATE static DirectHandle<ClosureFeedbackCellArray> New(
       Isolate* isolate, DirectHandle<SharedFunctionInfo> shared,
       AllocationType allocation = AllocationType::kYoung);
 
@@ -348,8 +348,8 @@ class FeedbackVector
 
   // Returns the feedback cell at |index| that is used to create the
   // closure.
-  inline Handle<FeedbackCell> GetClosureFeedbackCell(Isolate* isolate,
-                                                     int index) const;
+  inline DirectHandle<FeedbackCell> GetClosureFeedbackCell(Isolate* isolate,
+                                                           int index) const;
   inline Tagged<FeedbackCell> closure_feedback_cell(int index) const;
 
   // Gives access to raw memory which stores the array's data.
@@ -418,13 +418,13 @@ class FeedbackVector
   }
 
   // The object that indicates an uninitialized cache.
-  static inline Handle<Symbol> UninitializedSentinel(Isolate* isolate);
+  static inline DirectHandle<Symbol> UninitializedSentinel(Isolate* isolate);
 
   // The object that indicates a megamorphic state.
   static inline Handle<Symbol> MegamorphicSentinel(Isolate* isolate);
 
   // The object that indicates a MegaDOM state.
-  static inline Handle<Symbol> MegaDOMSentinel(Isolate* isolate);
+  static inline DirectHandle<Symbol> MegaDOMSentinel(Isolate* isolate);
 
   // A raw version of the uninitialized sentinel that's safe to read during
   // garbage collection (e.g., for patching the cache).
@@ -843,7 +843,7 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
                 const NexusConfig& config);
 
   const NexusConfig* config() const { return &config_; }
-  Handle<FeedbackVector> vector_handle() const {
+  DirectHandle<FeedbackVector> vector_handle() const {
     DCHECK(vector_.is_null());
     return vector_handle_;
   }
@@ -879,7 +879,7 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
   int ExtractMapsAndHandlers(
       MapsAndHandlers* maps_and_handlers,
       TryUpdateHandler map_handler = TryUpdateHandler()) const;
-  MaybeObjectHandle FindHandlerForMap(DirectHandle<Map> map) const;
+  MaybeObjectDirectHandle FindHandlerForMap(DirectHandle<Map> map) const;
   // Used to obtain maps. This is used by compilers to get all the feedback
   // stored in the vector.
   template <typename F>
@@ -905,12 +905,12 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
 
   void ConfigureMonomorphic(DirectHandle<Name> name,
                             DirectHandle<Map> receiver_map,
-                            const MaybeObjectHandle& handler);
+                            const MaybeObjectDirectHandle& handler);
 
   void ConfigurePolymorphic(DirectHandle<Name> name,
                             MapsAndHandlers const& maps_and_handlers);
 
-  void ConfigureMegaDOM(const MaybeObjectHandle& handler);
+  void ConfigureMegaDOM(const MaybeObjectDirectHandle& handler);
   MaybeObjectHandle ExtractMegaDOMHandler();
 
   BinaryOperationHint GetBinaryOperationFeedback() const;
@@ -943,14 +943,14 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
   using CallCountField = base::BitField<uint32_t, 2, 30>;
 
   // For InstanceOf ICs.
-  MaybeHandle<JSObject> GetConstructorFeedback() const;
+  MaybeDirectHandle<JSObject> GetConstructorFeedback() const;
 
   // For Global Load and Store ICs.
   void ConfigurePropertyCellMode(DirectHandle<PropertyCell> cell);
   // Returns false if given combination of indices is not allowed.
   bool ConfigureLexicalVarMode(int script_context_index, int context_slot_index,
                                bool immutable);
-  void ConfigureHandlerMode(const MaybeObjectHandle& handler);
+  void ConfigureHandlerMode(const MaybeObjectDirectHandle& handler);
 
   // For CloneObject ICs
   static constexpr int kCloneObjectPolymorphicEntrySize = 2;
@@ -983,10 +983,10 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
   inline Tagged<MaybeObject> MegaDOMSentinel() const;
 
   // Create an array. The caller must install it in a feedback vector slot.
-  Handle<WeakFixedArray> CreateArrayOfSize(int length);
+  DirectHandle<WeakFixedArray> CreateArrayOfSize(int length);
 
   // Helpers to maintain feedback_cache_.
-  inline Tagged<MaybeObject> FromHandle(MaybeObjectHandle slot) const;
+  inline Tagged<MaybeObject> FromHandle(MaybeObjectDirectHandle slot) const;
   inline MaybeObjectHandle ToHandle(Tagged<MaybeObject> value) const;
 
   // The reason for having a vector handle and a raw pointer is that we can and

@@ -163,8 +163,8 @@ InvokeParams InvokeParams::SetUpForRunMicrotasks(
   return params;
 }
 
-Handle<Code> JSEntry(Isolate* isolate, Execution::Target execution_target,
-                     bool is_construct) {
+DirectHandle<Code> JSEntry(Isolate* isolate, Execution::Target execution_target,
+                           bool is_construct) {
   if (is_construct) {
     DCHECK_EQ(Execution::Target::kCallable, execution_target);
     return BUILTIN_CODE(isolate, JSConstructEntry);
@@ -178,7 +178,7 @@ Handle<Code> JSEntry(Isolate* isolate, Execution::Target execution_target,
   UNREACHABLE();
 }
 
-MaybeHandle<Context> NewScriptContext(
+MaybeDirectHandle<Context> NewScriptContext(
     Isolate* isolate, DirectHandle<JSFunction> function,
     DirectHandle<FixedArray> host_defined_options) {
   // TODO(cbruni, 1244145): Use passed in host_defined_options.
@@ -187,12 +187,12 @@ MaybeHandle<Context> NewScriptContext(
   if (isolate->should_check_side_effects()) {
     isolate->Throw(*isolate->factory()->NewEvalError(
         MessageTemplate::kNoSideEffectDebugEvaluate));
-    return MaybeHandle<Context>();
+    return MaybeDirectHandle<Context>();
   }
   SaveAndSwitchContext save(isolate, function->context());
   Tagged<SharedFunctionInfo> sfi = function->shared();
   Handle<Script> script(Cast<Script>(sfi->script()), isolate);
-  Handle<ScopeInfo> scope_info(sfi->scope_info(), isolate);
+  DirectHandle<ScopeInfo> scope_info(sfi->scope_info(), isolate);
   DirectHandle<NativeContext> native_context(
       Cast<NativeContext>(function->context()), isolate);
   DirectHandle<JSGlobalObject> global_object(native_context->global_object(),
@@ -201,15 +201,15 @@ MaybeHandle<Context> NewScriptContext(
       native_context->script_context_table(), isolate);
 
   // Find name clashes.
-  for (auto it : ScopeInfo::IterateLocalNames(scope_info)) {
-    Handle<String> name(it->name(), isolate);
-    VariableMode mode = scope_info->ContextLocalMode(it->index());
+  for (auto name_it : ScopeInfo::IterateLocalNames(scope_info)) {
+    Handle<String> name(name_it->name(), isolate);
+    VariableMode mode = scope_info->ContextLocalMode(name_it->index());
     VariableLookupResult lookup;
     if (script_context->Lookup(name, &lookup)) {
       if (IsLexicalVariableMode(mode) || IsLexicalVariableMode(lookup.mode)) {
         DirectHandle<Context> context(script_context->get(lookup.context_index),
                                       isolate);
-        // If we are trying to re-declare a REPL-mode let as a let, REPL-mode
+        // If we are trying to redeclare a REPL-mode let as a let, REPL-mode
         // const as a const, REPL-mode using as a using and REPL-mode await
         // using as an await using allow it.
         if (!((mode == lookup.mode && IsLexicalVariableMode(mode)) &&
@@ -222,15 +222,16 @@ MaybeHandle<Context> NewScriptContext(
           isolate->ThrowAt(isolate->factory()->NewSyntaxError(
                                MessageTemplate::kVarRedeclaration, name),
                            &location);
-          return MaybeHandle<Context>();
+          return MaybeDirectHandle<Context>();
         }
       }
     }
 
     if (IsLexicalVariableMode(mode)) {
-      LookupIterator it(isolate, global_object, name, global_object,
-                        LookupIterator::OWN_SKIP_INTERCEPTOR);
-      Maybe<PropertyAttributes> maybe = JSReceiver::GetPropertyAttributes(&it);
+      LookupIterator lookup_it(isolate, global_object, name, global_object,
+                               LookupIterator::OWN_SKIP_INTERCEPTOR);
+      Maybe<PropertyAttributes> maybe =
+          JSReceiver::GetPropertyAttributes(&lookup_it);
       // Can't fail since the we looking up own properties on the global object
       // skipping interceptors.
       CHECK(!maybe.IsNothing());
@@ -244,14 +245,14 @@ MaybeHandle<Context> NewScriptContext(
         isolate->ThrowAt(isolate->factory()->NewSyntaxError(
                              MessageTemplate::kVarRedeclaration, name),
                          &location);
-        return MaybeHandle<Context>();
+        return MaybeDirectHandle<Context>();
       }
 
       JSGlobalObject::InvalidatePropertyCell(global_object, name);
     }
   }
 
-  Handle<Context> result =
+  DirectHandle<Context> result =
       isolate->factory()->NewScriptContext(native_context, scope_info);
 
   result->Initialize(isolate);
@@ -476,11 +477,11 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
   return Handle<Object>(value, isolate);
 }
 
-MaybeHandle<Object> InvokeWithTryCatch(Isolate* isolate,
-                                       const InvokeParams& params) {
+MaybeDirectHandle<Object> InvokeWithTryCatch(Isolate* isolate,
+                                             const InvokeParams& params) {
   DCHECK_IMPLIES(v8_flags.strict_termination_checks,
                  !isolate->is_execution_terminating());
-  MaybeHandle<Object> maybe_result;
+  MaybeDirectHandle<Object> maybe_result;
   if (params.exception_out != nullptr) {
     *params.exception_out = {};
   }
@@ -566,7 +567,7 @@ MaybeHandle<JSReceiver> Execution::New(
 }
 
 // static
-MaybeHandle<Object> Execution::TryCallScript(
+MaybeDirectHandle<Object> Execution::TryCallScript(
     Isolate* isolate, DirectHandle<JSFunction> script_function,
     DirectHandle<Object> receiver,
     DirectHandle<FixedArray> host_defined_options) {
@@ -580,7 +581,7 @@ MaybeHandle<Object> Execution::TryCallScript(
 }
 
 // static
-MaybeHandle<Object> Execution::TryCall(
+MaybeDirectHandle<Object> Execution::TryCall(
     Isolate* isolate, DirectHandle<Object> callable,
     DirectHandle<Object> receiver,
     base::Vector<const DirectHandle<Object>> args,
@@ -595,7 +596,7 @@ MaybeHandle<Object> Execution::TryCall(
 }
 
 // static
-MaybeHandle<Object> Execution::TryRunMicrotasks(
+MaybeDirectHandle<Object> Execution::TryRunMicrotasks(
     Isolate* isolate, MicrotaskQueue* microtask_queue) {
   return InvokeWithTryCatch(
       isolate, InvokeParams::SetUpForRunMicrotasks(isolate, microtask_queue));

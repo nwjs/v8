@@ -114,7 +114,7 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
       Isolate* isolate, DirectHandle<JSFunction> function,
       BytecodeOffset osr_offset, ConcurrencyMode mode, CodeKind code_kind);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<SharedFunctionInfo>
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<SharedFunctionInfo>
   CompileForLiveEdit(ParseInfo* parse_info, Handle<Script> script,
                      MaybeDirectHandle<ScopeInfo> outer_scope_info,
                      Isolate* isolate);
@@ -163,36 +163,39 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // real function with a context.
 
   // Create a (bound) function for a String source within a context for eval.
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSFunction> GetFunctionFromEval(
-      Handle<String> source, Handle<SharedFunctionInfo> outer_info,
-      DirectHandle<Context> context, LanguageMode language_mode,
-      ParseRestriction restriction, int parameters_end_pos, int eval_position,
-      ParsingWhileDebugging parsing_while_debugging =
-          ParsingWhileDebugging::kNo);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSFunction>
+  GetFunctionFromEval(DirectHandle<String> source,
+                      DirectHandle<SharedFunctionInfo> outer_info,
+                      DirectHandle<Context> context, LanguageMode language_mode,
+                      ParseRestriction restriction, int parameters_end_pos,
+                      int eval_position,
+                      ParsingWhileDebugging parsing_while_debugging =
+                          ParsingWhileDebugging::kNo);
 
   // Create a function that results from wrapping |source| in a function,
   // with |arguments| being a list of parameters for that function.
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSFunction> GetWrappedFunction(
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSFunction> GetWrappedFunction(
       Handle<String> source, DirectHandle<Context> context,
       const ScriptDetails& script_details, AlignedCachedData* cached_data,
       v8::ScriptCompiler::CompileOptions compile_options,
       v8::ScriptCompiler::NoCacheReason no_cache_reason);
 
   // Create a (bound) function for a String source within a context for eval.
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSFunction> GetFunctionFromString(
-      DirectHandle<NativeContext> context, Handle<i::Object> source,
-      int parameters_end_pos, bool is_code_like);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSFunction>
+  GetFunctionFromString(DirectHandle<NativeContext> context,
+                        Handle<i::Object> source, int parameters_end_pos,
+                        bool is_code_like);
 
   // Decompose GetFunctionFromString into two functions, to allow callers to
-  // deal seperately with a case of object not handled by the embedder.
-  V8_WARN_UNUSED_RESULT static std::pair<MaybeHandle<String>, bool>
+  // deal separately with a case of object not handled by the embedder.
+  V8_WARN_UNUSED_RESULT static std::pair<MaybeDirectHandle<String>, bool>
   ValidateDynamicCompilationSource(Isolate* isolate,
                                    DirectHandle<NativeContext> context,
                                    Handle<i::Object> source_object,
                                    bool is_code_like = false);
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSFunction>
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSFunction>
   GetFunctionFromValidatedString(DirectHandle<NativeContext> context,
-                                 MaybeHandle<String> source,
+                                 MaybeDirectHandle<String> source,
                                  ParseRestriction restriction,
                                  int parameters_end_pos);
 
@@ -266,7 +269,7 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // node (the code may be lazily compiled).
   template <typename IsolateT>
   static DirectHandle<SharedFunctionInfo> GetSharedFunctionInfo(
-      FunctionLiteral* node, Handle<Script> script, IsolateT* isolate);
+      FunctionLiteral* node, DirectHandle<Script> script, IsolateT* isolate);
 
   static void LogFunctionCompilation(Isolate* isolate,
                                      LogEventListener::CodeTag code_type,
@@ -465,10 +468,9 @@ class OptimizedCompilationJob : public CompilationJob {
 // Thin wrapper to split off Turbofan-specific parts.
 class TurbofanCompilationJob : public OptimizedCompilationJob {
  public:
-  TurbofanCompilationJob(OptimizedCompilationInfo* compilation_info,
-                         State initial_state)
-      : OptimizedCompilationJob("Turbofan", initial_state),
-        compilation_info_(compilation_info) {}
+  V8_EXPORT_PRIVATE TurbofanCompilationJob(
+      Isolate* isolate, OptimizedCompilationInfo* compilation_info,
+      State initial_state);
 
   OptimizedCompilationInfo* compilation_info() const {
     return compilation_info_;
@@ -493,8 +495,12 @@ class TurbofanCompilationJob : public OptimizedCompilationJob {
   // Intended for use as a globally unique id in trace events.
   uint64_t trace_id() const;
 
+  Isolate* isolate() const { return isolate_; }
+
  private:
+  Isolate* const isolate_;
   OptimizedCompilationInfo* const compilation_info_;
+  uint64_t trace_id_;
 };
 
 class FinalizeUnoptimizedCompilationData {
@@ -519,7 +525,9 @@ class FinalizeUnoptimizedCompilationData {
     return function_handle_;
   }
 
-  MaybeHandle<CoverageInfo> coverage_info() const { return coverage_info_; }
+  MaybeDirectHandle<CoverageInfo> coverage_info() const {
+    return coverage_info_;
+  }
 
   base::TimeDelta time_taken_to_execute() const {
     return time_taken_to_execute_;
@@ -702,9 +710,9 @@ class V8_EXPORT_PRIVATE BackgroundDeserializeTask {
   // once.
   void MergeWithExistingScript();
 
-  MaybeHandle<SharedFunctionInfo> Finish(Isolate* isolate,
-                                         DirectHandle<String> source,
-                                         const ScriptDetails& script_details);
+  MaybeDirectHandle<SharedFunctionInfo> Finish(
+      Isolate* isolate, DirectHandle<String> source,
+      const ScriptDetails& script_details);
 
   bool rejected() const { return cached_data_.rejected(); }
 

@@ -102,15 +102,17 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
               ToPrimitiveHint hint = ToPrimitiveHint::kDefault);
 
   // ES6 section 7.1.1.1 OrdinaryToPrimitive
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> OrdinaryToPrimitive(
-      Isolate* isolate, DirectHandle<JSReceiver> receiver,
-      OrdinaryToPrimitiveHint hint);
+  template <template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<Object>, DirectHandle<Object>>)
+  V8_WARN_UNUSED_RESULT static typename HandleType<Object>::MaybeType
+  OrdinaryToPrimitive(Isolate* isolate, DirectHandle<JSReceiver> receiver,
+                      OrdinaryToPrimitiveHint hint);
 
   // Unwraps the chain of potential function wrappers or JSProxy objects and
   // return the leaf function's creation context.
   // Throws TypeError in case there's a revoked JSProxy on the way.
   // https://tc39.es/ecma262/#sec-getfunctionrealm
-  static MaybeHandle<NativeContext> GetFunctionRealm(
+  static MaybeDirectHandle<NativeContext> GetFunctionRealm(
       DirectHandle<JSReceiver> receiver);
 
   V8_EXPORT_PRIVATE static MaybeHandle<NativeContext> GetContextForMicrotask(
@@ -178,8 +180,9 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
   V8_WARN_UNUSED_RESULT static Tagged<Object> DefineProperty(
       Isolate* isolate, DirectHandle<Object> object, DirectHandle<Object> name,
       Handle<Object> attributes);
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> DefineProperties(
-      Isolate* isolate, Handle<Object> object, DirectHandle<Object> properties);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object> DefineProperties(
+      Isolate* isolate, DirectHandle<Object> object,
+      DirectHandle<Object> properties);
 
   // "virtual" dispatcher to the correct [[DefineOwnProperty]] implementation.
   V8_WARN_UNUSED_RESULT static Maybe<bool> DefineOwnProperty(
@@ -266,19 +269,19 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
 
   // Returns the constructor (the function that was used to instantiate the
   // object).
-  static MaybeHandle<JSFunction> GetConstructor(
+  static MaybeDirectHandle<JSFunction> GetConstructor(
       Isolate* isolate, DirectHandle<JSReceiver> receiver);
 
   // Returns the constructor name (the (possibly inferred) name of the function
   // that was used to instantiate the object), if any. If a FunctionTemplate is
   // used to instantiate the object, the class_name of the FunctionTemplate is
   // returned instead.
-  static Handle<String> GetConstructorName(Isolate* isolate,
-                                           DirectHandle<JSReceiver> receiver);
+  static DirectHandle<String> GetConstructorName(
+      Isolate* isolate, DirectHandle<JSReceiver> receiver);
 
   V8_EXPORT_PRIVATE inline std::optional<Tagged<NativeContext>>
   GetCreationContext();
-  V8_EXPORT_PRIVATE inline MaybeHandle<NativeContext> GetCreationContext(
+  V8_EXPORT_PRIVATE inline MaybeDirectHandle<NativeContext> GetCreationContext(
       Isolate* isolate);
 
   V8_WARN_UNUSED_RESULT static inline Maybe<PropertyAttributes>
@@ -329,14 +332,14 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
   V8_EXPORT_PRIVATE void SetIdentityHash(int masked_hash);
 
   // ES6 [[OwnPropertyKeys]] (modulo return type)
-  V8_WARN_UNUSED_RESULT static inline MaybeHandle<FixedArray> OwnPropertyKeys(
-      Isolate* isolate, DirectHandle<JSReceiver> object);
+  V8_WARN_UNUSED_RESULT static inline MaybeDirectHandle<FixedArray>
+  OwnPropertyKeys(Isolate* isolate, DirectHandle<JSReceiver> object);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<FixedArray> GetOwnValues(
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<FixedArray> GetOwnValues(
       Isolate* isolate, DirectHandle<JSReceiver> object, PropertyFilter filter,
       bool try_fast_path = true);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<FixedArray> GetOwnEntries(
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<FixedArray> GetOwnEntries(
       Isolate* isolate, DirectHandle<JSReceiver> object, PropertyFilter filter,
       bool try_fast_path = true);
 
@@ -368,14 +371,14 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
       DirectHandle<AllocationSite> site,
       NewJSObjectType = NewJSObjectType::kNoAPIWrapper);
 
-  static MaybeHandle<JSObject> NewWithMap(
+  static MaybeDirectHandle<JSObject> NewWithMap(
       Isolate* isolate, DirectHandle<Map> initial_map,
       DirectHandle<AllocationSite> site,
       NewJSObjectType = NewJSObjectType::kNoAPIWrapper);
 
   // 9.1.12 ObjectCreate ( proto [ , internalSlotsList ] )
   // Notice: This is NOT 19.1.2.2 Object.create ( O, Properties )
-  static V8_WARN_UNUSED_RESULT MaybeHandle<JSObject> ObjectCreate(
+  static V8_WARN_UNUSED_RESULT MaybeDirectHandle<JSObject> ObjectCreate(
       Isolate* isolate, DirectHandle<JSPrototype> prototype);
 
   DECL_ACCESSORS(elements, Tagged<FixedArrayBase>)
@@ -481,19 +484,19 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
       EnforceDefineSemantics semantics = EnforceDefineSemantics::kSet,
       StoreOrigin store_origin = StoreOrigin::kNamed);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> V8_EXPORT_PRIVATE
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object> V8_EXPORT_PRIVATE
   SetOwnPropertyIgnoreAttributes(DirectHandle<JSObject> object,
                                  DirectHandle<Name> name, Handle<Object> value,
                                  PropertyAttributes attributes);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   SetOwnElementIgnoreAttributes(DirectHandle<JSObject> object, size_t index,
                                 Handle<Object> value,
                                 PropertyAttributes attributes);
 
   // Equivalent to one of the above depending on whether |name| can be converted
   // to an array index.
-  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   DefinePropertyOrElementIgnoreAttributes(DirectHandle<JSObject> object,
                                           DirectHandle<Name> name,
                                           Handle<Object> value,
@@ -584,19 +587,19 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   GetPropertyAttributesWithFailedAccessCheck(LookupIterator* it);
 
   // Defines an AccessorPair property on the given object.
-  V8_EXPORT_PRIVATE static MaybeHandle<Object>
+  V8_EXPORT_PRIVATE static MaybeDirectHandle<Object>
   DefineOwnAccessorIgnoreAttributes(DirectHandle<JSObject> object,
                                     DirectHandle<Name> name,
                                     DirectHandle<Object> getter,
                                     DirectHandle<Object> setter,
                                     PropertyAttributes attributes);
-  static MaybeHandle<Object> DefineOwnAccessorIgnoreAttributes(
+  static MaybeDirectHandle<Object> DefineOwnAccessorIgnoreAttributes(
       LookupIterator* it, DirectHandle<Object> getter,
       DirectHandle<Object> setter, PropertyAttributes attributes);
 
   // Defines an AccessorInfo property on the given object.
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> SetAccessor(
-      Handle<JSObject> object, DirectHandle<Name> name,
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object> SetAccessor(
+      DirectHandle<JSObject> object, DirectHandle<Name> name,
       DirectHandle<AccessorInfo> info, PropertyAttributes attributes);
 
   // Check if a data property can be created on the object. It will fail with
@@ -690,8 +693,8 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
 
   // Returns a new map with all transitions dropped from the object's current
   // map and the ElementsKind set.
-  static Handle<Map> GetElementsTransitionMap(DirectHandle<JSObject> object,
-                                              ElementsKind to_kind);
+  static DirectHandle<Map> GetElementsTransitionMap(
+      DirectHandle<JSObject> object, ElementsKind to_kind);
   V8_EXPORT_PRIVATE static void TransitionElementsKind(
       DirectHandle<JSObject> object, ElementsKind to_kind);
 
@@ -752,10 +755,11 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
                                       DirectHandle<JSObject> object,
                                       Representation representation,
                                       FieldIndex index);
-  static Handle<JSAny> FastPropertyAt(Isolate* isolate,
-                                      DirectHandle<JSObject> object,
-                                      Representation representation,
-                                      FieldIndex index, SeqCstAccessTag tag);
+  static DirectHandle<JSAny> FastPropertyAt(Isolate* isolate,
+                                            DirectHandle<JSObject> object,
+                                            Representation representation,
+                                            FieldIndex index,
+                                            SeqCstAccessTag tag);
   inline Tagged<JSAny> RawFastPropertyAt(FieldIndex index) const;
   inline Tagged<JSAny> RawFastPropertyAt(PtrComprCageBase cage_base,
                                          FieldIndex index) const;
@@ -840,7 +844,7 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
 
   static bool IsExtensible(Isolate* isolate, DirectHandle<JSObject> object);
 
-  static MaybeHandle<Object> ReadFromOptionsBag(
+  static MaybeDirectHandle<Object> ReadFromOptionsBag(
       DirectHandle<Object> options, DirectHandle<String> option_name,
       Isolate* isolate);
 
@@ -1333,7 +1337,7 @@ class JSMessageObject
   // Returns the source code line containing the given source
   // position, or the empty string if the position is invalid.
   // EnsureSourcePositionsAvailable must have been called before calling this.
-  Handle<String> GetSourceLine() const;
+  DirectHandle<String> GetSourceLine() const;
 
   DECL_INT_ACCESSORS(error_level)
 

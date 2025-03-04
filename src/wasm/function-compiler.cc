@@ -6,6 +6,7 @@
 
 #include <optional>
 
+#include "src/base/fpu.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/turboshaft/wasm-turboshaft-compiler.h"
@@ -76,7 +77,6 @@ WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
   }
 
   WasmCompilationResult result;
-  result.signature_hash = SignatureHasher::Hash(func->sig);
   int declared_index = declared_function_index(env->module, func_index_);
 
   switch (tier_) {
@@ -133,8 +133,8 @@ WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
       compiler::WasmCompilationData data(func_body);
       data.func_index = func_index_;
       data.wire_bytes_storage = wire_bytes_storage;
-        result = compiler::turboshaft::ExecuteTurboshaftWasmCompilation(
-            env, data, detected);
+      result = compiler::turboshaft::ExecuteTurboshaftWasmCompilation(
+          env, data, detected, counters);
       // In exceptional cases it can happen that compilation requests for
       // debugging end up being executed by Turbofan, e.g. if Liftoff bails out
       // because of unsupported features or the --wasm-tier-mask-for-testing is
@@ -176,14 +176,16 @@ void WasmCompilationUnit::CompileWasmFunction(Counters* counters,
   DCHECK_LT(function->func_index, native_module->num_functions());
   WasmCompilationUnit unit(function->func_index, tier, kNotForDebugging);
   CompilationEnv env = CompilationEnv::ForModule(native_module);
+  base::FlushDenormalsScope disable_denormals(
+      tier == ExecutionTier::kTurbofan &&
+      native_module->compile_imports().contains(
+          CompileTimeImport::kDisableDenormalFloats));
   WasmCompilationResult result = unit.ExecuteCompilation(
       &env, native_module->compilation_state()->GetWireBytesStorage().get(),
       counters, detected);
   if (result.succeeded()) {
     WasmCodeRefScope code_ref_scope;
-    AssumptionsJournal* assumptions = result.assumptions.get();
-    native_module->PublishCode(native_module->AddCompiledCode(result),
-                               assumptions->empty() ? nullptr : assumptions);
+    native_module->PublishCode(native_module->AddCompiledCode(result));
   } else {
     native_module->compilation_state()->SetError();
   }
@@ -220,7 +222,7 @@ void JSToWasmWrapperCompilationUnit::Execute() {
   }
 }
 
-Handle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
+DirectHandle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
 #if V8_ENABLE_DRUMBRAKE
   if (v8_flags.wasm_jitless) {
     return isolate_->builtins()->code_handle(
@@ -253,7 +255,7 @@ Handle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
 }
 
 // static
-Handle<Code> JSToWasmWrapperCompilationUnit::CompileJSToWasmWrapper(
+DirectHandle<Code> JSToWasmWrapperCompilationUnit::CompileJSToWasmWrapper(
     Isolate* isolate, const CanonicalSig* sig, CanonicalTypeIndex sig_index) {
   // Run the compilation unit synchronously.
   JSToWasmWrapperCompilationUnit unit(isolate, sig, sig_index);

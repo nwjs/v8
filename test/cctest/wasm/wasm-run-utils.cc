@@ -13,7 +13,6 @@
 #include "src/wasm/baseline/liftoff-compiler.h"
 #include "src/wasm/code-space-access.h"
 #include "src/wasm/compilation-environment-inl.h"
-#include "src/wasm/graph-builder-interface.h"
 #include "src/wasm/leb-helper.h"
 #include "src/wasm/module-compiler.h"
 #include "src/wasm/module-instantiate.h"
@@ -231,10 +230,8 @@ void TestingModuleBuilder::InitializeWrapperCache() {
       static_cast<int>(test_module_->types.size()));
   for (uint32_t index = 0; index < test_module_->types.size(); index++) {
     // TODO(14616): Support shared types.
-    CreateMapForType(
-        isolate_, test_module_.get(), ModuleTypeIndex{index},
-        handle(instance_object_->trusted_data(isolate()), isolate()),
-        instance_object_, maps);
+    CreateMapForType(isolate_, test_module_.get(), ModuleTypeIndex{index},
+                     maps);
   }
   trusted_instance_data_->set_managed_object_maps(*maps);
 }
@@ -294,6 +291,7 @@ void TestingModuleBuilder::AddIndirectFunctionTable(
   }
 
   if (function_indexes) {
+    WasmCodeRefScope code_ref_scope;
     for (uint32_t i = 0; i < table_size; ++i) {
       uint32_t function_index = function_indexes[i];
       WasmFunction& function = test_module_->functions[function_index];
@@ -535,13 +533,13 @@ void WasmFunctionCompiler::Build(base::Vector<const uint8_t> bytes) {
   std::optional<WasmCompilationResult> result;
   if (builder_->test_execution_tier() ==
       TestExecutionTier::kLiftoffForFuzzing) {
-    result.emplace(ExecuteLiftoffCompilation(
-        &env, func_body,
-        LiftoffOptions{}
-            .set_func_index(function_->func_index)
-            .set_for_debugging(kForDebugging)
-            .set_max_steps(builder_->max_steps_ptr())
-            .set_nondeterminism(builder_->non_determinism_ptr())));
+    result.emplace(
+        ExecuteLiftoffCompilation(&env, func_body,
+                                  LiftoffOptions{}
+                                      .set_func_index(function_->func_index)
+                                      .set_for_debugging(kForDebugging)
+                                      .set_max_steps(builder_->max_steps_ptr())
+                                      .set_detect_nondeterminism(true)));
   } else {
     WasmCompilationUnit unit(function_->func_index, builder_->execution_tier(),
                              for_debugging);

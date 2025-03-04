@@ -400,6 +400,8 @@ class RuntimeCallTimer final {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftLoopUnrolling)           \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftMachineLowering)         \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftMaglevGraphBuilding)     \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize,                                    \
+                              TurboshaftSimplificationAndNormalization)       \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftOptimize)                \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftProfileApplication)      \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftRecreateSchedule)        \
@@ -509,7 +511,8 @@ class RuntimeCallTimer final {
   V(NamedSetterCallback)                       \
   V(ObjectVerify)                              \
   V(Object_DeleteProperty)                     \
-  V(OptimizeBackgroundDispatcherJob)           \
+  V(OptimizeBackgroundMaglev)                  \
+  V(OptimizeBackgroundTurbofan)                \
   V(OptimizeCode)                              \
   V(OptimizeConcurrentFinalize)                \
   V(OptimizeConcurrentFinalizeMaglev)          \
@@ -518,7 +521,6 @@ class RuntimeCallTimer final {
   V(OptimizeHeapBrokerInitialization)          \
   V(OptimizeNonConcurrent)                     \
   V(OptimizeNonConcurrentMaglev)               \
-  V(OptimizeBackgroundMaglev)                  \
   V(OptimizeRevectorizer)                      \
   V(OptimizeSerialization)                     \
   V(OptimizeSerializeMetadata)                 \
@@ -594,7 +596,7 @@ class RuntimeCallTimer final {
   V(StoreIC_StoreTransitionDH)                    \
   V(StoreInArrayLiteralIC_SlowStub)
 
-enum RuntimeCallCounterId {
+enum class RuntimeCallCounterId {
 #define CALL_RUNTIME_COUNTER(name) kGC_##name,
   FOR_EACH_GC_COUNTER(CALL_RUNTIME_COUNTER)
 #undef CALL_RUNTIME_COUNTER
@@ -671,8 +673,9 @@ class RuntimeCallStats final {
     DCHECK(HasThreadSpecificCounterVariants(id));
     // All thread specific counters are laid out with the main thread variant
     // first followed by the background variant.
+    int idInt = static_cast<int>(id);
     return thread_type_ == kWorkerThread
-               ? static_cast<RuntimeCallCounterId>(id + 1)
+               ? static_cast<RuntimeCallCounterId>(idInt + 1)
                : id;
   }
 
@@ -722,7 +725,7 @@ class WorkerThreadRuntimeCallStats final {
   void AddToMainTable(RuntimeCallStats* main_call_stats);
 
  private:
-  base::Mutex mutex_;
+  base::SpinningMutex mutex_;
   std::vector<std::unique_ptr<RuntimeCallStats>> tables_;
   std::optional<base::Thread::LocalStorageKey> tls_key_;
   // Since this is for creating worker thread runtime-call stats, record the

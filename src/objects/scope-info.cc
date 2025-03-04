@@ -173,7 +173,7 @@ Handle<ScopeInfo> ScopeInfo::Create(IsolateT* isolate, Zone* zone, Scope* scope,
           : 0;
   const bool has_outer_scope_info = !outer_scope.is_null();
 
-  Handle<SourceTextModuleInfo> module_info;
+  DirectHandle<SourceTextModuleInfo> module_info;
   if (scope->is_module_scope()) {
     module_info = SourceTextModuleInfo::New(isolate, zone,
                                             scope->AsModuleScope()->module());
@@ -371,7 +371,7 @@ Handle<ScopeInfo> ScopeInfo::Create(IsolateT* isolate, Zone* zone, Scope* scope,
       if (has_inlined_local_names) {
         local_index = class_variable->index();
       } else {
-        Handle<Name> name = class_variable->name();
+        DirectHandle<Name> name = class_variable->name();
         InternalIndex entry = local_names_hashtable->FindEntry(isolate, name);
         local_index = entry.as_int();
       }
@@ -440,13 +440,13 @@ template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
         MaybeDirectHandle<ScopeInfo> outer_scope);
 
 // static
-Handle<ScopeInfo> ScopeInfo::CreateForWithScope(
+DirectHandle<ScopeInfo> ScopeInfo::CreateForWithScope(
     Isolate* isolate, MaybeDirectHandle<ScopeInfo> outer_scope) {
   const bool has_outer_scope_info = !outer_scope.is_null();
   const int length = kVariablePartIndex + (has_outer_scope_info ? 1 : 0);
 
   Factory* factory = isolate->factory();
-  Handle<ScopeInfo> scope_info = factory->NewScopeInfo(length);
+  DirectHandle<ScopeInfo> scope_info = factory->NewScopeInfo(length);
 
   // Encode the flags.
   uint32_t flags =
@@ -491,29 +491,29 @@ Handle<ScopeInfo> ScopeInfo::CreateForWithScope(
 }
 
 // static
-Handle<ScopeInfo> ScopeInfo::CreateGlobalThisBinding(Isolate* isolate) {
+DirectHandle<ScopeInfo> ScopeInfo::CreateGlobalThisBinding(Isolate* isolate) {
   return CreateForBootstrapping(isolate, BootstrappingType::kScript);
 }
 
 // static
-Handle<ScopeInfo> ScopeInfo::CreateForEmptyFunction(Isolate* isolate) {
+DirectHandle<ScopeInfo> ScopeInfo::CreateForEmptyFunction(Isolate* isolate) {
   return CreateForBootstrapping(isolate, BootstrappingType::kFunction);
 }
 
 // static
-Handle<ScopeInfo> ScopeInfo::CreateForNativeContext(Isolate* isolate) {
+DirectHandle<ScopeInfo> ScopeInfo::CreateForNativeContext(Isolate* isolate) {
   return CreateForBootstrapping(isolate, BootstrappingType::kNative);
 }
 
 // static
-Handle<ScopeInfo> ScopeInfo::CreateForShadowRealmNativeContext(
+DirectHandle<ScopeInfo> ScopeInfo::CreateForShadowRealmNativeContext(
     Isolate* isolate) {
   return CreateForBootstrapping(isolate, BootstrappingType::kShadowRealm);
 }
 
 // static
-Handle<ScopeInfo> ScopeInfo::CreateForBootstrapping(Isolate* isolate,
-                                                    BootstrappingType type) {
+DirectHandle<ScopeInfo> ScopeInfo::CreateForBootstrapping(
+    Isolate* isolate, BootstrappingType type) {
   const int parameter_count = 0;
   const bool is_empty_function = type == BootstrappingType::kFunction;
   const bool is_native_context = (type == BootstrappingType::kNative) ||
@@ -531,7 +531,7 @@ Handle<ScopeInfo> ScopeInfo::CreateForBootstrapping(Isolate* isolate,
                      (has_inferred_function_name ? 1 : 0);
 
   Factory* factory = isolate->factory();
-  Handle<ScopeInfo> scope_info =
+  DirectHandle<ScopeInfo> scope_info =
       factory->NewScopeInfo(length, AllocationType::kReadOnly);
   DisallowGarbageCollection _nogc;
   // Encode the flags.
@@ -1212,7 +1212,7 @@ template Handle<SourceTextModuleInfoEntry> SourceTextModuleInfoEntry::New(
     int cell_index, int beg_pos, int end_pos);
 
 template <typename IsolateT>
-Handle<SourceTextModuleInfo> SourceTextModuleInfo::New(
+DirectHandle<SourceTextModuleInfo> SourceTextModuleInfo::New(
     IsolateT* isolate, Zone* zone, SourceTextModuleDescriptor* descr) {
   // Serialize module requests.
   int size = static_cast<int>(descr->module_requests().size());
@@ -1266,7 +1266,7 @@ Handle<SourceTextModuleInfo> SourceTextModuleInfo::New(
     }
   }
 
-  Handle<SourceTextModuleInfo> result =
+  DirectHandle<SourceTextModuleInfo> result =
       isolate->factory()->NewSourceTextModuleInfo();
   result->set(kModuleRequestsIndex, *module_requests);
   result->set(kSpecialExportsIndex, *special_exports);
@@ -1275,9 +1275,10 @@ Handle<SourceTextModuleInfo> SourceTextModuleInfo::New(
   result->set(kRegularImportsIndex, *regular_imports);
   return result;
 }
-template Handle<SourceTextModuleInfo> SourceTextModuleInfo::New(
+
+template DirectHandle<SourceTextModuleInfo> SourceTextModuleInfo::New(
     Isolate* isolate, Zone* zone, SourceTextModuleDescriptor* descr);
-template Handle<SourceTextModuleInfo> SourceTextModuleInfo::New(
+template DirectHandle<SourceTextModuleInfo> SourceTextModuleInfo::New(
     LocalIsolate* isolate, Zone* zone, SourceTextModuleDescriptor* descr);
 
 int SourceTextModuleInfo::RegularExportCount() const {

@@ -389,6 +389,8 @@ class V8_EXPORT_PRIVATE WasmEngine {
 
   TypeCanonicalizer* type_canonicalizer() { return &type_canonicalizer_; }
 
+  void DecodeAllNameSections(CanonicalTypeNamesProvider* target);
+
   compiler::WasmCallDescriptors* call_descriptors() {
     return &call_descriptors_;
   }
@@ -409,6 +411,30 @@ class V8_EXPORT_PRIVATE WasmEngine {
   static WasmOrphanedGlobalHandle* NewOrphanedGlobalHandle(
       WasmOrphanedGlobalHandle** pointer);
   static void FreeAllOrphanedGlobalHandles(WasmOrphanedGlobalHandle* start);
+
+  size_t NativeModuleCount() const;
+
+  // Get the address of the static {had_nondeterminism_} flag, for embedding in
+  // generated code.
+  static Address GetNondeterminismAddr() {
+    return reinterpret_cast<Address>(&had_nondeterminism_);
+  }
+
+  // Return {true} if nondeterminism was detected during previous execution.
+  static bool had_nondeterminism() {
+    return had_nondeterminism_.load(std::memory_order_relaxed) != 0;
+  }
+
+  // Set the {had_nondeterminism_} flag.
+  static void set_had_nondeterminism() {
+    had_nondeterminism_.store(1, std::memory_order_relaxed);
+  }
+
+  // Clear the {had_nondeterminism_} flag and return whether nondeterminism was
+  // detected before clearing.
+  static bool clear_nondeterminism() {
+    return had_nondeterminism_.exchange(0, std::memory_order_relaxed) != 0;
+  }
 
  private:
   struct CurrentGCInfo;
@@ -437,6 +463,17 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // {num_modules_with_code_logging_} accordingly.
   void EnableCodeLogging(NativeModule*);
   void DisableCodeLogging(NativeModule*);
+
+  // Remember in a global flag whether we saw nondeterminism during execution.
+  // This is used in differential fuzzing.
+  // The address of this global is embedded in generated Liftoff code, and also
+  // some runtime functions update it (notably for growing memory, which can
+  // fail nondeterministically). In non-Liftoff executions, we still get the
+  // latter.
+  // This is typed as {int32_t} to have a deterministic bit pattern (in contrast
+  // to {bool}). A value of `0` means no nondeterminism, everything else
+  // indicates nondeterminism.
+  static std::atomic<int32_t> had_nondeterminism_;
 
   AccountingAllocator allocator_;
 
@@ -489,12 +526,8 @@ class V8_EXPORT_PRIVATE WasmEngine {
   size_t new_potentially_dead_code_size_ = 0;
   // Set of potentially dead code. This set holds one ref for each code object,
   // until code is detected to be really dead. At that point, the ref count is
-  // decremented and code is moved to the {dead_code} set. If the code is
-  // finally deleted, it is also removed from {dead_code}.
+  // decremented and code is removed from the set.
   std::unordered_set<WasmCode*> potentially_dead_code_;
-  // Code that is not being executed in any isolate any more, but the ref count
-  // did not drop to zero yet.
-  std::unordered_set<WasmCode*> dead_code_;
   int8_t num_code_gcs_triggered_ = 0;
 
   // If an engine-wide GC is currently running, this pointer stores information
@@ -516,6 +549,8 @@ V8_EXPORT_PRIVATE WasmCodeManager* GetWasmCodeManager();
 // Returns a reference to the WasmImportWrapperCache shared by the entire
 // process.
 V8_EXPORT_PRIVATE WasmImportWrapperCache* GetWasmImportWrapperCache();
+
+V8_EXPORT_PRIVATE CanonicalTypeNamesProvider* GetCanonicalTypeNamesProvider();
 
 }  // namespace wasm
 }  // namespace internal

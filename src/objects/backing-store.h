@@ -67,7 +67,8 @@ class V8_EXPORT_PRIVATE BackingStore : public BackingStoreBase {
   static std::unique_ptr<BackingStore> TryAllocateAndPartiallyCommitMemory(
       Isolate* isolate, size_t byte_length, size_t max_byte_length,
       size_t page_size, size_t initial_pages, size_t maximum_pages,
-      WasmMemoryFlag wasm_memory, SharedFlag shared);
+      WasmMemoryFlag wasm_memory, SharedFlag shared,
+      bool has_guard_regions = false);
 
   // Create a backing store that wraps existing allocated memory.
   static std::unique_ptr<BackingStore> WrapAllocation(
@@ -108,14 +109,7 @@ class V8_EXPORT_PRIVATE BackingStore : public BackingStoreBase {
   ResizeOrGrowResult ResizeInPlace(Isolate* isolate, size_t new_byte_length);
   ResizeOrGrowResult GrowInPlace(Isolate* isolate, size_t new_byte_length);
 
-  bool CanReallocate() const {
-    return !is_wasm_memory_ && !custom_deleter_ && !globally_registered_ &&
-           !is_resizable_by_js_ && buffer_start_ != nullptr;
-  }
-
   void set_nodejs(bool nodejs) { is_nodejs_ = nodejs; }
-  // Wrapper around ArrayBuffer::Allocator::Reallocate.
-  bool Reallocate(Isolate* isolate, size_t new_byte_length);
 
 #if V8_ENABLE_WEBASSEMBLY
   // Attempt to grow this backing store in place.

@@ -1873,8 +1873,8 @@ class TurboshaftAssemblerOpInterface
                                Float64)
 #undef DECL_SINGLE_REP_COMPARISON_V
 
-  OpIndex Comparison(OpIndex left, OpIndex right, ComparisonOp::Kind kind,
-                     RegisterRepresentation rep) {
+  V<Word32> Comparison(OpIndex left, OpIndex right, ComparisonOp::Kind kind,
+                       RegisterRepresentation rep) {
     return ReduceIfReachableComparison(left, right, kind, rep);
   }
 
@@ -2170,6 +2170,7 @@ class TurboshaftAssemblerOpInterface
   }
   CONVERT_PRIMITIVE_TO_OBJECT(ConvertInt32ToNumber, Number, Word32, Signed)
   CONVERT_PRIMITIVE_TO_OBJECT(ConvertUint32ToNumber, Number, Word32, Unsigned)
+  CONVERT_PRIMITIVE_TO_OBJECT(ConvertIntPtrToNumber, Number, WordPtr, Signed)
   CONVERT_PRIMITIVE_TO_OBJECT(ConvertWord32ToBoolean, Boolean, Word32, Signed)
   CONVERT_PRIMITIVE_TO_OBJECT(ConvertCharCodeToString, String, Word32, CharCode)
 #undef CONVERT_PRIMITIVE_TO_OBJECT
@@ -2472,10 +2473,10 @@ class TurboshaftAssemblerOpInterface
                 Word64, Float64)
   DECL_CHANGE_V(ChangeUint32ToFloat64, kUnsignedToFloat, kNoAssumption, Word32,
                 Float64)
+  DECL_CHANGE_V(ChangeIntPtrToFloat64, kSignedToFloat, kNoAssumption, WordPtr,
+                Float64)
   DECL_CHANGE_V(TruncateFloat64ToFloat32, kFloatConversion, kNoAssumption,
                 Float64, Float32)
-  DECL_CHANGE_V(TruncateFloat64ToFloat16RawBits, kJSFloat16TruncateWithBitcast,
-                kNoAssumption, Float64, Word32)
   DECL_CHANGE_V(ChangeFloat32ToFloat64, kFloatConversion, kNoAssumption,
                 Float32, Float64)
   DECL_CHANGE_V(JSTruncateFloat64ToWord32, kJSFloatTruncate, kNoAssumption,
@@ -3692,8 +3693,8 @@ class TurboshaftAssemblerOpInterface
         isolate, context, {object});
   }
   V<Context> CallBuiltin_FastNewFunctionContextFunction(
-      Isolate* isolate, OpIndex frame_state, V<Context> context,
-      V<ScopeInfo> scope_info, ConstOrV<Word32> slot_count,
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      V<Context> context, V<ScopeInfo> scope_info, ConstOrV<Word32> slot_count,
       LazyDeoptOnThrow lazy_deopt_on_throw) {
     return CallBuiltin<
         typename BuiltinCallDescriptor::FastNewFunctionContextFunction>(
@@ -3701,8 +3702,8 @@ class TurboshaftAssemblerOpInterface
         lazy_deopt_on_throw);
   }
   V<Context> CallBuiltin_FastNewFunctionContextEval(
-      Isolate* isolate, OpIndex frame_state, V<Context> context,
-      V<ScopeInfo> scope_info, ConstOrV<Word32> slot_count,
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      V<Context> context, V<ScopeInfo> scope_info, ConstOrV<Word32> slot_count,
       LazyDeoptOnThrow lazy_deopt_on_throw) {
     return CallBuiltin<
         typename BuiltinCallDescriptor::FastNewFunctionContextEval>(
@@ -4517,9 +4518,9 @@ class TurboshaftAssemblerOpInterface
     return BigIntUnary(input, BigIntUnaryOp::Kind::kNegate);
   }
 
-  OpIndex Word32PairBinop(V<Word32> left_low, V<Word32> left_high,
-                          V<Word32> right_low, V<Word32> right_high,
-                          Word32PairBinopOp::Kind kind) {
+  V<Word32Pair> Word32PairBinop(V<Word32> left_low, V<Word32> left_high,
+                                V<Word32> right_low, V<Word32> right_high,
+                                Word32PairBinopOp::Kind kind) {
     return ReduceIfReachableWord32PairBinop(left_low, left_high, right_low,
                                             right_high, kind);
   }
@@ -4549,6 +4550,11 @@ class TurboshaftAssemblerOpInterface
 
   V<Word32> StringLength(V<String> string) {
     return ReduceIfReachableStringLength(string);
+  }
+
+  V<WordPtr> TypedArrayLength(V<JSTypedArray> typed_array,
+                              ElementsKind elements_kind) {
+    return ReduceIfReachableTypedArrayLength(typed_array, elements_kind);
   }
 
   V<Smi> StringIndexOf(V<String> string, V<String> search, V<Smi> position) {
@@ -4617,6 +4623,11 @@ class TurboshaftAssemblerOpInterface
     return ReduceIfReachableLoadStackArgument(base, index);
   }
 
+  V<Float64OrWord32> Float16Change(V<Float64OrWord32> input,
+                                   Float16ChangeOp::Kind op) {
+    return ReduceIfReachableFloat16Change(input, op);
+  }
+
   void StoreTypedElement(OpIndex buffer, V<Object> base, V<WordPtr> external,
                          V<WordPtr> index, OpIndex value,
                          ExternalArrayType array_type) {
@@ -4674,6 +4685,18 @@ class TurboshaftAssemblerOpInterface
                                      V<turboshaft::FrameState> frame_state) {
     ReduceIfReachableCheckEqualsInternalizedString(expected, value,
                                                    frame_state);
+  }
+
+  V<Word32> TruncateFloat64ToFloat16RawBits(V<Float64> input) {
+    return V<Word32>::Cast(__ ReduceChange(
+        input, ChangeOp::Kind::kJSFloat16TruncateWithBitcast,
+        ChangeOp::Assumption::kNoAssumption, V<Float64>::rep, V<Word32>::rep));
+  }
+
+  V<Float64> ChangeFloat16RawBitsToFloat64(V<Word32> input) {
+    return V<Float64>::Cast(__ ReduceChange(
+        input, ChangeOp::Kind::kJSFloat16ChangeWithBitcast,
+        ChangeOp::Assumption::kNoAssumption, V<Word32>::rep, V<Float64>::rep));
   }
 
   V<Object> LoadMessage(V<WordPtr> offset) {
@@ -5138,13 +5161,24 @@ class TurboshaftAssemblerOpInterface
     return result;                                                       \
   }
 #else
-#define REDUCE_OP(Op)                                             \
-  template <class... Args>                                        \
-  V8_INLINE OpIndex ReduceIfReachable##Op(Args... args) {         \
-    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) { \
-      return OpIndex::Invalid();                                  \
-    }                                                             \
-    return Asm().Reduce##Op(args...);                             \
+#define REDUCE_OP(Op)                                                        \
+  template <class... Args>                                                   \
+  V8_INLINE OpIndex ReduceIfReachable##Op(Args... args) {                    \
+    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {            \
+      return OpIndex::Invalid();                                             \
+    }                                                                        \
+    /* With an empty reducer stack, `Asm().Reduce##Op` will just create a */ \
+    /* new `Op` operation (defined in operations.h). To figure out where  */ \
+    /* this operation is lowered or optimized (if anywhere), search for   */ \
+    /* `REDUCE(<your operation>)`. Then, to know when this lowering       */ \
+    /* actually happens, search for phases that are instantiated with     */ \
+    /* that reducer. You can also look in operation.h where the opcode is */ \
+    /* declared: operations declared in                                   */ \
+    /* TURBOSHAFT_SIMPLIFIED_OPERATION_LIST are typically lowered in      */ \
+    /* machine-lowering-reducer-inl.h, and operations in                  */ \
+    /* TURBOSHAFT_MACHINE_OPERATION_LIST are typically not lowered before */ \
+    /* reaching instruction-selector.h.                                   */ \
+    return Asm().Reduce##Op(args...);                                        \
   }
 #endif
   TURBOSHAFT_OPERATION_LIST(REDUCE_OP)

@@ -278,10 +278,12 @@ Node* FastApiCallBuilder::Build(FastApiCallFunction c_function,
   builder.AddReturn(return_type);
   for (int i = 0; i < c_arg_count; ++i) {
     CTypeInfo type = c_signature->ArgumentInfo(i);
+    START_ALLOW_USE_DEPRECATED()
     MachineType machine_type =
         type.GetSequenceType() == CTypeInfo::SequenceType::kScalar
             ? MachineType::TypeForCType(type)
             : MachineType::AnyTagged();
+    END_ALLOW_USE_DEPRECATED()
     builder.AddParam(machine_type);
   }
 
@@ -403,9 +405,9 @@ FastApiCallFunction GetFastApiCallTarget(
       // supported on 64 bit architectures. We should support this on 32 bit
       // architectures.
 #if defined(V8_TARGET_ARCH_32_BIT)
-      for (unsigned int i = 0; i < c_signature->ArgumentCount(); ++i) {
+      for (unsigned int j = 0; j < c_signature->ArgumentCount(); ++j) {
         const uint8_t flags =
-            static_cast<uint8_t>(c_signature->ArgumentInfo(i).GetFlags());
+            static_cast<uint8_t>(c_signature->ArgumentInfo(j).GetFlags());
         if (flags & static_cast<uint8_t>(CTypeInfo::Flags::kEnforceRangeBit)) {
           // Bailout
           return {0, nullptr};

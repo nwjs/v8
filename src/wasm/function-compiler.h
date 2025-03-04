@@ -89,7 +89,6 @@ struct WasmCompilationResult {
   int func_index = kAnonymousFuncIndex;
   ExecutionTier result_tier = ExecutionTier::kNone;
   Kind kind = kFunction;
-  uint64_t signature_hash;
   ForDebugging for_debugging = kNotForDebugging;
   bool frame_has_feedback_slot = false;
 };
@@ -140,15 +139,14 @@ class V8_EXPORT_PRIVATE JSToWasmWrapperCompilationUnit final {
   Isolate* isolate() const { return isolate_; }
 
   void Execute();
-  Handle<Code> Finalize();
+  DirectHandle<Code> Finalize();
 
   const CanonicalSig* sig() const { return sig_; }
   CanonicalTypeIndex sig_index() const { return sig_index_; }
 
   // Run a compilation unit synchronously.
-  static Handle<Code> CompileJSToWasmWrapper(Isolate* isolate,
-                                             const CanonicalSig* sig,
-                                             CanonicalTypeIndex sig_index);
+  static DirectHandle<Code> CompileJSToWasmWrapper(
+      Isolate* isolate, const CanonicalSig* sig, CanonicalTypeIndex sig_index);
 
  private:
   // Wrapper compilation is bound to an isolate. Concurrent accesses to the

@@ -393,32 +393,32 @@ TryMatchBaseWithScaledIndexAndDisplacement64(
     result.displacement = 0;
     if (lane_op->kind.tagged_base) result.displacement -= kHeapObjectTag;
     return result;
-  } else if (const Simd128LoadTransformOp* load_transform =
+  } else if (const Simd128LoadTransformOp* load_transform_128 =
                  op.TryCast<Simd128LoadTransformOp>()) {
-    result.base = load_transform->base();
-    DCHECK_EQ(load_transform->offset, 0);
+    result.base = load_transform_128->base();
+    DCHECK_EQ(load_transform_128->offset, 0);
 
-    if (CanBeImmediate(selector, load_transform->index())) {
+    if (CanBeImmediate(selector, load_transform_128->index())) {
       result.index = {};
       result.displacement =
-          GetImmediateIntegerValue(selector, load_transform->index());
+          GetImmediateIntegerValue(selector, load_transform_128->index());
     } else {
-      result.index = load_transform->index();
+      result.index = load_transform_128->index();
       result.displacement = 0;
     }
 
     result.scale = 0;
-    DCHECK(!load_transform->load_kind.tagged_base);
+    DCHECK(!load_transform_128->load_kind.tagged_base);
     return result;
 #if V8_ENABLE_WASM_SIMD256_REVEC
-  } else if (const Simd256LoadTransformOp* load_transform =
+  } else if (const Simd256LoadTransformOp* load_transform_256 =
                  op.TryCast<Simd256LoadTransformOp>()) {
-    result.base = load_transform->base();
-    result.index = load_transform->index();
-    DCHECK_EQ(load_transform->offset, 0);
+    result.base = load_transform_256->base();
+    result.index = load_transform_256->index();
+    DCHECK_EQ(load_transform_256->offset, 0);
     result.scale = 0;
     result.displacement = 0;
-    DCHECK(!load_transform->load_kind.tagged_base);
+    DCHECK(!load_transform_256->load_kind.tagged_base);
     return result;
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -2179,11 +2179,6 @@ static void VisitBinop(InstructionSelectorT<Adapter>* selector,
     }
   }
 
-  if (cont->IsBranch()) {
-    inputs[input_count++] = g.Label(cont->true_block());
-    inputs[input_count++] = g.Label(cont->false_block());
-  }
-
   outputs[output_count++] = g.DefineSameAsFirst(node);
 
   DCHECK_NE(0u, input_count);
@@ -3832,6 +3827,15 @@ void InstructionSelectorT<Adapter>::VisitTruncateFloat64ToFloat16RawBits(
 }
 
 template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitChangeFloat16RawBitsToFloat64(
+    node_t node) {
+  X64OperandGeneratorT<Adapter> g(this);
+  InstructionOperand temps[] = {g.TempDoubleRegister()};
+  Emit(kSSEFloat16RawBitsToFloat64, g.DefineAsRegister(node),
+       g.UseRegister(this->input_at(node, 0)), arraysize(temps), temps);
+}
+
+template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitTruncateInt64ToInt32(node_t node) {
   // We rely on the fact that TruncateInt64ToInt32 zero extends the
   // value (see ZeroExtendsWord32ToWord64). So all code paths here
@@ -4937,23 +4941,20 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitWordCompareZero(
         // of the actual value, or was already defined, which means it is
         // scheduled *AFTER* this branch).
         OpIndex node = projection->input();
-        OpIndex result = FindProjection(node, 0);
-        if (!result.valid() || IsDefined(result)) {
-          if (const OverflowCheckedBinopOp* binop =
-                  this->TryCast<OverflowCheckedBinopOp>(node)) {
-            const bool is64 = binop->rep == WordRepresentation::Word64();
-            cont->OverwriteAndNegateIfEqual(kOverflow);
-            switch (binop->kind) {
-              case OverflowCheckedBinopOp::Kind::kSignedAdd:
-                return VisitBinop(this, node, is64 ? kX64Add : kX64Add32, cont);
-              case OverflowCheckedBinopOp::Kind::kSignedSub:
-                return VisitBinop(this, node, is64 ? kX64Sub : kX64Sub32, cont);
-              case OverflowCheckedBinopOp::Kind::kSignedMul:
-                return VisitBinop(this, node, is64 ? kX64Imul : kX64Imul32,
-                                  cont);
-            }
-            UNREACHABLE();
+        if (const OverflowCheckedBinopOp* binop =
+                this->TryCast<OverflowCheckedBinopOp>(node);
+            binop && CanDoBranchIfOverflowFusion(node)) {
+          const bool is64 = binop->rep == WordRepresentation::Word64();
+          cont->OverwriteAndNegateIfEqual(kOverflow);
+          switch (binop->kind) {
+            case OverflowCheckedBinopOp::Kind::kSignedAdd:
+              return VisitBinop(this, node, is64 ? kX64Add : kX64Add32, cont);
+            case OverflowCheckedBinopOp::Kind::kSignedSub:
+              return VisitBinop(this, node, is64 ? kX64Sub : kX64Sub32, cont);
+            case OverflowCheckedBinopOp::Kind::kSignedMul:
+              return VisitBinop(this, node, is64 ? kX64Imul : kX64Imul32, cont);
           }
+          UNREACHABLE();
         }
       }
     } else if (value_op.Is<StackPointerGreaterThanOp>()) {
@@ -7778,7 +7779,7 @@ InstructionSelector::SupportedMachineOperatorFlags() {
   if (CpuFeatures::IsSupported(F16C)) {
     flags |= MachineOperatorBuilder::kFloat16;
     if (CpuFeatures::IsSupported(AVX)) {
-      flags |= MachineOperatorBuilder::kTruncateFloat64ToFloat16RawBits;
+      flags |= MachineOperatorBuilder::kFloat16RawBitsConversion;
     }
   }
   return flags;

@@ -80,7 +80,7 @@ class V8_EXPORT_PRIVATE FunctionTargetAndImplicitArg {
       Isolate* isolate, Handle<WasmTrustedInstanceData> target_instance_data,
       int target_func_index);
   // The "implicit_arg" will be a WasmTrustedInstanceData or a WasmImportData.
-  Handle<TrustedObject> implicit_arg() { return implicit_arg_; }
+  DirectHandle<TrustedObject> implicit_arg() { return implicit_arg_; }
   WasmCodePointer call_target() { return call_target_; }
 
 #if V8_ENABLE_DRUMBRAKE
@@ -174,7 +174,7 @@ class WasmModuleObject
   inline bool is_asm_js();
 
   // Get the module name, if set. Returns an empty handle otherwise.
-  static MaybeHandle<String> GetModuleNameOrNull(
+  static MaybeDirectHandle<String> GetModuleNameOrNull(
       Isolate*, DirectHandle<WasmModuleObject>);
 
   // Get the function name of the function identified by the given index.
@@ -215,6 +215,8 @@ class WasmTableObject
   class BodyDescriptor;
 
   inline wasm::ValueType type(const wasm::WasmModule* module);
+  inline wasm::CanonicalValueType canonical_type(
+      const wasm::WasmModule* module);
   // Use this when you don't care whether the type stored on the in-sandbox
   // object might have been corrupted to contain an invalid type index.
   // That implies that you can't even canonicalize the type!
@@ -312,10 +314,10 @@ class WasmMemoryMapDescriptor
     : public TorqueGeneratedWasmMemoryMapDescriptor<WasmMemoryMapDescriptor,
                                                     JSObject> {
  public:
-  V8_EXPORT_PRIVATE static MaybeHandle<WasmMemoryMapDescriptor>
+  V8_EXPORT_PRIVATE static MaybeDirectHandle<WasmMemoryMapDescriptor>
   NewFromAnonymous(Isolate* isolate, size_t length);
 
-  V8_EXPORT_PRIVATE static Handle<WasmMemoryMapDescriptor>
+  V8_EXPORT_PRIVATE static DirectHandle<WasmMemoryMapDescriptor>
   NewFromFileDescriptor(
       Isolate* isolate,
       v8::WasmMemoryMapDescriptor::WasmFileDescriptor file_descriptor);
@@ -364,8 +366,8 @@ class WasmMemoryObject
                                         uint32_t pages);
 
   // Returns the number of bytes that got mapped into the WebAssembly.Memory.
-  V8_EXPORT_PRIVATE size_t
-  MapDescriptor(Handle<WasmMemoryMapDescriptor> descriptor, size_t offset);
+  V8_EXPORT_PRIVATE size_t MapDescriptor(
+      DirectHandle<WasmMemoryMapDescriptor> descriptor, size_t offset);
 
   static constexpr int kNoMaximum = -1;
 
@@ -903,7 +905,7 @@ class WasmDispatchTable : public ExposedTrustedObject {
   static V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT Handle<WasmDispatchTable> New(
       Isolate* isolate, int length, wasm::CanonicalValueType table_type);
   static V8_WARN_UNUSED_RESULT Handle<WasmDispatchTable> Grow(
-      Isolate*, Handle<WasmDispatchTable>, int new_length);
+      Isolate*, Handle<WasmDispatchTable>, uint32_t new_length);
 
   DECL_PRINTER(WasmDispatchTable)
   DECL_VERIFIER(WasmDispatchTable)
@@ -913,11 +915,11 @@ class WasmDispatchTable : public ExposedTrustedObject {
 // A Wasm exception that has been thrown out of Wasm code.
 class V8_EXPORT_PRIVATE WasmExceptionPackage : public JSObject {
  public:
-  static Handle<WasmExceptionPackage> New(
+  static DirectHandle<WasmExceptionPackage> New(
       Isolate* isolate, DirectHandle<WasmExceptionTag> exception_tag,
       int encoded_size);
 
-  static Handle<WasmExceptionPackage> New(
+  static DirectHandle<WasmExceptionPackage> New(
       Isolate* isolate, DirectHandle<WasmExceptionTag> exception_tag,
       DirectHandle<FixedArray> values);
 
@@ -987,10 +989,10 @@ class WasmJSFunction : public JSFunction {
  public:
   static bool IsWasmJSFunction(Tagged<Object> object);
 
-  static Handle<WasmJSFunction> New(Isolate* isolate,
-                                    const wasm::FunctionSig* sig,
-                                    DirectHandle<JSReceiver> callable,
-                                    wasm::Suspend suspend);
+  static DirectHandle<WasmJSFunction> New(Isolate* isolate,
+                                          const wasm::FunctionSig* sig,
+                                          DirectHandle<JSReceiver> callable,
+                                          wasm::Suspend suspend);
 
   OBJECT_CONSTRUCTORS(WasmJSFunction, JSFunction);
 };
@@ -1000,10 +1002,11 @@ class WasmCapiFunction : public JSFunction {
  public:
   static bool IsWasmCapiFunction(Tagged<Object> object);
 
-  static Handle<WasmCapiFunction> New(Isolate* isolate, Address call_target,
-                                      DirectHandle<Foreign> embedder_data,
-                                      wasm::CanonicalTypeIndex sig_index,
-                                      const wasm::CanonicalSig* sig);
+  static DirectHandle<WasmCapiFunction> New(Isolate* isolate,
+                                            Address call_target,
+                                            DirectHandle<Foreign> embedder_data,
+                                            wasm::CanonicalTypeIndex sig_index,
+                                            const wasm::CanonicalSig* sig);
 
   const wasm::CanonicalSig* sig() const;
 
@@ -1172,17 +1175,18 @@ class WasmJSFunctionData
   // garbage-collected.
   class OffheapData {
    public:
-    OffheapData() = default;
+    explicit OffheapData(uint64_t signature_hash)
+        : signature_hash_(signature_hash) {}
     ~OffheapData();
 
     // These functions return the CPT entry owned by this class.
     WasmCodePointer set_compiled_wrapper(wasm::WasmCode* wrapper);
-    WasmCodePointer set_generic_wrapper(Address call_target,
-                                        uint64_t signature_hash);
+    WasmCodePointer set_generic_wrapper(Address call_target);
 
    private:
     WasmCodePointer wrapper_code_pointer_ = wasm::kInvalidWasmCodePointer;
     wasm::WasmCode* wrapper_{nullptr};
+    const uint64_t signature_hash_;
   };
 
   DECL_PROTECTED_POINTER_ACCESSORS(protected_offheap_data,
@@ -1292,10 +1296,9 @@ class WasmScript : public AllStatic {
 
   // Return an empty handle if no breakpoint is hit at that location, or a
   // FixedArray with all hit breakpoint objects.
-  static MaybeHandle<FixedArray> CheckBreakPoints(Isolate*,
-                                                  DirectHandle<Script>,
-                                                  int position,
-                                                  StackFrameId stack_frame_id);
+  static MaybeDirectHandle<FixedArray> CheckBreakPoints(
+      Isolate*, DirectHandle<Script>, int position,
+      StackFrameId stack_frame_id);
 
  private:
   // Helper functions that update the breakpoint info list.
@@ -1336,9 +1339,8 @@ class AsmWasmData : public TorqueGeneratedAsmWasmData<AsmWasmData, Struct> {
 class WasmTypeInfo
     : public TorqueGeneratedWasmTypeInfo<WasmTypeInfo, HeapObject> {
  public:
-  DECL_EXTERNAL_POINTER_ACCESSORS(native_type, Address)
-  inline wasm::ModuleTypeIndex type_index() const;
-  DECL_TRUSTED_POINTER_ACCESSORS(trusted_data, WasmTrustedInstanceData)
+  inline wasm::CanonicalTypeIndex type_index() const;
+  inline wasm::CanonicalValueType element_type() const;  // Only for WasmArrays.
 
   DECL_PRINTER(WasmTypeInfo)
 
@@ -1351,10 +1353,10 @@ class WasmObject : public TorqueGeneratedWasmObject<WasmObject, JSReceiver> {
  protected:
   // Returns boxed value of the object's field/element with given type and
   // offset.
-  static inline Handle<Object> ReadValueAt(Isolate* isolate,
-                                           DirectHandle<HeapObject> obj,
-                                           wasm::ValueType type,
-                                           uint32_t offset);
+  static inline DirectHandle<Object> ReadValueAt(Isolate* isolate,
+                                                 DirectHandle<HeapObject> obj,
+                                                 wasm::CanonicalValueType type,
+                                                 uint32_t offset);
 
  private:
   template <typename ElementType>
@@ -1365,12 +1367,10 @@ class WasmObject : public TorqueGeneratedWasmObject<WasmObject, JSReceiver> {
 
 class WasmStruct : public TorqueGeneratedWasmStruct<WasmStruct, WasmObject> {
  public:
-  static inline wasm::StructType* type(Tagged<Map> map);
-  inline wasm::StructType* type() const;
-  static inline wasm::StructType* GcSafeType(Tagged<Map> map);
+  static const wasm::CanonicalStructType* GcSafeType(Tagged<Map> map);
   static inline int Size(const wasm::StructType* type);
+  static inline int Size(const wasm::CanonicalStructType* type);
   static inline int GcSafeSize(Tagged<Map> map);
-  inline const wasm::WasmModule* module();
   static inline void EncodeInstanceSizeInMap(int instance_size,
                                              Tagged<Map> map);
   static inline int DecodeInstanceSizeFromMap(Tagged<Map> map);
@@ -1402,12 +1402,20 @@ int WasmStruct::Size(const wasm::StructType* type) {
                   Heap::kMinObjectSizeInTaggedWords * kTaggedSize);
 }
 
+int WasmStruct::Size(const wasm::CanonicalStructType* type) {
+  // Object size must fit into a Smi (because of filler objects), and its
+  // computation must not overflow.
+  static_assert(Smi::kMaxValue <= kMaxInt);
+  DCHECK_LE(type->total_fields_size(), Smi::kMaxValue - kHeaderSize);
+  return std::max(kHeaderSize + static_cast<int>(type->total_fields_size()),
+                  Heap::kMinObjectSizeInTaggedWords * kTaggedSize);
+}
+
 class WasmArray : public TorqueGeneratedWasmArray<WasmArray, WasmObject> {
  public:
-  static inline wasm::ArrayType* type(Tagged<Map> map);
-  inline wasm::ArrayType* type() const;
-  static inline wasm::ArrayType* GcSafeType(Tagged<Map> map);
-  inline const wasm::WasmModule* module();
+  static inline wasm::CanonicalTypeIndex type_index(Tagged<Map> map);
+  static inline const wasm::CanonicalValueType GcSafeElementType(
+      Tagged<Map> map);
 
   // Get the {ObjectSlot} corresponding to the element at {index}. Requires that
   // this is a reference array.
@@ -1417,9 +1425,9 @@ class WasmArray : public TorqueGeneratedWasmArray<WasmArray, WasmObject> {
   static inline int SizeFor(Tagged<Map> map, int length);
 
   // Returns boxed value of the array's element.
-  static inline Handle<Object> GetElement(Isolate* isolate,
-                                          DirectHandle<WasmArray> array,
-                                          uint32_t index);
+  static inline DirectHandle<Object> GetElement(Isolate* isolate,
+                                                DirectHandle<WasmArray> array,
+                                                uint32_t index);
 
   void SetTaggedElement(uint32_t index, DirectHandle<Object> value,
                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
@@ -1454,11 +1462,11 @@ class WasmContinuationObject
     : public TorqueGeneratedWasmContinuationObject<WasmContinuationObject,
                                                    HeapObject> {
  public:
-  static Handle<WasmContinuationObject> New(
+  static DirectHandle<WasmContinuationObject> New(
       Isolate* isolate, wasm::StackMemory* stack,
       wasm::JumpBuffer::StackState state,
       AllocationType allocation_type = AllocationType::kYoung);
-  static Handle<WasmContinuationObject> New(
+  static DirectHandle<WasmContinuationObject> New(
       Isolate* isolate, wasm::StackMemory* stack,
       wasm::JumpBuffer::StackState state, DirectHandle<HeapObject> parent,
       AllocationType allocation_type = AllocationType::kYoung);
@@ -1493,7 +1501,7 @@ class WasmSuspendingObject
     : public TorqueGeneratedWasmSuspendingObject<WasmSuspendingObject,
                                                  JSObject> {
  public:
-  V8_EXPORT_PRIVATE static Handle<WasmSuspendingObject> New(
+  V8_EXPORT_PRIVATE static DirectHandle<WasmSuspendingObject> New(
       Isolate* isolate, DirectHandle<JSReceiver> callable);
   DECL_PRINTER(WasmSuspendingObject)
   TQ_OBJECT_CONSTRUCTORS(WasmSuspendingObject)
@@ -1527,7 +1535,9 @@ class WasmNull : public TorqueGeneratedWasmNull<WasmNull, HeapObject> {
 
 #undef DECL_OPTIONAL_ACCESSORS
 
-Handle<Map> CreateFuncRefMap(Isolate* isolate, Handle<Map> opt_rtt_parent);
+DirectHandle<Map> CreateFuncRefMap(Isolate* isolate,
+                                   wasm::CanonicalTypeIndex type,
+                                   Handle<Map> opt_rtt_parent);
 
 namespace wasm {
 // Takes a {value} in the JS representation and typechecks it according to

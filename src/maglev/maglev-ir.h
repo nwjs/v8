@@ -229,18 +229,23 @@ class ExceptionHandlerInfo;
   V(CheckedSmiSizedInt32)                           \
   V(CheckedSmiTagInt32)                             \
   V(CheckedSmiTagUint32)                            \
+  V(CheckedSmiTagIntPtr)                            \
   V(UnsafeSmiTagInt32)                              \
   V(UnsafeSmiTagUint32)                             \
+  V(UnsafeSmiTagIntPtr)                             \
   V(CheckedSmiUntag)                                \
   V(UnsafeSmiUntag)                                 \
   V(CheckedInternalizedString)                      \
   V(CheckedObjectToIndex)                           \
   V(CheckedTruncateNumberOrOddballToInt32)          \
   V(CheckedInt32ToUint32)                           \
+  V(CheckedIntPtrToUint32)                          \
   V(UnsafeInt32ToUint32)                            \
   V(CheckedUint32ToInt32)                           \
+  V(CheckedIntPtrToInt32)                           \
   V(ChangeInt32ToFloat64)                           \
   V(ChangeUint32ToFloat64)                          \
+  V(ChangeIntPtrToFloat64)                          \
   V(CheckedTruncateFloat64ToInt32)                  \
   V(CheckedTruncateFloat64ToUint32)                 \
   V(TruncateNumberOrOddballToInt32)                 \
@@ -254,6 +259,8 @@ class ExceptionHandlerInfo;
   V(CheckedNumberToUint8Clamped)                    \
   V(Int32ToNumber)                                  \
   V(Uint32ToNumber)                                 \
+  V(IntPtrToBoolean)                                \
+  V(IntPtrToNumber)                                 \
   V(Float64ToTagged)                                \
   V(Float64ToHeapNumberForField)                    \
   V(HoleyFloat64ToTagged)                           \
@@ -305,6 +312,7 @@ class ExceptionHandlerInfo;
   V(CheckDynamicValue)                        \
   V(CheckInt32IsSmi)                          \
   V(CheckUint32IsSmi)                         \
+  V(CheckIntPtrIsSmi)                         \
   V(CheckHoleyFloat64IsSmi)                   \
   V(CheckHeapObject)                          \
   V(CheckInt32Condition)                      \
@@ -372,6 +380,7 @@ class ExceptionHandlerInfo;
   V(BranchIfRootConstant)           \
   V(BranchIfToBooleanTrue)          \
   V(BranchIfInt32ToBooleanTrue)     \
+  V(BranchIfIntPtrToBooleanTrue)    \
   V(BranchIfFloat64ToBooleanTrue)   \
   V(BranchIfFloat64IsHole)          \
   V(BranchIfReferenceEqual)         \
@@ -578,46 +587,63 @@ inline constexpr bool IsZeroExtendedRepresentation(ValueRepresentation repr) {
 }
 
 /*
- * The intersection (using `&`) of any two NodeTypes must be a valid NodeType
- * (possibly "kUnknown", modulo heap object bit).
+ * NodeType lattice.
  *
- * All heap object types include the heap object bit, so that they can be
- * checked for AnyHeapObject with a single bit check.
+ * Maglev node types are intersection types. As an example consider
  *
- * Here is a diagram of the relations between the types, where (*) means that
- * they have the kAnyHeapObject bit set.
+ *     Boolen = Oddball & NumberOrBoolean
  *
- *      NumberOrOddball
- *       /     |      \
- *      /      |       NumberOrBoolean
- *      |      |   ___/  /                     StringOrStringWrapper
- *      |      \ /      /                             |
- *      |       X      /         JSReceiver*          |      Name*
- *     /       / \    |          /       \            |     /    \
- *  Oddball*  /  Number      Callable* JSArray*     String*  Symbol*
- *    |      /   /    \                                |
- *  Boolean*    Smi   HeapNumber*              InternalizedString*
+ * The individual bits can be thought of as atomic propositions. An object of
+ * type boolean is an object for which the Oddball as well as the
+ * NumberOrBoolean proposition holds.
  *
+ * The literals in the NODE_TYPE_LIST form a semi-lattice.
+ *
+ * For efficiency often used intersections (i.e., the join operation using `&`)
+ * should be added as NodeType.
+ *
+ * Here is a diagram of the relations between the types:
+ *
+ *
+ *            .----------- Unknown ---------------------.
+ *            |                                         |
+ *            |              .---.-----.------- AnyHeapObject ---------.
+ *            |             /   /      |                |              |
+ *            |            /   /       |                |              |
+ *      NumberOrOddball   /   /   JSReceiver   StringOrStringWrapper  Name
+ *         /      \      /   /   /     |    \       /         \       /  \
+ *        /        \    /   /   /      |     \     /           \     /    \
+ * NumberOrBoolean Oddball / Callable JSArray String            String   Symbol
+ *      /      \   /      /                   Wrapper            |
+ *   Number   Boolean    /                                   Internalized
+ *    /  \              /                                      String
+ * Smi    \            /
+ *          HeapNumber
+ *
+ * Ensure that each super-type mentioned in the following NODE_TYPE_LIST
+ * corresponds to exactly one arrow in the above diagram.
+ *
+ * TODO(olivf): Rename Unknown to Any.
  */
-
-#define NODE_TYPE_LIST(V)                                   \
-  V(Unknown, 0)                                             \
-  V(NumberOrOddball, (1 << 1))                              \
-  V(NumberOrBoolean, (1 << 2) | kNumberOrOddball)           \
-  V(Number, (1 << 3) | kNumberOrOddball | kNumberOrBoolean) \
-  V(Smi, (1 << 4) | kNumber)                                \
-  V(AnyHeapObject, (1 << 5))                                \
-  V(Oddball, (1 << 6) | kAnyHeapObject | kNumberOrOddball)  \
-  V(Boolean, kOddball | kNumberOrBoolean)                   \
-  V(Name, (1 << 7) | kAnyHeapObject)                        \
-  V(StringOrStringWrapper, (1 << 8) | kAnyHeapObject)       \
-  V(String, (1 << 9) | kName | kStringOrStringWrapper)      \
-  V(InternalizedString, (1 << 10) | kString)                \
-  V(Symbol, (1 << 11) | kName)                              \
-  V(JSReceiver, (1 << 12) | kAnyHeapObject)                 \
-  V(JSArray, (1 << 13) | kJSReceiver)                       \
-  V(Callable, (1 << 14) | kJSReceiver)                      \
-  V(HeapNumber, kAnyHeapObject | kNumber)
+#define NODE_TYPE_LIST(V)                                  \
+  V(Unknown, 0)                                            \
+  V(NumberOrOddball, (1 << 1) | kUnknown)                  \
+  V(NumberOrBoolean, (1 << 2) | kNumberOrOddball)          \
+  V(Number, (1 << 3) | kNumberOrBoolean)                   \
+  V(Smi, (1 << 4) | kNumber)                               \
+  V(AnyHeapObject, (1 << 5) | kUnknown)                    \
+  V(HeapNumber, kAnyHeapObject | kNumber)                  \
+  V(Oddball, (1 << 6) | kAnyHeapObject | kNumberOrOddball) \
+  V(Boolean, kOddball | kNumberOrBoolean)                  \
+  V(Name, (1 << 7) | kAnyHeapObject)                       \
+  V(StringOrStringWrapper, (1 << 8) | kAnyHeapObject)      \
+  V(String, kName | kStringOrStringWrapper)                \
+  V(InternalizedString, (1 << 9) | kString)                \
+  V(Symbol, (1 << 10) | kName)                             \
+  V(JSReceiver, (1 << 11) | kAnyHeapObject)                \
+  V(JSArray, (1 << 12) | kJSReceiver)                      \
+  V(Callable, (1 << 13) | kJSReceiver)                     \
+  V(StringWrapper, kStringOrStringWrapper | kJSReceiver)
 
 enum class NodeType : uint32_t {
 #define DEFINE_NODE_TYPE(Name, Value) k##Name = Value,
@@ -625,15 +651,15 @@ enum class NodeType : uint32_t {
 #undef DEFINE_NODE_TYPE
 };
 
-inline NodeType CombineType(NodeType left, NodeType right) {
+inline constexpr NodeType CombineType(NodeType left, NodeType right) {
   return static_cast<NodeType>(static_cast<int>(left) |
                                static_cast<int>(right));
 }
-inline NodeType IntersectType(NodeType left, NodeType right) {
+inline constexpr NodeType IntersectType(NodeType left, NodeType right) {
   return static_cast<NodeType>(static_cast<int>(left) &
                                static_cast<int>(right));
 }
-inline bool NodeTypeIs(NodeType type, NodeType to_check) {
+inline constexpr bool NodeTypeIs(NodeType type, NodeType to_check) {
   int right = static_cast<int>(to_check);
   return (static_cast<int>(type) & right) == right;
 }
@@ -642,11 +668,13 @@ inline NodeType StaticTypeForMap(compiler::MapRef map,
                                  compiler::JSHeapBroker* broker) {
   if (map.IsHeapNumberMap()) return NodeType::kHeapNumber;
   if (map.IsInternalizedStringMap()) return NodeType::kInternalizedString;
-  if (map.IsStringMap()) return NodeType::kString;
+  if (map.IsStringMap()) {
+    return NodeType::kString;
+  }
   if (map.IsNameMap()) return NodeType::kName;
   if (map.IsJSPrimitiveWrapperMap() &&
       IsStringWrapperElementsKind(map.elements_kind())) {
-    return NodeType::kStringOrStringWrapper;
+    return NodeType::kStringWrapper;
   }
   if (map.IsSymbolMap()) return NodeType::kSymbol;
   if (map.IsJSArrayMap()) return NodeType::kJSArray;
@@ -657,10 +685,36 @@ inline NodeType StaticTypeForMap(compiler::MapRef map,
   return NodeType::kAnyHeapObject;
 }
 
+// Conservatively find types which are guaranteed to have no instances.
+// Currently we search for some common contradicting properties.
+// TODO(olivf): Find a better way of doing this. Alternatives considered are,
+// * ensure that every inhabited type is also a NodeType. This would blow up the
+//   lattice quite a bit.
+// * ensure that every possible leaf type exists in the lattice and check if the
+//   type is reachable from a leaf. This is difficult to test for correctness
+//   and also more expensive to compute.
+constexpr static std::initializer_list<std::pair<NodeType, NodeType>>
+    kNodeTypeExclusivePairs{
+        {NodeType::kAnyHeapObject, NodeType::kSmi},
+        {NodeType::kNumberOrOddball, NodeType::kName},
+        {NodeType::kNumberOrOddball, NodeType::kJSReceiver},
+        {NodeType::kJSReceiver, NodeType::kName},
+    };
+inline constexpr bool NodeTypeCannotHaveInstances(NodeType type) {
+  for (auto types : kNodeTypeExclusivePairs) {
+    if (NodeTypeIs(type, types.first) && NodeTypeIs(type, types.second)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 inline NodeType StaticTypeForConstant(compiler::JSHeapBroker* broker,
                                       compiler::ObjectRef ref) {
   if (ref.IsSmi()) return NodeType::kSmi;
-  return StaticTypeForMap(ref.AsHeapObject().map(broker), broker);
+  NodeType type = StaticTypeForMap(ref.AsHeapObject().map(broker), broker);
+  DCHECK(!NodeTypeCannotHaveInstances(type));
+  return type;
 }
 
 inline bool IsInstanceOfNodeType(compiler::MapRef map, NodeType type,
@@ -687,6 +741,9 @@ inline bool IsInstanceOfNodeType(compiler::MapRef map, NodeType type,
       return map.IsNameMap();
     case NodeType::kString:
       return map.IsStringMap();
+    case NodeType::kStringWrapper:
+      return map.IsJSPrimitiveWrapperMap() &&
+             IsStringWrapperElementsKind(map.elements_kind());
     case NodeType::kStringOrStringWrapper:
       return map.IsStringMap() ||
              (map.IsJSPrimitiveWrapperMap() &&
@@ -725,9 +782,11 @@ inline std::ostream& operator<<(std::ostream& out, const NodeType& type) {
     NODE_TYPE_LIST(CASE)
 #undef CASE
     default:
-#define CASE(Name, _)                        \
-  if (NodeTypeIs(type, NodeType::k##Name)) { \
-    out << #Name ",";                        \
+#define CASE(Name, _)                                        \
+  if (NodeTypeIs(type, NodeType::k##Name)) {                 \
+    if constexpr (NodeType::k##Name != NodeType::kUnknown) { \
+      out << #Name ",";                                      \
+    }                                                        \
   }
       NODE_TYPE_LIST(CASE)
 #undef CASE
@@ -2003,7 +2062,7 @@ class NodeBase : public ZoneObject {
   }
 
   // Specify that there need to be a certain number of registers free (i.e.
-  // useable as scratch registers) on entry into this node.
+  // usable as scratch registers) on entry into this node.
   //
   // Does not include any registers requested by RequireSpecificTemporary.
   void set_temporaries_needed(uint8_t value) {
@@ -2316,7 +2375,7 @@ class ValueNode : public Node {
   void LoadToRegister(MaglevAssembler*, DoubleRegister);
   void DoLoadToRegister(MaglevAssembler*, Register);
   void DoLoadToRegister(MaglevAssembler*, DoubleRegister);
-  Handle<Object> Reify(LocalIsolate* isolate) const;
+  DirectHandle<Object> Reify(LocalIsolate* isolate) const;
 
   size_t GetInputLocationsArraySize() const;
 
@@ -2365,7 +2424,7 @@ class ValueNode : public Node {
   LiveRange live_range() const { return {start_id(), end_id_}; }
   NodeIdT current_next_use() const { return next_use_; }
 
-  // The following metods should only be used during register allocation, to
+  // The following methods should only be used during register allocation, to
   // mark the _current_ state of this Node according to the register allocator.
   void advance_next_use(NodeIdT use) { next_use_ = use; }
 
@@ -2493,7 +2552,7 @@ class ValueNode : public Node {
                                         GetMachineRepresentation(),
                                         FirstRegisterCode());
     }
-    DCHECK(is_loadable());
+    CHECK(is_loadable());
     return spill_;
   }
 
@@ -2988,6 +3047,29 @@ class Int32ToBoolean : public FixedInputValueNodeT<1, Int32ToBoolean> {
   using FlipBitField = NextBitField<bool, 1>;
 };
 
+class IntPtrToBoolean : public FixedInputValueNodeT<1, IntPtrToBoolean> {
+  using Base = FixedInputValueNodeT<1, IntPtrToBoolean>;
+
+ public:
+  explicit IntPtrToBoolean(uint64_t bitfield, bool flip)
+      : Base(FlipBitField::update(bitfield, flip)) {}
+
+  static constexpr Base::InputTypes kInputTypes{ValueRepresentation::kIntPtr};
+
+  Input& value() { return Node::input(0); }
+
+  constexpr bool flip() const { return FlipBitField::decode(bitfield()); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+  auto options() const { return std::tuple{flip()}; }
+
+ private:
+  using FlipBitField = NextBitField<bool, 1>;
+};
+
 class CheckedSmiIncrement
     : public FixedInputValueNodeT<1, CheckedSmiIncrement> {
   using Base = FixedInputValueNodeT<1, CheckedSmiIncrement>;
@@ -3260,6 +3342,23 @@ class CheckUint32IsSmi : public FixedInputNodeT<1, CheckUint32IsSmi> {
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
+class CheckIntPtrIsSmi : public FixedInputNodeT<1, CheckIntPtrIsSmi> {
+  using Base = FixedInputNodeT<1, CheckIntPtrIsSmi>;
+
+ public:
+  explicit CheckIntPtrIsSmi(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kIntPtr};
+
+  Input& input() { return Node::input(0); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
 class CheckHoleyFloat64IsSmi
     : public FixedInputNodeT<1, CheckHoleyFloat64IsSmi> {
   using Base = FixedInputNodeT<1, CheckHoleyFloat64IsSmi>;
@@ -3339,6 +3438,25 @@ class CheckedSmiTagUint32
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
+class CheckedSmiTagIntPtr
+    : public FixedInputValueNodeT<1, CheckedSmiTagIntPtr> {
+  using Base = FixedInputValueNodeT<1, CheckedSmiTagIntPtr>;
+
+ public:
+  explicit CheckedSmiTagIntPtr(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::EagerDeopt() | OpProperties::ConversionNode();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kIntPtr};
+
+  Input& input() { return Node::input(0); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
 // Input must guarantee to fit in a Smi.
 class UnsafeSmiTagInt32 : public FixedInputValueNodeT<1, UnsafeSmiTagInt32> {
   using Base = FixedInputValueNodeT<1, UnsafeSmiTagInt32>;
@@ -3373,6 +3491,30 @@ class UnsafeSmiTagUint32 : public FixedInputValueNodeT<1, UnsafeSmiTagUint32> {
   static constexpr OpProperties kProperties = OpProperties::ConversionNode();
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kUint32};
+
+  Input& input() { return Node::input(0); }
+
+#ifdef V8_COMPRESS_POINTERS
+  void MarkTaggedInputsAsDecompressing() {
+    // No tagged inputs.
+  }
+#endif
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+// Input must guarantee to fit in a Smi.
+class UnsafeSmiTagIntPtr : public FixedInputValueNodeT<1, UnsafeSmiTagIntPtr> {
+  using Base = FixedInputValueNodeT<1, UnsafeSmiTagIntPtr>;
+
+ public:
+  explicit UnsafeSmiTagIntPtr(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::ConversionNode();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kIntPtr};
 
   Input& input() { return Node::input(0); }
 
@@ -3456,7 +3598,7 @@ class Int32Constant : public FixedInputValueNodeT<0, Int32Constant> {
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
   void DoLoadToRegister(MaglevAssembler*, OutputRegister);
-  Handle<Object> DoReify(LocalIsolate* isolate) const;
+  DirectHandle<Object> DoReify(LocalIsolate* isolate) const;
 
  private:
   const int32_t value_;
@@ -3482,7 +3624,7 @@ class Uint32Constant : public FixedInputValueNodeT<0, Uint32Constant> {
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
   void DoLoadToRegister(MaglevAssembler*, OutputRegister);
-  Handle<Object> DoReify(LocalIsolate* isolate) const;
+  DirectHandle<Object> DoReify(LocalIsolate* isolate) const;
 
  private:
   const uint32_t value_;
@@ -3510,7 +3652,7 @@ class Float64Constant : public FixedInputValueNodeT<0, Float64Constant> {
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
   void DoLoadToRegister(MaglevAssembler*, OutputRegister);
-  Handle<Object> DoReify(LocalIsolate* isolate) const;
+  DirectHandle<Object> DoReify(LocalIsolate* isolate) const;
 
  private:
   const Float64 value_;
@@ -3620,6 +3762,26 @@ class Uint32ToNumber : public FixedInputValueNodeT<1, Uint32ToNumber> {
                                               OpProperties::ConversionNode();
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kUint32};
+
+  Input& input() { return Node::input(0); }
+
+  int MaxCallStackArgs() const { return 0; }
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class IntPtrToNumber : public FixedInputValueNodeT<1, IntPtrToNumber> {
+  using Base = FixedInputValueNodeT<1, IntPtrToNumber>;
+
+ public:
+  explicit IntPtrToNumber(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::CanAllocate() |
+                                              OpProperties::DeferredCall() |
+                                              OpProperties::ConversionNode();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kIntPtr};
 
   Input& input() { return Node::input(0); }
 
@@ -3768,6 +3930,26 @@ class CheckedInt32ToUint32
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
+class CheckedIntPtrToUint32
+    : public FixedInputValueNodeT<1, CheckedIntPtrToUint32> {
+  using Base = FixedInputValueNodeT<1, CheckedIntPtrToUint32>;
+
+ public:
+  explicit CheckedIntPtrToUint32(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::Uint32() |
+                                              OpProperties::ConversionNode() |
+                                              OpProperties::EagerDeopt();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kIntPtr};
+
+  Input& input() { return Node::input(0); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
 class UnsafeInt32ToUint32
     : public FixedInputValueNodeT<1, UnsafeInt32ToUint32> {
   using Base = FixedInputValueNodeT<1, UnsafeInt32ToUint32>;
@@ -3807,6 +3989,26 @@ class CheckedUint32ToInt32
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
+class CheckedIntPtrToInt32
+    : public FixedInputValueNodeT<1, CheckedIntPtrToInt32> {
+  using Base = FixedInputValueNodeT<1, CheckedIntPtrToInt32>;
+
+ public:
+  explicit CheckedIntPtrToInt32(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::Int32() |
+                                              OpProperties::ConversionNode() |
+                                              OpProperties::EagerDeopt();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kIntPtr};
+
+  Input& input() { return Node::input(0); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
 class ChangeInt32ToFloat64
     : public FixedInputValueNodeT<1, ChangeInt32ToFloat64> {
   using Base = FixedInputValueNodeT<1, ChangeInt32ToFloat64>;
@@ -3837,6 +4039,25 @@ class ChangeUint32ToFloat64
       OpProperties::Float64() | OpProperties::ConversionNode();
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kUint32};
+
+  Input& input() { return Node::input(0); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class ChangeIntPtrToFloat64
+    : public FixedInputValueNodeT<1, ChangeIntPtrToFloat64> {
+  using Base = FixedInputValueNodeT<1, ChangeIntPtrToFloat64>;
+
+ public:
+  explicit ChangeIntPtrToFloat64(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Float64() | OpProperties::ConversionNode();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kIntPtr};
 
   Input& input() { return Node::input(0); }
 
@@ -4875,7 +5096,7 @@ class SmiConstant : public FixedInputValueNodeT<0, SmiConstant> {
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
   void DoLoadToRegister(MaglevAssembler*, OutputRegister);
-  Handle<Object> DoReify(LocalIsolate* isolate) const;
+  DirectHandle<Object> DoReify(LocalIsolate* isolate) const;
 
  private:
   const Tagged<Smi> value_;
@@ -4900,7 +5121,7 @@ class TaggedIndexConstant
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
   void DoLoadToRegister(MaglevAssembler*, OutputRegister);
-  Handle<Object> DoReify(LocalIsolate* isolate) const;
+  DirectHandle<Object> DoReify(LocalIsolate* isolate) const;
 
  private:
   const Tagged<TaggedIndex> value_;
@@ -4928,7 +5149,7 @@ class ExternalConstant : public FixedInputValueNodeT<0, ExternalConstant> {
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
   void DoLoadToRegister(MaglevAssembler*, OutputRegister);
-  Handle<Object> DoReify(LocalIsolate* isolate) const;
+  DirectHandle<Object> DoReify(LocalIsolate* isolate) const;
 
  private:
   const ExternalReference reference_;
@@ -4958,7 +5179,7 @@ class Constant : public FixedInputValueNodeT<0, Constant> {
   compiler::HeapObjectRef object() { return object_; }
 
   void DoLoadToRegister(MaglevAssembler*, OutputRegister);
-  Handle<Object> DoReify(LocalIsolate* isolate) const;
+  DirectHandle<Object> DoReify(LocalIsolate* isolate) const;
 
   compiler::HeapObjectRef ref() const { return object_; }
 
@@ -5012,7 +5233,7 @@ class TrustedConstant : public FixedInputValueNodeT<0, TrustedConstant> {
   IndirectPointerTag tag() const { return tag_; }
 
   void DoLoadToRegister(MaglevAssembler*, OutputRegister);
-  Handle<Object> DoReify(LocalIsolate* isolate) const;
+  DirectHandle<Object> DoReify(LocalIsolate* isolate) const;
 
  private:
   const compiler::HeapObjectRef object_;
@@ -5304,7 +5525,7 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
   compiler::MapRef map_;
   const int id_;
   Type type_;  // We need to cache the type. We cannot do map comparison in some
-               // parts of the pipeline, because we would need to derefernece a
+               // parts of the pipeline, because we would need to dereference a
                // handle.
   bool snapshotted_ = false;  // Object should not be modified anymore.
   union {
@@ -6819,7 +7040,7 @@ class PolymorphicAccessInfo {
 
   const ZoneVector<compiler::MapRef>& maps() const { return maps_; }
 
-  Handle<Object> constant() const {
+  DirectHandle<Object> constant() const {
     DCHECK_EQ(kind_, kConstant);
     return constant_.object();
   }
@@ -6829,7 +7050,7 @@ class PolymorphicAccessInfo {
     return constant_double_.get_scalar();
   }
 
-  Handle<Cell> cell() const {
+  DirectHandle<Cell> cell() const {
     DCHECK_EQ(kind_, kModuleExport);
     return constant_.AsCell().object();
   }
@@ -10343,6 +10564,26 @@ class BranchIfInt32ToBooleanTrue
 
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kInt32};
+
+  Input& condition_input() { return input(0); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class BranchIfIntPtrToBooleanTrue
+    : public BranchControlNodeT<1, BranchIfIntPtrToBooleanTrue> {
+  using Base = BranchControlNodeT<1, BranchIfIntPtrToBooleanTrue>;
+
+ public:
+  explicit BranchIfIntPtrToBooleanTrue(uint64_t bitfield,
+                                       BasicBlockRef* if_true_refs,
+                                       BasicBlockRef* if_false_refs)
+      : Base(bitfield, if_true_refs, if_false_refs) {}
+
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kIntPtr};
 
   Input& condition_input() { return input(0); }
 

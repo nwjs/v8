@@ -71,9 +71,16 @@ ScriptCompiler::CachedData* CodeSerializer::Serialize(
 
   // Serialize code object.
   DirectHandle<String> source(Cast<String>(script->source()), isolate);
+  DirectHandle<FixedArray> wrapped_arguments;
+  if (script->is_wrapped()) {
+    wrapped_arguments =
+        DirectHandle<FixedArray>(script->wrapped_arguments(), isolate);
+  }
+
   HandleScope scope(isolate);
-  CodeSerializer cs(isolate, SerializedCodeData::SourceHash(
-                                 source, script->origin_options()));
+  CodeSerializer cs(isolate,
+                    SerializedCodeData::SourceHash(source, wrapped_arguments,
+                                                   script->origin_options()));
   DisallowGarbageCollection no_gc;
 
 #ifndef DEBUG
@@ -489,11 +496,17 @@ MaybeDirectHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
 
   HandleScope scope(isolate);
 
+  DirectHandle<FixedArray> wrapped_arguments;
+  if (!script_details.wrapped_arguments.is_null()) {
+    wrapped_arguments = script_details.wrapped_arguments.ToHandleChecked();
+  }
+
   SerializedCodeSanityCheckResult sanity_check_result =
       SerializedCodeSanityCheckResult::kSuccess;
   const SerializedCodeData scd = SerializedCodeData::FromCachedData(
       isolate, cached_data,
-      SerializedCodeData::SourceHash(source, script_details.origin_options),
+      SerializedCodeData::SourceHash(source, wrapped_arguments,
+                                     script_details.origin_options),
       &sanity_check_result);
   if (sanity_check_result != SerializedCodeSanityCheckResult::kSuccess) {
     if (v8_flags.profile_deserialization) {
@@ -546,7 +559,7 @@ MaybeDirectHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
   return scope.CloseAndEscape(result);
 }
 
-Handle<Script> CodeSerializer::OffThreadDeserializeData::GetOnlyScript(
+DirectHandle<Script> CodeSerializer::OffThreadDeserializeData::GetOnlyScript(
     LocalHeap* heap) {
   std::unique_ptr<PersistentHandles> previous_persistent_handles =
       heap->DetachPersistentHandles();
@@ -554,7 +567,7 @@ Handle<Script> CodeSerializer::OffThreadDeserializeData::GetOnlyScript(
 
   DCHECK_EQ(scripts.size(), 1);
   // Make a non-persistent handle to return.
-  Handle<Script> script = handle(*scripts[0], heap);
+  DirectHandle<Script> script = direct_handle(*scripts[0], heap);
   DCHECK_EQ(*script, maybe_result.ToHandleChecked()->script());
 
   persistent_handles = heap->DetachPersistentHandles();
@@ -593,7 +606,8 @@ CodeSerializer::StartDeserializeOffThread(LocalIsolate* local_isolate,
   return result;
 }
 
-MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
+MaybeDirectHandle<SharedFunctionInfo>
+CodeSerializer::FinishOffThreadDeserialize(
     Isolate* isolate, OffThreadDeserializeData&& data,
     AlignedCachedData* cached_data, DirectHandle<String> source,
     const ScriptDetails& script_details,
@@ -605,6 +619,11 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
 
   HandleScope scope(isolate);
 
+  DirectHandle<FixedArray> wrapped_arguments;
+  if (!script_details.wrapped_arguments.is_null()) {
+    wrapped_arguments = script_details.wrapped_arguments.ToHandleChecked();
+  }
+
   // Do a source sanity check now that we have the source. It's important for
   // FromPartiallySanityCheckedCachedData call that the sanity_check_result
   // holds the result of the off-thread sanity check.
@@ -613,7 +632,8 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
   const SerializedCodeData scd =
       SerializedCodeData::FromPartiallySanityCheckedCachedData(
           cached_data,
-          SerializedCodeData::SourceHash(source, script_details.origin_options),
+          SerializedCodeData::SourceHash(source, wrapped_arguments,
+                                         script_details.origin_options),
           &sanity_check_result);
   if (sanity_check_result != SerializedCodeSanityCheckResult::kSuccess) {
     // The only case where the deserialization result could exist despite a
@@ -633,7 +653,7 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
     DCHECK(cached_data->rejected());
     isolate->counters()->code_cache_reject_reason()->AddSample(
         static_cast<int>(sanity_check_result));
-    return MaybeHandle<SharedFunctionInfo>();
+    return MaybeDirectHandle<SharedFunctionInfo>();
   }
 
   Handle<SharedFunctionInfo> result;
@@ -642,7 +662,7 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
     if (v8_flags.profile_deserialization) {
       PrintF("[Off-thread deserializing failed]\n");
     }
-    return MaybeHandle<SharedFunctionInfo>();
+    return MaybeDirectHandle<SharedFunctionInfo>();
   }
 
   // Change the result persistent handle into a regular handle.
@@ -660,23 +680,23 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
     DCHECK(isolate->factory()->script_list()->Contains(
         MakeWeak(result->script())));
   } else {
-    DirectHandle<Script> script(Cast<Script>(result->script()), isolate);
+    DirectHandle<Script> result_script(Cast<Script>(result->script()), isolate);
     // Fix up the source on the script. This should be the only deserialized
     // script, and the off-thread deserializer should have set its source to the
     // empty string. In debug mode the code cache does contain the original
     // source.
     DCHECK_EQ(data.scripts.size(), 1);
-    DCHECK_EQ(*script, *data.scripts[0]);
+    DCHECK_EQ(*result_script, *data.scripts[0]);
 #ifdef DEBUG
-    if (!Cast<String>(script->source())->Equals(*source)) {
+    if (!Cast<String>(result_script->source())->Equals(*source)) {
       isolate->PushStackTraceAndDie(
-          reinterpret_cast<void*>(script->source().ptr()),
+          reinterpret_cast<void*>(result_script->source().ptr()),
           reinterpret_cast<void*>(source->ptr()));
     }
 #else
-    CHECK_EQ(script->source(), ReadOnlyRoots(isolate).empty_string());
+    CHECK_EQ(result_script->source(), ReadOnlyRoots(isolate).empty_string());
 #endif
-    Script::SetSource(isolate, script, source);
+    Script::SetSource(isolate, result_script, source);
 
     // Fix up the script list to include the newly deserialized script.
     Handle<WeakArrayList> list = isolate->factory()->script_list();
@@ -794,15 +814,20 @@ SerializedCodeSanityCheckResult SerializedCodeData::SanityCheckWithoutSource(
   return SerializedCodeSanityCheckResult::kSuccess;
 }
 
-uint32_t SerializedCodeData::SourceHash(DirectHandle<String> source,
-                                        ScriptOriginOptions origin_options) {
-  const uint32_t source_length = source->length();
+uint32_t SerializedCodeData::SourceHash(
+    DirectHandle<String> source, DirectHandle<FixedArray> wrapped_arguments,
+    ScriptOriginOptions origin_options) {
+  using LengthField = base::BitField<uint32_t, 0, 29>;
+  static_assert(String::kMaxLength <= LengthField::kMax,
+                "String length must fit into a LengthField");
+  using HasWrappedArgumentsField = LengthField::Next<bool, 1>;
+  using IsModuleField = HasWrappedArgumentsField::Next<bool, 1>;
 
-  static constexpr uint32_t kModuleFlagMask = (1 << 31);
-  const uint32_t is_module = origin_options.IsModule() ? kModuleFlagMask : 0;
-  DCHECK_EQ(0, source_length & kModuleFlagMask);
-
-  return source_length | is_module;
+  uint32_t hash = 0;
+  hash = LengthField::update(hash, source->length());
+  hash = HasWrappedArgumentsField::update(hash, !wrapped_arguments.is_null());
+  hash = IsModuleField::update(hash, origin_options.IsModule());
+  return hash;
 }
 
 // Return ScriptData object and relinquish ownership over it to the caller.
@@ -865,7 +890,7 @@ SerializedCodeData SerializedCodeData::FromPartiallySanityCheckedCachedData(
     SerializedCodeSanityCheckResult* rejection_result) {
   DisallowGarbageCollection no_gc;
   // The previous call to FromCachedDataWithoutSource may have already rejected
-  // the cached data, so re-use the previous rejection result if it's not a
+  // the cached data, so reuse the previous rejection result if it's not a
   // success.
   if (*rejection_result != SerializedCodeSanityCheckResult::kSuccess) {
     // FromCachedDataWithoutSource doesn't check the source, so there can't be

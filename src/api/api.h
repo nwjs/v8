@@ -57,12 +57,12 @@ inline v8::internal::Address ToCData(
     v8::internal::Tagged<v8::internal::Object> obj);
 
 template <internal::ExternalPointerTag tag, typename T>
-inline v8::internal::Handle<
+inline v8::internal::DirectHandle<
     v8::internal::UnionOf<v8::internal::Smi, v8::internal::Foreign>>
 FromCData(v8::internal::Isolate* isolate, T obj);
 
 template <internal::ExternalPointerTag tag>
-inline v8::internal::Handle<
+inline v8::internal::DirectHandle<
     v8::internal::UnionOf<v8::internal::Smi, v8::internal::Foreign>>
 FromCData(v8::internal::Isolate* isolate, v8::internal::Address obj);
 
@@ -265,7 +265,7 @@ class Utils {
   }
 
   template <class T>
-  static inline v8::internal::Handle<v8::internal::Object> OpenPersistent(
+  static inline v8::internal::DirectHandle<v8::internal::Object> OpenPersistent(
       v8::Persistent<T>* persistent) {
     return OpenPersistent(*persistent);
   }
@@ -370,7 +370,7 @@ class HandleScopeImplementer {
 
   // Returns the last entered context or an empty handle if no
   // contexts have been entered.
-  inline Handle<NativeContext> LastEnteredContext();
+  inline DirectHandle<NativeContext> LastEnteredContext();
 
   inline void SaveContext(Tagged<Context> context);
   inline Tagged<Context> RestoreContext();
@@ -488,14 +488,14 @@ void HandleScopeImplementer::DeleteExtensions(internal::Address* prev_limit) {
             reinterpret_cast<Address>(prev_limit) &&
         reinterpret_cast<Address>(prev_limit) <=
             reinterpret_cast<Address>(block_limit)) {
-#ifdef ENABLE_HANDLE_ZAPPING
+#ifdef ENABLE_LOCAL_HANDLE_ZAPPING
       internal::HandleScope::ZapRange(prev_limit, block_limit);
 #endif
       break;
     }
 
     blocks_.pop_back();
-#ifdef ENABLE_HANDLE_ZAPPING
+#ifdef ENABLE_LOCAL_HANDLE_ZAPPING
     internal::HandleScope::ZapRange(block_start, block_limit);
 #endif
     if (spare_ != nullptr) {

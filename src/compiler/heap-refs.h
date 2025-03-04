@@ -525,7 +525,7 @@ class HeapObjectRef : public ObjectRef {
 
   IndirectHandle<HeapObject> object() const;
 
-  MapRef map(JSHeapBroker* broker) const;
+  V8_EXPORT_PRIVATE MapRef map(JSHeapBroker* broker) const;
 
   // Only for use in special situations where we need to read the object's
   // current map (instead of returning the cached map). Use with care.
@@ -1187,6 +1187,8 @@ class JSTypedArrayRef : public JSObjectRef {
 
   bool is_on_heap() const;
   size_t length() const;
+  size_t byte_length() const;
+  ElementsKind elements_kind(JSHeapBroker* broker) const;
   void* data_ptr() const;
   HeapObjectRef buffer(JSHeapBroker* broker) const;
 };

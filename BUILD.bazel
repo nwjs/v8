@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 load("@bazel_skylib//lib:selects.bzl", "selects")
-load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("@v8_python_deps//:requirements.bzl", "requirement")
 load(
     "@v8//:bazel/defs.bzl",
@@ -85,6 +85,7 @@ load(":bazel/v8-non-pointer-compression.bzl", "v8_binary_non_pointer_compression
 # v8_enable_javascript_promise_hooks
 # v8_enable_allocation_folding
 # v8_allocation_site_tracking
+# v8_lower_limits_mode
 
 v8_flag(name = "v8_android_log_stdout")
 
@@ -108,7 +109,9 @@ v8_flag(name = "v8_enable_debug_code")
 
 v8_flag(name = "v8_enable_disassembler")
 
-v8_flag(name = "v8_enable_handle_zapping")
+v8_flag(name = "v8_enable_local_handle_zapping")
+
+v8_flag(name = "v8_enable_global_handle_zapping")
 
 v8_flag(name = "v8_enable_runtime_call_stats")
 
@@ -447,7 +450,8 @@ v8_config(
         "v8_imminent_deprecation_warnings": "V8_IMMINENT_DEPRECATION_WARNINGS",
         "v8_enable_debug_code": "V8_ENABLE_DEBUG_CODE",
         "v8_enable_disassembler": "ENABLE_DISASSEMBLER",
-        "v8_enable_handle_zapping": "ENABLE_HANDLE_ZAPPING",
+        "v8_enable_global_handle_zapping": "ENABLE_GLOBAL_HANDLE_ZAPPING",
+        "v8_enable_local_handle_zapping": "ENABLE_LOCAL_HANDLE_ZAPPING",
         "v8_enable_hugepage": "ENABLE_HUGEPAGE",
         "v8_enable_future": "V8_ENABLE_FUTURE",
         "v8_enable_lazy_source_positions": "V8_ENABLE_LAZY_SOURCE_POSITIONS",
@@ -472,6 +476,7 @@ v8_config(
         "GOOGLE3",
         "V8_ADVANCED_BIGINT_ALGORITHMS",
         "V8_CONCURRENT_MARKING",
+        "V8_ENABLE_LEAPTIERING",
         "V8_ENABLE_SPARKPLUG",
         "V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT",
         "V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA",
@@ -525,7 +530,7 @@ v8_config(
             "UNICODE",
             "_UNICODE",
             "_CRT_RAND_S",
-            "_WIN32_WINNT=0x0602",
+            "_WIN32_WINNT=0x0A00",
         ],
     }) + select({
         ":is_v8_enable_pointer_compression": [
@@ -776,6 +781,8 @@ filegroup(
         "src/base/file-utils.cc",
         "src/base/file-utils.h",
         "src/base/flags.h",
+        "src/base/fpu.cc",
+        "src/base/fpu.h",
         "src/base/free_deleter.h",
         "src/base/hashing.h",
         "src/base/hashmap.h",
@@ -822,6 +829,7 @@ filegroup(
         "src/base/platform/mutex.h",
         "src/base/platform/platform.cc",
         "src/base/platform/platform.h",
+        "src/base/platform/platform-posix.h",  # Always included by src/execution/isolate.h
         "src/base/platform/semaphore.cc",
         "src/base/platform/semaphore.h",
         "src/base/platform/time.cc",
@@ -866,7 +874,6 @@ filegroup(
     ] + select({
         "@v8//bazel/config:is_posix": [
             "src/base/platform/platform-posix.cc",
-            "src/base/platform/platform-posix.h",
             "src/base/platform/platform-posix-time.cc",
             "src/base/platform/platform-posix-time.h",
         ],
@@ -889,6 +896,7 @@ filegroup(
         "@v8//bazel/config:is_windows": [
             "src/base/debug/stack_trace_win.cc",
             "src/base/platform/platform-win32.cc",
+            "src/base/platform/platform-win32.h",
             "src/base/win32-headers.h",
         ],
     }),
@@ -1562,7 +1570,7 @@ filegroup(
         "src/execution/protectors.cc",
         "src/execution/protectors.h",
         "src/execution/protectors-inl.h",
-        "src/execution/shared-mutex-guard-if-off-thread.h",
+        "src/execution/mutex-guard-if-off-thread.h",
         "src/execution/simulator.h",
         "src/execution/simulator-base.cc",
         "src/execution/simulator-base.h",
@@ -2376,6 +2384,8 @@ filegroup(
         "src/sandbox/js-dispatch-table.cc",
         "src/sandbox/js-dispatch-table.h",
         "src/sandbox/js-dispatch-table-inl.h",
+        "src/sandbox/trusted-pointer-scope.cc",
+        "src/sandbox/trusted-pointer-scope.h",
         "src/sandbox/trusted-pointer-table.cc",
         "src/sandbox/trusted-pointer-table.h",
         "src/sandbox/trusted-pointer-table-inl.h",
@@ -2454,6 +2464,7 @@ filegroup(
         "src/strings/string-builder-inl.h",
         "src/strings/string-case.cc",
         "src/strings/string-case.h",
+        "src/strings/string-hasher.cc",
         "src/strings/string-hasher.h",
         "src/strings/string-hasher-inl.h",
         "src/strings/string-search.h",
@@ -2529,6 +2540,9 @@ filegroup(
         "src/zone/zone-segment.h",
         "src/zone/zone-type-traits.h",
         "src/zone/zone-utils.h",
+        "third_party/rapidhash-v8/rapidhash.h",
+        "third_party/simdutf/simdutf.cpp",
+        "third_party/simdutf/simdutf.h",
         "third_party/siphash/halfsiphash.cc",
         "third_party/siphash/halfsiphash.h",
         "third_party/utf8-decoder/utf8-decoder.h",
@@ -2757,18 +2771,17 @@ filegroup(
             "src/trap-handler/handler-inside-posix.cc",
             "src/trap-handler/handler-outside-posix.cc",
         ],
+        "@v8//bazel/config:is_windows": [
+            "src/trap-handler/handler-inside-win.cc",
+            "src/trap-handler/handler-inside-win.h",
+            "src/trap-handler/handler-outside-win.cc",
+            "include/v8-wasm-trap-handler-win.h",
+        ],
         "//conditions:default": [],
     }) + select({
         "@v8//bazel/config:v8_arm64_simulator": [
             "src/trap-handler/handler-outside-simulator.cc",
             "src/trap-handler/trap-handler-simulator.h",
-        ],
-        "//conditions:default": [],
-    }) + select({
-        "@v8//bazel/config:is_windows": [
-            "src/trap-handler/handler-inside-win.cc",
-            "src/trap-handler/handler-inside-win.h",
-            "src/trap-handler/handler-outside-win.cc",
         ],
         "//conditions:default": [],
     }) + select({
@@ -2902,8 +2915,6 @@ filegroup(
             "src/wasm/function-compiler.cc",
             "src/wasm/function-compiler.h",
             "src/wasm/fuzzing/random-module-generation.h",
-            "src/wasm/graph-builder-interface.cc",
-            "src/wasm/graph-builder-interface.h",
             "src/wasm/inlining-tree.h",
             "src/wasm/jump-table-assembler.cc",
             "src/wasm/jump-table-assembler.h",
@@ -3335,6 +3346,7 @@ filegroup(
         "src/compiler/turboshaft/explicit-truncation-reducer.h",
         "src/compiler/turboshaft/fast-api-call-lowering-reducer.h",
         "src/compiler/turboshaft/fast-hash.h",
+        "src/compiler/turboshaft/float16-lowering-reducer.h",
         "src/compiler/turboshaft/field-macro.inc",
         "src/compiler/turboshaft/graph.cc",
         "src/compiler/turboshaft/graph.h",
@@ -3383,10 +3395,6 @@ filegroup(
         "src/compiler/turboshaft/pipelines.h",
         "src/compiler/turboshaft/pretenuring-propagation-reducer.cc",
         "src/compiler/turboshaft/pretenuring-propagation-reducer.h",
-        "src/compiler/turboshaft/recreate-schedule.cc",
-        "src/compiler/turboshaft/recreate-schedule.h",
-        "src/compiler/turboshaft/recreate-schedule-phase.cc",
-        "src/compiler/turboshaft/recreate-schedule-phase.h",
         "src/compiler/turboshaft/reducer-traits.h",
         "src/compiler/turboshaft/register-allocation-phase.h",
         "src/compiler/turboshaft/representations.cc",
@@ -3539,16 +3547,10 @@ filegroup(
             "src/compiler/wasm-gc-operator-reducer.h",
             "src/compiler/wasm-graph-assembler.cc",
             "src/compiler/wasm-graph-assembler.h",
-            "src/compiler/wasm-inlining.cc",
-            "src/compiler/wasm-inlining.h",
             "src/compiler/wasm-inlining-into-js.cc",
             "src/compiler/wasm-inlining-into-js.h",
             "src/compiler/wasm-load-elimination.cc",
             "src/compiler/wasm-load-elimination.h",
-            "src/compiler/wasm-loop-peeling.cc",
-            "src/compiler/wasm-loop-peeling.h",
-            "src/compiler/wasm-js-lowering.cc",
-            "src/compiler/wasm-js-lowering.h",
             "src/compiler/wasm-typer.cc",
             "src/compiler/wasm-typer.h",
         ],
@@ -3830,29 +3832,10 @@ filegroup(
         "@v8//bazel/config:is_inline_asm_s390x": ["src/heap/base/asm/s390/push_registers_asm.cc"],
         "@v8//bazel/config:is_inline_asm_riscv64": ["src/heap/base/asm/riscv64/push_registers_asm.cc"],
         "@v8//bazel/config:is_inline_asm_ppc64le": ["src/heap/base/asm/ppc/push_registers_asm.cc"],
-        "@v8//bazel/config:is_msvc_asm_ia32": ["src/heap/base/asm/ia32/push_registers_masm.asm"],
+        "@v8//bazel/config:is_msvc_asm_ia32": ["src/heap/base/asm/ia32/push_registers_asm.cc"],
         "@v8//bazel/config:is_msvc_asm_x64": ["src/heap/base/asm/x64/push_registers_masm.asm"],
-        "@v8//bazel/config:is_msvc_asm_arm64": ["src/heap/base/asm/arm64/push_registers_masm.S"],
+        "@v8//bazel/config:is_msvc_asm_arm64": ["src/heap/base/asm/arm64/push_registers_asm.cc"],
     }),
-)
-
-v8_library(
-  name = "lib_fast_float",
-  srcs = [
-    "third_party/fast_float/src/include/fast_float/ascii_number.h",
-    "third_party/fast_float/src/include/fast_float/bigint.h",
-    "third_party/fast_float/src/include/fast_float/constexpr_feature_detect.h",
-    "third_party/fast_float/src/include/fast_float/decimal_to_binary.h",
-    "third_party/fast_float/src/include/fast_float/digit_comparison.h",
-    "third_party/fast_float/src/include/fast_float/fast_float.h",
-    "third_party/fast_float/src/include/fast_float/fast_table.h",
-    "third_party/fast_float/src/include/fast_float/float_common.h",
-    "third_party/fast_float/src/include/fast_float/parse_number.h",
-    ],
-  hdrs = [ "third_party/fast_float/src/include/fast_float/fast_float.h" ],
-  includes = [
-    "third_party/fast_float/src/include",
-  ],
 )
 
 v8_library(
@@ -4298,6 +4281,7 @@ v8_library(
         ":v8_shared_internal_headers",
     ],
     copts = ["-Wno-implicit-fallthrough"],
+    deps = ["@abseil-cpp//absl/synchronization", "@abseil-cpp//absl/time"],
 )
 
 cc_library(
@@ -4324,8 +4308,13 @@ cc_library(
     deps = [
         ":torque_base_headers",
         ":v8_libbase",
-        "//external:absl_optional",
     ],
+)
+
+cc_library(
+  name = "simdutf",
+  srcs = ["third_party/simdutf/simdutf.cpp"],
+  hdrs = ["third_party/simdutf/simdutf.h"],
 )
 
 v8_library(
@@ -4356,13 +4345,14 @@ v8_library(
         ":noicu/generated_torque_definitions",
     ],
     deps = [
-        ":lib_fast_float",
+        "//third_party/fast_float/src:fast_float",
         ":lib_fp16",
+        ":simdutf",
         ":v8_libbase",
-        "//external:absl_btree",
-        "//external:absl_flat_hash_map",
-        "//external:absl_flat_hash_set",
-        "//external:hwy",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@highway//:hwy",
     ],
 )
 
@@ -4449,7 +4439,6 @@ v8_binary(
     srcs = [
         "src/regexp/gen-regexp-special-case.cc",
         "src/regexp/special-case.h",
-        ":v8_libbase_files",
         ":v8_shared_internal_headers",
     ],
     copts = ["-Wno-implicit-fallthrough"],
@@ -4461,7 +4450,7 @@ v8_binary(
         "UNISTR_FROM_CHAR_EXPLICIT=",
     ],
     deps = [
-        "//external:absl_optional",
+        ":v8_libbase",
         "//external:icu",
     ],
 )

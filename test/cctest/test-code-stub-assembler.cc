@@ -885,7 +885,7 @@ void TestNameDictionaryLookup() {
   };
 
   for (size_t i = 0; i < arraysize(keys); i++) {
-    Handle<Object> value =
+    DirectHandle<Object> value =
         factory->NewPropertyCell(keys[i], fake_details, keys[i]);
     dictionary =
         Dictionary::Add(isolate, dictionary, keys[i], value, fake_details);
@@ -2009,7 +2009,7 @@ void TestDictionaryAllocation(CSAAllocator<Dictionary> csa_alloc,
     for (int i = 0; i < max_capacity; i = i * 1.1 + 1) {
       DirectHandle<HeapObject> result = Cast<HeapObject>(
           ft.Call(handle(Smi::FromInt(i), isolate)).ToHandleChecked());
-      Handle<Dictionary> dict = alloc(isolate, i);
+      DirectHandle<Dictionary> dict = alloc(isolate, i);
       // Both dictionaries should be memory equal.
       int size = dict->Size();
       CHECK_EQ(0, memcmp(reinterpret_cast<void*>(dict->address()),
@@ -2113,7 +2113,7 @@ TNode<Object> MakeConstantNode(CodeStubAssembler& m, Handle<Object> value) {
   return m.HeapConstantNoHole(Cast<HeapObject>(value));
 }
 
-// Buids a CSA function that calls |target| function with given arguments
+// Builds a CSA function that calls |target| function with given arguments
 // |number_of_iterations| times and checks that the stack pointer values before
 // the calls and after the calls are the same.
 // Then this new function is called multiple times.
@@ -2616,11 +2616,11 @@ class AppendJSArrayCodeStubAssembler : public CodeStubAssembler {
     Handle<JSArray> array = isolate->factory()->NewJSArray(
         kind_, 2, initial_size,
         ArrayStorageAllocationMode::INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
-    Object::SetElement(isolate, array, 0, Handle<Smi>(Smi::FromInt(1), isolate),
-                       kDontThrow)
+    Object::SetElement(isolate, array, 0,
+                       DirectHandle<Smi>(Smi::FromInt(1), isolate), kDontThrow)
         .Check();
-    Object::SetElement(isolate, array, 1, Handle<Smi>(Smi::FromInt(2), isolate),
-                       kDontThrow)
+    Object::SetElement(isolate, array, 1,
+                       DirectHandle<Smi>(Smi::FromInt(2), isolate), kDontThrow)
         .Check();
     CodeStubArguments args(this,
                            IntPtrConstant(kNumParams + kJSArgcReceiverSlots));
@@ -3973,10 +3973,10 @@ void TestCallJumpBuiltin(CallJumpMode mode,
 
     TNode<Smi> index = m.SmiConstant(2);
 
-    if (mode == kCall) {
+    if (mode == CallJumpMode::kCall) {
       m.Return(m.CallBuiltin(Builtin::kStringRepeat, context, str, index));
     } else {
-      DCHECK_EQ(mode, kTailCall);
+      DCHECK_EQ(mode, CallJumpMode::kTailCall);
       m.TailCallBuiltin(Builtin::kStringRepeat, context, str, index);
     }
   }
@@ -3992,27 +3992,28 @@ void TestCallJumpBuiltin(CallJumpMode mode,
 }  // namespace
 
 TEST(TestCallBuiltinAbsolute) {
-  TestCallJumpBuiltin(kCall, BuiltinCallJumpMode::kAbsolute);
+  TestCallJumpBuiltin(CallJumpMode::kCall, BuiltinCallJumpMode::kAbsolute);
 }
 
 TEST(TestCallBuiltinPCRelative) {
-  TestCallJumpBuiltin(kCall, BuiltinCallJumpMode::kPCRelative);
+  TestCallJumpBuiltin(CallJumpMode::kCall, BuiltinCallJumpMode::kPCRelative);
 }
 
 TEST(TestCallBuiltinIndirect) {
-  TestCallJumpBuiltin(kCall, BuiltinCallJumpMode::kIndirect);
+  TestCallJumpBuiltin(CallJumpMode::kCall, BuiltinCallJumpMode::kIndirect);
 }
 
 TEST(TestTailCallBuiltinAbsolute) {
-  TestCallJumpBuiltin(kTailCall, BuiltinCallJumpMode::kAbsolute);
+  TestCallJumpBuiltin(CallJumpMode::kTailCall, BuiltinCallJumpMode::kAbsolute);
 }
 
 TEST(TestTailCallBuiltinPCRelative) {
-  TestCallJumpBuiltin(kTailCall, BuiltinCallJumpMode::kPCRelative);
+  TestCallJumpBuiltin(CallJumpMode::kTailCall,
+                      BuiltinCallJumpMode::kPCRelative);
 }
 
 TEST(TestTailCallBuiltinIndirect) {
-  TestCallJumpBuiltin(kTailCall, BuiltinCallJumpMode::kIndirect);
+  TestCallJumpBuiltin(CallJumpMode::kTailCall, BuiltinCallJumpMode::kIndirect);
 }
 
 TEST(InstructionSchedulingCallerSavedRegisters) {

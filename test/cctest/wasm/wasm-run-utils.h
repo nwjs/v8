@@ -232,10 +232,10 @@ class TestingModuleBuilder {
   }
 
   Isolate* isolate() const { return isolate_; }
-  Handle<WasmInstanceObject> instance_object() const {
+  DirectHandle<WasmInstanceObject> instance_object() const {
     return instance_object_;
   }
-  Handle<WasmTrustedInstanceData> trusted_instance_data() const {
+  DirectHandle<WasmTrustedInstanceData> trusted_instance_data() const {
     return trusted_instance_data_;
   }
   WasmCode* GetFunctionCode(uint32_t index) const {
@@ -276,8 +276,6 @@ class TestingModuleBuilder {
 
   void set_max_steps(int n) { max_steps_ = n; }
   int* max_steps_ptr() { return &max_steps_; }
-  int32_t nondeterminism() { return nondeterminism_; }
-  int32_t* non_determinism_ptr() { return &nondeterminism_; }
 
   void EnableFeature(WasmEnabledFeature feature) {
     enabled_features_.Add(feature);
@@ -297,7 +295,6 @@ class TestingModuleBuilder {
   Handle<WasmTrustedInstanceData> trusted_instance_data_;
   NativeModule* native_module_ = nullptr;
   int32_t max_steps_ = kMaxNumSteps;
-  int32_t nondeterminism_ = 0;
 
   // Data segment arrays that are normally allocated on the instance.
   std::vector<uint8_t> data_segment_data_;
@@ -437,7 +434,7 @@ class WasmRunnerBase : public InitializedHandleScope {
     }
   }
 
-  MaybeHandle<Object> CallViaJS(
+  MaybeDirectHandle<Object> CallViaJS(
       uint32_t function_index,
       base::Vector<const DirectHandle<Object>> parameters) {
     Isolate* isolate = main_isolate();
@@ -514,7 +511,7 @@ class WasmRunner : public WasmRunnerBase {
   }
 
   template <typename T>
-  Handle<Object> MakeParam(T t) {
+  DirectHandle<Object> MakeParam(T t) {
     Factory* factory = builder_.isolate()->factory();
     if constexpr (std::is_integral_v<T> && std::is_signed_v<T> &&
                   sizeof(T) <= sizeof(int)) {
@@ -545,16 +542,21 @@ class WasmRunner : public WasmRunnerBase {
     MaybeDirectHandle<Object> retval =
         CallViaJS(function()->func_index, base::VectorOf(param_objs));
 
+    if constexpr (std::is_void_v<ReturnType>) {
+      return;
+    }
+
     if (retval.is_null()) {
       return static_cast<ReturnType>(0xDEADBEEFDEADBEEF);
     }
 
     DirectHandle<Object> result = retval.ToHandleChecked();
     // For int64_t and uint64_t returns we will get a BigInt.
-    if constexpr (std::is_integral_v<ReturnType> &&
-                  sizeof(ReturnType) == sizeof(int64_t)) {
-      CHECK(IsBigInt(*result));
-      return Cast<BigInt>(*result)->AsInt64();
+    if constexpr (std::is_integral_v<ReturnType>) {
+      if constexpr (sizeof(ReturnType) == sizeof(int64_t)) {
+        CHECK(IsBigInt(*result));
+        return Cast<BigInt>(*result)->AsInt64();
+      }
     }
 
     // Otherwise it must be a number (Smi or HeapNumber).
@@ -591,7 +593,6 @@ class WasmRunner : public WasmRunnerBase {
   }
 
   void SetMaxSteps(int n) { builder_.set_max_steps(n); }
-  bool HasNondeterminism() { return builder_.nondeterminism(); }
 };
 
 // A macro to define tests that run in different engine configurations.

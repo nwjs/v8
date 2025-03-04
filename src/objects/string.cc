@@ -5,6 +5,7 @@
 #include "src/objects/string.h"
 
 #include "src/base/small-vector.h"
+#include "src/base/template-utils.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/execution/isolate-utils.h"
@@ -29,6 +30,7 @@
 #include "src/strings/string-stream.h"
 #include "src/strings/unicode-inl.h"
 #include "src/utils/ostreams.h"
+#include "src/zone/zone-allocator.h"
 
 namespace v8 {
 namespace internal {
@@ -379,8 +381,8 @@ bool String::MakeExternal(Isolate* isolate,
   bool is_internalized = IsInternalizedString(this);
   bool has_pointers = StringShape(this).IsIndirect();
 
-  base::SharedMutexGuardIf<base::kExclusive> shared_mutex_guard(
-      isolate->internalized_string_access(), is_internalized);
+  base::SpinningMutexGuardIf mutex_guard(isolate->internalized_string_access(),
+                                         is_internalized);
   // Morph the string to an external string by replacing the map and
   // reinitializing the fields.  This won't work if the space the existing
   // string occupies is too small for a regular external string.  Instead, we
@@ -473,8 +475,8 @@ bool String::MakeExternal(Isolate* isolate,
   bool is_internalized = IsInternalizedString(this);
   bool has_pointers = StringShape(this).IsIndirect();
 
-  base::SharedMutexGuardIf<base::kExclusive> shared_mutex_guard(
-      isolate->internalized_string_access(), is_internalized);
+  base::SpinningMutexGuardIf mutex_guard(isolate->internalized_string_access(),
+                                         is_internalized);
   // Morph the string to an external string by replacing the map and
   // reinitializing the fields.  This won't work if the space the existing
   // string occupies is too small for a regular external string.  Instead, we
@@ -773,7 +775,6 @@ void String::WriteToFlat(Tagged<String> source, SinkCharT* sink, uint32_t start,
   return WriteToFlat(source, sink, start, length,
                      SharedStringAccessGuardIfNeeded::NotNeeded());
 }
-
 // static
 template <typename SinkCharT>
 void String::WriteToFlat(Tagged<String> source, SinkCharT* sink, uint32_t start,
@@ -786,107 +787,100 @@ void String::WriteToFlat(Tagged<String> source, SinkCharT* sink, uint32_t start,
     DCHECK_LE(length, source->length());
     DCHECK_LT(start, source->length());
     DCHECK_LE(start + length, source->length());
-    switch (StringShape(source).representation_and_encoding_tag()) {
-      case kOneByteStringTag | kExternalStringTag:
-        CopyChars(sink, Cast<ExternalOneByteString>(source)->GetChars() + start,
-                  length);
-        return;
-      case kTwoByteStringTag | kExternalStringTag:
-        CopyChars(sink, Cast<ExternalTwoByteString>(source)->GetChars() + start,
-                  length);
-        return;
-      case kOneByteStringTag | kSeqStringTag:
-        CopyChars(
-            sink,
-            Cast<SeqOneByteString>(source)->GetChars(no_gc, access_guard) +
-                start,
-            length);
-        return;
-      case kTwoByteStringTag | kSeqStringTag:
-        CopyChars(
-            sink,
-            Cast<SeqTwoByteString>(source)->GetChars(no_gc, access_guard) +
-                start,
-            length);
-        return;
-      case kOneByteStringTag | kConsStringTag:
-      case kTwoByteStringTag | kConsStringTag: {
-        Tagged<ConsString> cons_string = Cast<ConsString>(source);
-        Tagged<String> first = cons_string->first();
-        uint32_t boundary = first->length();
-        // Here we explicity use signed ints as the values can become negative.
-        // The sum of {first_length} and {second_length} is always {length},
-        // but the values can become negative, in which case no characters of
-        // the respective string are needed.
-        int32_t first_length = boundary - start;
-        int32_t second_length = length - first_length;
-        DCHECK_EQ(static_cast<uint32_t>(first_length + second_length), length);
-        if (second_length >= first_length) {
-          DCHECK_GT(second_length, 0);
-          // Right hand side is longer.  Recurse over left.
-          if (first_length > 0) {
-            DCHECK_LT(first_length, length);
-            DCHECK_LT(second_length, length);
 
-            WriteToFlat(first, sink, start, first_length, access_guard);
-            if (start == 0 && cons_string->second() == first) {
-              DCHECK_LE(boundary * 2, length);
-              CopyChars(sink + boundary, sink, boundary);
-              return;
-            }
-            sink += first_length;
-            start = 0;
-            length -= first_length;
-          } else {
-            start -= boundary;
-          }
-          source = cons_string->second();
-        } else {
-          DCHECK_GT(first_length, 0);
-          // Left hand side is longer.  Recurse over right.
-          if (second_length > 0) {
-            DCHECK_LT(first_length, length);
-            DCHECK_LT(second_length, length);
+    if (source->DispatchToSpecificType(base::overloaded{
+            [&](Tagged<SeqOneByteString> str) {
+              CopyChars(sink, str->GetChars(no_gc, access_guard) + start,
+                        length);
+              return true;
+            },
+            [&](Tagged<SeqTwoByteString> str) {
+              CopyChars(sink, str->GetChars(no_gc, access_guard) + start,
+                        length);
+              return true;
+            },
+            [&](Tagged<ExternalOneByteString> str) {
+              CopyChars(sink, str->GetChars() + start, length);
+              return true;
+            },
+            [&](Tagged<ExternalTwoByteString> str) {
+              CopyChars(sink, str->GetChars() + start, length);
+              return true;
+            },
+            [&](Tagged<ConsString> cons_string) {
+              Tagged<String> first = cons_string->first();
+              uint32_t boundary = first->length();
+              // Here we explicitly use signed ints as the values can become
+              // negative. The sum of {first_length} and {second_length} is
+              // always {length}, but the values can become negative, in which
+              // case no characters of the respective string are needed.
+              int32_t first_length = boundary - start;
+              int32_t second_length = length - first_length;
+              DCHECK_EQ(static_cast<uint32_t>(first_length + second_length),
+                        length);
+              if (second_length >= first_length) {
+                DCHECK_GT(second_length, 0);
+                // Right hand side is longer.  Recurse over left.
+                if (first_length > 0) {
+                  DCHECK_LT(first_length, length);
+                  DCHECK_LT(second_length, length);
 
-            uint32_t second_start = first_length;
-            DCHECK_EQ(second_start + second_length, length);
-            Tagged<String> second = cons_string->second();
-            // When repeatedly appending to a string, we get a cons string that
-            // is unbalanced to the left, a list, essentially.  We inline the
-            // common case of sequential one-byte right child.
-            if (second_length == 1) {
-              sink[second_start] =
-                  static_cast<SinkCharT>(second->Get(0, access_guard));
-            } else if (IsSeqOneByteString(second)) {
-              CopyChars(
-                  sink + second_start,
-                  Cast<SeqOneByteString>(second)->GetChars(no_gc, access_guard),
-                  second_length);
-            } else {
-              WriteToFlat(second, sink + second_start, 0, second_length,
-                          access_guard);
-            }
-            length -= second_length;
-          }
-          source = first;
-        }
-        if (length == 0) return;
-        continue;
-      }
-      case kOneByteStringTag | kSlicedStringTag:
-      case kTwoByteStringTag | kSlicedStringTag: {
-        Tagged<SlicedString> slice = Cast<SlicedString>(source);
-        uint32_t offset = slice->offset();
-        source = slice->parent();
-        start += offset;
-        continue;
-      }
-      case kOneByteStringTag | kThinStringTag:
-      case kTwoByteStringTag | kThinStringTag:
-        source = Cast<ThinString>(source)->actual();
-        continue;
+                  WriteToFlat(first, sink, start, first_length, access_guard);
+                  if (start == 0 && cons_string->second() == first) {
+                    DCHECK_LE(boundary * 2, length);
+                    CopyChars(sink + boundary, sink, boundary);
+                    return true;
+                  }
+                  sink += first_length;
+                  start = 0;
+                  length -= first_length;
+                } else {
+                  start -= boundary;
+                }
+                source = cons_string->second();
+              } else {
+                DCHECK_GT(first_length, 0);
+                // Left hand side is longer.  Recurse over right.
+                if (second_length > 0) {
+                  DCHECK_LT(first_length, length);
+                  DCHECK_LT(second_length, length);
+
+                  uint32_t second_start = first_length;
+                  DCHECK_EQ(second_start + second_length, length);
+                  Tagged<String> second = cons_string->second();
+                  // When repeatedly appending to a string, we get a cons string
+                  // that is unbalanced to the left, a list, essentially.  We
+                  // inline the common case of sequential one-byte right child.
+                  if (second_length == 1) {
+                    sink[second_start] =
+                        static_cast<SinkCharT>(second->Get(0, access_guard));
+                  } else if (IsSeqOneByteString(second)) {
+                    CopyChars(sink + second_start,
+                              Cast<SeqOneByteString>(second)->GetChars(
+                                  no_gc, access_guard),
+                              second_length);
+                  } else {
+                    WriteToFlat(second, sink + second_start, 0, second_length,
+                                access_guard);
+                  }
+                  length -= second_length;
+                }
+                source = first;
+              }
+              return length == 0;
+            },
+            [&](Tagged<SlicedString> slice) {
+              uint32_t offset = slice->offset();
+              source = slice->parent();
+              start += offset;
+              return false;
+            },
+            [&](Tagged<ThinString> thin_string) {
+              source = thin_string->actual();
+              return false;
+            }})) {
+      return;
     }
-    UNREACHABLE();
   }
   UNREACHABLE();
 }
@@ -1495,9 +1489,10 @@ int String::IndexOf(Isolate* isolate, DirectHandle<String> receiver,
                                         start_index);
 }
 
-MaybeHandle<String> String::GetSubstitution(Isolate* isolate, Match* match,
-                                            Handle<String> replacement,
-                                            uint32_t start_index) {
+MaybeDirectHandle<String> String::GetSubstitution(Isolate* isolate,
+                                                  Match* match,
+                                                  Handle<String> replacement,
+                                                  uint32_t start_index) {
   Factory* factory = isolate->factory();
 
   const int replacement_length = replacement->length();
@@ -1523,7 +1518,7 @@ MaybeHandle<String> String::GetSubstitution(Isolate* isolate, Match* match,
     const int peek_ix = next_dollar_ix + 1;
     if (peek_ix >= replacement_length) {
       builder.AppendCharacter('$');
-      return indirect_handle(builder.Finish(), isolate);
+      return builder.Finish();
     }
 
     int continue_from_ix = -1;
@@ -1639,7 +1634,7 @@ MaybeHandle<String> String::GetSubstitution(Isolate* isolate, Match* match,
         builder.AppendString(factory->NewSubString(
             replacement, continue_from_ix, replacement_length));
       }
-      return indirect_handle(builder.Finish(), isolate);
+      return builder.Finish();
     }
 
     // Append substring between the previous and the next $ character.

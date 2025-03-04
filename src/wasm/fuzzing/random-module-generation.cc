@@ -30,19 +30,25 @@ namespace {
 constexpr int kMaxArrays = 3;
 constexpr int kMaxStructs = 4;
 constexpr int kMaxStructFields = 4;
-constexpr int kMaxFunctions = 4;
 constexpr int kMaxGlobals = 64;
 constexpr uint32_t kMaxLocals = 32;
 constexpr int kMaxParameters = 15;
 constexpr int kMaxReturns = 15;
 constexpr int kMaxExceptions = 4;
-constexpr int kMaxTableSize = 32;
 constexpr int kMaxTables = 4;
 constexpr int kMaxMemories = 4;
 constexpr int kMaxArraySize = 20;
 constexpr int kMaxPassiveDataSegments = 2;
 constexpr uint32_t kMaxRecursionDepth = 64;
 constexpr int kMaxCatchCases = 6;
+
+int MaxTableSize() {
+  return std::min(static_cast<int>(v8_flags.wasm_max_table_size.value()), 32);
+}
+
+int MaxNumOfFunctions() {
+  return std::min(static_cast<int>(v8_flags.max_wasm_functions.value()), 4);
+}
 
 struct StringImports {
   uint32_t cast;
@@ -1188,15 +1194,19 @@ class BodyGen {
     bool is_valid() const { return type != kWasmVoid; }
   };
 
-  Var GetRandomLocal(DataRange* data) {
-    uint32_t num_params =
-        static_cast<uint32_t>(builder_->signature()->parameter_count());
-    uint32_t num_locals = static_cast<uint32_t>(locals_.size());
-    if (num_params + num_locals == 0) return {};
-    uint32_t index = data->get<uint8_t>() % (num_params + num_locals);
-    ValueType type = index < num_params ? builder_->signature()->GetParam(index)
-                                        : locals_[index - num_params];
-    return {index, type};
+  Var GetRandomLocal(DataRange* data, ValueType type = kWasmTop) {
+    const size_t locals_count = all_locals_count();
+    if (locals_count == 0) return {};
+    uint32_t start_index = data->get<uint8_t>() % locals_count;
+    uint32_t index = start_index;
+    // TODO(14034): Ideally we would check for subtyping here over type
+    // equality, but we don't have a module.
+    while (type != kWasmTop && local_type(index) != type &&
+           local_type(index).AsNullable() != type) {
+      index = (index + 1) % locals_count;
+      if (index == start_index) return {};
+    }
+    return {index, local_type(index)};
   }
 
   constexpr static bool is_convertible_kind(ValueKind kind) {
@@ -1232,6 +1242,42 @@ class BodyGen {
   template <ValueKind wanted_kind>
   void tee_local(DataRange* data) {
     local_op<wanted_kind>(data, kExprLocalTee);
+  }
+
+  // Shifts the assigned values of some locals towards the start_local.
+  // Assuming 4 locals with index 0-3 of the same type and start_local with
+  // index 0, this emits e.g.:
+  //   local.set 0 (local.get 1)
+  //   local.set 1 (local.get 2)
+  //   local.set 2 (local.get 3)
+  // If this is executed in a loop, the value in local 3 will eventually end up
+  // in local 0, but only after multiple iterations of the loop.
+  void shift_locals_to(DataRange* data, Var start_local) {
+    const uint32_t max_shift = data->get<uint8_t>() % 8 + 2;
+    const auto [start_index, type] = start_local;
+    const size_t locals_count = all_locals_count();
+    uint32_t previous_index = start_index;
+    uint32_t index = start_index;
+    for (uint32_t i = 0; i < max_shift; ++i) {
+      do {
+        index = (index + 1) % locals_count;
+      } while (local_type(index) != type);
+      // Never emit more than one shift over all same-typed locals.
+      // (In many cases we might end up with only one local with the same type.)
+      if (index == start_index) break;
+      builder_->EmitGetLocal(index);
+      builder_->EmitSetLocal(previous_index);
+      previous_index = index;
+    }
+  }
+
+  void shift_locals(DataRange* data) {
+    const Var local = GetRandomLocal(data);
+    if (local.type == kWasmVoid ||
+        (local.type.is_non_nullable() && !locals_initialized_)) {
+      return;
+    }
+    shift_locals_to(data, local);
   }
 
   template <size_t num_bytes>
@@ -1348,16 +1394,14 @@ class BodyGen {
   }
 
   bool get_local_ref(HeapType type, DataRange* data, Nullability nullable) {
-    Var local = GetRandomLocal(data);
-    // TODO(14034): Ideally we would check for subtyping here over type
-    // equality, but we don't have a module.
-    if (local.is_valid() && local.type.is_object_reference() &&
-        local.type.heap_type() == type &&
-        (local.type.is_nullable()
-             ? nullable == kNullable  // We check for nullability-subtyping
-             : locals_initialized_    // If the local is not nullable, we cannot
-                                      // use it during locals initialization
-         )) {
+    Var local = GetRandomLocal(data, ValueType::RefMaybeNull(type, nullable));
+    if (local.is_valid() && (local.type.is_nullable() || locals_initialized_)) {
+      // With a small chance don't only get the local but first "shift" local
+      // values around. This creates more interesting patterns for the typed
+      // optimizations.
+      if (data->get<uint8_t>() % 8 == 1) {
+        shift_locals_to(data, local);
+      }
       builder_->EmitWithU32V(kExprLocalGet, local.index);
       return true;
     }
@@ -2220,7 +2264,7 @@ class BodyGen {
                          data);
   }
 
-  // Returns true if it had succesfully generated a randomly chosen expression
+  // Returns true if it had successfully generated a randomly chosen expression
   // from the `alternatives`.
   template <typename Arr>
     requires requires(const Arr& arr) {
@@ -2304,6 +2348,18 @@ class BodyGen {
     return builder_->builder()->NumImportedFunctions();
   }
 
+  // Returns the number of locals including parameters.
+  size_t all_locals_count() const {
+    return builder_->signature()->parameter_count() + locals_.size();
+  }
+
+  // Returns the type of the local with the given index.
+  ValueType local_type(uint32_t index) const {
+    size_t num_params = builder_->signature()->parameter_count();
+    return index < num_params ? builder_->signature()->GetParam(index)
+                              : locals_[index - num_params];
+  }
+
   // Generator functions.
   // Implementation detail: We define non-template Generate*TYPE*() functions
   // instead of templatized Generate<TYPE>(). This is because we cannot define
@@ -2362,6 +2418,8 @@ class BodyGen {
                     &BodyGen::set_global,        //
                     &BodyGen::throw_or_rethrow,  //
                     &BodyGen::try_block<kVoid>,  //
+
+                    &BodyGen::shift_locals,  //
 
                     &BodyGen::table_set,   //
                     &BodyGen::table_fill,  //
@@ -3581,7 +3639,7 @@ class ModuleGen {
       bool has_maximum = random_byte & 2;
       static_assert(kV8MaxWasmMemory64Pages <= kMaxUInt32);
       uint32_t max_supported_pages =
-          mem64 ? kV8MaxWasmMemory64Pages : kV8MaxWasmMemory32Pages;
+          mem64 ? max_mem64_pages() : max_mem32_pages();
       uint32_t min_pages =
           module_range_->get<uint32_t>() % (max_supported_pages + 1);
       if (has_maximum) {
@@ -3876,12 +3934,14 @@ class ModuleGen {
     static_assert(
         kMaxTables <= 8,
         "Too many tables. Use more random bits to choose their address type.");
+    const int max_table_size = MaxTableSize();
     for (int i = 0; i < num_tables; i++) {
       uint32_t min_size = i == 0
                               ? num_functions_
-                              : module_range_->get<uint8_t>() % kMaxTableSize;
+                              : module_range_->get<uint8_t>() % max_table_size;
       uint32_t max_size =
-          module_range_->get<uint8_t>() % (kMaxTableSize - min_size) + min_size;
+          module_range_->get<uint8_t>() % (max_table_size - min_size) +
+          min_size;
       // Table 0 is always funcref. This guarantees that
       // - call_indirect has at least one funcref table to work with,
       // - we have a place to reference all functions in the program, so they
@@ -4230,8 +4290,10 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
   DataRange functions_range = module_range.split();
   std::vector<ModuleTypeIndex> function_signatures;
 
-  static_assert(kMaxFunctions >= 1, "need min. 1 function");
-  uint8_t num_functions = 1 + (module_range.get<uint8_t>() % kMaxFunctions);
+  // At least 1 function is needed.
+  int max_num_functions = MaxNumOfFunctions();
+  CHECK_GE(max_num_functions, 1);
+  uint8_t num_functions = 1 + (module_range.get<uint8_t>() % max_num_functions);
 
   // In case of WasmGC expressions:
   // Add struct and array types first so that we get a chance to generate
@@ -4789,9 +4851,6 @@ base::Vector<uint8_t> GenerateWasmModuleForDeopt(
     DataRange function_range = range.split();
     BodyGen gen_body(options, f, function_signatures, {}, {}, struct_types,
                      array_types, strings, &function_range);
-    const FunctionSig* sig = f->signature();
-    base::Vector<const ValueType> return_types(sig->returns().begin(),
-                                               sig->return_count());
     gen_body.InitializeNonDefaultableLocals(&function_range);
     if (i == 0) {
       // For the inner-most inlinee, emit the deopt point (e.g. a call_ref).
@@ -4818,9 +4877,6 @@ base::Vector<uint8_t> GenerateWasmModuleForDeopt(
     DataRange function_range = range.split();
     BodyGen gen_body(options, f, function_signatures, {}, {}, struct_types,
                      array_types, strings, &function_range);
-    const FunctionSig* sig = f->signature();
-    base::Vector<const ValueType> return_types(sig->returns().begin(),
-                                               sig->return_count());
     gen_body.InitializeNonDefaultableLocals(&function_range);
     // Store the call target
     f->EmitWithU32V(kExprLocalGet, 0);
@@ -4852,10 +4908,10 @@ base::Vector<uint8_t> GenerateWasmModuleForDeopt(
     BodyGen gen_body(options, f, function_signatures, {}, {}, struct_types,
                      array_types, strings, &function_range);
     const FunctionSig* sig = f->signature();
-    base::Vector<const ValueType> return_types(sig->returns().begin(),
-                                               sig->return_count());
+    base::Vector<const ValueType> target_return_types(sig->returns().begin(),
+                                                      sig->return_count());
     gen_body.InitializeNonDefaultableLocals(&function_range);
-    gen_body.Generate(return_types, &function_range);
+    gen_body.Generate(target_return_types, &function_range);
 
     f->Emit(kExprEnd);
     auto buffer = zone->AllocateVector<char>(32);

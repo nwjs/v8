@@ -1055,11 +1055,12 @@ RUNTIME_FUNCTION(Runtime_ForceFlush) {
   }
 
   // Don't flush functions that are active on the stack.
-  for (JavaScriptStackFrameIterator it(isolate); !it.done(); it.Advance()) {
+  for (JavaScriptStackFrameIterator frame_it(isolate); !frame_it.done();
+       frame_it.Advance()) {
     std::vector<Tagged<SharedFunctionInfo>> infos;
-    it.frame()->GetFunctions(&infos);
-    for (auto it = infos.rbegin(); it != infos.rend(); ++it) {
-      if ((*it) == sfi) return CrashUnlessFuzzing(isolate);
+    frame_it.frame()->GetFunctions(&infos);
+    for (auto infos_it = infos.rbegin(); infos_it != infos.rend(); ++infos_it) {
+      if ((*infos_it) == sfi) return CrashUnlessFuzzing(isolate);
     }
   }
 
@@ -1270,7 +1271,7 @@ RUNTIME_FUNCTION(Runtime_TakeHeapSnapshot) {
     filename = std::string(buffer.get());
   }
 
-  HeapProfiler* heap_profiler = isolate->heap_profiler();
+  HeapProfiler* heap_profiler = isolate->heap()->heap_profiler();
   // Since this API is intended for V8 devs, we do not treat globals as roots
   // here on purpose.
   v8::HeapProfiler::HeapSnapshotOptions options;
@@ -1417,6 +1418,7 @@ RUNTIME_FUNCTION(Runtime_PrintWithNameForAssert) {
     return CrashUnlessFuzzing(isolate);
   }
 
+  if (!IsString(args[0])) return CrashUnlessFuzzing(isolate);
   auto name = Cast<String>(args[0]);
 
   PrintF(" * ");
@@ -1828,6 +1830,12 @@ RUNTIME_FUNCTION(Runtime_IsConcatSpreadableProtector) {
       Protectors::IsIsConcatSpreadableLookupChainIntact(isolate));
 }
 
+RUNTIME_FUNCTION(Runtime_TypedArrayLengthProtector) {
+  SealHandleScope shs(isolate);
+  return isolate->heap()->ToBoolean(
+      Protectors::IsTypedArrayLengthLookupChainIntact(isolate));
+}
+
 RUNTIME_FUNCTION(Runtime_TypedArraySpeciesProtector) {
   SealHandleScope shs(isolate);
   return isolate->heap()->ToBoolean(
@@ -1921,11 +1929,6 @@ RUNTIME_FUNCTION(Runtime_HeapObjectVerify) {
   }
 #endif
   return isolate->heap()->ToBoolean(true);
-}
-
-RUNTIME_FUNCTION(Runtime_ArrayBufferMaxByteLength) {
-  HandleScope shs(isolate);
-  return *isolate->factory()->NewNumber(JSArrayBuffer::kMaxByteLength);
 }
 
 RUNTIME_FUNCTION(Runtime_CompleteInobjectSlackTracking) {

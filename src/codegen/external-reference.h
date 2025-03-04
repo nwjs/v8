@@ -52,6 +52,8 @@ enum class IsolateFieldId : uint8_t;
   V(old_space_allocation_top_address, "Heap::OldSpaceAllocationTopAddress")    \
   V(old_space_allocation_limit_address,                                        \
     "Heap::OldSpaceAllocationLimitAddress")                                    \
+  V(array_buffer_max_allocation_address,                                       \
+    "Heap::ArrayBufferMaxAllocationAddress")                                   \
   V(handle_scope_level_address, "HandleScope::level")                          \
   V(handle_scope_next_address, "HandleScope::next")                            \
   V(handle_scope_limit_address, "HandleScope::limit")                          \
@@ -141,6 +143,11 @@ enum class IsolateFieldId : uint8_t;
   V(get_date_field_function, "JSDate::GetField")                               \
   V(get_or_create_hash_raw, "get_or_create_hash_raw")                          \
   V(gsab_byte_length, "GsabByteLength")                                        \
+  V(ieee754_fp64_to_fp16_raw_bits, "ieee754_fp64_to_fp16_raw_bits")            \
+  V(ieee754_fp64_raw_bits_to_fp16_raw_bits_for_32bit_arch,                     \
+    "ieee754_fp64_raw_bits_to_fp16_raw_bits_for_32bit_arch")                   \
+  V(ieee754_fp16_raw_bits_to_fp32_raw_bits,                                    \
+    "ieee754_fp16_raw_bits_to_fp32_raw_bits")                                  \
   V(ieee754_acos_function, "base::ieee754::acos")                              \
   V(ieee754_acosh_function, "base::ieee754::acosh")                            \
   V(ieee754_asin_function, "base::ieee754::asin")                              \
@@ -545,6 +552,10 @@ class ExternalReference {
     // Builtin call that returns floating point.
     // double f(Address tagged_ptr).
     BUILTIN_FP_POINTER_CALL,
+
+    // Builtin call that takes a double and returns an int.
+    // int f(double).
+    BUILTIN_INT_FP_CALL,
 
     // Direct call to API function callback.
     // void f(v8::FunctionCallbackInfo&)

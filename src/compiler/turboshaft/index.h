@@ -5,6 +5,8 @@
 #ifndef V8_COMPILER_TURBOSHAFT_INDEX_H_
 #define V8_COMPILER_TURBOSHAFT_INDEX_H_
 
+#include <stdint.h>
+
 #include <cstddef>
 #include <optional>
 #include <type_traits>
@@ -23,8 +25,8 @@
 
 namespace v8::internal::compiler::turboshaft {
 
-// Operations are stored in possibly muliple sequential storage slots.
-using OperationStorageSlot = std::aligned_storage_t<8, 8>;
+// Operations are stored in possibly multiple sequential storage slots.
+using OperationStorageSlot = uint64_t;
 // Operations occupy at least 2 slots, therefore we assign one id per two slots.
 constexpr size_t kSlotsPerId = 2;
 
@@ -290,8 +292,9 @@ struct v_traits<Compressed> {
   static constexpr bool is_abstract_tag = true;
   using rep_type = RegisterRepresentation;
   static constexpr auto rep = RegisterRepresentation::Compressed();
-  static constexpr bool allows_representation(RegisterRepresentation rep) {
-    return rep == RegisterRepresentation::Compressed();
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return maybe_allowed_rep == RegisterRepresentation::Compressed();
   }
 
   template <typename U>
@@ -305,8 +308,9 @@ struct v_traits<Word32> {
   using rep_type = WordRepresentation;
   static constexpr auto rep = WordRepresentation::Word32();
   using constexpr_type = uint32_t;
-  static constexpr bool allows_representation(RegisterRepresentation rep) {
-    return rep == RegisterRepresentation::Word32();
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return maybe_allowed_rep == RegisterRepresentation::Word32();
   }
 
   template <typename U>
@@ -320,8 +324,9 @@ struct v_traits<Word64> {
   using rep_type = WordRepresentation;
   static constexpr auto rep = WordRepresentation::Word64();
   using constexpr_type = uint64_t;
-  static constexpr bool allows_representation(RegisterRepresentation rep) {
-    return rep == RegisterRepresentation::Word64();
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return maybe_allowed_rep == RegisterRepresentation::Word64();
   }
 
   template <typename U>
@@ -335,8 +340,9 @@ struct v_traits<Float32> {
   using rep_type = FloatRepresentation;
   static constexpr auto rep = FloatRepresentation::Float32();
   using constexpr_type = float;
-  static constexpr bool allows_representation(RegisterRepresentation rep) {
-    return rep == RegisterRepresentation::Float32();
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return maybe_allowed_rep == RegisterRepresentation::Float32();
   }
 
   template <typename U>
@@ -350,8 +356,9 @@ struct v_traits<Float64> {
   using rep_type = FloatRepresentation;
   static constexpr auto rep = FloatRepresentation::Float64();
   using constexpr_type = double;
-  static constexpr bool allows_representation(RegisterRepresentation rep) {
-    return rep == RegisterRepresentation::Float64();
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return maybe_allowed_rep == RegisterRepresentation::Float64();
   }
 
   template <typename U>
@@ -365,8 +372,9 @@ struct v_traits<Simd128> {
   using rep_type = RegisterRepresentation;
   static constexpr auto rep = RegisterRepresentation::Simd128();
   using constexpr_type = uint8_t[kSimd128Size];
-  static constexpr bool allows_representation(RegisterRepresentation rep) {
-    return rep == RegisterRepresentation::Simd128();
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return maybe_allowed_rep == RegisterRepresentation::Simd128();
   }
 
   template <typename U>
@@ -380,8 +388,9 @@ struct v_traits<Simd256> {
   using rep_type = RegisterRepresentation;
   static constexpr auto rep = RegisterRepresentation::Simd256();
   using constexpr_type = uint8_t[kSimd256Size];
-  static constexpr bool allows_representation(RegisterRepresentation rep) {
-    return rep == RegisterRepresentation::Simd256();
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return maybe_allowed_rep == RegisterRepresentation::Simd256();
   }
 
   template <typename U>
@@ -394,8 +403,9 @@ struct v_traits<T, std::enable_if_t<is_taggable_v<T> && !is_union_v<T>>> {
   static constexpr bool is_abstract_tag = false;
   using rep_type = RegisterRepresentation;
   static constexpr auto rep = RegisterRepresentation::Tagged();
-  static constexpr bool allows_representation(RegisterRepresentation rep) {
-    return rep == RegisterRepresentation::Tagged();
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return maybe_allowed_rep == RegisterRepresentation::Tagged();
   }
 
   template <typename U>
@@ -419,8 +429,9 @@ struct v_traits<Union<T, Ts...>> {
                  ...));
   using rep_type = typename v_traits<T>::rep_type;
   static constexpr auto rep = v_traits<T>::rep;
-  static constexpr bool allows_representation(RegisterRepresentation r) {
-    return r == rep;
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return maybe_allowed_rep == rep;
   }
 
   template <typename U>
@@ -473,8 +484,9 @@ struct v_traits<UntaggedUnion<Ts...>> {
       typename detail::RepresentationForUnion<UntaggedUnion<Ts...>>::rep_type;
   static constexpr auto rep =
       detail::RepresentationForUnion<UntaggedUnion<Ts...>>::rep;
-  static constexpr bool allows_representation(RegisterRepresentation r) {
-    return (v_traits<Ts>::allows_representation(r) || ...);
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return (v_traits<Ts>::allows_representation(maybe_allowed_rep) || ...);
   }
 
   template <typename U>
@@ -522,6 +534,7 @@ struct v_traits<Tuple<Ts...>> {
 
 using Word = UntaggedUnion<Word32, Word64>;
 using Float = UntaggedUnion<Float32, Float64>;
+using Float64OrWord32 = UntaggedUnion<Float64, Word32>;
 using Untagged = UntaggedUnion<Word, Float>;
 using BooleanOrNullOrUndefined = UnionOf<Boolean, Null, Undefined>;
 using NumberOrString = UnionOf<Number, String>;
@@ -533,6 +546,7 @@ using NonBigIntPrimitive = UnionOf<Symbol, PlainPrimitive>;
 using Primitive = UnionOf<BigInt, NonBigIntPrimitive>;
 using CallTarget = UntaggedUnion<WordPtr, Code, JSFunction, Word32>;
 using AnyOrNone = UntaggedUnion<Any, None>;
+using Word32Pair = Tuple<Word32, Word32>;
 
 template <typename T>
 concept IsUntagged =
@@ -620,8 +634,9 @@ class V : public OpIndex {
   }
   static V<T> Cast(OpIndex index) { return V<T>(index); }
 
-  static constexpr bool allows_representation(RegisterRepresentation rep) {
-    return v_traits<T>::allows_representation(rep);
+  static constexpr bool allows_representation(
+      RegisterRepresentation maybe_allowed_rep) {
+    return v_traits<T>::allows_representation(maybe_allowed_rep);
   }
 
 #if !defined(TURBOSHAFT_ALLOW_IMPLICIT_OPINDEX_INITIALIZATION_FOR_V)

@@ -351,6 +351,12 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_ENABLE_FP_PARAMS_IN_C_LINKAGE 1
 #endif
 
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+#define V8_EXPERIMENTAL_UNDEFINED_DOUBLE_BOOL true
+#else
+#define V8_EXPERIMENTAL_UNDEFINED_DOUBLE_BOOL false
+#endif
+
 // Superclass for classes only using static method functions.
 // The subclass of AllStatic cannot be instantiated at all.
 class AllStatic {
@@ -593,7 +599,7 @@ static_assert(kPointerSize == (1 << kPointerSizeLog2));
 #endif
 
 #ifdef V8_COMPRESS_POINTERS_8GB
-// To support 8GB heaps, all alocations are aligned to at least 8 bytes.
+// To support 8GB heaps, all allocations are aligned to at least 8 bytes.
 #define V8_COMPRESS_POINTERS_8GB_BOOL true
 #else
 #define V8_COMPRESS_POINTERS_8GB_BOOL false
@@ -978,6 +984,7 @@ constexpr uint64_t kClearedFreeMemoryValue = 0;
 constexpr uint64_t kZapValue = uint64_t{0xdeadbeedbeadbeef};
 constexpr uint64_t kHandleZapValue = uint64_t{0x1baddead0baddeaf};
 constexpr uint64_t kGlobalHandleZapValue = uint64_t{0x1baffed00baffedf};
+constexpr uint64_t kPersistentHandleZapValue = uint64_t{0x1baffed66baffedf};
 constexpr uint64_t kTracedHandleEagerResetZapValue =
     uint64_t{0x1beffedaabaffedf};
 constexpr uint64_t kTracedHandleMinorGCResetZapValue =
@@ -995,6 +1002,7 @@ constexpr uint32_t kClearedFreeMemoryValue = 0;
 constexpr uint32_t kZapValue = 0xdeadbeef;
 constexpr uint32_t kHandleZapValue = 0xbaddeaf;
 constexpr uint32_t kGlobalHandleZapValue = 0xbaffedf;
+constexpr uint32_t kPersistentHandleZapValue = 0xbaff6df;
 constexpr uint32_t kTracedHandleEagerResetZapValue = 0xbeffedf;
 constexpr uint32_t kTracedHandleMinorGCResetZapValue = 0xbeffadf;
 constexpr uint32_t kTracedHandleMinorGCWeakResetZapValue = 0xbe11adf;
@@ -1441,6 +1449,7 @@ enum class GarbageCollectionReason : int {
   kBackgroundAllocationFailure = 25,
   kFinalizeConcurrentMinorMS = 26,
   kCppHeapAllocationFailure = 27,
+  kFrozen = 28,
 
   NUM_REASONS,
 };
@@ -1507,6 +1516,8 @@ constexpr const char* ToString(GarbageCollectionReason reason) {
       return "finalize concurrent MinorMS";
     case GarbageCollectionReason::kCppHeapAllocationFailure:
       return "CppHeap allocation failure";
+    case GarbageCollectionReason::kFrozen:
+      return "frozen";
     case GarbageCollectionReason::NUM_REASONS:
       UNREACHABLE();
   }
@@ -1797,7 +1808,7 @@ constexpr int kIeeeDoubleExponentWordOffset = 0;
 // as a generated code segment.
 #define CODE_POINTER_PADDING(value) (CODE_POINTER_ALIGN(value) - (value))
 
-// DOUBLE_POINTER_ALIGN returns the value algined for double pointers.
+// DOUBLE_POINTER_ALIGN returns the value aligned for double pointers.
 #define DOUBLE_POINTER_ALIGN(value) \
   (((value) + ::i::kDoubleAlignmentMask) & ~::i::kDoubleAlignmentMask)
 
@@ -1805,7 +1816,7 @@ constexpr int kIeeeDoubleExponentWordOffset = 0;
 enum class BranchHint : uint8_t { kNone, kTrue, kFalse };
 
 // Like BranchHint but for GotoIf/GotoIfNot.
-enum GotoHint : uint8_t {
+enum class GotoHint : uint8_t {
   kNone,
   kLabel,        // Jump to the given label.
   kFallthrough,  // Don't jump, fall through.
@@ -1925,13 +1936,40 @@ enum class AllocationSiteUpdateMode { kUpdate, kCheckOnly };
      (!defined(USE_SIMULATOR) || !defined(_MIPS_TARGET_SIMULATOR)))
 constexpr uint32_t kHoleNanUpper32 = 0xFFFF7FFF;
 constexpr uint32_t kHoleNanLower32 = 0xFFFF7FFF;
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+constexpr uint32_t kUndefinedNanUpper32 = 0xFFFE7FFF;
+constexpr uint32_t kUndefinedNanLower32 = 0xFFFE7FFF;
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
 #else
 constexpr uint32_t kHoleNanUpper32 = 0xFFF7FFFF;
 constexpr uint32_t kHoleNanLower32 = 0xFFF7FFFF;
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+constexpr uint32_t kUndefinedNanUpper32 = 0xFFFFFFFF;
+constexpr uint32_t kUndefinedNanLower32 = 0xFFFFFFFF;
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
 #endif
 
 constexpr uint64_t kHoleNanInt64 =
     (static_cast<uint64_t>(kHoleNanUpper32) << 32) | kHoleNanLower32;
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+constexpr uint64_t kUndefinedNanInt64 =
+    (static_cast<uint64_t>(kUndefinedNanUpper32) << 32) | kUndefinedNanLower32;
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+// TODO(nicohartmann): Use proper constants.
+inline bool IsUndefinedNan(double d) {
+  uint64_t b;
+  std::memcpy(&b, &d, sizeof(double));
+  return b == kUndefinedNanInt64;
+}
+inline double UndefinedNan() {
+  uint64_t b = kUndefinedNanInt64;
+  double d;
+  std::memcpy(&d, &b, sizeof(double));
+  return d;
+}
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
 
 // ES6 section 20.1.2.6 Number.MAX_SAFE_INTEGER
 constexpr uint64_t kMaxSafeIntegerUint64 = 9007199254740991;  // 2^53-1
@@ -2816,7 +2854,9 @@ class WasmCodePointer {
   uint32_t value_ = -1;
 };
 
-enum CallJumpMode { kCall, kTailCall };
+constexpr uint64_t kInvalidWasmSignatureHash = ~uint64_t{0};
+
+enum class CallJumpMode { kCall, kTailCall };
 
 }  // namespace internal
 

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --allow-natives-syntax --turboshaft-from-maglev --turbofan
-// Flags: --no-always-turbofan
+// Flags: --allow-natives-syntax --turbolev --turbofan
+// Flags: --no-always-turbofan --const-tracking-let
 
 let glob_a = 0;
 let glob_b = 3.35;

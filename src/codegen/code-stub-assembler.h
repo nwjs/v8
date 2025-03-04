@@ -22,6 +22,7 @@
 #include "src/objects/cell.h"
 #include "src/objects/dictionary.h"
 #include "src/objects/feedback-vector.h"
+#include "src/objects/fixed-array.h"
 #include "src/objects/foreign.h"
 #include "src/objects/heap-number.h"
 #include "src/objects/hole.h"
@@ -88,6 +89,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   using AllocationFlags = base::Flags<AllocationFlag>;
 
+  TNode<UintPtrT> ArrayBufferMaxByteLength();
+
   TNode<IntPtrT> ParameterToIntPtr(TNode<Smi> value) { return SmiUntag(value); }
   TNode<IntPtrT> ParameterToIntPtr(TNode<IntPtrT> value) { return value; }
   TNode<IntPtrT> ParameterToIntPtr(TNode<UintPtrT> value) {
@@ -140,7 +143,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<IntPtrT> TaggedIndexToIntPtr(TNode<TaggedIndex> value);
   TNode<TaggedIndex> IntPtrToTaggedIndex(TNode<IntPtrT> value);
-  // TODO(v8:10047): Get rid of these convertions eventually.
+  // TODO(v8:10047): Get rid of these conversions eventually.
   TNode<Smi> TaggedIndexToSmi(TNode<TaggedIndex> value);
   TNode<TaggedIndex> SmiToTaggedIndex(TNode<Smi> value);
 
@@ -909,18 +912,18 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // ExternalPointerT-related functionality.
   //
 
-  TNode<RawPtrT> ExternalPointerTableAddress(ExternalPointerTag tag);
+  TNode<RawPtrT> ExternalPointerTableAddress(ExternalPointerTagRange tag_range);
 
   // Load an external pointer value from an object.
-  TNode<RawPtrT> LoadExternalPointerFromObject(TNode<HeapObject> object,
-                                               int offset,
-                                               ExternalPointerTag tag) {
-    return LoadExternalPointerFromObject(object, IntPtrConstant(offset), tag);
+  TNode<RawPtrT> LoadExternalPointerFromObject(
+      TNode<HeapObject> object, int offset, ExternalPointerTagRange tag_range) {
+    return LoadExternalPointerFromObject(object, IntPtrConstant(offset),
+                                         tag_range);
   }
 
-  TNode<RawPtrT> LoadExternalPointerFromObject(TNode<HeapObject> object,
-                                               TNode<IntPtrT> offset,
-                                               ExternalPointerTag tag);
+  TNode<RawPtrT> LoadExternalPointerFromObject(
+      TNode<HeapObject> object, TNode<IntPtrT> offset,
+      ExternalPointerTagRange tag_range);
 
   // Store external object pointer to object.
   void StoreExternalPointerToObject(TNode<HeapObject> object, int offset,
@@ -1060,11 +1063,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
         Word32Or(HasInstanceType(implicit_arg, WASM_TRUSTED_INSTANCE_DATA_TYPE),
                  HasInstanceType(implicit_arg, WASM_IMPORT_DATA_TYPE)));
     return CAST(implicit_arg);
-  }
-
-  TNode<RawPtrT> LoadWasmTypeInfoNativeTypePtr(TNode<WasmTypeInfo> object) {
-    return LoadExternalPointerFromObject(
-        object, WasmTypeInfo::kNativeTypeOffset, kWasmTypeInfoNativeTypeTag);
   }
 
   TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFuncRef(
@@ -1553,6 +1551,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<FixedDoubleArray> object, TNode<IntPtrT> index,
       Label* if_hole = nullptr,
       MachineType machine_type = MachineType::Float64());
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  TNode<Float64T> LoadFixedDoubleArrayElementWithUndefinedCheck(
+      TNode<FixedDoubleArray> object, TNode<IntPtrT> index, Label* if_undefined,
+      Label* if_hole, MachineType machine_type = MachineType::Float64());
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
 
   // Load an array element from a FixedArray, FixedDoubleArray or a
   // NumberDictionary (depending on the |elements_kind|) and return
@@ -1576,12 +1579,21 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                           Label* if_hole = nullptr);
 
   TNode<BoolT> IsDoubleHole(TNode<Object> base, TNode<IntPtrT> offset);
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  TNode<BoolT> IsDoubleUndefined(TNode<Object> base, TNode<IntPtrT> offset);
+  TNode<BoolT> IsDoubleUndefined(TNode<Float64T> value);
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
   // Load Float64 value by |base| + |offset| address. If the value is a double
   // hole then jump to |if_hole|. If |machine_type| is None then only the hole
   // check is generated.
   TNode<Float64T> LoadDoubleWithHoleCheck(
       TNode<Object> base, TNode<IntPtrT> offset, Label* if_hole,
       MachineType machine_type = MachineType::Float64());
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  TNode<Float64T> LoadDoubleWithUndefinedAndHoleCheck(
+      TNode<Object> base, TNode<IntPtrT> offset, Label* if_undefined,
+      Label* if_hole, MachineType machine_type = MachineType::Float64());
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
   TNode<Numeric> LoadFixedTypedArrayElementAsTagged(TNode<RawPtrT> data_pointer,
                                                     TNode<UintPtrT> index,
                                                     ElementsKind elements_kind);
@@ -1892,8 +1904,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<Float64T> value, CheckBounds check_bounds = CheckBounds::kAlways);
 
   void StoreDoubleHole(TNode<HeapObject> object, TNode<IntPtrT> offset);
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  void StoreDoubleUndefined(TNode<HeapObject> object, TNode<IntPtrT> offset);
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
   void StoreFixedDoubleArrayHole(TNode<FixedDoubleArray> array,
                                  TNode<IntPtrT> index);
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  void StoreFixedDoubleArrayUndefined(TNode<FixedDoubleArray> array,
+                                      TNode<IntPtrT> index);
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
   void StoreFeedbackVectorSlot(
       TNode<FeedbackVector> feedback_vector, TNode<UintPtrT> slot,
       TNode<AnyTaggedT> value,
@@ -2457,7 +2476,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // * |source_map| is the map of |source|. It will be used as the map of the
   // target array if the target can stay a FixedDoubleArray. Otherwise if the
   // target array needs to be a FixedArray, the FixedArrayMap will be used.
-  // * |var_holes_converted| is used to signal whether a FixedAray
+  // * |var_holes_converted| is used to signal whether a FixedArray
   // is produced or not.
   // * |allocation_flags| and |extract_flags| influence how the target array is
   // allocated.
@@ -2539,6 +2558,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<IntPtrT> TryTaggedToInt32AsIntPtr(TNode<Object> value,
                                           Label* if_not_possible);
   TNode<Float64T> TryTaggedToFloat64(TNode<Object> value,
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+                                     Label* if_valueisundefined,
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
                                      Label* if_valueisnotnumber);
   TNode<Float64T> TruncateTaggedToFloat64(TNode<Context> context,
                                           TNode<Object> value);
@@ -4712,9 +4734,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void StoreElement(TNode<FixedArrayBase> elements, ElementsKind kind,
                     TNode<TIndex> index, TNode<Float64T> value);
 
-  // Converts {input} to a number if {input} is a plain primitve (i.e. String or
-  // Oddball) and stores the result in {var_result}. Otherwise, it bails out to
-  // {if_bailout}.
+  // Converts {input} to a number if {input} is a plain primitive (i.e. String
+  // or Oddball) and stores the result in {var_result}. Otherwise, it bails out
+  // to {if_bailout}.
   void TryPlainPrimitiveNonNumberToNumber(TNode<HeapObject> input,
                                           TVariable<Number>* var_result,
                                           Label* if_bailout);

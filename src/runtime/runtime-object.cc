@@ -22,7 +22,7 @@
 namespace v8 {
 namespace internal {
 
-MaybeHandle<Object> Runtime::GetObjectProperty(
+MaybeDirectHandle<Object> Runtime::GetObjectProperty(
     Isolate* isolate, DirectHandle<JSAny> lookup_start_object,
     DirectHandle<Object> key, DirectHandle<JSAny> receiver, bool* is_found) {
   if (receiver.is_null()) {
@@ -30,16 +30,16 @@ MaybeHandle<Object> Runtime::GetObjectProperty(
   }
   if (IsNullOrUndefined(*lookup_start_object, isolate)) {
     ErrorUtils::ThrowLoadFromNullOrUndefined(isolate, lookup_start_object, key);
-    return MaybeHandle<Object>();
+    return MaybeDirectHandle<Object>();
   }
 
   bool success = false;
   PropertyKey lookup_key(isolate, key, &success);
-  if (!success) return MaybeHandle<Object>();
+  if (!success) return MaybeDirectHandle<Object>();
   LookupIterator it =
       LookupIterator(isolate, receiver, lookup_key, lookup_start_object);
 
-  MaybeHandle<Object> result = Object::GetProperty(&it);
+  MaybeDirectHandle<Object> result = Object::GetProperty(&it);
   if (result.is_null()) {
     return result;
   }
@@ -51,9 +51,9 @@ MaybeHandle<Object> Runtime::GetObjectProperty(
   return result;
 }
 
-MaybeHandle<Object> Runtime::HasProperty(Isolate* isolate,
-                                         DirectHandle<Object> object,
-                                         DirectHandle<Object> key) {
+MaybeDirectHandle<Object> Runtime::HasProperty(Isolate* isolate,
+                                               DirectHandle<Object> object,
+                                               DirectHandle<Object> key) {
   // Check that {object} is actually a receiver.
   if (!IsJSReceiver(*object)) {
     THROW_NEW_ERROR(
@@ -68,7 +68,7 @@ MaybeHandle<Object> Runtime::HasProperty(Isolate* isolate,
 
   // Lookup the {name} on {receiver}.
   Maybe<bool> maybe = JSReceiver::HasProperty(isolate, receiver, name);
-  if (maybe.IsNothing()) return MaybeHandle<Object>();
+  if (maybe.IsNothing()) return MaybeDirectHandle<Object>();
   return isolate->factory()->ToBoolean(maybe.FromJust());
 }
 
@@ -342,7 +342,7 @@ RUNTIME_FUNCTION(Runtime_ObjectCreate) {
   HandleScope scope(isolate);
   DirectHandle<Object> maybe_prototype = args.at(0);
   DirectHandle<Object> properties = args.at(1);
-  Handle<JSObject> obj;
+  DirectHandle<JSObject> obj;
   // 1. If Type(O) is neither Object nor Null, throw a TypeError exception.
   DirectHandle<JSPrototype> prototype;
   if (!TryCast(maybe_prototype, &prototype)) {
@@ -1005,7 +1005,7 @@ RUNTIME_FUNCTION(Runtime_DefineKeyedOwnPropertyInLiteral) {
       if (IsUniqueName(*name)) {
         nexus.ConfigureMonomorphic(Cast<Name>(name),
                                    direct_handle(object->map(), isolate),
-                                   MaybeObjectHandle());
+                                   MaybeObjectDirectHandle());
       } else {
         nexus.ConfigureMegamorphic(IcCheckType::kProperty);
       }
@@ -1471,9 +1471,8 @@ Maybe<bool> FindPrivateMembersFromReceiver(Isolate* isolate,
 }
 }  // namespace
 
-MaybeHandle<Object> Runtime::GetPrivateMember(Isolate* isolate,
-                                              DirectHandle<JSReceiver> receiver,
-                                              Handle<String> desc) {
+MaybeDirectHandle<Object> Runtime::GetPrivateMember(
+    Isolate* isolate, DirectHandle<JSReceiver> receiver, Handle<String> desc) {
   PrivateMember result;
   MAYBE_RETURN_NULL(FindPrivateMembersFromReceiver(
       isolate, receiver, desc, MessageTemplate::kInvalidPrivateMemberRead,
@@ -1501,10 +1500,9 @@ MaybeHandle<Object> Runtime::GetPrivateMember(Isolate* isolate,
   }
 }
 
-MaybeHandle<Object> Runtime::SetPrivateMember(Isolate* isolate,
-                                              DirectHandle<JSReceiver> receiver,
-                                              Handle<String> desc,
-                                              DirectHandle<Object> value) {
+MaybeDirectHandle<Object> Runtime::SetPrivateMember(
+    Isolate* isolate, DirectHandle<JSReceiver> receiver, Handle<String> desc,
+    DirectHandle<Object> value) {
   PrivateMember result;
   MAYBE_RETURN_NULL(FindPrivateMembersFromReceiver(
       isolate, receiver, desc, MessageTemplate::kInvalidPrivateMemberRead,
@@ -1599,7 +1597,7 @@ RUNTIME_FUNCTION(Runtime_CreatePrivateAccessors) {
   return *pair;
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableAllocate) {
   HandleScope scope(isolate);
@@ -1609,7 +1607,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableAllocate) {
                                                      AllocationType::kYoung);
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableAdd) {
   HandleScope scope(isolate);
@@ -1623,7 +1621,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableAdd) {
   return *SwissNameDictionary::Add(isolate, table, key, value, details);
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableFindEntry) {
   HandleScope scope(isolate);
@@ -1636,7 +1634,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableFindEntry) {
                           : SwissNameDictionary::kNotFoundSentinel);
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableUpdate) {
   HandleScope scope(isolate);
@@ -1652,7 +1650,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableUpdate) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableDelete) {
   HandleScope scope(isolate);
@@ -1662,7 +1660,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableDelete) {
   return *SwissNameDictionary::DeleteEntry(isolate, table, index);
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableEquals) {
   HandleScope scope(isolate);
@@ -1672,7 +1670,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableEquals) {
   return Smi::FromInt(table->EqualsForTesting(other));
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableElementsCount) {
   HandleScope scope(isolate);
@@ -1681,7 +1679,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableElementsCount) {
   return Smi::FromInt(table->NumberOfElements());
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableKeyAt) {
   HandleScope scope(isolate);
@@ -1691,7 +1689,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableKeyAt) {
   return table->KeyAt(index);
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableValueAt) {
   HandleScope scope(isolate);
@@ -1701,7 +1699,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableValueAt) {
   return table->ValueAt(index);
 }
 
-// TODO(v8:11330) This is only here while the CSA/Torque implementaton of
+// TODO(v8:11330) This is only here while the CSA/Torque implementation of
 // SwissNameDictionary is work in progress.
 RUNTIME_FUNCTION(Runtime_SwissTableDetailsAt) {
   HandleScope scope(isolate);

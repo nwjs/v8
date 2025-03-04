@@ -7,6 +7,7 @@
 #include <bit>
 #include <optional>
 
+#include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/diagnostics/code-tracer.h"
@@ -211,7 +212,7 @@ FeedbackSlotKind FeedbackVector::GetKind(FeedbackSlot slot,
 }
 
 // static
-Handle<ClosureFeedbackCellArray> ClosureFeedbackCellArray::New(
+DirectHandle<ClosureFeedbackCellArray> ClosureFeedbackCellArray::New(
     Isolate* isolate, DirectHandle<SharedFunctionInfo> shared,
     AllocationType allocation) {
   int length = shared->feedback_metadata()->create_closure_slot_count();
@@ -559,8 +560,7 @@ void NexusConfig::SetFeedbackPair(Tagged<FeedbackVector> vector,
                                   WriteBarrierMode mode_extra) const {
   CHECK(can_write());
   CHECK_GT(vector->length(), start_slot.WithOffset(1).ToInt());
-  base::SharedMutexGuard<base::kExclusive> shared_mutex_guard(
-      isolate()->feedback_vector_access());
+  base::SpinningMutexGuard mutex_guard(isolate()->feedback_vector_access());
   vector->Set(start_slot, feedback, mode);
   vector->Set(start_slot.WithOffset(1), feedback_extra, mode_extra);
 }
@@ -568,8 +568,8 @@ void NexusConfig::SetFeedbackPair(Tagged<FeedbackVector> vector,
 std::pair<Tagged<MaybeObject>, Tagged<MaybeObject>>
 NexusConfig::GetFeedbackPair(Tagged<FeedbackVector> vector,
                              FeedbackSlot slot) const {
-  base::SharedMutexGuardIf<base::kShared> scope(
-      isolate()->feedback_vector_access(), mode() == BackgroundThread);
+  base::SpinningMutexGuardIf guard(isolate()->feedback_vector_access(),
+                                   mode() == BackgroundThread);
   Tagged<MaybeObject> feedback = vector->Get(slot);
   Tagged<MaybeObject> feedback_extra = vector->Get(slot.WithOffset(1));
   return std::make_pair(feedback, feedback_extra);
@@ -598,9 +598,9 @@ FeedbackNexus::FeedbackNexus(Handle<FeedbackVector> vector, FeedbackSlot slot,
       kind_(vector->GetKind(slot, kAcquireLoad)),
       config_(config) {}
 
-Handle<WeakFixedArray> FeedbackNexus::CreateArrayOfSize(int length) {
+DirectHandle<WeakFixedArray> FeedbackNexus::CreateArrayOfSize(int length) {
   DCHECK(config()->can_write());
-  Handle<WeakFixedArray> array =
+  DirectHandle<WeakFixedArray> array =
       config()->isolate()->factory()->NewWeakFixedArray(length);
   return array;
 }
@@ -712,7 +712,7 @@ bool FeedbackNexus::ConfigureMegamorphic() {
   return false;
 }
 
-void FeedbackNexus::ConfigureMegaDOM(const MaybeObjectHandle& handler) {
+void FeedbackNexus::ConfigureMegaDOM(const MaybeObjectDirectHandle& handler) {
   DisallowGarbageCollection no_gc;
   Tagged<MaybeObject> sentinel = MegaDOMSentinel();
 
@@ -961,7 +961,8 @@ bool FeedbackNexus::ConfigureLexicalVarMode(int script_context_index,
   return true;
 }
 
-void FeedbackNexus::ConfigureHandlerMode(const MaybeObjectHandle& handler) {
+void FeedbackNexus::ConfigureHandlerMode(
+    const MaybeObjectDirectHandle& handler) {
   DCHECK(IsGlobalICKind(kind()));
   DCHECK(IC::IsHandler(*handler));
   SetFeedback(ClearedValue(config()->isolate()), UPDATE_WRITE_BARRIER, *handler,
@@ -1107,9 +1108,9 @@ float FeedbackNexus::ComputeCallFrequency() {
   return static_cast<float>(call_count / invocation_count);
 }
 
-void FeedbackNexus::ConfigureMonomorphic(DirectHandle<Name> name,
-                                         DirectHandle<Map> receiver_map,
-                                         const MaybeObjectHandle& handler) {
+void FeedbackNexus::ConfigureMonomorphic(
+    DirectHandle<Name> name, DirectHandle<Map> receiver_map,
+    const MaybeObjectDirectHandle& handler) {
   DCHECK(handler.is_null() || IC::IsHandler(*handler));
   if (kind() == FeedbackSlotKind::kDefineKeyedOwnPropertyInLiteral) {
     SetFeedback(MakeWeak(*receiver_map), UPDATE_WRITE_BARRIER, *name);
@@ -1134,7 +1135,7 @@ void FeedbackNexus::ConfigurePolymorphic(
   for (int current = 0; current < receiver_count; ++current) {
     DirectHandle<Map> map = maps_and_handlers[current].first;
     array->set(current * 2, MakeWeak(*map));
-    MaybeObjectHandle handler = maps_and_handlers[current].second;
+    MaybeObjectDirectHandle handler = maps_and_handlers[current].second;
     DCHECK(IC::IsHandler(*handler));
     array->set(current * 2 + 1, *handler);
   }
@@ -1195,7 +1196,7 @@ int FeedbackNexus::ExtractMapsAndHandlers(MapsAndHandlers* maps_and_handlers,
   return found;
 }
 
-MaybeObjectHandle FeedbackNexus::FindHandlerForMap(
+MaybeObjectDirectHandle FeedbackNexus::FindHandlerForMap(
     DirectHandle<Map> map) const {
   DCHECK(!IsStoreInArrayLiteralICKind(kind()));
 
@@ -1204,7 +1205,7 @@ MaybeObjectHandle FeedbackNexus::FindHandlerForMap(
       return config()->NewHandle(it.handler());
     }
   }
-  return MaybeObjectHandle();
+  return MaybeObjectDirectHandle();
 }
 
 Tagged<Name> FeedbackNexus::GetName() const {
@@ -1391,14 +1392,14 @@ ForInHint FeedbackNexus::GetForInFeedback() const {
   return ForInHintFromFeedback(static_cast<ForInFeedback>(feedback));
 }
 
-MaybeHandle<JSObject> FeedbackNexus::GetConstructorFeedback() const {
+MaybeDirectHandle<JSObject> FeedbackNexus::GetConstructorFeedback() const {
   DCHECK_EQ(kind(), FeedbackSlotKind::kInstanceOf);
   Tagged<MaybeObject> feedback = GetFeedback();
   Tagged<HeapObject> heap_object;
   if (feedback.GetHeapObjectIfWeak(&heap_object)) {
     return config()->NewHandle(Cast<JSObject>(heap_object));
   }
-  return MaybeHandle<JSObject>();
+  return MaybeDirectHandle<JSObject>();
 }
 
 FeedbackIterator::FeedbackIterator(const FeedbackNexus* nexus)

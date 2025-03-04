@@ -739,7 +739,12 @@ Representation Object::OptimalRepresentation(Tagged<Object> obj,
 ElementsKind Object::OptimalElementsKind(Tagged<Object> obj,
                                          PtrComprCageBase cage_base) {
   if (IsSmi(obj)) return PACKED_SMI_ELEMENTS;
-  if (IsNumber(obj, cage_base)) return PACKED_DOUBLE_ELEMENTS;
+  if (IsHeapNumber(obj, cage_base)) return PACKED_DOUBLE_ELEMENTS;
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  if (IsUndefined(obj, GetReadOnlyRoots())) {
+    return HOLEY_DOUBLE_ELEMENTS;
+  }
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
   return PACKED_ELEMENTS;
 }
 
@@ -903,10 +908,11 @@ MaybeHandle<Object> Object::GetElement(Isolate* isolate,
   return GetProperty(&it);
 }
 
-MaybeHandle<Object> Object::SetElement(Isolate* isolate,
-                                       DirectHandle<JSAny> object,
-                                       uint32_t index, Handle<Object> value,
-                                       ShouldThrow should_throw) {
+MaybeDirectHandle<Object> Object::SetElement(Isolate* isolate,
+                                             DirectHandle<JSAny> object,
+                                             uint32_t index,
+                                             DirectHandle<Object> value,
+                                             ShouldThrow should_throw) {
   LookupIterator it(isolate, object, index);
   MAYBE_RETURN_NULL(
       SetProperty(&it, value, StoreOrigin::kMaybeKeyed, Just(should_throw)));
@@ -949,10 +955,10 @@ void HeapObject::InitExternalPointerField(size_t offset,
                                              tag, mode);
 }
 
-template <ExternalPointerTag tag>
+template <ExternalPointerTagRange tag_range>
 Address HeapObject::ReadExternalPointerField(size_t offset,
                                              IsolateForSandbox isolate) const {
-  return i::ReadExternalPointerField<tag>(field_address(offset), isolate);
+  return i::ReadExternalPointerField<tag_range>(field_address(offset), isolate);
 }
 
 template <CppHeapPointerTag lower_bound, CppHeapPointerTag upper_bound>
@@ -996,7 +1002,7 @@ void HeapObject::WriteLazilyInitializedExternalPointerField(
   ExternalPointerHandle handle = base::AsAtomic32::Relaxed_Load(location);
   if (handle == kNullExternalPointerHandle) {
     // Field has not been initialized yet.
-    ExternalPointerHandle handle = table.AllocateAndInitializeEntry(
+    handle = table.AllocateAndInitializeEntry(
         isolate.GetExternalPointerTableSpaceFor(tag, address()), value, tag);
     base::AsAtomic32::Release_Store(location, handle);
     // In this case, we're adding a reference from an existing object to a new
@@ -1169,8 +1175,8 @@ InstructionStreamSlot HeapObject::RawInstructionStreamField(
 }
 
 ExternalPointerSlot HeapObject::RawExternalPointerField(
-    int byte_offset, ExternalPointerTag tag) const {
-  return ExternalPointerSlot(field_address(byte_offset), tag);
+    int byte_offset, ExternalPointerTagRange tag_range) const {
+  return ExternalPointerSlot(field_address(byte_offset), tag_range);
 }
 
 CppHeapPointerSlot HeapObject::RawCppHeapPointerField(int byte_offset) const {
@@ -1722,17 +1728,17 @@ MaybeHandle<Object> Object::GetPropertyOrElement(Isolate* isolate,
   return GetProperty(&it);
 }
 
-MaybeHandle<Object> Object::SetPropertyOrElement(
+MaybeDirectHandle<Object> Object::SetPropertyOrElement(
     Isolate* isolate, DirectHandle<JSAny> object, DirectHandle<Name> name,
     DirectHandle<Object> value, Maybe<ShouldThrow> should_throw,
     StoreOrigin store_origin) {
   PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key);
   MAYBE_RETURN_NULL(SetProperty(&it, value, store_origin, should_throw));
-  return indirect_handle(value, isolate);
+  return value;
 }
 
-MaybeHandle<Object> Object::GetPropertyOrElement(
+MaybeDirectHandle<Object> Object::GetPropertyOrElement(
     DirectHandle<JSAny> receiver, DirectHandle<Name> name,
     DirectHandle<JSReceiver> holder) {
   Isolate* isolate = holder->GetIsolate();
@@ -1872,7 +1878,8 @@ bool Object::CanBeHeldWeakly(Tagged<Object> obj) {
   return IsSymbol(obj) && !Cast<Symbol>(obj)->is_in_public_symbol_table();
 }
 
-DirectHandle<Object> ObjectHashTableShape::AsHandle(DirectHandle<Object> key) {
+DirectHandle<Object> ObjectHashTableShapeBase::AsHandle(
+    DirectHandle<Object> key) {
   return key;
 }
 
@@ -1893,8 +1900,8 @@ static inline uint32_t ObjectAddressForHashing(Address object) {
   return MemoryChunk::AddressToOffset(object);
 }
 
-static inline Handle<Object> MakeEntryPair(Isolate* isolate, size_t index,
-                                           DirectHandle<Object> value) {
+static inline DirectHandle<Object> MakeEntryPair(Isolate* isolate, size_t index,
+                                                 DirectHandle<Object> value) {
   DirectHandle<Object> key = isolate->factory()->SizeToString(index);
   DirectHandle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
   {
@@ -1905,9 +1912,9 @@ static inline Handle<Object> MakeEntryPair(Isolate* isolate, size_t index,
                                                     PACKED_ELEMENTS, 2);
 }
 
-static inline Handle<Object> MakeEntryPair(Isolate* isolate,
-                                           DirectHandle<Object> key,
-                                           DirectHandle<Object> value) {
+static inline DirectHandle<Object> MakeEntryPair(Isolate* isolate,
+                                                 DirectHandle<Object> key,
+                                                 DirectHandle<Object> value) {
   DirectHandle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
   {
     entry_storage->set(0, *key, SKIP_WRITE_BARRIER);

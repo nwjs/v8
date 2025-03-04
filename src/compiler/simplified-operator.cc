@@ -842,6 +842,8 @@ bool operator==(AssertNotNullParameters const& lhs,
   V(NumberToInt32, Operator::kNoProperties, 1, 0)                 \
   V(NumberToString, Operator::kNoProperties, 1, 0)                \
   V(NumberToUint32, Operator::kNoProperties, 1, 0)                \
+  V(NumberToFloat16RawBits, Operator::kNoProperties, 1, 0)        \
+  V(Float16RawBitsToNumber, Operator::kNoProperties, 1, 0)        \
   V(NumberToUint8Clamped, Operator::kNoProperties, 1, 0)          \
   V(Integral32OrMinusZeroToBigInt, Operator::kNoProperties, 1, 0) \
   V(NumberSilenceNaN, Operator::kNoProperties, 1, 0)              \
@@ -2021,6 +2023,16 @@ const Operator* SimplifiedOperatorBuilder::RestLength(
       "RestLength",                    // name
       0, 0, 0, 1, 0, 0,                // counts
       formal_parameter_count);         // parameter
+}
+
+const Operator* SimplifiedOperatorBuilder::TypedArrayLength(
+    ElementsKind elements_kind) {
+  return zone()->New<Operator1<ElementsKind>>(                       // --
+      IrOpcode::kTypedArrayLength,                                   // opcode
+      Operator::kNoWrite | Operator::kNoThrow | Operator::kNoDeopt,  // flags
+      "TypedArrayLength",                                            // name
+      1, 0, 0, 1, 0, 0,                                              // counts
+      elements_kind);  // parameter
 }
 
 int FormalParameterCountOf(const Operator* op) {

@@ -67,8 +67,8 @@ class Deoptimizer : public Malloced {
 
   static const char* MessageFor(DeoptimizeKind kind);
 
-  Handle<JSFunction> function() const;
-  Handle<Code> compiled_code() const;
+  DirectHandle<JSFunction> function() const;
+  DirectHandle<Code> compiled_code() const;
   DeoptimizeKind deopt_kind() const { return deopt_kind_; }
   int output_count() const { return output_count_; }
 
@@ -176,7 +176,7 @@ class Deoptimizer : public Malloced {
 
   // Patch the generated code to jump to a safepoint entry. This is used only
   // when Shadow Stack is enabled.
-  static void PatchJumpToTrampoline(Address pc, Address new_pc);
+  static void PatchToJump(Address pc, Address new_pc);
 
  private:
   void QueueValueForMaterialization(Address output_address, Tagged<Object> obj,
@@ -305,7 +305,7 @@ class Deoptimizer : public Malloced {
 
 #if V8_ENABLE_WEBASSEMBLY && V8_TARGET_ARCH_32_BIT
   // Needed by webassembly for lowering signatures containing i64 types. Stored
-  // as members for re-use for multiple signatures during one de-optimization.
+  // as members for reuse for multiple signatures during one de-optimization.
   std::optional<AccountingAllocator> alloc_;
   std::optional<Zone> zone_;
 #endif

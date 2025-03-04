@@ -11,6 +11,7 @@
 
 #include "src/api/api-inl.h"
 #include "src/base/enum-set.h"
+#include "src/base/fpu.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/platform/semaphore.h"
 #include "src/base/platform/time.h"
@@ -111,8 +112,10 @@ class CompilationUnitQueues {
     bool ShouldPublish(int num_processed_units) const;
   };
 
-  explicit CompilationUnitQueues(int num_declared_functions)
-      : num_declared_functions_(num_declared_functions) {
+  explicit CompilationUnitQueues(int num_imported_functions,
+                                 int num_declared_functions)
+      : num_imported_functions_(num_imported_functions),
+        num_declared_functions_(num_declared_functions) {
     // Add one first queue, to add units to.
     queues_.emplace_back(std::make_unique<QueueImpl>(0));
 
@@ -137,14 +140,14 @@ class CompilationUnitQueues {
   Queue* GetQueueForTask(int task_id) {
     int required_queues = task_id + 1;
     {
-      base::SharedMutexGuard<base::kShared> queues_guard{&queues_mutex_};
+      base::SpinningMutexGuard queues_guard{&queues_mutex_};
       if (V8_LIKELY(static_cast<int>(queues_.size()) >= required_queues)) {
         return queues_[task_id].get();
       }
     }
 
     // Otherwise increase the number of queues.
-    base::SharedMutexGuard<base::kExclusive> queues_guard{&queues_mutex_};
+    base::SpinningMutexGuard queues_guard{&queues_mutex_};
     int num_queues = static_cast<int>(queues_.size());
     while (num_queues < required_queues) {
       int steal_from = num_queues + 1;
@@ -194,7 +197,7 @@ class CompilationUnitQueues {
     QueueImpl* queue;
     {
       int queue_to_add = next_queue_to_add.load(std::memory_order_relaxed);
-      base::SharedMutexGuard<base::kShared> queues_guard{&queues_mutex_};
+      base::SpinningMutexGuard queues_guard{&queues_mutex_};
       while (!next_queue_to_add.compare_exchange_weak(
           queue_to_add, next_task_id(queue_to_add, queues_.size()),
           std::memory_order_relaxed)) {
@@ -229,7 +232,7 @@ class CompilationUnitQueues {
   }
 
   void AddTopTierPriorityUnit(WasmCompilationUnit unit, size_t priority) {
-    base::SharedMutexGuard<base::kShared> queues_guard{&queues_mutex_};
+    base::SpinningMutexGuard queues_guard{&queues_mutex_};
     // Add to the individual queues in a round-robin fashion. No special care is
     // taken to balance them; they will be balanced by work stealing.
     // Priorities should only be seen as a hint here; without balancing, we
@@ -265,13 +268,8 @@ class CompilationUnitQueues {
   }
 
   void AllowAnotherTopTierJob(uint32_t func_index) {
-    top_tier_compiled_[func_index].store(false, std::memory_order_relaxed);
-  }
-
-  void AllowAnotherTopTierJobForAllFunctions() {
-    for (int i = 0; i < num_declared_functions_; i++) {
-      AllowAnotherTopTierJob(i);
-    }
+    top_tier_compiled_[declared_function_index(func_index)].store(
+        false, std::memory_order_relaxed);
   }
 
   size_t EstimateCurrentMemoryConsumption() const;
@@ -375,7 +373,7 @@ class CompilationUnitQueues {
     // Try to steal from all other queues. If this succeeds, return one of the
     // stolen units.
     {
-      base::SharedMutexGuard<base::kShared> guard{&queues_mutex_};
+      base::SpinningMutexGuard guard{&queues_mutex_};
       for (size_t steal_trials = 0; steal_trials < queues_.size();
            ++steal_trials, ++steal_task_id) {
         if (steal_task_id >= static_cast<int>(queues_.size())) {
@@ -420,8 +418,8 @@ class CompilationUnitQueues {
         queue->top_tier_priority_units.pop();
         num_priority_units_.fetch_sub(1, std::memory_order_relaxed);
 
-        if (!top_tier_compiled_[unit.func_index()].exchange(
-                true, std::memory_order_relaxed)) {
+        if (!top_tier_compiled_[declared_function_index(unit.func_index())]
+                 .exchange(true, std::memory_order_relaxed)) {
           return unit;
         }
         num_units_[CompilationTier::kTopTier].fetch_sub(
@@ -433,7 +431,7 @@ class CompilationUnitQueues {
     // Try to steal from all other queues. If this succeeds, return one of the
     // stolen units.
     {
-      base::SharedMutexGuard<base::kShared> guard{&queues_mutex_};
+      base::SpinningMutexGuard guard{&queues_mutex_};
       for (size_t steal_trials = 0; steal_trials < queues_.size();
            ++steal_trials, ++steal_task_id) {
         if (steal_task_id >= static_cast<int>(queues_.size())) {
@@ -494,8 +492,8 @@ class CompilationUnitQueues {
         steal_queue->top_tier_priority_units.pop();
         num_priority_units_.fetch_sub(1, std::memory_order_relaxed);
 
-        if (!top_tier_compiled_[unit.func_index()].exchange(
-                true, std::memory_order_relaxed)) {
+        if (!top_tier_compiled_[declared_function_index(unit.func_index())]
+                 .exchange(true, std::memory_order_relaxed)) {
           returned_unit = unit;
           break;
         }
@@ -508,10 +506,17 @@ class CompilationUnitQueues {
     return returned_unit;
   }
 
+  int declared_function_index(int func_index) const {
+    DCHECK_LE(num_imported_functions_, func_index);
+    DCHECK_LT(func_index, num_imported_functions_ + num_declared_functions_);
+    return func_index - num_imported_functions_;
+  }
+
   // {queues_mutex_} protectes {queues_};
-  mutable base::SharedMutex queues_mutex_;
+  mutable base::SpinningMutex queues_mutex_;
   std::vector<std::unique_ptr<QueueImpl>> queues_;
 
+  const int num_imported_functions_;
   const int num_declared_functions_;
 
   BigUnitsQueue big_units_queue_;
@@ -523,14 +528,14 @@ class CompilationUnitQueues {
 };
 
 size_t CompilationUnitQueues::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(CompilationUnitQueues, 200);
-  UPDATE_WHEN_CLASS_CHANGES(QueueImpl, 96);
-  UPDATE_WHEN_CLASS_CHANGES(BigUnitsQueue, 72);
+  UPDATE_WHEN_CLASS_CHANGES(CompilationUnitQueues, 160);
+  UPDATE_WHEN_CLASS_CHANGES(QueueImpl, 104);
+  UPDATE_WHEN_CLASS_CHANGES(BigUnitsQueue, 80);
   // Not including sizeof(CompilationUnitQueues) because that's included in
   // sizeof(CompilationStateImpl).
   size_t result = 0;
   {
-    base::SharedMutexGuard<base::kShared> lock(&queues_mutex_);
+    base::SpinningMutexGuard mutex_guard(&queues_mutex_);
     result += ContentSize(queues_) + queues_.size() * sizeof(QueueImpl);
     for (const auto& q : queues_) {
       base::SpinningMutexGuard guard(&q->mutex);
@@ -639,8 +644,7 @@ class CompilationStateImpl {
 
   void OnCompilationStopped(WasmDetectedFeatures detected);
   void SchedulePublishCompilationResults(
-      std::vector<std::unique_ptr<WasmCode>> unpublished_code,
-      CompilationTier tier);
+      std::vector<UnpublishedWasmCode> unpublished_code, CompilationTier tier);
 
   WasmDetectedFeatures detected_features() const {
     return detected_features_.load(std::memory_order_relaxed);
@@ -661,10 +665,28 @@ class CompilationStateImpl {
 
   void AllowAnotherTopTierJob(uint32_t func_index) {
     compilation_unit_queues_.AllowAnotherTopTierJob(func_index);
+    // Reset the stored priority; otherwise triggers might be ignored if the
+    // priority is not bumped to the next power of two.
+    TypeFeedbackStorage* feedback = &native_module_->module()->type_feedback;
+    base::SpinningMutexGuard mutex_guard(&feedback->mutex);
+    feedback->feedback_for_function[func_index].tierup_priority = 0;
   }
 
   void AllowAnotherTopTierJobForAllFunctions() {
-    compilation_unit_queues_.AllowAnotherTopTierJobForAllFunctions();
+    const WasmModule* module = native_module_->module();
+    uint32_t fn_start = module->num_imported_functions;
+    uint32_t fn_end = fn_start + module->num_declared_functions;
+    base::SpinningMutexGuard mutex_guard(&module->type_feedback.mutex);
+    std::unordered_map<uint32_t, FunctionTypeFeedback>& feedback_map =
+        module->type_feedback.feedback_for_function;
+    for (uint32_t i = fn_start; i < fn_end; i++) {
+      compilation_unit_queues_.AllowAnotherTopTierJob(i);
+      // Reset the stored priority; otherwise triggers might be ignored if the
+      // priority is not bumped to the next power of two.
+      if (auto it = feedback_map.find(i); it != feedback_map.end()) {
+        it->second.tierup_priority = 0;
+      }
+    }
   }
 
   bool failed() const {
@@ -705,8 +727,7 @@ class CompilationStateImpl {
   // been compiled to the top tier in the meantime.
   void TriggerCachingAfterTimeout();
 
-  std::vector<WasmCode*> PublishCode(
-      base::Vector<std::unique_ptr<WasmCode>> codes);
+  std::vector<WasmCode*> PublishCode(base::Vector<UnpublishedWasmCode> codes);
 
  private:
   void AddCompilationUnitInternal(CompilationUnitBuilder* builder,
@@ -722,7 +743,7 @@ class CompilationStateImpl {
   void TriggerCallbacks(base::EnumSet<CompilationEvent>);
 
   void PublishCompilationResults(
-      std::vector<std::unique_ptr<WasmCode>> unpublished_code);
+      std::vector<UnpublishedWasmCode> unpublished_code);
 
   NativeModule* const native_module_;
   std::weak_ptr<NativeModule> const native_module_weak_;
@@ -802,7 +823,7 @@ class CompilationStateImpl {
   struct PublishState {
     // {mutex_} protects {publish_queue_} and {publisher_running_}.
     base::SpinningMutex mutex_;
-    std::vector<std::unique_ptr<WasmCode>> publish_queue_;
+    std::vector<UnpublishedWasmCode> publish_queue_;
     bool publisher_running_ = false;
   };
   PublishState publish_state_[CompilationTier::kNumTiers];
@@ -826,7 +847,7 @@ CompilationStateImpl* BackgroundCompileScope::compilation_state() const {
 }
 
 size_t CompilationStateImpl::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(CompilationStateImpl, 456);
+  UPDATE_WHEN_CLASS_CHANGES(CompilationStateImpl, 424);
   size_t result = sizeof(CompilationStateImpl);
 
   {
@@ -936,7 +957,7 @@ size_t CompilationState::EstimateCurrentMemoryConsumption() const {
 }
 
 std::vector<WasmCode*> CompilationState::PublishCode(
-    base::Vector<std::unique_ptr<WasmCode>> unpublished_code) {
+    base::Vector<UnpublishedWasmCode> unpublished_code) {
   return Impl(this)->PublishCode(unpublished_code);
 }
 
@@ -1306,9 +1327,8 @@ class TransitiveTypeFeedbackProcessor {
 
   void ProcessFunction(int func_index);
 
-  void EnqueueCallees(const std::vector<CallSiteFeedback>& feedback) {
-    for (size_t i = 0; i < feedback.size(); i++) {
-      const CallSiteFeedback& csf = feedback[i];
+  void EnqueueCallees(base::Vector<CallSiteFeedback> feedback) {
+    for (const CallSiteFeedback& csf : feedback) {
       for (int j = 0; j < csf.num_cases(); j++) {
         int func = csf.function_index(j);
         // Don't spend time on calls that have never been executed.
@@ -1334,7 +1354,7 @@ class TransitiveTypeFeedbackProcessor {
   const WasmModule* const module_;
   // TODO(jkummerow): Check if it makes a difference to apply any updates
   // as a single batch at the end.
-  base::SharedMutexGuard<base::kExclusive> mutex_guard;
+  base::SpinningMutexGuard mutex_guard;
   std::unordered_map<uint32_t, FunctionTypeFeedback>& feedback_for_function_;
   std::set<int> queue_;
 };
@@ -1350,11 +1370,11 @@ class FeedbackMaker {
                 int func_index, int num_calls)
       : isolate_(isolate),
         instance_data_(trusted_instance_data),
+        result_(
+            base::OwnedVector<CallSiteFeedback>::NewForOverwrite(num_calls)),
         num_imported_functions_(static_cast<int>(
             trusted_instance_data->module()->num_imported_functions)),
-        func_index_(func_index) {
-    result_.reserve(num_calls);
-  }
+        func_index_(func_index) {}
 
   void AddCallRefCandidate(Tagged<WasmFuncRef> funcref, int count) {
     Tagged<WasmInternalFunction> internal_function =
@@ -1435,25 +1455,31 @@ class FeedbackMaker {
     return std::find(targets_cache_.begin(), end, target) != end;
   }
 
+  void AddResult(CallSiteFeedback feedback) {
+    DCHECK_LT(seen_calls_, result_.size());
+    result_[seen_calls_] = feedback;
+    ++seen_calls_;
+  }
+
   void FinalizeCall() {
     if (is_megamorphic_) {
       if (v8_flags.trace_wasm_inlining) {
-        PrintF("[function %d: call #%zu: megamorphic]\n", func_index_,
-               result_.size());
+        PrintF("[function %d: call #%d: megamorphic]\n", func_index_,
+               seen_calls_);
       }
-      result_.push_back(CallSiteFeedback::CreateMegamorphic());
+      AddResult(CallSiteFeedback::CreateMegamorphic());
     } else if (cache_usage_ == 0) {
-      result_.emplace_back();
+      AddResult(CallSiteFeedback{});
     } else if (cache_usage_ == 1) {
       if (v8_flags.trace_wasm_inlining) {
-        PrintF("[function %d: call #%zu inlineable (monomorphic)]\n",
-               func_index_, result_.size());
+        PrintF("[function %d: call #%d inlineable (monomorphic)]\n",
+               func_index_, seen_calls_);
       }
-      result_.emplace_back(targets_cache_[0], counts_cache_[0]);
+      AddResult(CallSiteFeedback{targets_cache_[0], counts_cache_[0]});
     } else {
       if (v8_flags.trace_wasm_inlining) {
-        PrintF("[function %d: call #%zu inlineable (polymorphic %d)]\n",
-               func_index_, result_.size(), cache_usage_);
+        PrintF("[function %d: call #%d inlineable (polymorphic %d)]\n",
+               func_index_, seen_calls_, cache_usage_);
       }
       DCHECK_LE(cache_usage_, kMaxPolymorphism);
       CallSiteFeedback::PolymorphicCase* polymorphic =
@@ -1462,9 +1488,10 @@ class FeedbackMaker {
         polymorphic[i].function_index = targets_cache_[i];
         polymorphic[i].absolute_call_frequency = counts_cache_[i];
       }
-      result_.emplace_back(polymorphic, cache_usage_);
+      AddResult(CallSiteFeedback{polymorphic, cache_usage_});
     }
-    result_.back().set_has_non_inlineable_targets(has_non_inlineable_targets_);
+    result_[seen_calls_ - 1].set_has_non_inlineable_targets(
+        has_non_inlineable_targets_);
     // TODO(mliedtke): Have a better representation that merges these properties
     // into one object.
     has_non_inlineable_targets_ = false;
@@ -1477,12 +1504,15 @@ class FeedbackMaker {
 
   // {GetResult} can only be called on a r-value reference to make it more
   // obvious at call sites that {this} should not be used after this operation.
-  std::vector<CallSiteFeedback>&& GetResult() && { return std::move(result_); }
+  base::OwnedVector<CallSiteFeedback> GetResult() && {
+    return std::move(result_);
+  }
 
  private:
   Isolate* const isolate_;
   const Tagged<WasmTrustedInstanceData> instance_data_;
-  std::vector<CallSiteFeedback> result_;
+  base::OwnedVector<CallSiteFeedback> result_;
+  int seen_calls_ = 0;
   const int num_imported_functions_;
   const int func_index_;
   int cache_usage_{0};
@@ -1595,7 +1625,7 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
       // feedback to prevent deopt loops where two different instantiations
       // (which have their own on-heap feedback vector) to "flip-flop" between
       // their inlining decisions potentially causing deopt loops.
-      const std::vector<CallSiteFeedback>& existing =
+      const base::OwnedVector<CallSiteFeedback>& existing =
           feedback_for_function_[func_index].feedback_vector;
       size_t feedback_index = i / 2;
       if (feedback_index < existing.size()) {
@@ -1606,12 +1636,12 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
         if (old_feedback.is_megamorphic()) {
           fm.set_megamorphic();
         }
-        for (int i = 0; i < old_feedback.num_cases(); ++i) {
-          int old_target_function_index = old_feedback.function_index(i);
+        for (int j = 0; j < old_feedback.num_cases(); ++j) {
+          int old_target_function_index = old_feedback.function_index(j);
           // If the new feedback already contains the target, we do not touch
           // the call count.
           if (!fm.HasTargetCached(old_target_function_index)) {
-            fm.AddCall(old_target_function_index, old_feedback.call_count(i));
+            fm.AddCall(old_target_function_index, old_feedback.call_count(j));
             // There shouldn't be any imported functions in there as they can't
             // be inlined. If this DCHECK is invalidated,
             // has_non_inlineable_targets_ would need to be updated here to
@@ -1625,8 +1655,10 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
 
     fm.FinalizeCall();
   }
-  std::vector<CallSiteFeedback> result = std::move(fm).GetResult();
-  EnqueueCallees(result);
+  base::OwnedVector<CallSiteFeedback> result = std::move(fm).GetResult();
+  EnqueueCallees(result.as_vector());
+  DCHECK_EQ(result.size(),
+            feedback_for_function_[func_index].call_targets.size());
   feedback_for_function_[func_index].feedback_vector = std::move(result);
 }
 
@@ -1642,8 +1674,7 @@ void TriggerTierUp(Isolate* isolate,
   const WasmModule* module = native_module->module();
   int priority;
   {
-    base::SharedMutexGuard<base::kExclusive> mutex_guard(
-        &module->type_feedback.mutex);
+    base::SpinningMutexGuard mutex_guard(&module->type_feedback.mutex);
     int array_index = wasm::declared_function_index(module, func_index);
     trusted_instance_data->tiering_budget_array()[array_index].store(
         v8_flags.wasm_tiering_budget, std::memory_order_relaxed);
@@ -2030,6 +2061,7 @@ CompilationExecutionResult ExecuteCompilationUnits(
   // These fields are initialized in a {BackgroundCompileScope} before
   // starting compilation.
   std::optional<CompilationEnv> env;
+  std::optional<base::FlushDenormalsScope> disable_denormals;
   std::shared_ptr<WireBytesStorage> wire_bytes;
   std::shared_ptr<const WasmModule> module;
   // Task 0 is any main thread (there might be multiple from multiple isolates),
@@ -2048,6 +2080,11 @@ CompilationExecutionResult ExecuteCompilationUnits(
     BackgroundCompileScope compile_scope(native_module);
     if (compile_scope.cancelled()) return kYield;
     env.emplace(CompilationEnv::ForModule(compile_scope.native_module()));
+    // We only really need this for optimized compilation, but for simplicity
+    // set it just once for everything.
+    disable_denormals.emplace(
+        compile_scope.native_module()->compile_imports().contains(
+            CompileTimeImport::kDisableDenormalFloats));
     wire_bytes = compile_scope.compilation_state()->GetWireBytesStorage();
     module = compile_scope.native_module()->shared_module();
     queue = compile_scope.compilation_state()->GetQueueForCompileTask(task_id);
@@ -2096,7 +2133,7 @@ CompilationExecutionResult ExecuteCompilationUnits(
       if (yield ||
           !(unit = compile_scope.compilation_state()->GetNextCompilationUnit(
                 queue, tier))) {
-        std::vector<std::unique_ptr<WasmCode>> unpublished_code =
+        std::vector<UnpublishedWasmCode> unpublished_code =
             compile_scope.native_module()->AddCompiledCode(
                 base::VectorOf(results_to_publish));
         results_to_publish.clear();
@@ -2117,7 +2154,7 @@ CompilationExecutionResult ExecuteCompilationUnits(
       bool liftoff_finished = unit->tier() != current_tier &&
                               unit->tier() == ExecutionTier::kTurbofan;
       if (batch_full || liftoff_finished) {
-        std::vector<std::unique_ptr<WasmCode>> unpublished_code =
+        std::vector<UnpublishedWasmCode> unpublished_code =
             compile_scope.native_module()->AddCompiledCode(
                 base::VectorOf(results_to_publish));
         results_to_publish.clear();
@@ -3554,7 +3591,8 @@ CompilationStateImpl::CompilationStateImpl(
     : native_module_(native_module.get()),
       native_module_weak_(std::move(native_module)),
       async_counters_(std::move(async_counters)),
-      compilation_unit_queues_(native_module->num_functions()),
+      compilation_unit_queues_(native_module->num_imported_functions(),
+                               native_module->num_declared_functions()),
       dynamic_tiering_(dynamic_tiering),
       detected_features_(detected_features) {}
 
@@ -4042,7 +4080,7 @@ void CompilationStateImpl::OnFinishedUnits(
       // Allow another top tier compilation if deopts are enabled and the
       // currently installed code object is a liftoff object.
       // Ideally, this would be done only if the code->tier() ==
-      // ExeuctionTier::Liftoff as the code object for which we run this
+      // ExecutionTier::Liftoff as the code object for which we run this
       // function should be the same as the one installed on the native_module.
       // This is unfortunately not the case as installing a code object on the
       // native module and updating the compilation_progress_ and the
@@ -4241,12 +4279,12 @@ WasmDetectedFeatures CompilationStateImpl::UpdateDetectedFeatures(
 }
 
 void CompilationStateImpl::PublishCompilationResults(
-    std::vector<std::unique_ptr<WasmCode>> unpublished_code) {
+    std::vector<UnpublishedWasmCode> unpublished_code) {
   if (unpublished_code.empty()) return;
 
 #if DEBUG
   // We don't compile import wrappers eagerly.
-  for (const auto& code : unpublished_code) {
+  for (const auto& [code, assumptions] : unpublished_code) {
     int func_index = code->index();
     DCHECK_LE(native_module_->num_imported_functions(), func_index);
     DCHECK_LT(func_index, native_module_->num_functions());
@@ -4256,7 +4294,7 @@ void CompilationStateImpl::PublishCompilationResults(
 }
 
 std::vector<WasmCode*> CompilationStateImpl::PublishCode(
-    base::Vector<std::unique_ptr<WasmCode>> code) {
+    base::Vector<UnpublishedWasmCode> code) {
   WasmCodeRefScope code_ref_scope;
   std::vector<WasmCode*> published_code =
       native_module_->PublishCode(std::move(code));
@@ -4270,8 +4308,7 @@ std::vector<WasmCode*> CompilationStateImpl::PublishCode(
 }
 
 void CompilationStateImpl::SchedulePublishCompilationResults(
-    std::vector<std::unique_ptr<WasmCode>> unpublished_code,
-    CompilationTier tier) {
+    std::vector<UnpublishedWasmCode> unpublished_code, CompilationTier tier) {
   PublishState& state = publish_state_[tier];
   {
     base::SpinningMutexGuard guard(&state.mutex_);

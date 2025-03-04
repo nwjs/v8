@@ -355,7 +355,20 @@ void MaglevAssembler::MaterialiseValueNode(Register dst, ValueNode* value) {
       bind(&done);
       break;
     }
-    case ValueRepresentation::kIntPtr:
+    case ValueRepresentation::kIntPtr: {
+      Label done;
+      TemporaryRegisterScope temps(this);
+      Register scratch = temps.AcquireScratch();
+      Move(scratch, src);
+      SmiTagIntPtrAndJumpIfSuccess(dst, scratch, &done, Label::kNear);
+      // If smi tagging fails, instead of bailing out (deopting), we change
+      // representation to a HeapNumber.
+      IntPtrToDouble(builtin_input_value, scratch);
+      CallBuiltin<Builtin::kNewHeapNumber>(builtin_input_value);
+      Move(dst, kReturnRegister0);
+      bind(&done);
+      break;
+    }
     case ValueRepresentation::kTagged:
       UNREACHABLE();
   }
@@ -413,7 +426,7 @@ void MaglevAssembler::TestTypeOf(
     case LiteralFlag::kUndefined: {
       MaglevAssembler::TemporaryRegisterScope temps(this);
       Register map = temps.AcquireScratch();
-      // Make sure `object` isn't a valid temp here, since we re-use it.
+      // Make sure `object` isn't a valid temp here, since we reuse it.
       DCHECK(!temps.Available().has(object));
       JumpIfSmi(object, is_false, false_distance);
       // Check it has the undetectable bit set and it is not null.

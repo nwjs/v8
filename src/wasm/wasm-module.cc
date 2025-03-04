@@ -216,6 +216,18 @@ WasmModule::WasmModule(ModuleOrigin origin)
     : signature_zone(GetWasmEngine()->allocator(), "signature zone"),
       origin(origin) {}
 
+uint64_t WasmModule::signature_hash(const TypeCanonicalizer* type_canonicalizer,
+                                    uint32_t function_index) const {
+  if (function_index >= functions.size()) {
+    return kInvalidWasmSignatureHash;
+  }
+
+  CanonicalTypeIndex canonical_type_id =
+      canonical_sig_id(functions[function_index].sig_index);
+  return type_canonicalizer->LookupFunctionSignature(canonical_type_id)
+      ->signature_hash();
+}
+
 bool IsWasmCodegenAllowed(Isolate* isolate,
                           DirectHandle<NativeContext> context) {
   // TODO(wasm): Once wasm has its own CSP policy, we should introduce a
@@ -241,7 +253,7 @@ namespace {
 
 // Converts the given {type} into a string representation that can be used in
 // reflective functions. Should be kept in sync with the {GetValueType} helper.
-Handle<String> ToValueTypeString(Isolate* isolate, ValueType type) {
+DirectHandle<String> ToValueTypeString(Isolate* isolate, ValueType type) {
   return isolate->factory()->InternalizeUtf8String(base::VectorOf(type.name()));
 }
 }  // namespace
@@ -671,9 +683,9 @@ int GetSourcePosition(const WasmModule* module, uint32_t func_index,
 size_t WasmModule::EstimateStoredSize() const {
   UPDATE_WHEN_CLASS_CHANGES(WasmModule,
 #if V8_ENABLE_DRUMBRAKE
-                            904
+                            816
 #else   // V8_ENABLE_DRUMBRAKE
-                            792
+                            752
 #endif  // V8_ENABLE_DRUMBRAKE
   );
   return sizeof(WasmModule) +                            // --
@@ -729,10 +741,10 @@ size_t IndirectNameMap::EstimateCurrentMemoryConsumption() const {
 }
 
 size_t TypeFeedbackStorage::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(TypeFeedbackStorage, 152);
-  UPDATE_WHEN_CLASS_CHANGES(FunctionTypeFeedback, 48);
+  UPDATE_WHEN_CLASS_CHANGES(TypeFeedbackStorage, 104);
+  UPDATE_WHEN_CLASS_CHANGES(FunctionTypeFeedback, 40);
   // Not including sizeof(TFS) because that's contained in sizeof(WasmModule).
-  base::SharedMutexGuard<base::kShared> lock(&mutex);
+  base::SpinningMutexGuard guard(&mutex);
   size_t result = ContentSize(feedback_for_function);
   for (const auto& [func_idx, feedback] : feedback_for_function) {
     result += ContentSize(feedback.feedback_vector);
@@ -750,9 +762,9 @@ size_t TypeFeedbackStorage::EstimateCurrentMemoryConsumption() const {
 size_t WasmModule::EstimateCurrentMemoryConsumption() const {
   UPDATE_WHEN_CLASS_CHANGES(WasmModule,
 #if V8_ENABLE_DRUMBRAKE
-                            904
+                            816
 #else   // V8_ENABLE_DRUMBRAKE
-                            792
+                            752
 #endif  // V8_ENABLE_DRUMBRAKE
   );
   size_t result = EstimateStoredSize();
@@ -801,8 +813,7 @@ size_t GetWireBytesHash(base::Vector<const uint8_t> wire_bytes) {
 }
 
 int NumFeedbackSlots(const WasmModule* module, int func_index) {
-  base::SharedMutexGuard<base::kShared> type_feedback_guard{
-      &module->type_feedback.mutex};
+  base::SpinningMutexGuard mutex_guard{&module->type_feedback.mutex};
   auto it = module->type_feedback.feedback_for_function.find(func_index);
   if (it == module->type_feedback.feedback_for_function.end()) return 0;
   // The number of call instructions is capped by max function size.

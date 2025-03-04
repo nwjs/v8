@@ -186,7 +186,7 @@ class SerializationDataQueue {
 
 class Worker : public std::enable_shared_from_this<Worker> {
  public:
-  static constexpr i::ExternalPointerTag kManagedTag = i::kGenericManagedTag;
+  static constexpr i::ExternalPointerTag kManagedTag = i::kD8WorkerTag;
 
   explicit Worker(Isolate* parent_isolate, const char* script);
   ~Worker();
@@ -512,6 +512,7 @@ class ShellOptions {
   DisallowReassignment<bool> wasm_trap_handler = {"wasm-trap-handler", true};
 #endif  // V8_ENABLE_WEBASSEMBLY
   DisallowReassignment<bool> expose_fast_api = {"expose-fast-api", false};
+  DisallowReassignment<bool> flush_denormals = {"flush-denormals", false};
   DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                         1 * i::MB};
 };
@@ -604,6 +605,8 @@ class Shell : public i::AllStatic {
   static void InstallConditionalFeatures(
       const v8::FunctionCallbackInfo<v8::Value>& info);
   static void EnableJSPI(const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void SetFlushDenormals(
+      const v8::FunctionCallbackInfo<v8::Value>& info);
 
   static void AsyncHooksCreateHook(
       const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -792,7 +795,7 @@ class Shell : public i::AllStatic {
 
   static const char* stringify_source_;
   static CounterMap* counter_map_;
-  static base::SharedMutex counter_mutex_;
+  static base::SpinningMutex counter_mutex_;
   // We statically allocate a set of local counters to be used if we
   // don't want to store the stats in a memory-mapped file
   static CounterCollection local_counters_;

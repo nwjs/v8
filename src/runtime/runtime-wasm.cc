@@ -48,7 +48,7 @@ class RuntimeArgumentsWithoutHandles : public RuntimeArguments {
  private:
   // Disallowing the superclass method.
   template <class S = Object>
-  V8_INLINE Handle<S> at(int index) const;
+  V8_INLINE DirectHandle<S> at(int index) const;
 };
 
 #define RuntimeArguments RuntimeArgumentsWithoutHandles
@@ -170,7 +170,7 @@ Tagged<Object> ThrowWasmSuspendError(Isolate* isolate,
 }  // namespace
 
 RUNTIME_FUNCTION(Runtime_WasmGenericWasmToJSObject) {
-  SealHandleScope scope(isolate);
+  SealHandleScope seal_handle_scope(isolate);
   DCHECK_EQ(1, args.length());
   Tagged<Object> value = args[0];
   if (IsWasmFuncRef(value)) {
@@ -179,7 +179,7 @@ RUNTIME_FUNCTION(Runtime_WasmGenericWasmToJSObject) {
     Tagged<JSFunction> external;
     if (internal->try_get_external(&external)) return external;
     // Slow path:
-    HandleScope scope(isolate);
+    HandleScope handle_scope(isolate);
     return *WasmInternalFunction::GetOrCreateExternal(
         direct_handle(internal, isolate));
   }
@@ -1182,7 +1182,8 @@ RUNTIME_FUNCTION(Runtime_WasmArrayCopy) {
       dst_array.ptr() == src_array.ptr() &&
       (dst_index < src_index ? dst_index + length > src_index
                              : src_index + length > dst_index);
-  wasm::ValueType element_type = src_array->type()->element_type();
+  wasm::CanonicalValueType element_type =
+      src_array->map()->wasm_type_info()->element_type();
   if (element_type.is_reference()) {
     ObjectSlot dst_slot = dst_array->ElementSlot(dst_index);
     ObjectSlot src_slot = src_array->ElementSlot(src_index);
@@ -1217,16 +1218,15 @@ RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
   uint32_t length = args.positive_smi_value_at(3);
   DirectHandle<Map> rtt(Cast<Map>(args[4]), isolate);
 
-  wasm::ArrayType* type =
-      reinterpret_cast<wasm::ArrayType*>(rtt->wasm_type_info()->native_type());
+  wasm::CanonicalValueType element_type = rtt->wasm_type_info()->element_type();
 
-  uint32_t element_size = type->element_type().value_kind_size();
+  uint32_t element_size = element_type.value_kind_size();
   // This check also implies no overflow.
   if (length > static_cast<uint32_t>(WasmArray::MaxLength(element_size))) {
     return ThrowWasmError(isolate, MessageTemplate::kWasmTrapArrayTooLarge);
   }
 
-  if (type->element_type().is_numeric()) {
+  if (element_type.is_numeric()) {
     // No chance of overflow due to the check above.
     uint32_t length_in_bytes = length * element_size;
 
@@ -1240,7 +1240,8 @@ RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
     Address source =
         trusted_instance_data->data_segment_starts()->get(segment_index) +
         offset;
-    return *isolate->factory()->NewWasmArrayFromMemory(length, rtt, source);
+    return *isolate->factory()->NewWasmArrayFromMemory(length, rtt,
+                                                       element_type, source);
   } else {
     DirectHandle<Object> elem_segment_raw(
         trusted_instance_data->element_segments()->get(segment_index), isolate);
@@ -1260,7 +1261,7 @@ RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
     DirectHandle<Object> result =
         isolate->factory()->NewWasmArrayFromElementSegment(
             trusted_instance_data, trusted_instance_data, segment_index, offset,
-            length, rtt);
+            length, rtt, element_type);
     if (IsSmi(*result)) {
       return ThrowWasmError(
           isolate, static_cast<MessageTemplate>(Cast<Smi>(*result).value()));
@@ -1282,12 +1283,10 @@ RUNTIME_FUNCTION(Runtime_WasmArrayInitSegment) {
   uint32_t segment_offset = args.positive_smi_value_at(4);
   uint32_t length = args.positive_smi_value_at(5);
 
-  wasm::ArrayType* type = reinterpret_cast<wasm::ArrayType*>(
-      array->map()->wasm_type_info()->native_type());
+  wasm::CanonicalValueType element_type =
+      array->map()->wasm_type_info()->element_type();
 
-  uint32_t element_size = type->element_type().value_kind_size();
-
-  if (type->element_type().is_numeric()) {
+  if (element_type.is_numeric()) {
     if (!base::IsInBounds<uint32_t>(array_index, length, array->length())) {
       return ThrowWasmError(isolate,
                             MessageTemplate::kWasmTrapArrayOutOfBounds);
@@ -1295,7 +1294,7 @@ RUNTIME_FUNCTION(Runtime_WasmArrayInitSegment) {
 
     // No chance of overflow, due to the check above and the limit in array
     // length.
-    uint32_t length_in_bytes = length * element_size;
+    uint32_t length_in_bytes = length * element_type.value_kind_size();
 
     if (!base::IsInBounds<uint32_t>(
             segment_offset, length_in_bytes,
@@ -1311,7 +1310,7 @@ RUNTIME_FUNCTION(Runtime_WasmArrayInitSegment) {
 #if V8_TARGET_BIG_ENDIAN
     MemCopyAndSwitchEndianness(reinterpret_cast<void*>(dest),
                                reinterpret_cast<void*>(source), length,
-                               element_size);
+                               element_type.value_kind_size());
 #else
     MemCopy(reinterpret_cast<void*>(dest), reinterpret_cast<void*>(source),
             length_in_bytes);
@@ -1439,14 +1438,14 @@ RUNTIME_FUNCTION(Runtime_WasmCastToSpecialPrimitiveArray) {
   MessageTemplate illegal_cast = MessageTemplate::kWasmTrapIllegalCast;
   if (!IsWasmArray(args[0])) return ThrowWasmError(isolate, illegal_cast);
   Tagged<WasmArray> obj = Cast<WasmArray>(args[0]);
-  Tagged<WasmTypeInfo> wti = obj->map()->wasm_type_info();
-  const wasm::WasmModule* module = wti->trusted_data(isolate)->module();
-  wasm::ModuleTypeIndex type_index = wti->type_index();
-  DCHECK(module->has_array(type_index));
   wasm::CanonicalTypeIndex expected =
       bits == 8 ? wasm::TypeCanonicalizer::kPredefinedArrayI8Index
                 : wasm::TypeCanonicalizer::kPredefinedArrayI16Index;
-  if (module->canonical_type_id(type_index) != expected) {
+  Tagged<Object> expected_map =
+      MakeStrong(isolate->heap()->wasm_canonical_rtts()->get(expected.index));
+  // If the expected_map has been cleared or never even created, then there's
+  // no chance of a match anyway.
+  if (obj->map() != expected_map) {
     return ThrowWasmError(isolate, illegal_cast);
   }
   return obj;

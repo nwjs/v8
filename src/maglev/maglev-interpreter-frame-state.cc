@@ -975,6 +975,20 @@ ValueNode* FromUint32ToTagged(const MaglevGraphBuilder* builder,
   return tagged;
 }
 
+ValueNode* FromIntPtrToTagged(const MaglevGraphBuilder* builder,
+                              NodeType node_type, ValueNode* value,
+                              BasicBlock* predecessor) {
+  DCHECK_EQ(value->properties().value_representation(),
+            ValueRepresentation::kIntPtr);
+  DCHECK(!value->properties().is_conversion());
+
+  ValueNode* tagged = Node::New<IntPtrToNumber>(builder->zone(), {value});
+
+  predecessor->nodes().Add(tagged);
+  builder->compilation_unit()->RegisterNodeInGraphLabeller(tagged);
+  return tagged;
+}
+
 ValueNode* FromFloat64ToTagged(const MaglevGraphBuilder* builder,
                                NodeType node_type, ValueNode* value,
                                BasicBlock* predecessor) {
@@ -1013,13 +1027,14 @@ ValueNode* NonTaggedToTagged(const MaglevGraphBuilder* builder,
                              NodeType node_type, ValueNode* value,
                              BasicBlock* predecessor) {
   switch (value->properties().value_representation()) {
-    case ValueRepresentation::kIntPtr:
     case ValueRepresentation::kTagged:
       UNREACHABLE();
     case ValueRepresentation::kInt32:
       return FromInt32ToTagged(builder, node_type, value, predecessor);
     case ValueRepresentation::kUint32:
       return FromUint32ToTagged(builder, node_type, value, predecessor);
+    case ValueRepresentation::kIntPtr:
+      return FromIntPtrToTagged(builder, node_type, value, predecessor);
     case ValueRepresentation::kFloat64:
       return FromFloat64ToTagged(builder, node_type, value, predecessor);
     case ValueRepresentation::kHoleyFloat64:
@@ -1377,21 +1392,25 @@ void MergePointInterpreterFrameState::ReducePhiPredecessorCount(unsigned num) {
   }
 }
 
-bool MergePointInterpreterFrameState::IsUnreachable() const {
+bool MergePointInterpreterFrameState::IsUnreachableByForwardEdge() const {
   DCHECK_EQ(predecessors_so_far_, predecessor_count_);
-  if (predecessor_count_ > 1) {
-    return false;
+  DCHECK_IMPLIES(
+      is_loop(),
+      predecessor_at(predecessor_count_ - 1)->control_node()->Is<JumpLoop>());
+  switch (predecessor_count_) {
+    case 0:
+      // This happens after the back-edge of a resumable loop died at which
+      // point we mark it non-looping.
+      DCHECK(!is_loop());
+      return true;
+    case 1:
+      // Only resumable loops can be reachable by back-edge only. Others we
+      // prune in the front-end.
+      DCHECK_EQ(is_loop(), is_resumable_loop());
+      return is_loop();
+    default:
+      return false;
   }
-  // This should actually only support predecessor_count == 1, but we
-  // currently don't eliminate resumable loop headers (and subsequent code
-  // until the next resume) that end up being unreachable from JumpLoop.
-  if (predecessor_count_ == 0) {
-    DCHECK(is_resumable_loop());
-    return true;
-  }
-  DCHECK_EQ(predecessor_count_, 1);
-  DCHECK_IMPLIES(is_loop(), predecessor_at(0)->control_node()->Is<JumpLoop>());
-  return is_loop();
 }
 
 }  // namespace maglev

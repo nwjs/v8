@@ -208,6 +208,10 @@ int InterruptBudgetFor(Isolate* isolate, std::optional<CodeKind> code_kind,
         case CachedTieringDecision::kNormal:
           return v8_flags.invocation_count_for_maglev * bytecode_length;
       }
+      // The enum value is coming from inside the sandbox and while the switch
+      // is exhaustive, it's not guaranteed that value is one of the declared
+      // values.
+      SBXCHECK(false);
     }
     return v8_flags.invocation_count_for_maglev * bytecode_length;
   }
@@ -430,6 +434,9 @@ bool ShouldResetInterruptBudgetByICChange(
     case CachedTieringDecision::kNormal:
       return true;
   }
+  // The enum value is coming from inside the sandbox and while the switch is
+  // exhaustive, it's not guaranteed that value is one of the declared values.
+  SBXCHECK(false);
 }
 
 }  // namespace
@@ -582,10 +589,10 @@ void TieringManager::OnInterruptTick(DirectHandle<JSFunction> function,
     if (v8_flags.baseline_batch_compilation) {
       isolate_->baseline_batch_compiler()->EnqueueFunction(function);
     } else {
-      IsCompiledScope is_compiled_scope(
+      IsCompiledScope inner_is_compiled_scope(
           function->shared()->is_compiled_scope(isolate_));
       Compiler::CompileBaseline(isolate_, function, Compiler::CLEAR_EXCEPTION,
-                                &is_compiled_scope);
+                                &inner_is_compiled_scope);
     }
 #else
     UNREACHABLE();

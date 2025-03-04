@@ -44,7 +44,7 @@ void ExecuteAgainstReference(Isolate* isolate,
 
 Handle<WasmModuleObject> CompileReferenceModule(
     Isolate* isolate, base::Vector<const uint8_t> wire_bytes,
-    int32_t* max_steps, int32_t* nondeterminism);
+    int32_t* max_steps);
 
 void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
                       bool compiles);
@@ -63,6 +63,9 @@ void AddDummyTypesToTypeCanonicalizer(Isolate* isolate, Zone* zone);
 // conditions with threads reading the flags. Fuzzers are executed in their own
 // process anyway, so this should not interfere with anything.
 void EnableExperimentalWasmFeatures(v8::Isolate* isolate);
+
+// Clear the type canonicalizer storage and re-add the dummy types.
+void ResetTypeCanonicalizer(v8::Isolate* isolate, Zone* zone);
 
 constexpr int kMaxFuzzerInputSize = 512;
 

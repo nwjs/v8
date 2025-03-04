@@ -145,7 +145,7 @@ class V8_EXPORT String : public Name {
    */
   V8_DEPRECATED("Use Isolate version instead") int Utf8Length() const;
 
-  V8_DEPRECATE_SOON("Use Utf8LengthV2 instead.")
+  V8_DEPRECATED("Use Utf8LengthV2 instead.")
   int Utf8Length(Isolate* isolate) const;
 
   /**
@@ -205,14 +205,14 @@ class V8_EXPORT String : public Name {
   };
 
   // 16-bit character codes.
-  V8_DEPRECATE_SOON("Use WriteV2 instead.")
+  V8_DEPRECATED("Use WriteV2 instead.")
   int Write(Isolate* isolate, uint16_t* buffer, int start = 0, int length = -1,
             int options = NO_OPTIONS) const;
   V8_DEPRECATED("Use Isolate* version")
                 int Write(uint16_t* buffer, int start = 0, int length = -1,
                           int options = NO_OPTIONS) const;
   // One byte characters.
-  V8_DEPRECATE_SOON("Use WriteOneByteV2 instead.")
+  V8_DEPRECATED("Use WriteOneByteV2 instead.")
   int WriteOneByte(Isolate* isolate, uint8_t* buffer, int start = 0,
                    int length = -1, int options = NO_OPTIONS) const;
   V8_DEPRECATED("Use Isolate* version")
@@ -220,7 +220,7 @@ class V8_EXPORT String : public Name {
                                  int length = -1, int options = NO_OPTIONS)
                     const;
   // UTF-8 encoded characters.
-  V8_DEPRECATE_SOON("Use WriteUtf8V2 instead.")
+  V8_DEPRECATED("Use WriteUtf8V2 instead.")
   int WriteUtf8(Isolate* isolate, char* buffer, int length = -1,
                 int* nchars_ref = nullptr, int options = NO_OPTIONS) const;
 
@@ -322,6 +322,13 @@ class V8_EXPORT String : public Name {
      * subclasses to control how allocated external bytes are accounted.
      */
     virtual void Unaccount(Isolate* isolate) {}
+
+    /**
+     * Returns an estimate of the memory occupied by this external string, to be
+     * used by V8 when producing a heap snapshot. If this function returns -1,
+     * then V8 will estimate the external size based on the string length.
+     */
+    virtual int EstimateMemoryUsage() const { return -1; }
 
     // Disallow copying and assigning.
     ExternalStringResourceBase(const ExternalStringResourceBase&) = delete;

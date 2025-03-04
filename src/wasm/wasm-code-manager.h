@@ -321,6 +321,9 @@ class V8_EXPORT_PRIVATE WasmCode final {
     return ForDebuggingField::decode(flags_);
   }
 
+  bool is_dying() const { return dying_; }
+  void mark_as_dying() { dying_ = true; }
+
   // Returns {true} for Liftoff code that sets up a feedback vector slot in its
   // stack frame.
   // TODO(jkummerow): This can be dropped when we ship Wasm inlining.
@@ -450,6 +453,10 @@ class V8_EXPORT_PRIVATE WasmCode final {
   using ForDebuggingField = ExecutionTierField::Next<ForDebugging, 2>;
   using FrameHasFeedbackSlotField = ForDebuggingField::Next<bool, 1>;
 
+  // Will be set to {true} the first time this code object is considered
+  // "potentially dead" (to be confirmed by the next Wasm Code GC cycle).
+  std::atomic<bool> dying_{false};
+
   // WasmCode is ref counted. Counters are held by:
   //   1) The jump table / code table.
   //   2) {WasmCodeRefScope}s.
@@ -467,6 +474,15 @@ WasmCode::Kind GetCodeKind(const WasmCompilationResult& result);
 
 // Return a textual description of the kind.
 const char* GetWasmCodeKindAsString(WasmCode::Kind);
+
+// Unpublished code is still tied to the assumptions made when generating this
+// code; those will be checked right before publishing.
+struct UnpublishedWasmCode {
+  std::unique_ptr<WasmCode> code;
+  std::unique_ptr<AssumptionsJournal> assumptions;
+
+  static constexpr AssumptionsJournal* kNoAssumptions = nullptr;
+};
 
 // Manages the code reservations and allocations of a single {NativeModule}.
 class WasmCodeAllocator {
@@ -565,12 +581,11 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   // {PublishCode} makes the code available to the system by entering it into
   // the code table and patching the jump table. It returns a raw pointer to the
-  // given {WasmCode} object. Ownership is transferred to the {NativeModule}.
-  // Returns {nullptr} if the {AssumptionsJournal} is non-nullptr and contains
-  // invalid assumptions.
-  WasmCode* PublishCode(std::unique_ptr<WasmCode>,
-                        AssumptionsJournal* = nullptr);
-  std::vector<WasmCode*> PublishCode(base::Vector<std::unique_ptr<WasmCode>>);
+  // {WasmCode} object in the argument. Ownership is transferred to the
+  // {NativeModule}. Returns {nullptr} if the {AssumptionsJournal} in the
+  // argument is non-nullptr and contains invalid assumptions.
+  WasmCode* PublishCode(UnpublishedWasmCode);
+  std::vector<WasmCode*> PublishCode(base::Vector<UnpublishedWasmCode>);
 
   // Clears outdated code as necessary when a new instantiation's imports
   // conflict with previously seen well-known imports.
@@ -678,6 +693,9 @@ class V8_EXPORT_PRIVATE NativeModule final {
   uint32_t num_imported_functions() const {
     return module_->num_imported_functions;
   }
+  uint32_t num_declared_functions() const {
+    return module_->num_declared_functions;
+  }
   void set_lazy_compile_frozen(bool frozen) { lazy_compile_frozen_ = frozen; }
   bool lazy_compile_frozen() const { return lazy_compile_frozen_; }
   base::Vector<const uint8_t> wire_bytes() const {
@@ -755,10 +773,10 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Sample the current code size of this modules to the given counters.
   void SampleCodeSize(Counters*) const;
 
-  V8_WARN_UNUSED_RESULT std::unique_ptr<WasmCode> AddCompiledCode(
-      const WasmCompilationResult&);
-  V8_WARN_UNUSED_RESULT std::vector<std::unique_ptr<WasmCode>> AddCompiledCode(
-      base::Vector<const WasmCompilationResult>);
+  V8_WARN_UNUSED_RESULT UnpublishedWasmCode
+  AddCompiledCode(WasmCompilationResult&);
+  V8_WARN_UNUSED_RESULT std::vector<UnpublishedWasmCode> AddCompiledCode(
+      base::Vector<WasmCompilationResult>);
 
   // Set a new debugging state, but don't trigger any recompilation;
   // recompilation happens lazily.
@@ -944,7 +962,11 @@ class V8_EXPORT_PRIVATE NativeModule final {
   void AddCodeSpaceLocked(base::AddressRegion);
 
   // Hold the {allocation_mutex_} when calling {PublishCodeLocked}.
-  WasmCode* PublishCodeLocked(std::unique_ptr<WasmCode>);
+  // This takes the code by value because ownership will be transferred to the
+  // {NativeModule}. The {AssumptionsJournal} (if provided) will be checked
+  // before publishing the code, but should only be deallocated by the caller
+  // after releasing the lock, to keep the critical section small.
+  WasmCode* PublishCodeLocked(std::unique_ptr<WasmCode>, AssumptionsJournal*);
 
   // Transfer owned code from {new_owned_code_} to {owned_code_}.
   void TransferNewOwnedCodeLocked() const;

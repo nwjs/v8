@@ -65,10 +65,10 @@ namespace internal {
 
 namespace {
 
-Handle<SharedFunctionInfo> CreateSharedFunctionInfo(
+DirectHandle<SharedFunctionInfo> CreateSharedFunctionInfo(
     Isolate* isolate, Builtin builtin, int len,
     FunctionKind kind = FunctionKind::kNormalFunction) {
-  Handle<SharedFunctionInfo> shared =
+  DirectHandle<SharedFunctionInfo> shared =
       isolate->factory()->NewSharedFunctionInfoForBuiltin(
           isolate->factory()->empty_string(), builtin, len, kAdapt, kind);
   return shared;
@@ -227,6 +227,8 @@ bool Heap::CreateMutableHeapObjects() {
   {  // Map allocation
     ALLOCATE_MAP(JS_MESSAGE_OBJECT_TYPE, JSMessageObject::kHeaderSize,
                  message_object)
+    message_object_map()->set_is_extensible(false);
+
     ALLOCATE_MAP(JS_EXTERNAL_OBJECT_TYPE, JSExternalObject::kHeaderSize,
                  external)
     external_map()->set_is_extensible(false);
@@ -837,7 +839,7 @@ bool Heap::CreateLateReadOnlyJSReceiverMaps() {
     Descriptor length_descriptor = Descriptor::DataField(
         factory->length_string(), JSSharedArray::kLengthFieldIndex,
         ALL_ATTRIBUTES_MASK, PropertyConstness::kConst, Representation::Smi(),
-        MaybeObjectHandle(FieldType::Any(isolate())));
+        MaybeObjectDirectHandle(FieldType::Any(isolate())));
     descriptors->Set(InternalIndex(0), &length_descriptor);
     shared_array_map->InitializeDescriptors(isolate(), *descriptors);
     set_js_shared_array_map(shared_array_map);
@@ -1293,14 +1295,15 @@ bool Heap::CreateReadOnlyObjects() {
 
   // Finally, allocate the wasm-null object.
   {
-    Tagged<HeapObject> obj;
-    CHECK(AllocateRaw(WasmNull::kSize, AllocationType::kReadOnly).To(&obj));
+    Tagged<HeapObject> wasm_null_obj;
+    CHECK(AllocateRaw(WasmNull::kSize, AllocationType::kReadOnly)
+              .To(&wasm_null_obj));
     // No need to initialize the payload since it's either empty or unmapped.
     CHECK_IMPLIES(!(V8_STATIC_ROOTS_BOOL || V8_STATIC_ROOTS_GENERATION_BOOL),
                   WasmNull::kSize == sizeof(Tagged_t));
-    obj->set_map_after_allocation(isolate(), roots.wasm_null_map(),
-                                  SKIP_WRITE_BARRIER);
-    set_wasm_null(Cast<WasmNull>(obj));
+    wasm_null_obj->set_map_after_allocation(isolate(), roots.wasm_null_map(),
+                                            SKIP_WRITE_BARRIER);
+    set_wasm_null(Cast<WasmNull>(wasm_null_obj));
     if (V8_STATIC_ROOTS_BOOL || V8_STATIC_ROOTS_GENERATION_BOOL) {
       CHECK_EQ(read_only_space_->top() % kLargestPossibleOSPageSize, 0);
     }
@@ -1403,6 +1406,7 @@ void Heap::CreateInitialMutableObjects() {
   set_string_length_protector(*factory->NewProtector());
   set_string_wrapper_to_primitive_protector(*factory->NewProtector());
   set_number_string_not_regexp_like_protector(*factory->NewProtector());
+  set_typed_array_length_protector(*factory->NewProtector());
   set_typed_array_species_protector(*factory->NewProtector());
 
   set_serialized_objects(roots.empty_fixed_array());

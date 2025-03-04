@@ -186,8 +186,8 @@ class IdentityMapTester {
 
 class IdentityMapTest : public TestWithIsolateAndZone {
  public:
-  Handle<Smi> smi(int value) {
-    return Handle<Smi>(Smi::FromInt(value), isolate());
+  DirectHandle<Smi> smi(int value) {
+    return DirectHandle<Smi>(Smi::FromInt(value), isolate());
   }
 
   Handle<Object> num(double value) {
@@ -711,6 +711,7 @@ TEST_F(IdentityMapTest, GCShortCutting) {
   // We don't create ThinStrings immediately when using the forwarding table.
   if (v8_flags.always_use_string_forwarding_table) return;
   v8_flags.shortcut_strings_with_stack = true;
+  v8_flags.scavenger_precise_pinning_objects = false;
   ManualGCScope manual_gc_scope(isolate());
   IdentityMapTester t(isolate()->heap(), zone());
   Factory* factory = isolate()->factory();

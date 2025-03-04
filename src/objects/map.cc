@@ -529,7 +529,7 @@ MaybeHandle<Map> Map::CopyWithField(Isolate* isolate, DirectHandle<Map> map,
         isolate, map->instance_type(), &representation, &type);
   }
 
-  MaybeObjectHandle wrapped_type = WrapFieldType(type);
+  MaybeObjectDirectHandle wrapped_type = WrapFieldType(type);
 
   Descriptor d = Descriptor::DataField(name, index, attributes, constness,
                                        representation, wrapped_type);
@@ -911,10 +911,10 @@ void Map::EnsureDescriptorSlack(Isolate* isolate, DirectHandle<Map> map,
 }
 
 // static
-Handle<Map> Map::GetObjectCreateMap(Isolate* isolate,
-                                    DirectHandle<JSPrototype> prototype) {
-  Handle<Map> map(isolate->native_context()->object_function()->initial_map(),
-                  isolate);
+DirectHandle<Map> Map::GetObjectCreateMap(Isolate* isolate,
+                                          DirectHandle<JSPrototype> prototype) {
+  DirectHandle<Map> map(
+      isolate->native_context()->object_function()->initial_map(), isolate);
   if (map->prototype() == *prototype) return map;
   if (IsNull(*prototype, isolate)) {
     return isolate->slow_object_with_null_prototype_map();
@@ -929,7 +929,7 @@ Handle<Map> Map::GetObjectCreateMap(Isolate* isolate,
     // TODO(verwaest): Use inobject slack tracking for this map.
     Tagged<HeapObject> map_obj;
     if (info->ObjectCreateMap().GetHeapObjectIfWeak(&map_obj)) {
-      map = handle(Cast<Map>(map_obj), isolate);
+      map = direct_handle(Cast<Map>(map_obj), isolate);
     } else {
       map = Map::CopyInitialMap(isolate, map);
       Map::SetPrototype(isolate, map, prototype);
@@ -1076,8 +1076,8 @@ bool Map::IsMapInArrayPrototypeChain(Isolate* isolate) const {
   return false;
 }
 
-Handle<Map> Map::TransitionElementsTo(Isolate* isolate, Handle<Map> map,
-                                      ElementsKind to_kind) {
+DirectHandle<Map> Map::TransitionElementsTo(Isolate* isolate, Handle<Map> map,
+                                            ElementsKind to_kind) {
   ElementsKind from_kind = map->elements_kind();
   if (from_kind == to_kind) return map;
 
@@ -1085,12 +1085,14 @@ Handle<Map> Map::TransitionElementsTo(Isolate* isolate, Handle<Map> map,
   if (from_kind == FAST_SLOPPY_ARGUMENTS_ELEMENTS) {
     if (*map == native_context->fast_aliased_arguments_map()) {
       DCHECK_EQ(SLOW_SLOPPY_ARGUMENTS_ELEMENTS, to_kind);
-      return handle(native_context->slow_aliased_arguments_map(), isolate);
+      return direct_handle(native_context->slow_aliased_arguments_map(),
+                           isolate);
     }
   } else if (from_kind == SLOW_SLOPPY_ARGUMENTS_ELEMENTS) {
     if (*map == native_context->slow_aliased_arguments_map()) {
       DCHECK_EQ(FAST_SLOPPY_ARGUMENTS_ELEMENTS, to_kind);
-      return handle(native_context->fast_aliased_arguments_map(), isolate);
+      return direct_handle(native_context->fast_aliased_arguments_map(),
+                           isolate);
     }
   } else if (IsFastElementsKind(from_kind) && IsFastElementsKind(to_kind)) {
     // Reuse map transitions for JSArrays.
@@ -1099,7 +1101,7 @@ Handle<Map> Map::TransitionElementsTo(Isolate* isolate, Handle<Map> map,
       Tagged<Object> maybe_transitioned_map =
           native_context->get(Context::ArrayMapIndex(to_kind));
       if (IsMap(maybe_transitioned_map)) {
-        return handle(Cast<Map>(maybe_transitioned_map), isolate);
+        return direct_handle(Cast<Map>(maybe_transitioned_map), isolate);
       }
     }
   }
@@ -1110,7 +1112,7 @@ Handle<Map> Map::TransitionElementsTo(Isolate* isolate, Handle<Map> map,
       to_kind == GetPackedElementsKind(from_kind) &&
       IsMap(map->GetBackPointer()) &&
       Cast<Map>(map->GetBackPointer())->elements_kind() == to_kind) {
-    return handle(Cast<Map>(map->GetBackPointer()), isolate);
+    return direct_handle(Cast<Map>(map->GetBackPointer()), isolate);
   }
 
   bool allow_store_transition = IsTransitionElementsKind(from_kind);
@@ -1421,9 +1423,9 @@ Handle<Map> Map::CopyNormalized(Isolate* isolate, DirectHandle<Map> map,
 // memory on the map transition tree.
 
 // static
-Handle<Map> Map::TransitionToImmutableProto(Isolate* isolate,
-                                            DirectHandle<Map> map) {
-  Handle<Map> new_map = Map::Copy(isolate, map, "ImmutablePrototype");
+DirectHandle<Map> Map::TransitionToImmutableProto(Isolate* isolate,
+                                                  DirectHandle<Map> map) {
+  DirectHandle<Map> new_map = Map::Copy(isolate, map, "ImmutablePrototype");
   new_map->set_is_immutable_proto(true);
   return new_map;
 }
@@ -1456,9 +1458,8 @@ void EnsureInitialMap(Isolate* isolate, DirectHandle<Map> map) {
 }  // namespace
 
 // static
-Handle<Map> Map::CopyInitialMapNormalized(Isolate* isolate,
-                                          DirectHandle<Map> map,
-                                          PropertyNormalizationMode mode) {
+DirectHandle<Map> Map::CopyInitialMapNormalized(
+    Isolate* isolate, DirectHandle<Map> map, PropertyNormalizationMode mode) {
   EnsureInitialMap(isolate, map);
   return CopyNormalized(isolate, map, mode);
 }
@@ -1743,8 +1744,9 @@ Handle<Map> Map::CopyAsElementsKind(Isolate* isolate, DirectHandle<Map> map,
   return new_map;
 }
 
-Handle<Map> Map::AsLanguageMode(Isolate* isolate, Handle<Map> initial_map,
-                                DirectHandle<SharedFunctionInfo> shared_info) {
+DirectHandle<Map> Map::AsLanguageMode(
+    Isolate* isolate, DirectHandle<Map> initial_map,
+    DirectHandle<SharedFunctionInfo> shared_info) {
   DCHECK(InstanceTypeChecker::IsJSFunction(initial_map->instance_type()));
   // Initial map for sloppy mode function is stored in the function
   // constructor. Initial maps for strict mode are cached as special transitions
@@ -1759,7 +1761,7 @@ Handle<Map> Map::AsLanguageMode(Isolate* isolate, Handle<Map> initial_map,
   DCHECK_EQ(LanguageMode::kStrict, shared_info->language_mode());
   DirectHandle<Symbol> transition_symbol =
       isolate->factory()->strict_function_transition_symbol();
-  MaybeHandle<Map> maybe_transition = TransitionsAccessor::SearchSpecial(
+  MaybeDirectHandle<Map> maybe_transition = TransitionsAccessor::SearchSpecial(
       isolate, initial_map, *transition_symbol);
   if (!maybe_transition.is_null()) {
     return maybe_transition.ToHandleChecked();
@@ -1768,7 +1770,7 @@ Handle<Map> Map::AsLanguageMode(Isolate* isolate, Handle<Map> initial_map,
 
   // Create new map taking descriptors from the |function_map| and all
   // the other details from the |initial_map|.
-  Handle<Map> map =
+  DirectHandle<Map> map =
       Map::CopyInitialMap(isolate, function_map, initial_map->instance_size(),
                           initial_map->GetInObjectProperties(),
                           initial_map->UnusedPropertyFields());
@@ -1993,7 +1995,7 @@ Handle<Map> Map::PrepareForDataProperty(Isolate* isolate, Handle<Map> map,
   return UpdateDescriptorForValue(isolate, map, descriptor, constness, value);
 }
 
-Handle<Map> Map::TransitionToDataProperty(
+DirectHandle<Map> Map::TransitionToDataProperty(
     Isolate* isolate, DirectHandle<Map> map, DirectHandle<Name> name,
     DirectHandle<Object> value, PropertyAttributes attributes,
     PropertyConstness constness, StoreOrigin store_origin) {
@@ -2025,7 +2027,7 @@ Handle<Map> Map::TransitionToDataProperty(
   // Do not track transitions during bootstrapping.
   TransitionFlag flag =
       isolate->bootstrapper()->IsActive() ? OMIT_TRANSITION : INSERT_TRANSITION;
-  MaybeHandle<Map> maybe_map;
+  MaybeDirectHandle<Map> maybe_map;
   if (!map->TooManyFastProperties(store_origin)) {
     Representation representation =
         Object::OptimalRepresentation(*value, isolate);
@@ -2035,7 +2037,7 @@ Handle<Map> Map::TransitionToDataProperty(
                                    constness, representation, flag);
   }
 
-  Handle<Map> result;
+  DirectHandle<Map> result;
   if (!maybe_map.ToHandle(&result)) {
     const char* reason = "TooManyFastProperties";
 #if V8_TRACE_MAPS
@@ -2078,12 +2080,10 @@ Handle<Map> Map::TransitionToDataProperty(
   return result;
 }
 
-Handle<Map> Map::TransitionToAccessorProperty(Isolate* isolate, Handle<Map> map,
-                                              DirectHandle<Name> name,
-                                              InternalIndex descriptor,
-                                              DirectHandle<Object> getter,
-                                              DirectHandle<Object> setter,
-                                              PropertyAttributes attributes) {
+DirectHandle<Map> Map::TransitionToAccessorProperty(
+    Isolate* isolate, DirectHandle<Map> map, DirectHandle<Name> name,
+    InternalIndex descriptor, DirectHandle<Object> getter,
+    DirectHandle<Object> setter, PropertyAttributes attributes) {
   RCS_SCOPE(
       isolate,
       map->IsDetached(isolate)
@@ -2104,9 +2104,10 @@ Handle<Map> Map::TransitionToAccessorProperty(Isolate* isolate, Handle<Map> map,
                                        ? KEEP_INOBJECT_PROPERTIES
                                        : CLEAR_INOBJECT_PROPERTIES;
 
-  MaybeHandle<Map> maybe_transition = TransitionsAccessor::SearchTransition(
-      isolate, map, *name, PropertyKind::kAccessor, attributes);
-  Handle<Map> transition;
+  MaybeDirectHandle<Map> maybe_transition =
+      TransitionsAccessor::SearchTransition(
+          isolate, map, *name, PropertyKind::kAccessor, attributes);
+  DirectHandle<Map> transition;
   if (maybe_transition.ToHandle(&transition)) {
     Tagged<DescriptorArray> descriptors =
         transition->instance_descriptors(isolate);
@@ -2384,30 +2385,32 @@ void Map::SetInstanceDescriptors(Isolate* isolate,
 }
 
 // static
-Handle<PrototypeInfo> Map::GetOrCreatePrototypeInfo(
+DirectHandle<PrototypeInfo> Map::GetOrCreatePrototypeInfo(
     DirectHandle<JSObject> prototype, Isolate* isolate) {
   DCHECK(IsJSObjectThatCanBeTrackedAsPrototype(*prototype));
   {
     Tagged<PrototypeInfo> prototype_info;
     if (prototype->map()->TryGetPrototypeInfo(&prototype_info)) {
-      return handle(prototype_info, isolate);
+      return direct_handle(prototype_info, isolate);
     }
   }
-  Handle<PrototypeInfo> proto_info = isolate->factory()->NewPrototypeInfo();
+  DirectHandle<PrototypeInfo> proto_info =
+      isolate->factory()->NewPrototypeInfo();
   prototype->map()->set_prototype_info(*proto_info, kReleaseStore);
   return proto_info;
 }
 
 // static
-Handle<PrototypeInfo> Map::GetOrCreatePrototypeInfo(
+DirectHandle<PrototypeInfo> Map::GetOrCreatePrototypeInfo(
     DirectHandle<Map> prototype_map, Isolate* isolate) {
   {
     Tagged<Object> maybe_proto_info = prototype_map->prototype_info();
     if (PrototypeInfo::IsPrototypeInfoFast(maybe_proto_info)) {
-      return handle(Cast<PrototypeInfo>(maybe_proto_info), isolate);
+      return direct_handle(Cast<PrototypeInfo>(maybe_proto_info), isolate);
     }
   }
-  Handle<PrototypeInfo> proto_info = isolate->factory()->NewPrototypeInfo();
+  DirectHandle<PrototypeInfo> proto_info =
+      isolate->factory()->NewPrototypeInfo();
   prototype_map->set_prototype_info(*proto_info, kReleaseStore);
   return proto_info;
 }
@@ -2534,8 +2537,8 @@ Handle<Map> Map::TransitionToUpdatePrototype(
   return new_map;
 }
 
-Handle<NormalizedMapCache> NormalizedMapCache::New(Isolate* isolate) {
-  Handle<WeakFixedArray> array(
+DirectHandle<NormalizedMapCache> NormalizedMapCache::New(Isolate* isolate) {
+  DirectHandle<WeakFixedArray> array(
       isolate->factory()->NewWeakFixedArray(kEntries, AllocationType::kOld));
   return Cast<NormalizedMapCache>(array);
 }

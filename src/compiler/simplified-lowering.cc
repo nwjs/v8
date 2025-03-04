@@ -99,7 +99,7 @@ MachineRepresentation MachineRepresentationFromArrayType(
     case kExternalBigUint64Array:
       return MachineRepresentation::kWord64;
     case kExternalFloat16Array:
-      UNIMPLEMENTED();
+      return MachineRepresentation::kWord16;
   }
   UNREACHABLE();
 }
@@ -771,7 +771,7 @@ class RepresentationSelector {
     }
   }
 
-  void RunVerifyPhase(OptimizedCompilationInfo* info) {
+  void RunVerifyPhase(OptimizedCompilationInfo* compilation_info) {
     DCHECK_NOT_NULL(verifier_);
 
     TRACE("--{Verify Phase}--\n");
@@ -803,11 +803,11 @@ class RepresentationSelector {
     }
 
     // Print graph.
-    if (info != nullptr && info->trace_turbo_json()) {
+    if (compilation_info != nullptr && compilation_info->trace_turbo_json()) {
       UnparkedScopeIfNeeded scope(broker_);
       AllowHandleDereference allow_deref;
 
-      TurboJsonFile json_of(info, std::ios_base::app);
+      TurboJsonFile json_of(compilation_info, std::ios_base::app);
       JSONGraphWriter writer(json_of, graph(), source_positions_,
                              node_origins_);
       writer.PrintPhase("V8.TFSimplifiedLowering [after lower]");
@@ -819,11 +819,11 @@ class RepresentationSelector {
     }
 
     // Print graph.
-    if (info != nullptr && info->trace_turbo_json()) {
+    if (compilation_info != nullptr && compilation_info->trace_turbo_json()) {
       UnparkedScopeIfNeeded scope(broker_);
       AllowHandleDereference allow_deref;
 
-      TurboJsonFile json_of(info, std::ios_base::app);
+      TurboJsonFile json_of(compilation_info, std::ios_base::app);
       JSONGraphWriterWithVerifierTypes writer(
           json_of, graph(), source_positions_, node_origins_, verifier_);
       writer.PrintPhase("V8.TFSimplifiedLowering [after verify]");
@@ -1956,6 +1956,7 @@ class RepresentationSelector {
   UseInfo UseInfoForFastApiCallArgument(CTypeInfo type,
                                         CFunctionInfo::Int64Representation repr,
                                         FeedbackSource const& feedback) {
+    START_ALLOW_USE_DEPRECATED()
     switch (type.GetSequenceType()) {
       case CTypeInfo::SequenceType::kScalar: {
         uint8_t flags = uint8_t(type.GetFlags());
@@ -2006,15 +2007,11 @@ class RepresentationSelector {
         CHECK_EQ(type.GetType(), CTypeInfo::Type::kVoid);
         return UseInfo::AnyTagged();
       }
-        START_ALLOW_USE_DEPRECATED()
-      case CTypeInfo::SequenceType::kIsTypedArray: {
-        return UseInfo::AnyTagged();
-      }
-        END_ALLOW_USE_DEPRECATED()
       default: {
         UNREACHABLE();  // TODO(mslekova): Implement array buffers.
       }
     }
+    END_ALLOW_USE_DEPRECATED()
   }
 
   static constexpr int kInitialArgumentsCount = 10;
@@ -3465,6 +3462,20 @@ class RepresentationSelector {
         }
         return;
       }
+      case IrOpcode::kNumberToFloat16RawBits: {
+        VisitUnop<T>(node, UseInfo::TruncatingFloat64(),
+                     MachineRepresentation::kWord16);
+
+        if (lower<T>()) lowering->DoNumberToFloat16RawBits(node);
+        return;
+      }
+      case IrOpcode::kFloat16RawBitsToNumber: {
+        VisitUnop<T>(node, UseInfo::TruncatingFloat16RawBits(),
+                     MachineRepresentation::kFloat64);
+
+        if (lower<T>()) lowering->DoFloat16RawBitsToNumber(node);
+        return;
+      }
       case IrOpcode::kIntegral32OrMinusZeroToBigInt: {
         VisitUnop<T>(node, UseInfo::Word64(kIdentifyZeros),
                      MachineRepresentation::kWord64);
@@ -3748,6 +3759,11 @@ class RepresentationSelector {
         // operator, which marks it's output as TaggedPointer properly.
         VisitUnop<T>(node, UseInfo::AnyTagged(),
                      MachineRepresentation::kWord32);
+        return;
+      }
+      case IrOpcode::kTypedArrayLength: {
+        VisitUnop<T>(node, UseInfo::AnyTagged(),
+                     MachineType::PointerRepresentation());
         return;
       }
       case IrOpcode::kStringSubstring: {
@@ -5657,6 +5673,14 @@ void SimplifiedLowering::DoIntegerToUint8Clamped(Node* node) {
           max));
   node->AppendInput(graph()->zone(), min);
   ChangeOp(node, common()->Select(MachineRepresentation::kFloat64));
+}
+
+void SimplifiedLowering::DoNumberToFloat16RawBits(Node* node) {
+  ChangeOp(node, machine()->TruncateFloat64ToFloat16RawBits().placeholder());
+}
+
+void SimplifiedLowering::DoFloat16RawBitsToNumber(Node* node) {
+  ChangeOp(node, machine()->ChangeFloat16RawBitsToFloat64().placeholder());
 }
 
 void SimplifiedLowering::DoNumberToUint8Clamped(Node* node) {

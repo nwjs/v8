@@ -1322,14 +1322,18 @@ Reduction JSNativeContextSpecialization::ReduceJSLoadGlobal(Node* node) {
     Node* script_context =
         jsgraph()->ConstantNoHole(feedback.script_context(), broker());
     Node* value;
-    if (feedback.immutable()) {
-      value = effect = graph()->NewNode(
-          javascript()->LoadContext(0, feedback.slot_index(), true),
-          script_context, effect);
-    } else {
+    if ((v8_flags.script_context_mutable_heap_number ||
+         v8_flags.const_tracking_let) &&
+        !feedback.immutable()) {
+      // We collect feedback only for mutable context slots.
       value = effect = graph()->NewNode(
           javascript()->LoadScriptContext(0, feedback.slot_index()),
           script_context, effect, control);
+    } else {
+      value = effect =
+          graph()->NewNode(javascript()->LoadContext(0, feedback.slot_index(),
+                                                     feedback.immutable()),
+                           script_context, effect);
     }
     ReplaceWithValue(node, value, effect, control);
     return Replace(value);
@@ -1360,9 +1364,16 @@ Reduction JSNativeContextSpecialization::ReduceJSStoreGlobal(Node* node) {
     Node* control = n.control();
     Node* script_context =
         jsgraph()->ConstantNoHole(feedback.script_context(), broker());
-    effect = control = graph()->NewNode(
-        javascript()->StoreScriptContext(0, feedback.slot_index()), value,
-        script_context, effect, control);
+    if (v8_flags.script_context_mutable_heap_number ||
+        v8_flags.const_tracking_let) {
+      effect = control = graph()->NewNode(
+          javascript()->StoreScriptContext(0, feedback.slot_index()), value,
+          script_context, effect, control);
+    } else {
+      effect =
+          graph()->NewNode(javascript()->StoreContext(0, feedback.slot_index()),
+                           value, script_context, effect, control);
+    }
     ReplaceWithValue(node, value, effect, control);
     return Replace(value);
   } else if (feedback.IsPropertyCell()) {
@@ -2267,18 +2278,6 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
     }
   }
 
-  // Do not optimize Float16 typed arrays, since they are not yet supported by
-  // the rest of the compiler.
-  // TODO(v8:14012): We could lower further here and emit LoadTypedElement (like
-  // we do for other typed arrays). However, given the lack of hardware support
-  // for Float16 operations, it's not clear whether optimizing further would be
-  // really useful.
-  for (const ElementAccessInfo& access_info : access_infos) {
-    if (IsFloat16TypedArrayElementsKind(access_info.elements_kind())) {
-      return NoChange();
-    }
-  }
-
   // For holey stores or growing stores, we need to check that the prototype
   // chain contains no setters for elements, and we need to guard those checks
   // via code dependencies on the relevant prototype maps.
@@ -3041,6 +3040,12 @@ JSNativeContextSpecialization::BuildPropertyLoad(
   } else if (access_info.IsStringWrapperLength()) {
     value = graph()->NewNode(simplified()->StringWrapperLength(),
                              lookup_start_object);
+  } else if (access_info.IsTypedArrayLength()) {
+    const ZoneVector<MapRef> maps = access_info.lookup_start_object_maps();
+    DCHECK_EQ(maps.size(), 1);
+    value = graph()->NewNode(
+        simplified()->TypedArrayLength(maps[0].elements_kind()),
+        lookup_start_object);
   } else {
     DCHECK(access_info.IsDataField() || access_info.IsFastDataConstant() ||
            access_info.IsDictionaryProtoDataConstant());
@@ -3881,7 +3886,6 @@ JSNativeContextSpecialization::
   // Access the actual element.
   ExternalArrayType external_array_type =
       GetArrayTypeFromElementsKind(elements_kind);
-  DCHECK_NE(external_array_type, ExternalArrayType::kExternalFloat16Array);
   switch (keyed_mode.access_mode()) {
     case AccessMode::kLoad: {
       // Check if we can return undefined for out-of-bounds loads.
@@ -3935,6 +3939,11 @@ JSNativeContextSpecialization::
             simplified()->LoadTypedElement(external_array_type),
             buffer_or_receiver, base_pointer, external_pointer, index, effect,
             control);
+
+        if (external_array_type == kExternalFloat16Array) {
+          value =
+              graph()->NewNode(simplified()->Float16RawBitsToNumber(), value);
+        }
       }
       break;
     }
@@ -3964,6 +3973,8 @@ JSNativeContextSpecialization::
       // might want to change that at some point.
       if (external_array_type == kExternalUint8ClampedArray) {
         value = graph()->NewNode(simplified()->NumberToUint8Clamped(), value);
+      } else if (external_array_type == kExternalFloat16Array) {
+        value = graph()->NewNode(simplified()->NumberToFloat16RawBits(), value);
       }
 
       if (situation == kHandleOOB_SmiAndRangeCheckComputed) {

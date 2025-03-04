@@ -44,6 +44,11 @@ ALL_VARIANT_FLAGS = {
         "--no-wasm-generic-wrapper",
         "--no-liftoff",
     ]],
+    # Turboshaft with Maglev as a frontend
+    "turbolev": [[
+        "--turboshaft",
+        "--turbolev",
+    ]],
     "concurrent_sparkplug": [["--concurrent-sparkplug", "--sparkplug"]],
     "always_sparkplug": [["--always-sparkplug", "--sparkplug"]],
     # This combines two orthogonal variants always_sparkplug and
@@ -237,7 +242,6 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
         "--trace_wasm_serialization",
         "--trace_wasm_stack_switching",
         "--trace_wasm_streaming",
-        "--trap_on_abort",
     ],
     "!verify_heap": ["--verify-heap"],
     "!debug_code": ["--debug-code"],
@@ -257,9 +261,6 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
         "--stress-concurrent-allocation", "--stress-concurrent-inlining"
     ],
     "dict_property_const_tracking": ["--stress-concurrent-inlining"],
-    "cet_shadow_stack": [
-        "--sparkplug", "--always-sparkplug", "--concurrent-sparkplug"
-    ]
 }
 
 # Flags that lead to a contradiction when a certain extra-flag is present.

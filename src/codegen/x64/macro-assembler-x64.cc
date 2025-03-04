@@ -516,12 +516,13 @@ void MacroAssembler::StoreSandboxedPointerField(Operand dst_field_operand,
 }
 
 void MacroAssembler::LoadExternalPointerField(
-    Register destination, Operand field_operand, ExternalPointerTag tag,
-    Register scratch, IsolateRootLocation isolateRootLocation) {
+    Register destination, Operand field_operand,
+    ExternalPointerTagRange tag_range, Register scratch,
+    IsolateRootLocation isolateRootLocation) {
   DCHECK(!AreAliased(destination, scratch));
 #ifdef V8_ENABLE_SANDBOX
-  DCHECK_NE(tag, kExternalPointerNullTag);
-  DCHECK(!IsSharedExternalPointerType(tag));
+  DCHECK(!tag_range.IsEmpty());
+  DCHECK(!IsSharedExternalPointerType(tag_range));
   DCHECK(!field_operand.AddressUsesRegister(scratch));
   if (isolateRootLocation == IsolateRootLocation::kInRootRegister) {
     DCHECK(root_array_available_);
@@ -541,8 +542,26 @@ void MacroAssembler::LoadExternalPointerField(
   shrq(destination, Immediate(kExternalPointerIndexShift));
   static_assert(kExternalPointerTableEntrySize == 8);
   movq(destination, Operand(scratch, destination, times_8, 0));
-  movq(scratch, Immediate64(~tag));
-  andq(destination, scratch);
+
+  // We don't expect to see empty fields here. If this is ever needed, consider
+  // using an dedicated empty value entry for those tags instead (i.e. an entry
+  // with the right tag and nullptr payload).
+  DCHECK(!ExternalPointerCanBeEmpty(tag_range));
+
+  if (tag_range.Size() == 1) {
+    // The common and simple case: we expect exactly one tag.
+    movq(scratch, destination);
+    shrq(scratch, Immediate(kExternalPointerTagShift));
+    andl(scratch, Immediate(kExternalPointerShiftedTagMask));
+    cmpl(scratch, Immediate(tag_range.first));
+    SbxCheck(equal, AbortReason::kExternalPointerTagMismatch);
+    movq(scratch, Immediate64(kExternalPointerPayloadMask));
+    andq(destination, scratch);
+  } else {
+    // Not currently supported. Implement once needed.
+    DCHECK_NE(tag_range, kAnyExternalPointerTagRange);
+    UNREACHABLE();
+  }
 #else
   movq(destination, field_operand);
 #endif  // V8_ENABLE_SANDBOX
@@ -1037,13 +1056,12 @@ void MacroAssembler::AlignStackPointer() {
 void MacroAssembler::Abort(AbortReason reason) {
   ASM_CODE_COMMENT(this);
   if (v8_flags.code_comments) {
-    const char* msg = GetAbortReason(reason);
-    RecordComment("Abort message: ");
-    RecordComment(msg);
+    RecordComment("Abort message:", SourceLocation{});
+    RecordComment(GetAbortReason(reason), SourceLocation{});
   }
 
-  // Avoid emitting call to builtin if requested.
-  if (trap_on_abort()) {
+  // Without debug code, save the code size and just trap.
+  if (!v8_flags.debug_code) {
     int3();
     return;
   }
@@ -1691,6 +1709,15 @@ void MacroAssembler::Cvttsd2siq(Register dst, Operand src) {
   } else {
     cvttsd2siq(dst, src);
   }
+}
+
+void MacroAssembler::Cvtph2pd(XMMRegister dst, XMMRegister src) {
+  ASM_CODE_COMMENT(this);
+  CpuFeatureScope f16c_scope(this, F16C);
+  CpuFeatureScope avx_scope(this, AVX);
+
+  vcvtph2ps(dst, src);
+  Cvtss2sd(dst, dst);
 }
 
 void MacroAssembler::Cvtpd2ph(XMMRegister dst, XMMRegister src, Register tmp) {
@@ -3324,26 +3351,31 @@ void MacroAssembler::JumpJSFunction(Register function_object,
 
 #ifdef V8_ENABLE_WEBASSEMBLY
 
-void MacroAssembler::ResolveWasmCodePointer(Register target,
-                                            uint64_t signature_hash) {
-  ExternalReference global_jump_table =
-      ExternalReference::wasm_code_pointer_table();
-  Move(kScratchRegister, global_jump_table);
+void MacroAssembler::CallWasmCodePointer(Register target,
+                                         uint64_t signature_hash,
+                                         CallJumpMode call_jump_mode) {
+  ASM_CODE_COMMENT(this);
+  Move(kScratchRegister, ExternalReference::wasm_code_pointer_table());
 
 #ifdef V8_ENABLE_SANDBOX
-  Label fail, ok;
-
   static_assert(sizeof(wasm::WasmCodePointerTableEntry) == 16);
-  shlq(target, Immediate(4));
+  // Check that using a 32-bit shift is valid for any valid code pointer.
+  static_assert(wasm::WasmCodePointerTable::kMaxWasmCodePointers <=
+                (kMaxInt >> 4));
+  shll(target, Immediate(4));
+  // Add `target` and `kScratchRegister` early to free `kScratchRegister` again.
+  addq(target, kScratchRegister);
 
-  cmpl(Operand(kScratchRegister, target, ScaleFactor::times_1,
-               wasm::WasmCodePointerTable::kOffsetOfSignatureHash),
-       Immediate(static_cast<int32_t>(signature_hash)));
-  j(Condition::kNotEqual, &fail, Label::Distance::kNear);
-
-  cmpl(Operand(kScratchRegister, target, ScaleFactor::times_1,
-               wasm::WasmCodePointerTable::kOffsetOfSignatureHash + 4),
-       Immediate(static_cast<int32_t>(signature_hash >> 32)));
+  Operand signature_hash_op{target,
+                            wasm::WasmCodePointerTable::kOffsetOfSignatureHash};
+  if (is_int32(signature_hash)) {
+    // cmpq sign-extends the 32-bit immediate.
+    cmpq(signature_hash_op, Immediate(static_cast<int32_t>(signature_hash)));
+  } else {
+    Move(kScratchRegister, signature_hash);
+    cmpq(kScratchRegister, signature_hash_op);
+  }
+  Label fail, ok;
   j(Condition::kNotEqual, &fail, Label::Distance::kNear);
   jmp(&ok, Label::Distance::kNear);
 
@@ -3351,35 +3383,33 @@ void MacroAssembler::ResolveWasmCodePointer(Register target,
   Abort(AbortReason::kWasmSignatureMismatch);
 
   bind(&ok);
-  movq(target, Operand(kScratchRegister, target, ScaleFactor::times_1, 0));
+  Operand target_op{target, 0};
 #else
   static_assert(sizeof(wasm::WasmCodePointerTableEntry) == 8);
-  movq(target, Operand(kScratchRegister, target, ScaleFactor::times_8, 0));
+  Operand target_op{kScratchRegister, target, ScaleFactor::times_8, 0};
 #endif
-}
 
-void MacroAssembler::CallWasmCodePointer(Register target,
-                                         uint64_t signature_hash,
-                                         CallJumpMode call_jump_mode) {
-  ResolveWasmCodePointer(target, signature_hash);
   if (call_jump_mode == CallJumpMode::kTailCall) {
-    jmp(target);
+    jmp(target_op);
   } else {
-    call(target);
+    call(target_op);
   }
 }
 
 void MacroAssembler::CallWasmCodePointerNoSignatureCheck(Register target) {
-  ExternalReference global_jump_table =
-      ExternalReference::wasm_code_pointer_table();
-  Move(kScratchRegister, global_jump_table);
+  Move(kScratchRegister, ExternalReference::wasm_code_pointer_table());
 
-  constexpr unsigned int kEntrySizeLog2 =
-      std::bit_width(sizeof(wasm::WasmCodePointerTableEntry)) - 1;
-  shlq(target, Immediate(kEntrySizeLog2));
-
-  movq(target, Operand(kScratchRegister, target, ScaleFactor::times_1, 0));
-  call(target);
+#ifdef V8_ENABLE_SANDBOX
+  static_assert(sizeof(wasm::WasmCodePointerTableEntry) == 16);
+  // Check that using a 32-bit shift is valid for any valid code pointer.
+  static_assert(wasm::WasmCodePointerTable::kMaxWasmCodePointers <=
+                (kMaxInt >> 4));
+  shll(target, Immediate(4));
+  call(Operand(kScratchRegister, target, ScaleFactor::times_1, 0));
+#else
+  static_assert(sizeof(wasm::WasmCodePointerTableEntry) == 8);
+  call(Operand(kScratchRegister, target, ScaleFactor::times_8, 0));
+#endif
 }
 
 void MacroAssembler::LoadWasmCodePointer(Register dst, Operand src) {

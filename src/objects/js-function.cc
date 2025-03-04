@@ -451,7 +451,7 @@ Maybe<int> JSBoundFunction::GetLength(Isolate* isolate,
 }
 
 // static
-Handle<String> JSBoundFunction::ToString(
+DirectHandle<String> JSBoundFunction::ToString(
     DirectHandle<JSBoundFunction> function) {
   Isolate* const isolate = function->GetIsolate();
   return isolate->factory()->function_native_code_string();
@@ -496,14 +496,14 @@ Maybe<int> JSWrappedFunction::GetLength(
 }
 
 // static
-Handle<String> JSWrappedFunction::ToString(
+DirectHandle<String> JSWrappedFunction::ToString(
     DirectHandle<JSWrappedFunction> function) {
   Isolate* const isolate = function->GetIsolate();
   return isolate->factory()->function_native_code_string();
 }
 
 // static
-MaybeHandle<Object> JSWrappedFunction::Create(
+MaybeDirectHandle<Object> JSWrappedFunction::Create(
     Isolate* isolate, DirectHandle<NativeContext> creation_context,
     DirectHandle<JSReceiver> value) {
   // The value must be a callable according to the specification.
@@ -524,7 +524,7 @@ MaybeHandle<Object> JSWrappedFunction::Create(
   // 4. Set wrapped.[[Call]] as described in 2.1.
   // 5. Set wrapped.[[WrappedTargetFunction]] to Target.
   // 6. Set wrapped.[[Realm]] to callerRealm.
-  Handle<JSWrappedFunction> wrapped =
+  DirectHandle<JSWrappedFunction> wrapped =
       isolate->factory()->NewJSWrappedFunction(creation_context, value);
 
   // 7. Let result be CopyNameAndLength(wrapped, Target, "wrapped").
@@ -745,10 +745,10 @@ void JSFunction::InitializeFeedbackCell(
     if (v8_flags.baseline_batch_compilation) {
       isolate->baseline_batch_compiler()->EnqueueFunction(function);
     } else {
-      IsCompiledScope is_compiled_scope(
+      IsCompiledScope is_compiled_inner_scope(
           function->shared()->is_compiled_scope(isolate));
       Compiler::CompileBaseline(isolate, function, Compiler::CLEAR_EXCEPTION,
-                                &is_compiled_scope);
+                                &is_compiled_inner_scope);
     }
   }
 #endif  // V8_ENABLE_SPARKPLUG
@@ -1234,7 +1234,7 @@ int TypedArrayElementsKindToRabGsabCtorIndex(ElementsKind elements_kind) {
 
 }  // namespace
 
-MaybeHandle<Map> JSFunction::GetDerivedRabGsabTypedArrayMap(
+MaybeDirectHandle<Map> JSFunction::GetDerivedRabGsabTypedArrayMap(
     Isolate* isolate, DirectHandle<JSFunction> constructor,
     DirectHandle<JSReceiver> new_target) {
   MaybeDirectHandle<Map> maybe_map =
@@ -1249,20 +1249,20 @@ MaybeHandle<Map> JSFunction::GetDerivedRabGsabTypedArrayMap(
     if (*new_target == context->get(ctor_index)) {
       ctor_index =
           TypedArrayElementsKindToRabGsabCtorIndex(map->elements_kind());
-      return handle(Cast<Map>(context->get(ctor_index)), isolate);
+      return direct_handle(Cast<Map>(context->get(ctor_index)), isolate);
     }
   }
 
   // This only happens when subclassing TypedArrays. Create a new map with the
   // corresponding RAB / GSAB ElementsKind. Note: the map is not cached and
   // reused -> every array gets a unique map, making ICs slow.
-  Handle<Map> rab_gsab_map = Map::Copy(isolate, map, "RAB / GSAB");
+  DirectHandle<Map> rab_gsab_map = Map::Copy(isolate, map, "RAB / GSAB");
   rab_gsab_map->set_elements_kind(
       GetCorrespondingRabGsabElementsKind(map->elements_kind()));
   return rab_gsab_map;
 }
 
-MaybeHandle<Map> JSFunction::GetDerivedRabGsabDataViewMap(
+MaybeDirectHandle<Map> JSFunction::GetDerivedRabGsabDataViewMap(
     Isolate* isolate, DirectHandle<JSReceiver> new_target) {
   DirectHandle<Context> context(isolate->context()->native_context(), isolate);
   DirectHandle<JSFunction> constructor(context->data_view_fun(), isolate);
@@ -1271,13 +1271,14 @@ MaybeHandle<Map> JSFunction::GetDerivedRabGsabDataViewMap(
   DirectHandle<Map> map;
   if (!maybe_map.ToHandle(&map)) return {};
   if (*map == constructor->initial_map()) {
-    return handle(Cast<Map>(context->js_rab_gsab_data_view_map()), isolate);
+    return direct_handle(Cast<Map>(context->js_rab_gsab_data_view_map()),
+                         isolate);
   }
 
   // This only happens when subclassing DataViews. Create a new map with the
   // JS_RAB_GSAB_DATA_VIEW instance type. Note: the map is not cached and
   // reused -> every data view gets a unique map, making ICs slow.
-  Handle<Map> rab_gsab_map = Map::Copy(isolate, map, "RAB / GSAB");
+  DirectHandle<Map> rab_gsab_map = Map::Copy(isolate, map, "RAB / GSAB");
   rab_gsab_map->set_instance_type(JS_RAB_GSAB_DATA_VIEW_TYPE);
   return rab_gsab_map;
 }
@@ -1372,19 +1373,19 @@ bool JSFunction::SetName(DirectHandle<JSFunction> function, Handle<Name> name,
 
 namespace {
 
-Handle<String> NativeCodeFunctionSourceString(
+DirectHandle<String> NativeCodeFunctionSourceString(
     Isolate* isolate, DirectHandle<SharedFunctionInfo> shared_info) {
   IncrementalStringBuilder builder(isolate);
   builder.AppendCStringLiteral("function ");
   builder.AppendString(direct_handle(shared_info->Name(), isolate));
   builder.AppendCStringLiteral("() { [native code] }");
-  return indirect_handle(builder.Finish().ToHandleChecked(), isolate);
+  return builder.Finish().ToHandleChecked();
 }
 
 }  // namespace
 
 // static
-Handle<String> JSFunction::ToString(DirectHandle<JSFunction> function) {
+DirectHandle<String> JSFunction::ToString(DirectHandle<JSFunction> function) {
   Isolate* const isolate = function->GetIsolate();
   DirectHandle<SharedFunctionInfo> shared_info(function->shared(), isolate);
 

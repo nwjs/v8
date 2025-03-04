@@ -4595,7 +4595,8 @@ Reduction JSCallReducer::ReduceJSCall(Node* node) {
       // succeed.
       FixedArrayRef bound_arguments = function.bound_arguments(broker());
       const uint32_t bound_arguments_length = bound_arguments.length();
-      if (arity + bound_arguments_length > Code::kMaxArguments) {
+      if (arity + bound_arguments_length + /* receiver */ 1 >
+          Code::kMaxArguments) {
         return NoChange();
       }
       static constexpr int kInlineSize = 16;  // Arbitrary.
@@ -6480,7 +6481,7 @@ Reduction JSCallReducer::ReduceArrayIterator(Node* node,
           CallParametersOf(node->op()).feedback());
 
       JSCallReducerAssembler a(this, node);
-      a.CheckIfTypedArrayWasDetached(
+      a.CheckIfTypedArrayWasDetachedOrOutOfBounds(
           TNode<JSTypedArray>::UncheckedCast(receiver),
           std::move(elements_kinds), p.feedback());
       std::tie(effect, control) = ReleaseEffectAndControlFromAssembler(&a);
@@ -6889,10 +6890,10 @@ Reduction JSCallReducer::ReduceStringPrototypeCharAt(Node* node) {
         index_matcher.IsInRange(
             0.0, static_cast<double>(JSObject::kMaxElementIndex));
     if (is_content_accessible && is_integer_in_max_range) {
-      const uint32_t index =
-          static_cast<uint32_t>(index_matcher.ResolvedValue());
       JSCallReducerAssembler a(this, node);
-      Node* subgraph = a.ReduceStringPrototypeCharAt(receiver_string, index);
+      Node* subgraph = a.ReduceStringPrototypeCharAt(
+          receiver_string,
+          static_cast<uint32_t>(index_matcher.ResolvedValue()));
       return ReplaceWithSubgraph(&a, subgraph);
     }
   }
@@ -7813,6 +7814,15 @@ Reduction JSCallReducer::ReduceTypedArrayPrototypeLength(Node* node) {
   TNode<Number> length = a.TypedArrayLength(
       typed_array, std::move(elements_kinds), a.ContextInput());
 
+  if (!dependencies()->DependOnArrayBufferDetachingProtector()) {
+    length =
+        a.MachineSelectIf<Number>(a.ArrayBufferViewDetachedBit(typed_array))
+            .Then([&]() { return a.NumberConstant(0); })
+            .Else([&]() { return length; })
+            .ExpectFalse()
+            .Value();
+  }
+
   return ReplaceWithSubgraph(&a, length);
 }
 
@@ -8369,20 +8379,14 @@ Reduction JSCallReducer::ReduceArrayBufferViewAccessor(
   // See if we can skip the detaching check.
   if (!depended_on_detaching_protector) {
     // Check whether {receiver}s JSArrayBuffer was detached.
-    TNode<HeapObject> buffer = a.LoadField<HeapObject>(
-        AccessBuilder::ForJSArrayBufferViewBuffer(), receiver);
-    TNode<Word32T> bitfield = a.EnterMachineGraph<Word32T>(
-        a.LoadField<Word32T>(AccessBuilder::ForJSArrayBufferBitField(), buffer),
-        UseInfo::TruncatingWord32());
-    TNode<Word32T> detached_bit = a.Word32And(
-        bitfield, a.Uint32Constant(JSArrayBuffer::WasDetachedBit::kMask));
-
+    //
     // TODO(turbofan): Ideally we would bail out here if the {receiver}s
     // JSArrayBuffer was detached, but there's no way to guard against
     // deoptimization loops right now, since the JSCall {node} is usually
     // created from a LOAD_IC inlining, and so there's no CALL_IC slot
     // from which we could use the speculation bit.
-    value = a.MachineSelect<UintPtrT>(detached_bit, a.UintPtrConstant(0), value,
+    value = a.MachineSelect<UintPtrT>(a.ArrayBufferViewDetachedBit(receiver),
+                                      a.UintPtrConstant(0), value,
                                       BranchHint::kFalse);
   }
 

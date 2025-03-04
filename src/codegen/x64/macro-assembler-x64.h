@@ -173,6 +173,7 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void Cvttss2ui(Register dst, Operand src, Label* fail = nullptr);
   void Cvttss2ui(Register dst, XMMRegister src, Label* fail = nullptr);
   void Cvtpd2ph(XMMRegister dst, XMMRegister src, Register tmp);
+  void Cvtph2pd(XMMRegister dst, XMMRegister src);
 
   // cvtsi2sd and cvtsi2ss instructions only write to the low 64/32-bit of dst
   // register, which hinders register renaming and makes dependence chains
@@ -411,8 +412,7 @@ class V8_EXPORT_PRIVATE MacroAssembler
       xorl(dst, dst);
       // The following shorter sequence for uint8 causes performance
       // regressions:
-      // xorl(dst, dst); movb(dst,
-      // Immediate(static_cast<uint32_t>(x)));
+      // xorl(dst, dst); movb(dst, Immediate(static_cast<uint32_t>(x)));
     } else if (is_uint32(x)) {
       movl(dst, Immediate(static_cast<uint32_t>(x)));
     } else if (is_int32(x)) {
@@ -541,7 +541,6 @@ class V8_EXPORT_PRIVATE MacroAssembler
                            uint16_t argument_count);
 #endif
 #ifdef V8_ENABLE_WEBASSEMBLY
-  void ResolveWasmCodePointer(Register target, uint64_t signature_hash);
   void CallWasmCodePointer(Register target, uint64_t signature_hash,
                            CallJumpMode call_jump_mode = CallJumpMode::kCall);
   void CallWasmCodePointerNoSignatureCheck(Register target);
@@ -788,7 +787,8 @@ class V8_EXPORT_PRIVATE MacroAssembler
   // Loads a field containing off-heap pointer and does necessary decoding
   // if sandboxed external pointers are enabled.
   void LoadExternalPointerField(Register destination, Operand field_operand,
-                                ExternalPointerTag tag, Register scratch,
+                                ExternalPointerTagRange tag_range,
+                                Register scratch,
                                 IsolateRootLocation isolateRootLocation =
                                     IsolateRootLocation::kInRootRegister);
 

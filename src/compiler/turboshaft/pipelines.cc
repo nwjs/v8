@@ -7,17 +7,16 @@
 #include "src/compiler/pipeline-data-inl.h"
 #include "src/compiler/turboshaft/csa-optimize-phase.h"
 #include "src/compiler/turboshaft/debug-feature-lowering-phase.h"
-#include "src/compiler/turboshaft/recreate-schedule-phase.h"
+#include "src/compiler/turboshaft/instruction-selection-normalization-reducer.h"
+#include "src/compiler/turboshaft/load-store-simplification-reducer.h"
+#include "src/compiler/turboshaft/stack-check-lowering-reducer.h"
 
 namespace v8::internal::compiler::turboshaft {
 
-void Pipeline::RecreateTurbofanGraph(compiler::TFPipelineData* turbofan_data,
-                                     Linkage* linkage) {
-  Run<turboshaft::DecompressionOptimizationPhase>();
-
-  Run<turboshaft::RecreateSchedulePhase>(turbofan_data, linkage);
-  TraceSchedule(turbofan_data->info(), turbofan_data, turbofan_data->schedule(),
-                turboshaft::RecreateSchedulePhase::phase_name());
+void SimplificationAndNormalizationPhase::Run(PipelineData* data,
+                                              Zone* temp_zone) {
+  CopyingPhase<LoadStoreSimplificationReducer,
+               InstructionSelectionNormalizationReducer>::Run(data, temp_zone);
 }
 
 [[nodiscard]] bool Pipeline::GenerateCode(

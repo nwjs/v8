@@ -1748,7 +1748,7 @@ bool SharedFunctionInfoRef::HasBreakInfo(JSHeapBroker* broker) const {
     return object()->HasBreakInfo(broker->isolate());
   } else {
     LocalIsolate* local_isolate = broker->local_isolate();
-    SharedMutexGuardIfOffThread<LocalIsolate, base::kShared> mutex_guard(
+    MutexGuardIfOffThread<LocalIsolate> mutex_guard(
         local_isolate->shared_function_info_access(), local_isolate);
     return object()->HasBreakInfo(local_isolate->GetMainThreadIsolateUnsafe());
   }
@@ -1813,6 +1813,18 @@ size_t JSTypedArrayRef::length() const {
   CHECK(!is_on_heap());
   // Immutable after initialization.
   return object()->length();
+}
+
+size_t JSTypedArrayRef::byte_length() const {
+  CHECK(!is_on_heap());
+  // Immutable after initialization (since this is not used for RAB/GSAB).
+  return object()->byte_length();
+}
+
+ElementsKind JSTypedArrayRef::elements_kind(JSHeapBroker* broker) const {
+  CHECK(!is_on_heap());
+  // Immutable after initialization.
+  return map(broker).elements_kind();
 }
 
 HeapObjectRef JSTypedArrayRef::buffer(JSHeapBroker* broker) const {

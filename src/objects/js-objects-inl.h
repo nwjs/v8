@@ -126,7 +126,7 @@ MaybeHandle<Object> JSReceiver::GetProperty(Isolate* isolate,
 }
 
 // static
-V8_WARN_UNUSED_RESULT MaybeHandle<FixedArray> JSReceiver::OwnPropertyKeys(
+V8_WARN_UNUSED_RESULT MaybeDirectHandle<FixedArray> JSReceiver::OwnPropertyKeys(
     Isolate* isolate, DirectHandle<JSReceiver> object) {
   return KeyAccumulator::GetKeys(isolate, object, KeyCollectionMode::kOwnOnly,
                                  ALL_PROPERTIES,
@@ -188,9 +188,16 @@ void JSObject::EnsureCanContainElements(DirectHandle<JSObject> object,
     bool is_holey = IsHoleyElementsKind(current_kind);
     if (current_kind == HOLEY_ELEMENTS) return;
     Tagged<Object> the_hole = GetReadOnlyRoots().the_hole_value();
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+    Tagged<Undefined> undefined = GetReadOnlyRoots().undefined_value();
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
     for (uint32_t i = 0; i < count; ++i, ++objects) {
       Tagged<Object> current = *objects;
-      if (current == the_hole) {
+      if (current == the_hole
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+          || current == undefined
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+      ) {
         is_holey = true;
         target_kind = GetHoleyElementsKind(target_kind);
       } else if (!IsSmi(current)) {
@@ -937,11 +944,12 @@ std::optional<Tagged<NativeContext>> JSReceiver::GetCreationContext() {
   return Cast<NativeContext>(maybe_native_context);
 }
 
-MaybeHandle<NativeContext> JSReceiver::GetCreationContext(Isolate* isolate) {
+MaybeDirectHandle<NativeContext> JSReceiver::GetCreationContext(
+    Isolate* isolate) {
   DisallowGarbageCollection no_gc;
   std::optional<Tagged<NativeContext>> maybe_context = GetCreationContext();
   if (!maybe_context.has_value()) return {};
-  return handle(maybe_context.value(), isolate);
+  return direct_handle(maybe_context.value(), isolate);
 }
 
 Maybe<bool> JSReceiver::HasProperty(Isolate* isolate,

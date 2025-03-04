@@ -178,7 +178,7 @@ class MjsunitNamesProvider {
     }
     WasmName name = wire_bytes_.GetNameOrNull(function_variable_names_[index]);
     if (name.size() > 0) {
-      out << name << index;
+      out << name;
     } else {
       out << "$func" << index;
     }
@@ -427,10 +427,10 @@ class MjsunitNamesProvider {
       char uc = c | 0x20;
       if (uc >= 'a' && uc <= 'z') continue;
       if (c == '$' || c == '_') continue;
-      if (c >= '0' && c <= '9') continue;
+      if (i > 0 && c >= '0' && c <= '9') continue;
       return false;
     }
-    // Check for clashes with auto-generated names.
+    // Check for clashes with auto-generated names and reserved words.
     // This isn't perfect: any collision with a function (e.g. "makeSig")
     // or constant (e.g. "kFooRefCode") would also break the generated test,
     // but it doesn't seem feasible to accurately guard against all of those.
@@ -451,6 +451,7 @@ class MjsunitNamesProvider {
       if (memcmp(name.begin(), "kExpr", 5) == 0) return false;
       if (memcmp(name.begin(), "kSig_", 5) == 0) return false;
       if (memcmp(name.begin(), "kWasm", 5) == 0) return false;
+      if (memcmp(name.begin(), "throw", 5) == 0) return false;
     }
     if (name.length() >= 4) {
       if (memcmp(name.begin(), "$mem", 4) == 0) return false;
@@ -1478,8 +1479,8 @@ class MjsunitModuleDis {
       out_ << "[";
       uint32_t num_bytes = static_cast<uint32_t>(data.size());
       if (num_bytes > 0) out_ << uint32_t{data[0]};
-      for (uint32_t i = 1; i < num_bytes; i++) {
-        out_ << ", " << uint32_t{data[i]};
+      for (uint32_t j = 1; j < num_bytes; j++) {
+        out_ << ", " << uint32_t{data[j]};
       }
       out_ << "]";
       if (segment.shared) out_ << ", true";
@@ -1739,22 +1740,22 @@ class MjsunitModuleDis {
 
   void DecodeAndAppendInitExpr(ConstantExpression init, ValueType expected) {
     switch (init.kind()) {
-      case ConstantExpression::kEmpty:
+      case ConstantExpression::Kind::kEmpty:
         UNREACHABLE();
-      case ConstantExpression::kI32Const:
+      case ConstantExpression::Kind::kI32Const:
         out_ << "wasmI32Const(" << init.i32_value() << ")";
         break;
-      case ConstantExpression::kRefNull:
+      case ConstantExpression::Kind::kRefNull:
         out_ << "[kExprRefNull, ";
         names()->PrintHeapType(out_, HeapType(init.repr()), kEmitWireBytes);
         out_ << "]";
         break;
-      case ConstantExpression::kRefFunc:
+      case ConstantExpression::Kind::kRefFunc:
         out_ << "[kExprRefFunc, ";
         names()->PrintFunctionReferenceLeb(out_, init.index());
         out_ << "]";
         break;
-      case ConstantExpression::kWireBytesRef: {
+      case ConstantExpression::Kind::kWireBytesRef: {
         WireBytesRef ref = init.wire_bytes_ref();
         const uint8_t* start = wire_bytes_.start() + ref.offset();
         const uint8_t* end = start + ref.length();

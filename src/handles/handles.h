@@ -236,11 +236,11 @@ class Handle final : public HandleBase {
   friend class MaybeHandle;
   // Casts are allowed to access location_.
   template <typename To, typename From>
-  friend inline Handle<To> UncheckedCast(Handle<From> value);
+  friend inline IndirectHandle<To> UncheckedCast(IndirectHandle<From> value);
 };
 
 template <typename T>
-std::ostream& operator<<(std::ostream& os, Handle<T> handle);
+std::ostream& operator<<(std::ostream& os, IndirectHandle<T> handle);
 
 // ----------------------------------------------------------------------------
 // A stack-allocated class that governs a number of local handles.
@@ -325,9 +325,11 @@ class V8_NODISCARD HandleScope {
   // Extend the handle scope making room for more handles.
   V8_EXPORT_PRIVATE V8_NOINLINE static Address* Extend(Isolate* isolate);
 
-#ifdef ENABLE_HANDLE_ZAPPING
+#if defined(ENABLE_GLOBAL_HANDLE_ZAPPING) || \
+    defined(ENABLE_LOCAL_HANDLE_ZAPPING)
   // Zaps the handles in the half-open interval [start, end).
-  V8_EXPORT_PRIVATE static void ZapRange(Address* start, Address* end);
+  V8_EXPORT_PRIVATE static void ZapRange(Address* start, Address* end,
+                                         uintptr_t value = kHandleZapValue);
 #endif
 
   friend class v8::HandleScope;
@@ -507,14 +509,19 @@ class DirectHandle : public DirectHandleBase {
 
   V8_INLINE DirectHandle() : DirectHandle(kTaggedNullAddress) {}
 
-  V8_INLINE explicit DirectHandle(Address object) : DirectHandleBase(object) {}
-
   V8_INLINE DirectHandle(Tagged<T> object, Isolate* isolate)
       : DirectHandle(object) {}
   V8_INLINE DirectHandle(Tagged<T> object, LocalIsolate* isolate)
       : DirectHandle(object) {}
   V8_INLINE DirectHandle(Tagged<T> object, LocalHeap* local_heap)
       : DirectHandle(object) {}
+
+  V8_INLINE static DirectHandle FromAddress(Address object) {
+    return DirectHandle(object);
+  }
+  V8_INLINE static DirectHandle FromSlot(Address* slot) {
+    return FromAddress(slot != nullptr ? *slot : kTaggedNullAddress);
+  }
 
   V8_INLINE static DirectHandle<T> New(Tagged<T> object, Isolate* isolate) {
     return DirectHandle<T>(object);
@@ -593,6 +600,7 @@ class DirectHandle : public DirectHandleBase {
   friend inline DirectHandle<To> UncheckedCast(DirectHandle<From> value);
 
   V8_INLINE explicit DirectHandle(Tagged<T> object);
+  V8_INLINE explicit DirectHandle(Address object) : DirectHandleBase(object) {}
 
   explicit DirectHandle(no_checking_tag do_not_check)
       : DirectHandleBase(kTaggedNullAddress, do_not_check) {}
@@ -674,6 +682,10 @@ class V8_TRIVIAL_ABI DirectHandle :
   V8_INLINE DirectHandle(IndirectHandle<S> handle)
     requires(is_subtype_v<S, T>)
       : handle_(handle) {}
+
+  V8_INLINE static DirectHandle FromSlot(Address* slot) {
+    return DirectHandle(IndirectHandle<T>(slot));
+  }
 
   V8_INLINE IndirectHandle<T> operator->() const { return handle_; }
   V8_INLINE Tagged<T> operator*() const { return *handle_; }

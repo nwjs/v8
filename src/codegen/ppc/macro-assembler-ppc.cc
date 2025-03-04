@@ -2440,16 +2440,14 @@ void MacroAssembler::Check(Condition cond, AbortReason reason, CRegister cr) {
 }
 
 void MacroAssembler::Abort(AbortReason reason) {
-  Label abort_start;
-  bind(&abort_start);
+  ASM_CODE_COMMENT(this);
   if (v8_flags.code_comments) {
-    const char* msg = GetAbortReason(reason);
-    RecordComment("Abort message: ");
-    RecordComment(msg);
+    RecordComment("Abort message:", SourceLocation{});
+    RecordComment(GetAbortReason(reason), SourceLocation{});
   }
 
-  // Avoid emitting call to builtin if requested.
-  if (trap_on_abort()) {
+  // Without debug code, save the code size and just trap.
+  if (!v8_flags.debug_code) {
     stop();
     return;
   }
@@ -5304,6 +5302,7 @@ void MacroAssembler::JumpJSFunction(Register function_object, Register scratch,
 #ifdef V8_ENABLE_WEBASSEMBLY
 
 void MacroAssembler::ResolveWasmCodePointer(Register target) {
+  ASM_CODE_COMMENT(this);
   static_assert(!V8_ENABLE_SANDBOX_BOOL);
   ExternalReference global_jump_table =
       ExternalReference::wasm_code_pointer_table();
@@ -5385,7 +5384,7 @@ void MacroAssembler::BailoutIfDeoptimized() {
   }
 #ifdef V8_ENABLE_LEAPTIERING
   if (v8_flags.debug_code) {
-    Assert(kZero, AbortReason::kInvalidDeoptimizedCode);
+    Assert(to_condition(kZero), AbortReason::kInvalidDeoptimizedCode);
   }
 #else
   TailCallBuiltin(Builtin::kCompileLazyDeoptimizedCode, ne, cr0);

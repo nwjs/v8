@@ -361,7 +361,7 @@ class GraphVisitor : public OutputGraphAssembler<GraphVisitor<AfterNext>,
       // predecessor, we check the index of the input corresponding to the old
       // predecessor, and we put it next in {new_inputs}.
       new_inputs.clear();
-      int predecessor_index = predecessor_count - 1;
+      predecessor_index = predecessor_count - 1;
       for (new_pred = Asm().current_block()->LastPredecessor();
            new_pred != nullptr; new_pred = new_pred->NeighboringPredecessor()) {
         const Block* origin = new_pred->OriginForBlockEnd();
@@ -861,8 +861,8 @@ class GraphVisitor : public OutputGraphAssembler<GraphVisitor<AfterNext>,
     return Asm().ReduceFrameState(base::VectorOf(inputs), op.inlined, op.data);
   }
   OpIndex AssembleOutputGraphCall(const CallOp& op) {
-    OpIndex callee = MapToNewGraph(op.callee());
-    OptionalOpIndex frame_state = MapToNewGraph(op.frame_state());
+    V<CallTarget> callee = MapToNewGraph(op.callee());
+    OptionalV<FrameState> frame_state = MapToNewGraph(op.frame_state());
     auto arguments = MapToNewGraph<16>(op.arguments());
     return Asm().ReduceCall(callee, frame_state, base::VectorOf(arguments),
                             op.descriptor, op.Effects());

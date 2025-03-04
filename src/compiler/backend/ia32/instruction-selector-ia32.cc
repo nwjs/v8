@@ -1811,7 +1811,6 @@ void InstructionSelectorT<Adapter>::VisitWord32Ror(node_t node) {
   V(Word32Popcnt, kIA32Popcnt)                               \
   V(SignExtendWord8ToInt32, kIA32Movsxbl)                    \
   V(SignExtendWord16ToInt32, kIA32Movsxwl)                   \
-  IF_WASM(V, F64x2Sqrt, kIA32F64x2Sqrt)
 
 #define RO_WITH_TEMP_OP_T_LIST(V) V(ChangeUint32ToFloat64, kIA32Uint32ToFloat64)
 
@@ -1841,7 +1840,8 @@ void InstructionSelectorT<Adapter>::VisitWord32Ror(node_t node) {
   IF_WASM(V, F64x2Floor, kIA32F64x2Round | MiscField::encode(kRoundDown))      \
   IF_WASM(V, F64x2Trunc, kIA32F64x2Round | MiscField::encode(kRoundToZero))    \
   IF_WASM(V, F64x2NearestInt,                                                  \
-          kIA32F64x2Round | MiscField::encode(kRoundToNearest))
+          kIA32F64x2Round | MiscField::encode(kRoundToNearest))                \
+  IF_WASM(V, F64x2Sqrt, kIA32F64x2Sqrt)
 
 #define RRO_FLOAT_OP_T_LIST(V) \
   V(Float32Add, kFloat32Add)   \
@@ -1920,6 +1920,12 @@ FLOAT_UNOP_T_LIST(FLOAT_UNOP_VISITOR)
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitTruncateFloat64ToFloat16RawBits(
+    node_t node) {
+  UNIMPLEMENTED();
+}
+
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitChangeFloat16RawBitsToFloat64(
     node_t node) {
   UNIMPLEMENTED();
 }
@@ -2595,22 +2601,20 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitWordCompareZero(
         // of the actual value, or was already defined, which means it is
         // scheduled *AFTER* this branch).
         OpIndex node = projection->input();
-        OpIndex result = FindProjection(node, 0);
-        if (!result.valid() || IsDefined(result)) {
-          if (const OverflowCheckedBinopOp* binop =
-                  this->TryCast<OverflowCheckedBinopOp>(node)) {
-            DCHECK_EQ(binop->rep, WordRepresentation::Word32());
-            cont->OverwriteAndNegateIfEqual(kOverflow);
-            switch (binop->kind) {
-              case OverflowCheckedBinopOp::Kind::kSignedAdd:
-                return VisitBinop(this, node, kIA32Add, cont);
-              case OverflowCheckedBinopOp::Kind::kSignedSub:
-                return VisitBinop(this, node, kIA32Sub, cont);
-              case OverflowCheckedBinopOp::Kind::kSignedMul:
-                return VisitBinop(this, node, kIA32Imul, cont);
-            }
-            UNREACHABLE();
+        if (const OverflowCheckedBinopOp* binop =
+                this->TryCast<OverflowCheckedBinopOp>(node);
+            binop && CanDoBranchIfOverflowFusion(node)) {
+          DCHECK_EQ(binop->rep, WordRepresentation::Word32());
+          cont->OverwriteAndNegateIfEqual(kOverflow);
+          switch (binop->kind) {
+            case OverflowCheckedBinopOp::Kind::kSignedAdd:
+              return VisitBinop(this, node, kIA32Add, cont);
+            case OverflowCheckedBinopOp::Kind::kSignedSub:
+              return VisitBinop(this, node, kIA32Sub, cont);
+            case OverflowCheckedBinopOp::Kind::kSignedMul:
+              return VisitBinop(this, node, kIA32Imul, cont);
           }
+          UNREACHABLE();
         }
       }
     } else if (value_op.Is<StackPointerGreaterThanOp>()) {
@@ -3123,7 +3127,7 @@ void InstructionSelectorT<Adapter>::VisitWord32AtomicPairLoad(node_t node) {
     // TODO(ahaas): Introduce an enum for {scale} instead of an integer.
     // {scale = 0} means *1 in the generated code.
     int scale = 0;
-    AddressingMode mode = g.GenerateMemoryOperandInputs(
+    mode = g.GenerateMemoryOperandInputs(
         index, scale, base, this->valid(projection0) ? 0 : 4,
         kPositiveDisplacement, inputs, &input_count);
     InstructionCode code = opcode | AddressingModeField::encode(mode);

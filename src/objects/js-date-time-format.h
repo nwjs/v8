@@ -40,27 +40,27 @@ class JSDateTimeFormat
   enum class RequiredOption { kDate, kTime, kAny };
   enum class DefaultsOption { kDate, kTime, kAll };
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSDateTimeFormat> New(
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSDateTimeFormat> New(
       Isolate* isolate, DirectHandle<Map> map, DirectHandle<Object> locales,
       DirectHandle<Object> options, const char* service);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSDateTimeFormat>
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSDateTimeFormat>
   CreateDateTimeFormat(Isolate* isolate, DirectHandle<Map> map,
                        DirectHandle<Object> locales,
                        DirectHandle<Object> options, RequiredOption required,
                        DefaultsOption defaults, const char* service);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSObject> ResolvedOptions(
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSObject> ResolvedOptions(
       Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format);
 
-  V8_WARN_UNUSED_RESULT static Handle<String> Calendar(
+  V8_WARN_UNUSED_RESULT static DirectHandle<String> Calendar(
       Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format);
 
-  V8_WARN_UNUSED_RESULT static Handle<Object> TimeZone(
+  V8_WARN_UNUSED_RESULT static DirectHandle<Object> TimeZone(
       Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format);
 
   // ecma402/#sec-unwrapdatetimeformat
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSDateTimeFormat>
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSDateTimeFormat>
   UnwrapDateTimeFormat(Isolate* isolate, Handle<JSReceiver> format_holder);
 
   // ecma402/#sec-datetime-format-functions
@@ -99,7 +99,8 @@ class JSDateTimeFormat
 
   V8_EXPORT_PRIVATE static const std::set<std::string>& GetAvailableLocales();
 
-  Handle<Object> static TimeZoneId(Isolate* isolate, const icu::TimeZone& tz);
+  DirectHandle<Object> static TimeZoneId(Isolate* isolate,
+                                         const icu::TimeZone& tz);
   V8_WARN_UNUSED_RESULT static MaybeHandle<String> TimeZoneIdToString(
       Isolate* isolate, const icu::UnicodeString& id);
 

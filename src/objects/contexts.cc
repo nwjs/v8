@@ -52,7 +52,7 @@ Handle<NameToIndexHashTable> AddLocalNamesFromContext(
     DirectHandle<Context> script_context, bool ignore_duplicates,
     int script_context_index) {
   ReadOnlyRoots roots(isolate);
-  Handle<ScopeInfo> scope_info(script_context->scope_info(), isolate);
+  DirectHandle<ScopeInfo> scope_info(script_context->scope_info(), isolate);
   int local_count = scope_info->ContextLocalCount();
   names_table = names_table->EnsureCapacity(isolate, names_table, local_count);
 
@@ -523,7 +523,7 @@ Context::GetScriptContextSideProperty(size_t index) const {
 namespace {
 std::optional<int32_t> DoubleFitsInInt32(double value) {
   constexpr double int32_min = std::numeric_limits<int32_t>::min();
-  constexpr double int32_max = std::numeric_limits<int32_t>::min();
+  constexpr double int32_max = std::numeric_limits<int32_t>::max();
   // Check -0.0 first.
   if (value == 0.0 && std::signbit(value)) return {};
   double trunc_value = std::trunc(value);
@@ -542,8 +542,13 @@ DirectHandle<Object> TryLoadMutableHeapNumber(
   const int side_data_index = index - Context::MIN_CONTEXT_EXTENDED_SLOTS;
   Tagged<FixedArray> side_data_table = Cast<FixedArray>(
       script_context->get(Context::CONTEXT_SIDE_TABLE_PROPERTY_INDEX));
+  if (side_data_table == ReadOnlyRoots(isolate).empty_fixed_array()) {
+    // No side data (maybe the context was created while the side data
+    // collection was disabled).
+    return value;
+  }
+
   Tagged<Object> data = side_data_table->get(side_data_index);
-  if (IsUndefined(data)) return value;
   ContextSidePropertyCell::Property property;
   if (IsSmi(data)) {
     property =
@@ -575,16 +580,23 @@ DirectHandle<Object> Context::LoadScriptContextElement(
 void Context::StoreScriptContextAndUpdateSlotProperty(
     DirectHandle<Context> script_context, int index,
     DirectHandle<Object> new_value, Isolate* isolate) {
-  DCHECK(v8_flags.const_tracking_let);
+  DCHECK(v8_flags.script_context_mutable_heap_number ||
+         v8_flags.const_tracking_let);
   DCHECK(script_context->IsScriptContext());
 
-  DirectHandle<Object> old_value(script_context->get(index), isolate);
   const int side_data_index = index - Context::MIN_CONTEXT_EXTENDED_SLOTS;
   DirectHandle<FixedArray> side_data(
       Cast<FixedArray>(
           script_context->get(Context::CONTEXT_SIDE_TABLE_PROPERTY_INDEX)),
       isolate);
+  if (*side_data == ReadOnlyRoots(isolate).empty_fixed_array()) {
+    // No side data (maybe the context was created while the side data
+    // collection was disabled).
+    script_context->set(index, *new_value);
+    return;
+  }
 
+  DirectHandle<Object> old_value(script_context->get(index), isolate);
   if (IsTheHole(*old_value)) {
     // Setting the initial value. Here we cannot assert the corresponding side
     // data is `undefined` - that won't hold w/ variable redefinitions in REPL.
@@ -613,12 +625,12 @@ void Context::StoreScriptContextAndUpdateSlotProperty(
   std::optional<Tagged<ContextSidePropertyCell>> maybe_cell;
   ContextSidePropertyCell::Property property;
 
-  if (IsContextSidePropertyCell(data)) {
+  if (IsSmi(data)) {
+    property = ContextSidePropertyCell::FromSmi(data.ToSmi());
+  } else {
+    CHECK(Is<ContextSidePropertyCell>(data));
     maybe_cell = Cast<ContextSidePropertyCell>(data);
     property = maybe_cell.value()->context_side_property();
-  } else {
-    CHECK(IsSmi(data));
-    property = ContextSidePropertyCell::FromSmi(data.ToSmi());
   }
 
   switch (property) {
@@ -769,9 +781,9 @@ Handle<Object> Context::ErrorMessageForCodeGenerationFromStrings() {
       "Code generation from strings disallowed for this context");
 }
 
-Handle<Object> Context::ErrorMessageForWasmCodeGeneration() {
+DirectHandle<Object> Context::ErrorMessageForWasmCodeGeneration() {
   Isolate* isolate = GetIsolate();
-  Handle<Object> result(error_message_for_wasm_code_gen(), isolate);
+  DirectHandle<Object> result(error_message_for_wasm_code_gen(), isolate);
   if (!IsUndefined(*result, isolate)) return result;
   return isolate->factory()->NewStringFromStaticChars(
       "Wasm code generation disallowed by embedder");
@@ -905,16 +917,16 @@ void NativeContext::RunPromiseHook(PromiseHookType type,
   }
   if (failed) {
     DCHECK(isolate->has_exception());
-    Handle<Object> exception(isolate->exception(), isolate);
+    DirectHandle<Object> exception(isolate->exception(), isolate);
 
     MessageLocation* no_location = nullptr;
-    Handle<JSMessageObject> message =
+    DirectHandle<JSMessageObject> message =
         isolate->CreateMessageOrAbort(exception, no_location);
     MessageHandler::ReportMessage(isolate, no_location, message);
 
     isolate->clear_exception();
   }
 }
-#endif
+#endif  // V8_ENABLE_JAVASCRIPT_PROMISE_HOOKS
 
 }  // namespace v8::internal

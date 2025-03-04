@@ -231,8 +231,11 @@ V8_OBJECT class FixedArray
                            WriteBarrierMode mode);
 
   // Return a grown copy if the index is bigger than the array's length.
-  V8_EXPORT_PRIVATE static Handle<FixedArray> SetAndGrow(
-      Isolate* isolate, Handle<FixedArray> array, int index,
+  template <template <typename> typename HandleType>
+    requires(
+        std::is_convertible_v<HandleType<FixedArray>, DirectHandle<FixedArray>>)
+  V8_EXPORT_PRIVATE static HandleType<FixedArray> SetAndGrow(
+      Isolate* isolate, HandleType<FixedArray> array, int index,
       DirectHandle<Object> value);
 
   // Right-trim the array.
@@ -470,6 +473,10 @@ V8_OBJECT class FixedDoubleArray
   static inline Handle<Object> get(Tagged<FixedDoubleArray> array, int index,
                                    Isolate* isolate);
   inline void set(int index, double value);
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  inline void set_undefined(int index);
+  inline bool is_undefined(int index);
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
 
   inline void set_the_hole(Isolate* isolate, int index);
   inline void set_the_hole(int index);
@@ -720,7 +727,7 @@ V8_OBJECT class ArrayList : public TaggedArrayBase<ArrayList, ArrayListShape> {
       DirectHandle<Object> obj1,
       AllocationType allocation = AllocationType::kYoung);
 
-  V8_EXPORT_PRIVATE static Handle<FixedArray> ToFixedArray(
+  V8_EXPORT_PRIVATE static DirectHandle<FixedArray> ToFixedArray(
       Isolate* isolate, DirectHandle<ArrayList> array,
       AllocationType allocation = AllocationType::kYoung);
 
@@ -872,8 +879,8 @@ class FixedAddressArrayBase : public FixedIntegerArrayBase<Address, Base> {
 
   // {MoreArgs...} allows passing the `AllocationType` if `Base` is `ByteArray`.
   template <typename... MoreArgs>
-  static inline Handle<FixedAddressArrayBase> New(Isolate* isolate, int length,
-                                                  MoreArgs&&... more_args);
+  static inline DirectHandle<FixedAddressArrayBase> New(
+      Isolate* isolate, int length, MoreArgs&&... more_args);
 } V8_OBJECT_END;
 
 using FixedAddressArray = FixedAddressArrayBase<ByteArray>;
@@ -932,8 +939,9 @@ V8_OBJECT
 template <class T>
 class TrustedPodArray : public PodArrayBase<T, TrustedByteArray> {
  public:
-  static Handle<TrustedPodArray<T>> New(Isolate* isolate, int length);
-  static Handle<TrustedPodArray<T>> New(LocalIsolate* isolate, int length);
+  static DirectHandle<TrustedPodArray<T>> New(Isolate* isolate, int length);
+  static DirectHandle<TrustedPodArray<T>> New(LocalIsolate* isolate,
+                                              int length);
 } V8_OBJECT_END;
 
 }  // namespace v8::internal

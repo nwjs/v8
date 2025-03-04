@@ -62,11 +62,11 @@ Handle<Object> GetExport(Isolate* isolate,
   return desc.value();
 }
 
-void CheckEquivalent(const WasmValue& lhs, const WasmValue& rhs,
+void CheckEquivalent(const WasmValue& init_lhs, const WasmValue& init_rhs,
                      const WasmModule& module) {
   DisallowGarbageCollection no_gc;
   // Stack of elements to be checked.
-  std::vector<std::pair<WasmValue, WasmValue>> cmp = {{lhs, rhs}};
+  std::vector<std::pair<WasmValue, WasmValue>> cmp = {{init_lhs, init_rhs}};
   using TaggedT = decltype(Tagged<Object>().ptr());
   // Map of lhs objects we have already seen to their rhs object on the first
   // visit. This is needed to ensure a reasonable runtime for the check.
@@ -106,7 +106,9 @@ void CheckEquivalent(const WasmValue& lhs, const WasmValue& rhs,
     Tagged<WasmStruct> lhs_struct = Cast<WasmStruct>(lhs);
     Tagged<WasmStruct> rhs_struct = Cast<WasmStruct>(rhs);
     CHECK_EQ(lhs_struct->map(), rhs_struct->map());
-    uint32_t field_count = lhs_struct->type()->field_count();
+    const CanonicalStructType* type = GetTypeCanonicalizer()->LookupStruct(
+        lhs_struct->map()->wasm_type_info()->type_index());
+    uint32_t field_count = type->field_count();
     for (uint32_t i = 0; i < field_count; ++i) {
       cmp.emplace_back(lhs_struct->GetFieldValue(i),
                        rhs_struct->GetFieldValue(i));
@@ -176,14 +178,15 @@ void CheckEquivalent(const WasmValue& lhs, const WasmValue& rhs,
             }
             break;
           default:
-            CHECK(lhs.type().heap_type().is_index());
+            CHECK(lhs.type().has_index());
             if (IsWasmNull(lhs_ref)) break;
-            ModuleTypeIndex type_index = lhs.type().ref_index();
-            if (module.has_signature(type_index)) {
+            CanonicalTypeIndex type_index = lhs.type().ref_index();
+            TypeCanonicalizer* types = GetTypeCanonicalizer();
+            if (types->IsFunctionSignature(type_index)) {
               CHECK_EQ(lhs_ref, rhs_ref);
-            } else if (module.has_struct(type_index)) {
+            } else if (types->IsStruct(type_index)) {
               CheckStruct(lhs_ref, rhs_ref);
-            } else if (module.has_array(type_index)) {
+            } else if (types->IsArray(type_index)) {
               CheckArray(lhs_ref, rhs_ref);
             } else {
               UNIMPLEMENTED();
@@ -225,9 +228,7 @@ void FuzzIt(base::Vector<const uint8_t> data) {
   // Clear recursive groups: The fuzzer creates random types in every run. These
   // are saved as recursive groups as part of the type canonicalizer, but types
   // from previous runs just waste memory.
-  GetTypeCanonicalizer()->EmptyStorageForTesting();
-  TypeCanonicalizer::ClearWasmCanonicalTypesForTesting(i_isolate);
-  AddDummyTypesToTypeCanonicalizer(i_isolate, &zone);
+  ResetTypeCanonicalizer(isolate, &zone);
 
   size_t expression_count = 0;
   base::Vector<const uint8_t> bytes =
@@ -354,8 +355,7 @@ void FuzzIt(base::Vector<const uint8_t> data) {
             WasmValue global_value =
                 instance->trusted_data(i_isolate)->GetGlobalValue(
                     i_isolate, instance->module()->globals[i]);
-            WasmValue func_value(function_result, global_value.type(),
-                                 global_value.module());
+            WasmValue func_value(function_result, global_value.type());
             CheckEquivalent(global_value, func_value, *module_object->module());
           }
         }

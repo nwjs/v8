@@ -48,7 +48,7 @@ class JSObjectWalkVisitor {
       return StructureWalk(value);
     }
 
-    Handle<AllocationSite> current_site = site_context()->EnterNewScope();
+    DirectHandle<AllocationSite> current_site = site_context()->EnterNewScope();
     MaybeHandle<JSObject> copy_of_value = StructureWalk(value);
     site_context()->ExitScope(current_site, value);
     return copy_of_value;
@@ -77,7 +77,7 @@ MaybeHandle<JSObject> JSObjectWalkVisitor<ContextObject>::StructureWalk(
   }
 
   if (object->map(isolate)->is_deprecated()) {
-    base::SharedMutexGuard<base::kExclusive> mutex_guard(
+    base::SpinningMutexGuard mutex_guard(
         isolate->boilerplate_migration_access());
     JSObject::MigrateInstance(isolate, object);
   }
@@ -86,7 +86,7 @@ MaybeHandle<JSObject> JSObjectWalkVisitor<ContextObject>::StructureWalk(
   if (copying) {
     // JSFunction objects are not allowed to be in normal boilerplates at all.
     DCHECK(!IsJSFunction(*object, isolate));
-    Handle<AllocationSite> site_to_pass;
+    DirectHandle<AllocationSite> site_to_pass;
     if (site_context()->ShouldCreateMemento(object)) {
       site_to_pass = site_context()->current();
     }
@@ -236,10 +236,10 @@ class DeprecationUpdateContext {
   bool ShouldCreateMemento(DirectHandle<JSObject> object) { return false; }
   inline void ExitScope(DirectHandle<AllocationSite> scope_site,
                         DirectHandle<JSObject> object) {}
-  Handle<AllocationSite> EnterNewScope() { return Handle<AllocationSite>(); }
-  Handle<AllocationSite> current() {
-    UNREACHABLE();
+  DirectHandle<AllocationSite> EnterNewScope() {
+    return DirectHandle<AllocationSite>();
   }
+  DirectHandle<AllocationSite> current() { UNREACHABLE(); }
 
   static const bool kCopying = false;
 
@@ -283,7 +283,7 @@ class AllocationSiteCreationContext : public AllocationSiteContext {
     DCHECK(!scope_site.is_null());
     return scope_site;
   }
-  void ExitScope(Handle<AllocationSite> scope_site,
+  void ExitScope(DirectHandle<AllocationSite> scope_site,
                  DirectHandle<JSObject> object) {
     if (object.is_null()) return;
     scope_site->set_boilerplate(*object, kReleaseStore);
@@ -305,28 +305,28 @@ class AllocationSiteCreationContext : public AllocationSiteContext {
   static const bool kCopying = false;
 };
 
-MaybeHandle<JSObject> DeepWalk(Handle<JSObject> object,
-                               DeprecationUpdateContext* site_context) {
+MaybeDirectHandle<JSObject> DeepWalk(Handle<JSObject> object,
+                                     DeprecationUpdateContext* site_context) {
   JSObjectWalkVisitor<DeprecationUpdateContext> v(site_context);
-  MaybeHandle<JSObject> result = v.StructureWalk(object);
+  MaybeDirectHandle<JSObject> result = v.StructureWalk(object);
   DirectHandle<JSObject> for_assert;
   DCHECK(!result.ToHandle(&for_assert) || for_assert.is_identical_to(object));
   return result;
 }
 
-MaybeHandle<JSObject> DeepWalk(Handle<JSObject> object,
-                               AllocationSiteCreationContext* site_context) {
+MaybeDirectHandle<JSObject> DeepWalk(
+    Handle<JSObject> object, AllocationSiteCreationContext* site_context) {
   JSObjectWalkVisitor<AllocationSiteCreationContext> v(site_context);
-  MaybeHandle<JSObject> result = v.StructureWalk(object);
+  MaybeDirectHandle<JSObject> result = v.StructureWalk(object);
   DirectHandle<JSObject> for_assert;
   DCHECK(!result.ToHandle(&for_assert) || for_assert.is_identical_to(object));
   return result;
 }
 
-MaybeHandle<JSObject> DeepCopy(Handle<JSObject> object,
-                               AllocationSiteUsageContext* site_context) {
+MaybeDirectHandle<JSObject> DeepCopy(Handle<JSObject> object,
+                                     AllocationSiteUsageContext* site_context) {
   JSObjectWalkVisitor<AllocationSiteUsageContext> v(site_context);
-  MaybeHandle<JSObject> copy = v.StructureWalk(object);
+  MaybeDirectHandle<JSObject> copy = v.StructureWalk(object);
   DirectHandle<JSObject> for_assert;
   DCHECK(!copy.ToHandle(&for_assert) || !for_assert.is_identical_to(object));
   return copy;
@@ -507,7 +507,7 @@ Handle<JSObject> CreateArrayLiteral(
 }
 
 template <typename LiteralHelper>
-MaybeHandle<JSObject> CreateLiteralWithoutAllocationSite(
+MaybeDirectHandle<JSObject> CreateLiteralWithoutAllocationSite(
     Isolate* isolate, Handle<HeapObject> description, int flags) {
   Handle<JSObject> literal = LiteralHelper::Create(isolate, description, flags,
                                                    AllocationType::kYoung);
@@ -517,10 +517,11 @@ MaybeHandle<JSObject> CreateLiteralWithoutAllocationSite(
 }
 
 template <typename LiteralHelper>
-MaybeHandle<JSObject> CreateLiteral(Isolate* isolate,
-                                    Handle<HeapObject> maybe_vector,
-                                    int literals_index,
-                                    Handle<HeapObject> description, int flags) {
+MaybeDirectHandle<JSObject> CreateLiteral(Isolate* isolate,
+                                          Handle<HeapObject> maybe_vector,
+                                          int literals_index,
+                                          Handle<HeapObject> description,
+                                          int flags) {
   if (!IsFeedbackVector(*maybe_vector)) {
     DCHECK(IsUndefined(*maybe_vector));
     return CreateLiteralWithoutAllocationSite<LiteralHelper>(
@@ -566,7 +567,7 @@ MaybeHandle<JSObject> CreateLiteral(Isolate* isolate,
   // Copy the existing boilerplate.
   AllocationSiteUsageContext usage_context(isolate, site, enable_mementos);
   usage_context.EnterNewScope();
-  MaybeHandle<JSObject> copy = DeepCopy(boilerplate, &usage_context);
+  MaybeDirectHandle<JSObject> copy = DeepCopy(boilerplate, &usage_context);
   usage_context.ExitScope(site, boilerplate);
   return copy;
 }

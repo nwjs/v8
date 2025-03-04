@@ -69,6 +69,7 @@ Address ConservativeStackVisitorBase<ConcreteVisitor>::FindBasePtr(
 #endif  // V8_COMPRESS_POINTERS
   // Check if the pointer is contained by a normal or large page owned by this
   // heap. Bail out if it is not.
+  // TODO(379788114): Consider introducing a bloom filter for pages.
   const MemoryChunk* chunk =
       allocator_->LookupChunkContainingAddress(maybe_inner_ptr);
   if (chunk == nullptr) {
@@ -102,16 +103,17 @@ Address ConservativeStackVisitorBase<ConcreteVisitor>::FindBasePtr(
   // Iterate through the objects in the page forwards, until we find the object
   // containing maybe_inner_ptr.
   DCHECK_LE(base_ptr, maybe_inner_ptr);
+  MarkingBitmap* bitmap = const_cast<MarkingBitmap*>(page->marking_bitmap());
   while (true) {
     Tagged<HeapObject> obj(HeapObject::FromAddress(base_ptr));
     MapWord map_word = obj->map_word(cage_base, kRelaxedLoad);
-    if (!ConcreteVisitor::FilterNormalObject(obj, map_word)) {
+    if (!ConcreteVisitor::FilterNormalObject(obj, map_word, bitmap)) {
       return kNullAddress;
     }
     const int size = obj->SizeFromMap(map_word.ToMap());
     DCHECK_LT(0, size);
     if (maybe_inner_ptr < base_ptr + size) {
-      ConcreteVisitor::HandleObjectFound(obj, size);
+      ConcreteVisitor::HandleObjectFound(obj, size, bitmap);
       return IsFreeSpaceOrFiller(obj, cage_base) ? kNullAddress : base_ptr;
     }
     base_ptr += ALIGN_TO_ALLOCATION_ALIGNMENT(size);
@@ -123,11 +125,13 @@ template <typename ConcreteVisitor>
 void ConservativeStackVisitorBase<ConcreteVisitor>::VisitPointer(
     const void* pointer) {
   auto address = reinterpret_cast<Address>(const_cast<void*>(pointer));
-  VisitConservativelyIfPointer(address);
 #ifdef V8_COMPRESS_POINTERS
   V8HeapCompressionScheme::ProcessIntermediatePointers(
       cage_base_, address,
       [this](Address ptr) { VisitConservativelyIfPointer(ptr, cage_base_); });
+  if constexpr (ConcreteVisitor::kOnlyVisitMainV8Cage) {
+    return;
+  }
 #ifdef V8_EXTERNAL_CODE_SPACE
   ExternalCodeCompressionScheme::ProcessIntermediatePointers(
       code_cage_base_, address, [this](Address ptr) {
@@ -140,6 +144,8 @@ void ConservativeStackVisitorBase<ConcreteVisitor>::VisitPointer(
         VisitConservativelyIfPointer(ptr, trusted_cage_base_);
       });
 #endif  // V8_ENABLE_SANDBOX
+#else   // !V8_COMPRESS_POINTERS
+  VisitConservativelyIfPointer(address);
 #endif  // V8_COMPRESS_POINTERS
 }
 
@@ -152,11 +158,19 @@ void ConservativeStackVisitorBase<
   if (V8HeapCompressionScheme::GetPtrComprCageBaseAddress(address) ==
       cage_base_.address()) {
     VisitConservativelyIfPointer(address, cage_base_);
+  } else if constexpr (ConcreteVisitor::kOnlyVisitMainV8Cage) {
+    return;
 #ifdef V8_EXTERNAL_CODE_SPACE
   } else if (code_address_region_.contains(address)) {
     VisitConservativelyIfPointer(address, code_cage_base_);
 #endif  // V8_EXTERNAL_CODE_SPACE
   }
+#ifdef V8_ENABLE_SANDBOX
+  if (TrustedSpaceCompressionScheme::GetPtrComprCageBaseAddress(address) ==
+      trusted_cage_base_.address()) {
+    VisitConservativelyIfPointer(address, trusted_cage_base_);
+  }
+#endif  // V8_ENABLE_SANDBOX
 #else   // !V8_COMPRESS_POINTERS
   VisitConservativelyIfPointer(address, cage_base_);
 #endif  // V8_COMPRESS_POINTERS

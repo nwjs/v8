@@ -92,9 +92,8 @@ TypedObject GetTypedObjectForString(uintptr_t address, i::InstanceType type,
     }
   };
 
-  return i::StringShape(type)
-      .DispatchToSpecificTypeWithoutCast<StringGetDispatcher, TypedObject>(
-          address, type_source);
+  return String::DispatchToSpecificTypeWithoutCast<StringGetDispatcher>(
+      type, address, type_source);
 }
 
 TypedObject GetTypedObjectByInstanceType(uintptr_t address,
@@ -388,7 +387,8 @@ class ReadStringVisitor : public TqObjectVisitor {
           static_cast<int32_t>(resource_data >> kExternalPointerIndexShift);
       Address tagged_data =
           GetOrFinish(ReadValue<Address>(external_pointer_table, index));
-      Address data_address = tagged_data & ~kExternalStringResourceDataTag;
+      // We don't really need to perform the type check here.
+      Address data_address = tagged_data & kExternalPointerPayloadMask;
 #else
       uintptr_t data_address = static_cast<uintptr_t>(resource_data);
 #endif  // V8_ENABLE_SANDBOX

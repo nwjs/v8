@@ -73,12 +73,8 @@ bool SemiSpace::EnsureCapacity(size_t capacity) {
                        memory_chunk_list_.size() + quarantined_pages);
   if (num_pages >= 0) {
     for (int pages_added = 0; pages_added < num_pages; pages_added++) {
-      // Pages in the new spaces can be moved to the old space by the full
-      // collector. Therefore, they must be initialized with the same FreeList
-      // as old pages.
       if (!AllocateFreshPage()) {
         if (pages_added) RewindPages(pages_added);
-        DCHECK(!IsCommitted());
         return false;
       }
     }
@@ -129,7 +125,10 @@ size_t SemiSpace::CommittedPhysicalMemory() const {
 
 bool SemiSpace::GrowTo(size_t new_capacity) {
   if (!IsCommitted()) {
-    if (!Commit()) return false;
+    if (!Commit()) {
+      DCHECK(!IsCommitted());
+      return false;
+    }
   }
   DCHECK(MemoryChunk::IsAligned(new_capacity));
   DCHECK_LE(new_capacity, maximum_capacity_);
@@ -452,6 +451,7 @@ SemiSpaceNewSpace::SemiSpaceNewSpace(Heap* heap,
                   max_semispace_capacity) {
   DCHECK(initial_semispace_capacity <= max_semispace_capacity);
   if (!to_space_.Commit()) {
+    DCHECK(!to_space_.IsCommitted());
     V8::FatalProcessOutOfMemory(heap->isolate(), "New space setup");
   }
   DCHECK(!from_space_.IsCommitted());  // No need to use memory yet.
@@ -684,6 +684,22 @@ bool SemiSpaceNewSpace::IsAddressBelowAgeMarkForSpace(const SemiSpace& space,
 
 bool SemiSpaceNewSpace::ShouldBePromoted(Address address) const {
   return IsAddressBelowAgeMarkForSpace(from_space_, address);
+}
+
+bool SemiSpaceNewSpace::ShouldPageBePromoted(Address address) const {
+  MemoryChunk* chunk = MemoryChunk::FromAddress(address);
+  Address current_age_mark = from_space_.age_mark();
+  if (!chunk->IsFlagSet(MemoryChunk::NEW_SPACE_BELOW_AGE_MARK)) {
+    return false;
+  }
+  // If the page contains the current age mark, it contains both objects in the
+  // interemediate generation (that could be promoted to old space) and new
+  // objects (that should remain in new space). When pinning an intermediate
+  // generation object on this page, we don't yet know whether or not the page
+  // will also contain pinned new objects (that will prevent us from promoting
+  // the page). Thus, we conservatively keep the page in new space. Pinned
+  // objects on it will either die or be promoted in the next GC cycle.
+  return !chunk->Metadata()->ContainsLimit(current_age_mark);
 }
 
 #if DEBUG

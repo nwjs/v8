@@ -28,7 +28,7 @@ namespace internal {
 //
 // * All intrinsics have a C++ implementation Runtime_##name.
 //
-// * Each compiler has an explicit list of intrisics it supports, falling back
+// * Each compiler has an explicit list of intrinsics it supports, falling back
 //   to a simple runtime call if necessary.
 
 // Entries have the form F(name, number of arguments, number of return values):
@@ -652,6 +652,7 @@ namespace internal {
   F(TraceEnter, 0, 1)                         \
   F(TraceExit, 1, 1)                          \
   F(TurbofanStaticAssert, 1, 1)               \
+  F(TypedArrayLengthProtector, 0, 1)          \
   F(TypedArraySpeciesProtector, 0, 1)         \
   F(WaitForBackgroundOptimization, 0, 1)      \
   I(DeoptimizeNow, 0, 1)                      \
@@ -758,6 +759,7 @@ namespace internal {
   F(SetWasmCompileControls, 2, 1)                               \
   F(SetWasmImportedStringsEnabled, 1, 1)                        \
   F(SetWasmInstantiateControls, 0, 1)                           \
+  F(WasmArray, 0, 1)                                            \
   F(WasmCompiledExportWrappersCount, 0, 1)                      \
   F(WasmDeoptsExecutedCount, 0, 1)                              \
   F(WasmDeoptsExecutedForFunction, 1, 1)                        \
@@ -765,15 +767,15 @@ namespace internal {
   IF_V8_WASM_RANDOM_FUZZERS(F, WasmGenerateRandomModule, -1, 1) \
   F(WasmGetNumberOfInstances, 1, 1)                             \
   F(WasmLeaveDebugging, 0, 1)                                   \
+  F(WasmNull, 0, 1)                                             \
   F(WasmNumCodeSpaces, 1, 1)                                    \
+  F(WasmStruct, 0, 1)                                           \
   F(WasmSwitchToTheCentralStackCount, 0, 1)                     \
   F(WasmTierUpFunction, 1, 1)                                   \
   F(WasmTraceEnter, 0, 1)                                       \
   F(WasmTraceExit, 1, 1)                                        \
   F(WasmTraceMemory, 1, 1)                                      \
-  F(WasmNull, 0, 1)                                             \
-  F(WasmArray, 0, 1)                                            \
-  F(WasmStruct, 0, 1)
+  F(WasmTriggerTierUpForTesting, 1, 1)
 
 #define FOR_EACH_INTRINSIC_WASM_DRUMBRAKE_TEST(F, I) \
   F(WasmTraceBeginExecution, 0, 1)                   \
@@ -984,7 +986,7 @@ class Runtime : public AllStatic {
                           StoreOrigin store_origin);
 
   // When "receiver" is not passed, it defaults to "lookup_start_object".
-  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   GetObjectProperty(Isolate* isolate, DirectHandle<JSAny> lookup_start_object,
                     DirectHandle<Object> key, DirectHandle<JSAny> receiver = {},
                     bool* is_found = nullptr);
@@ -996,7 +998,7 @@ class Runtime : public AllStatic {
   // matching private member, or there are more than one matching private member
   // (which would be ambiguous). If the found private member is an accessor with
   // a getter, the getter will be called to set the value.
-  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   GetPrivateMember(Isolate* isolate, DirectHandle<JSReceiver> receiver,
                    Handle<String> desc);
 
@@ -1008,17 +1010,17 @@ class Runtime : public AllStatic {
   // than one matching private member (which would be ambiguous).
   // If the found private member is an accessor with a setter, the setter will
   // be called to set the value.
-  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   SetPrivateMember(Isolate* isolate, DirectHandle<JSReceiver> receiver,
                    Handle<String> desc, DirectHandle<Object> value);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> HasProperty(
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object> HasProperty(
       Isolate* isolate, DirectHandle<Object> object, DirectHandle<Object> key);
 
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<JSArray>
   GetInternalProperties(Isolate* isolate, Handle<Object>);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> ThrowIteratorError(
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object> ThrowIteratorError(
       Isolate* isolate, Handle<Object> object);
 };
 

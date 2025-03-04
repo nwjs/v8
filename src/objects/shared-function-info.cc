@@ -37,7 +37,7 @@ void SharedFunctionInfo::Init(ReadOnlyRoots ro_roots, int unique_id) {
   DisallowGarbageCollection no_gc;
 
   // Set the function data to the "illegal" builtin. Ideally we'd use some sort
-  // of "uninitialized" marker here, but it's cheaper to use a valid buitin and
+  // of "uninitialized" marker here, but it's cheaper to use a valid builtin and
   // avoid having to do uninitialized checks elsewhere.
   set_builtin_id(Builtin::kIllegal);
 
@@ -440,7 +440,7 @@ void SharedFunctionInfo::DiscardCompiled(
 }
 
 // static
-Handle<Object> SharedFunctionInfo::GetSourceCode(
+DirectHandle<Object> SharedFunctionInfo::GetSourceCode(
     Isolate* isolate, DirectHandle<SharedFunctionInfo> shared) {
   if (!shared->HasSourceCode()) return isolate->factory()->undefined_value();
   Handle<String> source(Cast<String>(Cast<Script>(shared->script())->source()),
@@ -607,7 +607,7 @@ template <typename IsolateT>
 void SharedFunctionInfo::CreateAndSetUncompiledData(IsolateT* isolate,
                                                     FunctionLiteral* lit) {
   DCHECK(!lit->shared_function_info()->HasUncompiledData());
-  Handle<UncompiledData> data;
+  DirectHandle<UncompiledData> data;
   ProducedPreparseData* scope_data = lit->produced_preparse_data();
   if (scope_data != nullptr) {
     Handle<PreparseData> preparse_data = scope_data->Serialize(isolate);
@@ -840,8 +840,7 @@ void SharedFunctionInfo::InstallDebugBytecode(
 
   {
     DisallowGarbageCollection no_gc;
-    base::SharedMutexGuard<base::kExclusive> mutex_guard(
-        isolate->shared_function_info_access());
+    base::SpinningMutexGuard guard(isolate->shared_function_info_access());
     Tagged<DebugInfo> debug_info = shared->GetDebugInfo(isolate);
     debug_info->set_original_bytecode_array(*original_bytecode_array,
                                             kReleaseStore);
@@ -854,8 +853,7 @@ void SharedFunctionInfo::InstallDebugBytecode(
 void SharedFunctionInfo::UninstallDebugBytecode(
     Tagged<SharedFunctionInfo> shared, Isolate* isolate) {
   DisallowGarbageCollection no_gc;
-  base::SharedMutexGuard<base::kExclusive> mutex_guard(
-      isolate->shared_function_info_access());
+  base::SpinningMutexGuard guard(isolate->shared_function_info_access());
   Tagged<DebugInfo> debug_info = shared->GetDebugInfo(isolate);
   Tagged<BytecodeArray> original_bytecode_array =
       debug_info->OriginalBytecodeArray(isolate);

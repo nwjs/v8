@@ -1934,6 +1934,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Fmov(i.OutputRegister32(), tmp_dst.S());
       break;
     }
+    case kArm64Float16RawBitsToFloat64: {
+      VRegister tmp_dst = i.TempDoubleRegister(0);
+      __ Fmov(tmp_dst.S(), i.InputRegister32(0));
+      __ Fcvt(i.OutputDoubleRegister(), tmp_dst.H());
+      break;
+    }
     case kArm64Float32ToInt32: {
       __ Fcvtzs(i.OutputRegister32(), i.InputFloat32Register(0));
       bool set_overflow_to_min_i32 = MiscField::decode(instr->opcode());
@@ -3073,6 +3079,36 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Usra(dst, i.InputSimd128Register(1).Format(f), i.InputUint8(2) & mask);
       break;
     }
+    case kArm64S64x2Shuffle: {
+      Simd128Register dst = i.OutputSimd128Register().V2D(),
+                      src0 = i.InputSimd128Register(0).V2D(),
+                      src1 = i.InputSimd128Register(1).V2D();
+      UseScratchRegisterScope scope(masm());
+      if (dst == src0 || dst == src1) {
+        VRegister temp = scope.AcquireV(kFormat2D);
+        if (dst == src0) {
+          __ Mov(temp, src0);
+          src0 = temp;
+        } else {
+          DCHECK_EQ(dst, src1);
+          __ Mov(temp, src1);
+          src1 = temp;
+        }
+      }
+      int32_t shuffle = i.InputInt32(2);
+      // Perform shuffle as a vmov per lane.
+      for (int i = 0; i < 2; i++) {
+        VRegister src = src0;
+        int lane = shuffle & 0x7;
+        if (lane >= 2) {
+          src = src1;
+          lane &= 0x1;
+        }
+        __ Mov(dst, i, src, lane);
+        shuffle >>= 8;
+      }
+      break;
+    }
     case kArm64S32x4Shuffle: {
       Simd128Register dst = i.OutputSimd128Register().V4S(),
                       src0 = i.InputSimd128Register(0).V4S(),
@@ -3133,6 +3169,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     }
+      SIMD_BINOP_CASE(kArm64S64x2UnzipLeft, Uzp1, 2D);
+      SIMD_BINOP_CASE(kArm64S64x2UnzipRight, Uzp2, 2D);
       SIMD_BINOP_CASE(kArm64S32x4ZipLeft, Zip1, 4S);
       SIMD_BINOP_CASE(kArm64S32x4ZipRight, Zip2, 4S);
       SIMD_BINOP_CASE(kArm64S32x4UnzipLeft, Uzp1, 4S);

@@ -180,9 +180,8 @@ Handle<Map> MapUpdater::ReconfigureToDataField(InternalIndex descriptor,
   DCHECK(descriptor.is_found());
   DCHECK(!old_map_->is_dictionary_map());
 
-  ParkedSharedMutexGuardIf<base::kExclusive> mutex_guard(
-      isolate_->main_thread_local_isolate(), isolate_->map_updater_access(),
-      true);
+  ParkedMutexGuardIf mutex_guard(isolate_->main_thread_local_isolate(),
+                                 isolate_->map_updater_access(), true);
 
   modified_descriptor_ = descriptor;
   new_kind_ = PropertyKind::kData;
@@ -262,7 +261,8 @@ Handle<Map> MapUpdater::ApplyPrototypeTransition(
 }
 
 // static
-Handle<Map> MapUpdater::UpdateMapNoLock(Isolate* isolate, Handle<Map> map) {
+DirectHandle<Map> MapUpdater::UpdateMapNoLock(Isolate* isolate,
+                                              Handle<Map> map) {
   if (!map->is_deprecated()) return map;
   // TODO(ishell): support fast map updating if we enable it.
   CHECK(!v8_flags.fast_map_update);
@@ -272,8 +272,7 @@ Handle<Map> MapUpdater::UpdateMapNoLock(Isolate* isolate, Handle<Map> map) {
 }
 
 Handle<Map> MapUpdater::Update() {
-  base::SharedMutexGuard<base::kExclusive> mutex_guard(
-      isolate_->map_updater_access());
+  base::SpinningMutexGuard mutex_guard(isolate_->map_updater_access());
   return UpdateImpl();
 }
 
@@ -492,8 +491,7 @@ void MapUpdater::CompleteInobjectSlackTracking(Isolate* isolate,
     // Note: Avoid locking the full_transition_array_access lock inside this
     // call to TraverseTransitionTree to prevent dependencies between the two
     // locks.
-    base::SharedMutexGuard<base::kExclusive> mutex_guard(
-        isolate->map_updater_access());
+    base::SpinningMutexGuard guard(isolate->map_updater_access());
     transitions.TraverseTransitionTree(callback);
   }
 }
@@ -821,7 +819,7 @@ MapUpdater::State MapUpdater::FindTargetMap() {
   return state_;  // Not done yet.
 }
 
-Handle<DescriptorArray> MapUpdater::BuildDescriptorArray() {
+DirectHandle<DescriptorArray> MapUpdater::BuildDescriptorArray() {
   InstanceType instance_type = old_map_->instance_type();
   int target_nof = target_map_->NumberOfOwnDescriptors();
   DirectHandle<DescriptorArray> target_descriptors(
@@ -833,7 +831,7 @@ Handle<DescriptorArray> MapUpdater::BuildDescriptorArray() {
   int new_slack =
       std::max<int>(old_nof_, old_descriptors_->number_of_descriptors()) -
       old_nof_;
-  Handle<DescriptorArray> new_descriptors =
+  DirectHandle<DescriptorArray> new_descriptors =
       DescriptorArray::Allocate(isolate_, old_nof_, new_slack);
   DCHECK(new_descriptors->number_of_all_descriptors() >
              target_descriptors->number_of_all_descriptors() ||
@@ -923,7 +921,7 @@ Handle<DescriptorArray> MapUpdater::BuildDescriptorArray() {
       Map::GeneralizeIfCanHaveTransitionableFastElementsKind(
           isolate_, instance_type, &next_representation, &next_field_type);
 
-      MaybeObjectHandle wrapped_type(Map::WrapFieldType(next_field_type));
+      MaybeObjectDirectHandle wrapped_type(Map::WrapFieldType(next_field_type));
       Descriptor d;
       if (next_kind == PropertyKind::kData) {
         d = Descriptor::DataField(key, current_offset, next_attributes,
@@ -969,7 +967,7 @@ Handle<DescriptorArray> MapUpdater::BuildDescriptorArray() {
           is_transitionable_fast_elements_kind_,
           Map::IsMostGeneralFieldType(next_representation, *next_field_type));
 
-      MaybeObjectHandle wrapped_type(Map::WrapFieldType(next_field_type));
+      MaybeObjectDirectHandle wrapped_type(Map::WrapFieldType(next_field_type));
       Descriptor d;
       if (next_kind == PropertyKind::kData) {
         d = Descriptor::DataField(key, current_offset, next_attributes,
@@ -1001,7 +999,7 @@ Handle<DescriptorArray> MapUpdater::BuildDescriptorArray() {
   return new_descriptors;
 }
 
-Handle<Map> MapUpdater::FindSplitMap(
+DirectHandle<Map> MapUpdater::FindSplitMap(
     DirectHandle<DescriptorArray> descriptors) {
   int root_nof = root_map_->NumberOfOwnDescriptors();
   Tagged<Map> current = *root_map_;
@@ -1035,7 +1033,7 @@ Handle<Map> MapUpdater::FindSplitMap(
     }
     current = next;
   }
-  return handle(current, isolate_);
+  return direct_handle(current, isolate_);
 }
 
 MapUpdater::State MapUpdater::ConstructNewMap() {
@@ -1270,7 +1268,7 @@ void MapUpdater::UpdateFieldType(Isolate* isolate, DirectHandle<Map> map,
     }
 
     DCHECK_IMPLIES(IsClass(*new_type), new_representation.IsHeapObject());
-    MaybeObjectHandle wrapped_type(Map::WrapFieldType(new_type));
+    MaybeObjectDirectHandle wrapped_type(Map::WrapFieldType(new_type));
     Descriptor d = Descriptor::DataField(
         name, descriptors->GetFieldIndex(descriptor), details.attributes(),
         new_constness, new_representation, wrapped_type);

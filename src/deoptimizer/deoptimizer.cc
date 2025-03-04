@@ -370,7 +370,7 @@ class ActivationsFinder : public ThreadVisitor {
             Address new_pc = code->instruction_start() + trampoline_pc;
             if (v8_flags.cet_compatible) {
               Address pc = *it.frame()->pc_address();
-              Deoptimizer::PatchJumpToTrampoline(pc, new_pc);
+              Deoptimizer::PatchToJump(pc, new_pc);
             } else {
               // Replace the current pc on the stack with the trampoline.
               // TODO(v8:10026): avoid replacing a signed pointer.
@@ -728,12 +728,12 @@ Deoptimizer::Deoptimizer(Isolate* isolate, Tagged<JSFunction> function,
   }
 }
 
-Handle<JSFunction> Deoptimizer::function() const {
-  return Handle<JSFunction>(function_, isolate());
+DirectHandle<JSFunction> Deoptimizer::function() const {
+  return DirectHandle<JSFunction>(function_, isolate());
 }
 
-Handle<Code> Deoptimizer::compiled_code() const {
-  return Handle<Code>(compiled_code_, isolate());
+DirectHandle<Code> Deoptimizer::compiled_code() const {
+  return DirectHandle<Code>(compiled_code_, isolate());
 }
 
 Deoptimizer::~Deoptimizer() {
@@ -846,6 +846,11 @@ void Deoptimizer::TraceDeoptEnd(double deopt_duration) {
 void Deoptimizer::TraceMarkForDeoptimization(Isolate* isolate,
                                              Tagged<Code> code,
                                              LazyDeoptimizeReason reason) {
+  // `DiscardBaselineCodeVisitor` can discard baseline code for debug purpose,
+  // and it may use `MarkForDeoptimization` for interpreting the new stack
+  // frame as an interpreter frame, but it does not have deoptimization data.
+  if (code->kind() == CodeKind::BASELINE) return;
+
   DCHECK(code->uses_deoptimization_data());
   if (!v8_flags.trace_deopt && !v8_flags.log_deopt) return;
 
@@ -934,7 +939,7 @@ CompileWithLiftoffAndGetDeoptInfo(wasm::NativeModule* native_module,
 
   // Replace the optimized code with the unoptimized code in the
   // WasmCodeManager as a deopt was reached.
-  std::unique_ptr<wasm::WasmCode> compiled_code =
+  wasm::UnpublishedWasmCode compiled_code =
       native_module->AddCompiledCode(result);
   wasm::WasmCodeRefScope code_ref_scope;
   // TODO(mliedtke): This might unoptimize functions because they were inlined
@@ -1021,9 +1026,8 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
   // just sign it as if there weren't any parameter stack slots.
   // When building up the next frame we can check and "move" the caller PC by
   // signing it again with the correct stack pointer.
-  Address signed_pc = PointerAuthentication::SignAndCheckPC(
-      isolate(), pc, output_frame->GetTop());
-  output_frame->SetPc(signed_pc);
+  output_frame->SetPc(PointerAuthentication::SignAndCheckPC(
+      isolate(), pc, output_frame->GetTop()));
 #ifdef V8_ENABLE_CET_SHADOW_STACK
   if (v8_flags.cet_compatible) {
     if (is_topmost) {
@@ -1047,12 +1051,11 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
     // The previous frame's PC is stored at a different stack slot, so we need
     // to re-sign the PC for the new context (stack pointer).
     FrameDescription* previous_frame = output_[frame_index - 1];
-    Address pc = previous_frame->GetPc();
     Address old_context = previous_frame->GetTop();
     Address new_context =
         old_context - parameter_stack_slots * kSystemPointerSize;
     Address signed_pc = PointerAuthentication::MoveSignedPC(
-        isolate(), pc, new_context, old_context);
+        isolate(), previous_frame->GetPc(), new_context, old_context);
     previous_frame->SetPc(signed_pc);
   }
 
@@ -1401,7 +1404,7 @@ void Deoptimizer::DoComputeOutputFramesWasmImpl() {
     // otherwise.
     wasm::TypeFeedbackStorage& feedback =
         native_module->module()->type_feedback;
-    base::SharedMutexGuard<base::kExclusive> mutex_guard(&feedback.mutex);
+    base::SpinningMutexGuard mutex_guard(&feedback.mutex);
     for (const TranslatedFrame& frame : translated_state_) {
       int index = frame.wasm_function_index();
       auto iter = feedback.feedback_for_function.find(index);

@@ -503,6 +503,18 @@ bool IsTheHoleAt(Tagged<FixedDoubleArray> array, int index) {
   return array->is_the_hole(index);
 }
 
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+template <class T>
+bool IsUndefinedAt(Tagged<T> array, int index) {
+  return false;
+}
+
+template <>
+bool IsUndefinedAt(Tagged<FixedDoubleArray> array, int index) {
+  return array->is_undefined(index);
+}
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+
 template <class T>
 double GetScalarElement(Tagged<T> array, int index) {
   if (IsTheHoleAt(array, index)) {
@@ -517,15 +529,13 @@ void DoPrintElements(std::ostream& os, Tagged<Object> object, int length) {
   Tagged<T> array = Cast<T>(object);
   if (length == 0) return;
   int previous_index = 0;
-  double previous_value = GetScalarElement(array, 0);
-  double value = 0.0;
+  uint64_t previous_representation = array->get_representation(0);
+  uint64_t representation = 0;
   int i;
   for (i = 1; i <= length; i++) {
-    if (i < length) value = GetScalarElement(array, i);
-    bool values_are_nan = std::isnan(previous_value) && std::isnan(value);
-    if (i != length && (previous_value == value || values_are_nan) &&
-        IsTheHoleAt(array, i - 1) == IsTheHoleAt(array, i)) {
-      continue;
+    if (i < length) {
+      representation = array->get_representation(i);
+      if (previous_representation == representation) continue;
     }
     os << "\n";
     std::stringstream ss;
@@ -536,11 +546,15 @@ void DoPrintElements(std::ostream& os, Tagged<Object> object, int length) {
     os << std::setw(12) << ss.str() << ": ";
     if (print_the_hole && IsTheHoleAt(array, i - 1)) {
       os << "<the_hole>";
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+    } else if (IsUndefinedAt(array, i - 1)) {
+      os << "undefined";
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
     } else {
-      os << previous_value;
+      os << GetScalarElement(array, i - 1);
     }
     previous_index = i;
-    previous_value = value;
+    previous_representation = representation;
   }
 }
 
@@ -714,7 +728,7 @@ void JSObject::PrintElements(std::ostream& os) {
                                   Cast<SloppyArgumentsElements>(elements()));
       break;
     case WASM_ARRAY_ELEMENTS:
-      // WasmArrayPrint() should be called intead.
+      // WasmArrayPrint() should be called instead.
       UNREACHABLE();
     case NO_ELEMENTS:
       break;
@@ -1251,7 +1265,7 @@ using DataPrinter = std::function<void(InternalIndex)>;
 // that index, like just the value (in case of a hash map), or value and
 // property details (in case of a property dictionary). No leading space
 // required or trailing newline required. It can be null/non-callable
-// std::function to indicate that there is no associcated data to be printed
+// std::function to indicate that there is no associated data to be printed
 // (for example in case of a hash set).
 template <typename T>
 void PrintTableContentsGeneric(std::ostream& os, T* dict,
@@ -2571,23 +2585,24 @@ void AsmWasmData::AsmWasmDataPrint(std::ostream& os) {
 }
 
 void WasmTypeInfo::WasmTypeInfoPrint(std::ostream& os) {
-  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   PrintHeader(os, "WasmTypeInfo");
-  os << "\n - type address: " << reinterpret_cast<void*>(native_type());
+  os << "\n - canonical type index: " << canonical_type_index();
+  os << "\n - element type: " << element_type().name();
   os << "\n - supertypes: ";
   for (int i = 0; i < supertypes_length(); i++) {
     os << "\n  - " << Brief(supertypes(i));
   }
-  os << "\n - trusted_data: " << Brief(trusted_data(isolate));
   os << "\n";
 }
 
 void WasmStruct::WasmStructPrint(std::ostream& os) {
   PrintHeader(os, "WasmStruct");
-  wasm::StructType* struct_type = type();
+  const wasm::CanonicalStructType* struct_type =
+      wasm::GetTypeCanonicalizer()->LookupStruct(
+          map()->wasm_type_info()->type_index());
   os << "\n - fields (" << struct_type->field_count() << "):";
   for (uint32_t i = 0; i < struct_type->field_count(); i++) {
-    wasm::ValueType field = struct_type->field(i);
+    wasm::CanonicalValueType field = struct_type->field(i);
     os << "\n   - " << field.short_name() << ": ";
     uint32_t field_offset = struct_type->field_offset(i);
     Address field_address = RawFieldAddress(field_offset);
@@ -2649,12 +2664,13 @@ void WasmStruct::WasmStructPrint(std::ostream& os) {
 
 void WasmArray::WasmArrayPrint(std::ostream& os) {
   PrintHeader(os, "WasmArray");
-  wasm::ArrayType* array_type = type();
+  const wasm::CanonicalValueType element_type =
+      map()->wasm_type_info()->element_type();
   uint32_t len = length();
-  os << "\n - element type: " << array_type->element_type().name();
+  os << "\n - element type: " << element_type.name();
   os << "\n - length: " << len;
   Address data_ptr = ptr() + WasmArray::kHeaderSize - kHeapObjectTag;
-  switch (array_type->element_type().kind()) {
+  switch (element_type.kind()) {
     case wasm::kI32:
       PrintTypedArrayElements(os, reinterpret_cast<int32_t*>(data_ptr), len,
                               true);
@@ -3730,19 +3746,11 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
 }
 
 void HeapNumber::HeapNumberShortPrint(std::ostream& os) {
-  static constexpr uint64_t kUint64AllBitsSet =
-      static_cast<uint64_t>(int64_t{-1});
-  // Min/max integer values representable by 52 bits of mantissa and 1 sign bit.
-  static constexpr int64_t kMinSafeInteger =
-      static_cast<int64_t>(kUint64AllBitsSet << 53);
-  static constexpr int64_t kMaxSafeInteger = -(kMinSafeInteger + 1);
-
   double val = value();
   if (i::IsMinusZero(val)) {
     os << "-0.0";
-  } else if (val == DoubleToInteger(val) &&
-             val >= static_cast<double>(kMinSafeInteger) &&
-             val <= static_cast<double>(kMaxSafeInteger)) {
+  } else if (val == DoubleToInteger(val) && val >= kMinSafeInteger &&
+             val <= kMaxSafeInteger) {
     // Print integer HeapNumbers in safe integer range with max precision: as
     // 9007199254740991.0 instead of 9.0072e+15
     int64_t i = static_cast<int64_t>(val);
@@ -4296,7 +4304,7 @@ V8_EXPORT_PRIVATE extern std::vector<
 _v8_internal_Expand_StackTrace(i::Isolate* isolate) {
   std::vector<_v8_internal_debugonly::StackTraceDebugDetails> stack;
   i::DisallowGarbageCollection no_gc;
-  int i = 0;
+  int frame_index = 0;
 
   for (i::StackFrameIterator it(isolate); !it.done(); it.Advance()) {
     i::CommonFrame* frame = i::CommonFrame::cast(it.frame());
@@ -4317,7 +4325,7 @@ _v8_internal_Expand_StackTrace(i::Isolate* isolate) {
     i::StringStream::ClearMentionedObjectCache(isolate);
     i::HeapStringAllocator allocator;
     i::StringStream accumulator(&allocator);
-    frame->Print(&accumulator, i::StackFrame::OVERVIEW, i++);
+    frame->Print(&accumulator, i::StackFrame::OVERVIEW, frame_index++);
     std::unique_ptr<char[]> overview = accumulator.ToCString();
     details.summary = overview.get();
     stack.push_back(std::move(details));

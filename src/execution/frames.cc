@@ -242,7 +242,7 @@ StackFrame::Type GetStateForFastCCallCallerFP(Isolate* isolate, Address fp,
                                               Address pc, Address pc_address,
                                               StackFrame::State* state) {
   // 'Fast C calls' are a special type of C call where we call directly from
-  // JS to C without an exit frame inbetween. The CEntryStub is responsible
+  // JS to C without an exit frame in between. The CEntryStub is responsible
   // for setting Isolate::c_entry_fp, meaning that it won't be set for fast C
   // calls. To keep the stack iterable, we store the FP and PC of the caller
   // of the fast C call on the isolate. This is guaranteed to be the topmost
@@ -1002,6 +1002,9 @@ StackFrame::Type StackFrameIterator::ComputeStackFrameType(
       return ComputeBuiltinFrameType(lookup_result.value());
     }
     case CodeKind::BASELINE:
+      // Baseline code can be deoptimized by DiscardBaselineCodeVisitor.
+      if (lookup_result.value()->marked_for_deoptimization())
+        return StackFrame::INTERPRETED;
       return StackFrame::BASELINE;
     case CodeKind::MAGLEV:
       if (StackFrame::IsTypeMarker(marker)) {
@@ -1298,7 +1301,7 @@ int BuiltinExitFrame::ComputeParametersCount() const {
   return argc;
 }
 
-Handle<FixedArray> BuiltinExitFrame::GetParameters() const {
+DirectHandle<FixedArray> BuiltinExitFrame::GetParameters() const {
   if (V8_LIKELY(!v8_flags.detailed_error_stack_trace)) {
     return isolate()->factory()->empty_fixed_array();
   }
@@ -1327,10 +1330,10 @@ static_assert(FC::kFunctionCallbackInfoNewTargetIndex == FCA::kNewTargetIndex);
 static_assert(FC::kFunctionCallbackInfoArgsLength == FCA::kArgsLength);
 }  // namespace ensure_layout
 
-Handle<JSFunction> ApiCallbackExitFrame::GetFunction() const {
+DirectHandle<JSFunction> ApiCallbackExitFrame::GetFunction() const {
   Tagged<HeapObject> maybe_function = target();
   if (IsJSFunction(maybe_function)) {
-    return Handle<JSFunction>(target_slot().location());
+    return DirectHandle<JSFunction>::FromSlot(target_slot().location());
   }
   DCHECK(IsFunctionTemplateInfo(maybe_function));
   DirectHandle<FunctionTemplateInfo> function_template_info(
@@ -1341,7 +1344,7 @@ Handle<JSFunction> ApiCallbackExitFrame::GetFunction() const {
   DirectHandle<NativeContext> native_context(
       Cast<Context>(context())->native_context(), isolate());
 
-  Handle<JSFunction> function =
+  DirectHandle<JSFunction> function =
       ApiNatives::InstantiateFunction(isolate(), native_context,
                                       function_template_info)
           .ToHandleChecked();
@@ -1350,20 +1353,20 @@ Handle<JSFunction> ApiCallbackExitFrame::GetFunction() const {
   return function;
 }
 
-Handle<FunctionTemplateInfo> ApiCallbackExitFrame::GetFunctionTemplateInfo()
-    const {
+DirectHandle<FunctionTemplateInfo>
+ApiCallbackExitFrame::GetFunctionTemplateInfo() const {
   Tagged<HeapObject> maybe_function = target();
   if (IsJSFunction(maybe_function)) {
     Tagged<SharedFunctionInfo> shared_info =
         Cast<JSFunction>(maybe_function)->shared();
     DCHECK(shared_info->IsApiFunction());
-    return handle(shared_info->api_func_data(), isolate());
+    return direct_handle(shared_info->api_func_data(), isolate());
   }
   DCHECK(IsFunctionTemplateInfo(maybe_function));
-  return handle(Cast<FunctionTemplateInfo>(maybe_function), isolate());
+  return direct_handle(Cast<FunctionTemplateInfo>(maybe_function), isolate());
 }
 
-Handle<FixedArray> ApiCallbackExitFrame::GetParameters() const {
+DirectHandle<FixedArray> ApiCallbackExitFrame::GetParameters() const {
   if (V8_LIKELY(!v8_flags.detailed_error_stack_trace)) {
     return isolate()->factory()->empty_fixed_array();
   }
@@ -2251,7 +2254,7 @@ void MaglevFrame::Iterate(RootVisitor* v) const {
   IteratePc(v, constant_pool_address(), code);
 }
 
-Handle<JSFunction> MaglevFrame::GetInnermostFunction() const {
+DirectHandle<JSFunction> MaglevFrame::GetInnermostFunction() const {
   return Summarize().frames.back().AsJavaScript().function();
 }
 
@@ -2685,12 +2688,12 @@ int JavaScriptFrame::GetActualArgumentCount() const {
          kJSArgcReceiverSlots;
 }
 
-Handle<FixedArray> CommonFrameWithJSLinkage::GetParameters() const {
+DirectHandle<FixedArray> CommonFrameWithJSLinkage::GetParameters() const {
   if (V8_LIKELY(!v8_flags.detailed_error_stack_trace)) {
     return isolate()->factory()->empty_fixed_array();
   }
   int param_count = ComputeParametersCount();
-  Handle<FixedArray> parameters =
+  DirectHandle<FixedArray> parameters =
       isolate()->factory()->NewFixedArray(param_count);
   for (int i = 0; i < param_count; i++) {
     parameters->set(i, GetParameter(i));
@@ -2800,11 +2803,12 @@ Handle<Object> FrameSummary::JavaScriptFrameSummary::script() const {
   return handle(function_->shared()->script(), isolate());
 }
 
-Handle<Context> FrameSummary::JavaScriptFrameSummary::native_context() const {
-  return handle(function_->native_context(), isolate());
+DirectHandle<Context> FrameSummary::JavaScriptFrameSummary::native_context()
+    const {
+  return direct_handle(function_->native_context(), isolate());
 }
 
-Handle<StackFrameInfo>
+DirectHandle<StackFrameInfo>
 FrameSummary::JavaScriptFrameSummary::CreateStackFrameInfo() const {
   DirectHandle<SharedFunctionInfo> shared(function_->shared(), isolate());
   DirectHandle<Script> script(Cast<Script>(shared->script()), isolate());
@@ -2860,19 +2864,20 @@ Handle<Script> FrameSummary::WasmFrameSummary::script() const {
   return handle(wasm_instance()->module_object()->script(), isolate());
 }
 
-Handle<WasmInstanceObject> FrameSummary::WasmFrameSummary::wasm_instance()
+DirectHandle<WasmInstanceObject> FrameSummary::WasmFrameSummary::wasm_instance()
     const {
   // TODO(42204563): Avoid crashing if the instance object is not available.
   CHECK(instance_data_->has_instance_object());
-  return handle(instance_data_->instance_object(), isolate());
+  return direct_handle(instance_data_->instance_object(), isolate());
 }
 
-Handle<Context> FrameSummary::WasmFrameSummary::native_context() const {
-  return handle(wasm_trusted_instance_data()->native_context(), isolate());
+DirectHandle<Context> FrameSummary::WasmFrameSummary::native_context() const {
+  return direct_handle(wasm_trusted_instance_data()->native_context(),
+                       isolate());
 }
 
-Handle<StackFrameInfo> FrameSummary::WasmFrameSummary::CreateStackFrameInfo()
-    const {
+DirectHandle<StackFrameInfo>
+FrameSummary::WasmFrameSummary::CreateStackFrameInfo() const {
   DirectHandle<String> function_name =
       GetWasmFunctionDebugName(isolate(), instance_data_, function_index());
   return isolate()->factory()->NewStackFrameInfo(script(), SourcePosition(),
@@ -2887,11 +2892,11 @@ FrameSummary::WasmInlinedFrameSummary::WasmInlinedFrameSummary(
       function_index_(function_index),
       op_wire_bytes_offset_(op_wire_bytes_offset) {}
 
-Handle<WasmInstanceObject>
+DirectHandle<WasmInstanceObject>
 FrameSummary::WasmInlinedFrameSummary::wasm_instance() const {
   // TODO(42204563): Avoid crashing if the instance object is not available.
   CHECK(instance_data_->has_instance_object());
-  return handle(instance_data_->instance_object(), isolate());
+  return direct_handle(instance_data_->instance_object(), isolate());
 }
 
 Handle<Object> FrameSummary::WasmInlinedFrameSummary::receiver() const {
@@ -2911,11 +2916,13 @@ Handle<Script> FrameSummary::WasmInlinedFrameSummary::script() const {
   return handle(wasm_instance()->module_object()->script(), isolate());
 }
 
-Handle<Context> FrameSummary::WasmInlinedFrameSummary::native_context() const {
-  return handle(wasm_trusted_instance_data()->native_context(), isolate());
+DirectHandle<Context> FrameSummary::WasmInlinedFrameSummary::native_context()
+    const {
+  return direct_handle(wasm_trusted_instance_data()->native_context(),
+                       isolate());
 }
 
-Handle<StackFrameInfo>
+DirectHandle<StackFrameInfo>
 FrameSummary::WasmInlinedFrameSummary::CreateStackFrameInfo() const {
   DirectHandle<String> function_name =
       GetWasmFunctionDebugName(isolate(), instance_data_, function_index());
@@ -2979,12 +2986,13 @@ Handle<Object> FrameSummary::BuiltinFrameSummary::script() const {
   return isolate()->factory()->undefined_value();
 }
 
-Handle<Context> FrameSummary::BuiltinFrameSummary::native_context() const {
+DirectHandle<Context> FrameSummary::BuiltinFrameSummary::native_context()
+    const {
   return isolate()->native_context();
 }
 
-Handle<StackFrameInfo> FrameSummary::BuiltinFrameSummary::CreateStackFrameInfo()
-    const {
+DirectHandle<StackFrameInfo>
+FrameSummary::BuiltinFrameSummary::CreateStackFrameInfo() const {
   DirectHandle<String> name_str =
       isolate()->factory()->NewStringFromAsciiChecked(
           Builtins::NameForStackTrace(isolate(), builtin_));
@@ -3069,8 +3077,8 @@ FRAME_SUMMARY_DISPATCH(bool, is_subject_to_debugging)
 FRAME_SUMMARY_DISPATCH(Handle<Object>, script)
 FRAME_SUMMARY_DISPATCH(int, SourcePosition)
 FRAME_SUMMARY_DISPATCH(int, SourceStatementPosition)
-FRAME_SUMMARY_DISPATCH(Handle<Context>, native_context)
-FRAME_SUMMARY_DISPATCH(Handle<StackFrameInfo>, CreateStackFrameInfo)
+FRAME_SUMMARY_DISPATCH(DirectHandle<Context>, native_context)
+FRAME_SUMMARY_DISPATCH(DirectHandle<StackFrameInfo>, CreateStackFrameInfo)
 
 #undef CASE_WASM_INTERPRETED
 #undef FRAME_SUMMARY_DISPATCH
@@ -3190,7 +3198,7 @@ FrameSummaries OptimizedJSFrame::Summarize() const {
     }
   }
   if (is_constructor) {
-    // If {is_constructor} is true, then we haven't inlined the contructor in
+    // If {is_constructor} is true, then we haven't inlined the constructor in
     // the optimized frames and the previous visited frame (top of the inlined
     // frames) is a construct call.
     summaries.top_frame_is_construct_call = true;

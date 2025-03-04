@@ -369,8 +369,9 @@ class ConcurrentInternalizationThread final
 
 namespace {
 
-std::pair<Handle<String>, MaybeHandle<String>> CreateSharedOneByteString(
-    Isolate* isolate, Factory* factory, int length, bool internalize) {
+std::pair<DirectHandle<String>, MaybeDirectHandle<String>>
+CreateSharedOneByteString(Isolate* isolate, Factory* factory, int length,
+                          bool internalize) {
   char* ascii = new char[length + 1];
   // Don't make single character strings, which will end up deduplicating to
   // an RO string and mess up the string table hit test.
@@ -869,6 +870,7 @@ UNINITIALIZED_TEST(PromotionScavenge) {
 
   v8_flags.stress_concurrent_allocation = false;  // For SealCurrentObjects.
   v8_flags.shared_string_table = true;
+  v8_flags.scavenger_precise_pinning_objects = false;
   i::FlagList::EnforceFlagImplications();
 
   MultiClientIsolateTest test;
@@ -915,6 +917,7 @@ UNINITIALIZED_TEST(PromotionScavengeOldToShared) {
   if (v8_flags.stress_concurrent_allocation) return;
 
   v8_flags.shared_string_table = true;
+  v8_flags.scavenger_precise_pinning_objects = false;
   i::FlagList::EnforceFlagImplications();
 
   MultiClientIsolateTest test;

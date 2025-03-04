@@ -463,6 +463,7 @@ void MacroAssembler::JumpJSFunction(Register function_object,
 #ifdef V8_ENABLE_WEBASSEMBLY
 
 void MacroAssembler::ResolveWasmCodePointer(Register target) {
+  ASM_CODE_COMMENT(this);
   static_assert(!V8_ENABLE_SANDBOX_BOOL);
   ExternalReference global_jump_table =
       ExternalReference::wasm_code_pointer_table();
@@ -1976,7 +1977,7 @@ void MacroAssembler::TryInlineTruncateDoubleToI(Register result,
   if (temps.CanAcquireVfp<SwVfpRegister>()) {
     single_scratch = temps.AcquireS();
   } else {
-    // Re-use the input as a scratch register. However, we can only do this if
+    // Reuse the input as a scratch register. However, we can only do this if
     // the input register is d0-d15 as there are no s32+ registers.
     DCHECK_LT(double_input.code(), LowDwVfpRegister::kNumRegisters);
     LowDwVfpRegister double_scratch =
@@ -2446,16 +2447,13 @@ void MacroAssembler::Check(Condition cond, AbortReason reason) {
 
 void MacroAssembler::Abort(AbortReason reason) {
   ASM_CODE_COMMENT(this);
-  Label abort_start;
-  bind(&abort_start);
   if (v8_flags.code_comments) {
-    const char* msg = GetAbortReason(reason);
-    RecordComment("Abort message: ");
-    RecordComment(msg);
+    RecordComment("Abort message:", SourceLocation{});
+    RecordComment(GetAbortReason(reason), SourceLocation{});
   }
 
-  // Avoid emitting call to builtin if requested.
-  if (trap_on_abort()) {
+  // Without debug code, save the code size and just trap.
+  if (!v8_flags.debug_code) {
     stop();
     return;
   }

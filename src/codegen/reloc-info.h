@@ -307,7 +307,7 @@ class RelocInfo {
   // Cage base value is used for decompressing compressed embedded references.
   V8_INLINE Tagged<HeapObject> target_object(PtrComprCageBase cage_base);
 
-  V8_INLINE Handle<HeapObject> target_object_handle(Assembler* origin);
+  V8_INLINE DirectHandle<HeapObject> target_object_handle(Assembler* origin);
 
   // Decodes builtin ID encoded as a PC-relative offset. This encoding is used
   // during code generation of call/jump with NEAR_BUILTIN_ENTRY.
@@ -482,7 +482,7 @@ class RelocInfoWriter {
   inline uint32_t WriteLongPCJump(uint32_t pc_delta);
 
   inline void WriteShortTaggedPC(uint32_t pc_delta, int tag);
-  inline void WriteShortData(intptr_t data_delta);
+  inline void WriteShortData(uint8_t data_delta);
 
   inline void WriteMode(RelocInfo::Mode rmode);
   inline void WriteModeAndPC(uint32_t pc_delta, RelocInfo::Mode rmode);

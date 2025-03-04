@@ -46,7 +46,7 @@ static void SetGlobalProperty(const char* name, Tagged<Object> value) {
       .Check();
 }
 
-static Handle<JSFunction> Compile(const char* source) {
+static DirectHandle<JSFunction> Compile(const char* source) {
   Isolate* isolate = reinterpret_cast<i::Isolate*>(v8::Isolate::GetCurrent());
   Handle<String> source_code = isolate->factory()
                                    ->NewStringFromUtf8(base::CStrVector(source))
@@ -944,7 +944,7 @@ using BackgroundMergeTest = TestWithNativeContext;
 TEST_F(BackgroundMergeTest, GCDuringMerge) {
   v8_flags.verify_code_merge = true;
 
-  HandleScope scope(isolate());
+  HandleScope handle_scope(isolate());
   const char* source =
       // f is compiled eagerly thanks to the IIFE hack.
       "f = (function f(x) {"

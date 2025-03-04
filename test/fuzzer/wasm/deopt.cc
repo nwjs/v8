@@ -124,7 +124,6 @@ std::vector<ExecutionResult> PerformReferenceRun(
   ErrorThrower thrower(isolate, "WasmFuzzerSyncCompileReference");
 
   int32_t max_steps = kDefaultMaxFuzzerExecutedInstructions;
-  int32_t nondeterminism = 0;
 
   // We aren't really debugging but this will prevent tier-up and other
   // "dynamic" behavior that we do not want to trigger during reference
@@ -132,8 +131,8 @@ std::vector<ExecutionResult> PerformReferenceRun(
   // with the kForDebugging liftoff option.
   EnterDebuggingScope debugging_scope(isolate);
 
-  Handle<WasmModuleObject> module_object = CompileReferenceModule(
-      isolate, wire_bytes.module_bytes(), &max_steps, &nondeterminism);
+  Handle<WasmModuleObject> module_object =
+      CompileReferenceModule(isolate, wire_bytes.module_bytes(), &max_steps);
 
   thrower.Reset();
   CHECK(!isolate->has_exception());
@@ -152,17 +151,21 @@ std::vector<ExecutionResult> PerformReferenceRun(
 
   NearHeapLimitCallbackScope near_heap_limit(isolate);
   for (uint32_t i = 0; i < callees.size(); ++i) {
+    // Before execution, there should be no dangling nondeterminism registered
+    // on the engine.
+    DCHECK(!WasmEngine::had_nondeterminism());
+
     DirectHandle<Object> arguments[] = {
         direct_handle(Smi::FromInt(i), isolate)};
     std::unique_ptr<const char[]> exception;
     int32_t result = testing::CallWasmFunctionForTesting(
         isolate, instance, "main", base::VectorOf(arguments), &exception);
+    // If there is nondeterminism, we cannot guarantee the behavior of the test
+    // module, and in particular it may not terminate.
+    if (WasmEngine::clear_nondeterminism()) break;
     // Reached max steps, do not try to execute the test module as it might
     // never terminate.
     if (max_steps < 0) break;
-    // If there is nondeterminism, we cannot guarantee the behavior of the test
-    // module, and in particular it may not terminate.
-    if (nondeterminism != 0) break;
     // Similar to max steps reached, also discard modules that need too much
     // memory.
     if (near_heap_limit.heap_limit_reached()) {
@@ -210,8 +213,6 @@ void ConfigureFlags(v8::Isolate* isolate) {
       v8_flags.wasm_inlining_budget = v8_flags.wasm_inlining_budget * 5;
       v8_flags.wasm_inlining_max_size = v8_flags.wasm_inlining_max_size * 5;
       v8_flags.wasm_inlining_factor = v8_flags.wasm_inlining_factor * 5;
-      // Force new instruction selection.
-      v8_flags.turboshaft_wasm_instruction_selection_staged = true;
       // Enable other staged or experimental features and enforce flag
       // implications.
       EnableExperimentalWasmFeatures(isolate);
@@ -243,9 +244,7 @@ int FuzzIt(base::Vector<const uint8_t> data) {
   // Clear recursive groups: The fuzzer creates random types in every run. These
   // are saved as recursive groups as part of the type canonicalizer, but types
   // from previous runs just waste memory.
-  GetTypeCanonicalizer()->EmptyStorageForTesting();
-  TypeCanonicalizer::ClearWasmCanonicalTypesForTesting(i_isolate);
-  AddDummyTypesToTypeCanonicalizer(i_isolate, &zone);
+  ResetTypeCanonicalizer(isolate, &zone);
 
   std::vector<std::string> callees;
   std::vector<std::string> inlinees;
@@ -314,7 +313,7 @@ int FuzzIt(base::Vector<const uint8_t> data) {
 
   if (reference_results.empty()) {
     // If the first run already included non-determinism, there isn't any value
-    // in even compiling it (as this fuzzer focusses on executing deopts).
+    // in even compiling it (as this fuzzer focuses on executing deopts).
     // Return -1 to not add this case to the corpus.
     return -1;
   }
@@ -351,8 +350,17 @@ int FuzzIt(base::Vector<const uint8_t> data) {
     DirectHandle<Object> arguments[] = {
         direct_handle(Smi::FromInt(i), i_isolate)};
     std::unique_ptr<const char[]> exception;
+
+    DCHECK(!WasmEngine::had_nondeterminism());  // No dangling nondeterminism.
     int32_t result_value = testing::CallWasmFunctionForTesting(
         i_isolate, instance, "main", base::VectorOf(arguments), &exception);
+    // Also the second run can hit nondeterminism which was not hit before (when
+    // growing memory). In that case, do not compare results.
+    // TODO(384781857): Due to nondeterminism, the second run could even not
+    // terminate. If this happens often enough we should do something about
+    // this.
+    if (WasmEngine::clear_nondeterminism()) return -1;
+
     ExecutionResult actual_result;
     if (exception) {
       actual_result = exception.get();

@@ -243,7 +243,8 @@ void ShrinkNewSpace(NewSpace* new_space) {
   // which we just shrink without marking or sweeping.
   PagedNewSpace* paged_new_space = PagedNewSpace::From(new_space);
   Heap* heap = paged_new_space->heap();
-  heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
+  heap->EnsureSweepingCompleted(
+      Heap::SweepingForcedFinalizationMode::kUnifiedHeap);
   GCTracer* tracer = heap->tracer();
   tracer->StartObservablePause(base::TimeTicks::Now());
   tracer->StartCycle(GarbageCollector::MARK_COMPACTOR,
@@ -275,6 +276,17 @@ void ShrinkNewSpace(NewSpace* new_space) {
   tracer->StopAtomicPause();
   tracer->StopObservablePause(GarbageCollector::MARK_COMPACTOR,
                               base::TimeTicks::Now());
+  if (heap->cpp_heap()) {
+    using namespace cppgc::internal;
+    StatsCollector* stats_collector =
+        CppHeap::From(heap->cpp_heap())->stats_collector();
+    stats_collector->NotifyMarkingStarted(
+        CollectionType::kMajor, cppgc::Heap::MarkingType::kAtomic,
+        MarkingConfig::IsForcedGC::kNotForced);
+    stats_collector->NotifyMarkingCompleted(0);
+    stats_collector->NotifySweepingCompleted(
+        cppgc::Heap::SweepingType::kAtomic);
+  }
   tracer->NotifyFullSweepingCompleted();
 }
 }  // namespace
@@ -428,11 +440,12 @@ static size_t GetRememberedSetSize(Tagged<HeapObject> obj) {
 TEST_F(HeapTest, RememberedSet_InsertOnPromotingObjectToOld) {
   if (v8_flags.single_generation || v8_flags.stress_incremental_marking) return;
   v8_flags.stress_concurrent_allocation = false;  // For SealCurrentObjects.
+  v8_flags.scavenger_precise_pinning_objects = false;
   ManualGCScope manual_gc_scope(isolate());
   Factory* factory = isolate()->factory();
   Heap* heap = isolate()->heap();
   SealCurrentObjects();
-  HandleScope scope(isolate());
+  HandleScope handle_scope(isolate());
 
   // Create a young object and age it one generation inside the new space.
   DirectHandle<FixedArray> arr = factory->NewFixedArray(1);
@@ -591,62 +604,6 @@ TEST_F(HeapTestWithRandomGCInterval, AllocationTimeout) {
   EXPECT_TRUE(allocation.IsFailure());
 }
 #endif  // V8_ENABLE_ALLOCATION_TIMEOUT
-
-TEST_F(HeapTest, Regress341769455) {
-#ifdef V8_COMPRESS_POINTERS
-  if (!v8_flags.incremental_marking) return;
-  if (!v8_flags.minor_ms) return;
-  Isolate* iso = isolate();
-  bool original_concurrent_minor_ms_marking_value =
-      v8_flags.concurrent_minor_ms_marking;
-  ManualGCScope manual_gc_scope(iso);
-  v8_flags.concurrent_minor_ms_marking =
-      original_concurrent_minor_ms_marking_value;
-  Heap* heap = iso->heap();
-  HandleScope outer(iso);
-  DirectHandle<JSArrayBuffer> ab;
-  {
-    // Make sure new space is empty
-    InvokeAtomicMajorGC();
-    ab = iso->factory()
-             ->NewJSArrayBufferAndBackingStore(
-                 1, InitializedFlag::kZeroInitialized, AllocationType::kYoung)
-             .ToHandleChecked();
-    // Reset the EPT handle to null.
-    ab->init_extension();
-    // MinorMS promotes pages that haven't been allocated on since the last GC.
-    // Force a minor GC to reset the counter of bytes allocated on the page.
-    InvokeAtomicMinorGC();
-    // Set up a global to make sure the JSArrayBuffer is visited before the
-    // atomic pause.
-    Global<JSArrayBuffer> global(
-        v8_isolate(), Utils::Convert<JSArrayBuffer, JSArrayBuffer>(ab));
-    CHECK_EQ(Heap::HeapState::NOT_IN_GC, heap->gc_state());
-    CHECK(heap->incremental_marking()->IsStopped());
-    // Start incremental marking such that setting an extension (via
-    // `EnsureExtension`) triggers a write barrier.
-    v8_flags.incremental_marking = true;
-    heap->StartIncrementalMarking(GCFlag::kNoFlags,
-                                  GarbageCollectionReason::kTesting,
-                                  GCCallbackFlags::kNoGCCallbackFlags,
-                                  GarbageCollector::MINOR_MARK_SWEEPER);
-    CHECK(heap->incremental_marking()->IsMinorMarking());
-    heap->minor_mark_sweep_collector()->DrainMarkingWorklistForTesting();
-    ab->EnsureExtension();
-    heap->AppendArrayBufferExtension(*ab, ab->extension());
-  }
-  // Trigger a 2nd minor GC to promote the JSArrayBuffer to old space.
-  CHECK(HeapLayout::InYoungGeneration(*ab));
-  InvokeAtomicMinorGC();
-  CHECK(!HeapLayout::InYoungGeneration(*ab));
-  // If the EPT entry for the JSArrayBuffer wasn't promoted to the old table, a
-  // 3rd minor GC will observe it as unmarked (since the owning object is old)
-  // and free it. The major GC after it will then crash when trying to access
-  // the extension of the JSArrayBuffer although the entry has been freed.
-  InvokeAtomicMinorGC();
-  InvokeAtomicMajorGC();
-#endif  // V8_COMPRESS_POINTERS
-}
 
 namespace {
 struct CompactionDisabler {
@@ -835,6 +792,7 @@ TEST_F(HeapTest, PinningScavengerDoesntMoveObjectReachableFromStack) {
   if (v8_flags.single_generation) return;
   if (v8_flags.minor_ms) return;
   if (!v8_flags.scavenger_pinning_objects) return;
+  v8_flags.scavenger_precise_pinning_objects = false;
   ManualGCScope manual_gc_scope(isolate());
 
   DirectHandle<HeapObject> number =
@@ -844,21 +802,15 @@ TEST_F(HeapTest, PinningScavengerDoesntMoveObjectReachableFromStack) {
 
   CHECK(HeapLayout::InYoungGeneration(*number));
 
-  for (int i = 0; i < 10; i++) {
-    InvokeMinorGC();
-    CHECK(HeapLayout::InYoungGeneration(*number));
-    CHECK_EQ(number_address, number->address());
-  }
+  InvokeMinorGC();
+  CHECK(HeapLayout::InYoungGeneration(*number));
+  CHECK_EQ(number_address, number->address());
 
-  // `number` is already in the intermediate generation. A stackless GC should
+  // `number` is already in the intermediate generation. Another GC should
   // now move it to old gen.
-  {
-    DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-        isolate()->heap());
-    InvokeMinorGC();
-  }
+  InvokeMinorGC();
   CHECK(!HeapLayout::InYoungGeneration(*number));
-  CHECK_NE(number_address, number->address());
+  CHECK_EQ(number_address, number->address());
 }
 
 TEST_F(HeapTest, PinningScavengerObjectWithSelfReference) {

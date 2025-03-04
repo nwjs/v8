@@ -150,6 +150,8 @@ class BaseDictionaryShape : public BaseShape<Key> {
   template <typename Dictionary>
   static inline void DetailsAtPut(Tagged<Dictionary> dict, InternalIndex entry,
                                   PropertyDetails value);
+  static const bool kDoHashSpreading = false;
+  static const uint32_t kHashBits = 0;
 };
 
 class BaseNameDictionaryShape : public BaseDictionaryShape<DirectHandle<Name>> {
@@ -238,7 +240,7 @@ EXTERN_DECLARE_BASE_NAME_DICTIONARY(NameDictionary, NameDictionaryShape)
 class V8_EXPORT_PRIVATE NameDictionary
     : public BaseNameDictionary<NameDictionary, NameDictionaryShape> {
  public:
-  static inline Handle<Map> GetMap(RootsTable& roots);
+  static inline DirectHandle<Map> GetMap(RootsTable& roots);
 
   DECL_PRINTER(NameDictionary)
 
@@ -296,7 +298,7 @@ EXTERN_DECLARE_BASE_NAME_DICTIONARY(GlobalDictionary, GlobalDictionaryShape)
 class V8_EXPORT_PRIVATE GlobalDictionary
     : public BaseNameDictionary<GlobalDictionary, GlobalDictionaryShape> {
  public:
-  static inline Handle<Map> GetMap(RootsTable& roots);
+  static inline DirectHandle<Map> GetMap(RootsTable& roots);
 
   DECL_PRINTER(GlobalDictionary)
 
@@ -366,7 +368,7 @@ EXTERN_DECLARE_DICTIONARY(SimpleNumberDictionary, SimpleNumberDictionaryShape)
 class SimpleNumberDictionary
     : public Dictionary<SimpleNumberDictionary, SimpleNumberDictionaryShape> {
  public:
-  static inline Handle<Map> GetMap(RootsTable& roots);
+  static inline DirectHandle<Map> GetMap(RootsTable& roots);
 
   // Type specific at put (default NONE attributes is used when adding).
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static Handle<SimpleNumberDictionary>
@@ -383,7 +385,7 @@ EXTERN_DECLARE_DICTIONARY(NumberDictionary, NumberDictionaryShape)
 class NumberDictionary
     : public Dictionary<NumberDictionary, NumberDictionaryShape> {
  public:
-  static inline Handle<Map> GetMap(RootsTable& roots);
+  static inline DirectHandle<Map> GetMap(RootsTable& roots);
 
   DECL_PRINTER(NumberDictionary)
 
@@ -445,11 +447,11 @@ template <typename Dictionary>
 struct EnumIndexComparator {
   explicit EnumIndexComparator(Tagged<Dictionary> dict) : dict(dict) {}
   bool operator()(Tagged_t a, Tagged_t b) {
-    PropertyDetails da(dict->DetailsAt(
+    PropertyDetails details_a(dict->DetailsAt(
         InternalIndex(Tagged<Smi>(static_cast<Address>(a)).value())));
-    PropertyDetails db(dict->DetailsAt(
+    PropertyDetails details_b(dict->DetailsAt(
         InternalIndex(Tagged<Smi>(static_cast<Address>(b)).value())));
-    return da.dictionary_index() < db.dictionary_index();
+    return details_a.dictionary_index() < details_b.dictionary_index();
   }
   Tagged<Dictionary> dict;
 };

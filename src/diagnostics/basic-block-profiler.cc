@@ -53,7 +53,7 @@ void BasicBlockProfilerData::AddBranch(int32_t true_block_id,
 }
 
 BasicBlockProfilerData* BasicBlockProfiler::NewData(size_t n_blocks) {
-  base::MutexGuard lock(&data_list_mutex_);
+  base::SpinningMutexGuard lock(&data_list_mutex_);
   auto data = std::make_unique<BasicBlockProfilerData>(n_blocks);
   BasicBlockProfilerData* data_ptr = data.get();
   data_list_.push_back(std::move(data));
@@ -61,7 +61,8 @@ BasicBlockProfilerData* BasicBlockProfiler::NewData(size_t n_blocks) {
 }
 
 namespace {
-Handle<String> CopyStringToJSHeap(const std::string& source, Isolate* isolate) {
+DirectHandle<String> CopyStringToJSHeap(const std::string& source,
+                                        Isolate* isolate) {
   return isolate->factory()->NewStringFromAsciiChecked(source.c_str(),
                                                        AllocationType::kOld);
 }
@@ -104,7 +105,7 @@ void BasicBlockProfilerData::CopyFromJSHeap(
   hash_ = js_heap_data->hash();
 }
 
-Handle<OnHeapBasicBlockProfilerData> BasicBlockProfilerData::CopyToJSHeap(
+DirectHandle<OnHeapBasicBlockProfilerData> BasicBlockProfilerData::CopyToJSHeap(
     Isolate* isolate) {
   int id_array_size_in_bytes = static_cast<int>(n_blocks() * kBlockIdSlotSize);
   CHECK(id_array_size_in_bytes >= 0 &&

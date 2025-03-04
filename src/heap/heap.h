@@ -91,6 +91,7 @@ class IncrementalMarking;
 class IsolateSafepoint;
 class HeapObjectAllocationTracker;
 class HeapObjectsFilter;
+class HeapProfiler;
 class HeapStats;
 class Isolate;
 class JSArrayBuffer;
@@ -364,6 +365,8 @@ class Heap final {
     return ephemeron_remembered_set_.get();
   }
 
+  HeapProfiler* heap_profiler() const { return heap_profiler_.get(); }
+
   // Notifies the heap that is ok to start marking or other activities that
   // should not happen during deserialization.
   void NotifyDeserializationComplete();
@@ -563,7 +566,7 @@ class Heap final {
       double threshold_percent);
 
   V8_EXPORT_PRIVATE void AppendArrayBufferExtension(
-      Tagged<JSArrayBuffer> object, ArrayBufferExtension* extension);
+      ArrayBufferExtension* extension);
   V8_EXPORT_PRIVATE void ResizeArrayBufferExtension(
       ArrayBufferExtension* extension, int64_t delta);
   void DetachArrayBufferExtension(ArrayBufferExtension* extension);
@@ -875,7 +878,8 @@ class Heap final {
                          Tagged<Object> target)>
           gc_notify_updated_slot);
 
-  MaybeHandle<JSFinalizationRegistry> DequeueDirtyJSFinalizationRegistry();
+  MaybeDirectHandle<JSFinalizationRegistry>
+  DequeueDirtyJSFinalizationRegistry();
 
   // Called from Heap::NotifyContextDisposed to remove all
   // FinalizationRegistries with {context} from the dirty list when the context
@@ -1061,7 +1065,7 @@ class Heap final {
   // manually.
   // If the object contains external pointer slots, then these need to be
   // invalidated as well if a GC marker may have observed them previously. To
-  // do this, pass HasExernalPointerSlots::kYes.
+  // do this, pass HasExternalPointerSlots::kYes.
   void NotifyObjectLayoutChange(
       Tagged<HeapObject> object, const DisallowGarbageCollection&,
       InvalidateRecordedSlots invalidate_recorded_slots,
@@ -1358,7 +1362,7 @@ class Heap final {
   // Returns the amount of wasted bytes in non-new spaces.
   V8_EXPORT_PRIVATE size_t OldGenerationWastedBytes() const;
 
-  // Returns the amount of bytes in non-new spaces not availalbe for allocation,
+  // Returns the amount of bytes in non-new spaces not available for allocation,
   // including bytes allocated and wasted.
   V8_EXPORT_PRIVATE size_t OldGenerationConsumedBytes() const;
 
@@ -1369,7 +1373,7 @@ class Heap final {
   // Returns the amount of wasted bytes in new spaces.
   V8_EXPORT_PRIVATE size_t YoungGenerationWastedBytes() const;
 
-  // Returns the amount of bytes in new space not availalbe for allocation,
+  // Returns the amount of bytes in new space not available for allocation,
   // including bytes allocated and wasted.
   V8_EXPORT_PRIVATE size_t YoungGenerationConsumedBytes() const;
 
@@ -1382,7 +1386,7 @@ class Heap final {
   // Returns the global amount of wasted bytes.
   V8_EXPORT_PRIVATE size_t GlobalWastedBytes() const;
 
-  // Returns the global amount of bytes not availalbe for allocation, including
+  // Returns the global amount of bytes not available for allocation, including
   // bytes allocated and wasted.
   V8_EXPORT_PRIVATE size_t GlobalConsumedBytes() const;
 
@@ -1876,7 +1880,6 @@ class Heap final {
                                 double mutator_utilization);
   void CheckIneffectiveMarkCompact(size_t old_generation_size,
                                    double mutator_utilization);
-  void ReportIneffectiveMarkCompactIfNeeded();
 
   inline void IncrementExternalBackingStoreBytes(ExternalBackingStoreType type,
                                                  size_t amount);
@@ -2087,8 +2090,8 @@ class Heap final {
   // first full GC this field is only ever reset for top context disposals.
   std::atomic<bool> using_initial_limit_ = true;
 
-  // True if initial limits were provided by the embedder.
-  bool initial_limit_overwritten_ = false;
+  // True if initial heap size was provided by the embedder.
+  bool initial_size_overwritten_ = false;
 
   size_t maximum_committed_ = 0;
   size_t old_generation_capacity_after_bootstrap_ = 0;
@@ -2257,6 +2260,7 @@ class Heap final {
   std::unique_ptr<AllocationTrackerForDebugging>
       allocation_tracker_for_debugging_;
   std::unique_ptr<EphemeronRememberedSet> ephemeron_remembered_set_;
+  std::unique_ptr<HeapProfiler> heap_profiler_;
 
   std::shared_ptr<v8::TaskRunner> task_runner_;
 
@@ -2699,6 +2703,50 @@ class V8_NODISCARD CppClassNamesAsHeapObjectNameScope final {
 
  private:
   std::unique_ptr<cppgc::internal::ClassNameAsHeapObjectNameScope> scope_;
+};
+
+// We cannot avoid stale handles to left-trimmed objects, but can only make
+// sure all handles still needed are updated. Filter out a stale pointer
+// and clear the slot to allow post processing of handles (needed because
+// the sweeper might actually free the underlying page).
+class ClearStaleLeftTrimmedPointerVisitor : public RootVisitor {
+ public:
+  ClearStaleLeftTrimmedPointerVisitor(Heap* heap, RootVisitor* visitor);
+
+  void VisitRootPointer(Root root, const char* description,
+                        FullObjectSlot p) override;
+
+  void VisitRootPointers(Root root, const char* description,
+                         FullObjectSlot start, FullObjectSlot end) override;
+
+  void VisitRunningCode(FullObjectSlot code_slot,
+                        FullObjectSlot istream_or_smi_zero_slot) override;
+
+  void Synchronize(VisitorSynchronization::SyncTag tag) override {
+    visitor_->Synchronize(tag);
+  }
+
+  // The pointer compression cage base value used for decompression of all
+  // tagged values except references to InstructionStream objects.
+  PtrComprCageBase cage_base() const {
+#if V8_COMPRESS_POINTERS
+    return cage_base_;
+#else
+    return PtrComprCageBase{};
+#endif  // V8_COMPRESS_POINTERS
+  }
+
+ private:
+  inline void ClearLeftTrimmedOrForward(Root root, const char* description,
+                                        FullObjectSlot p);
+  inline bool IsLeftTrimmed(FullObjectSlot p);
+
+  Heap* heap_;
+  RootVisitor* visitor_;
+
+#if V8_COMPRESS_POINTERS
+  const PtrComprCageBase cage_base_;
+#endif  // V8_COMPRESS_POINTERS
 };
 
 }  // namespace internal

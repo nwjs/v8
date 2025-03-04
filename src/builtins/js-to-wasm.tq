@@ -470,7 +470,7 @@ macro JSToWasmObject(
       if (kind == ValueKind::kRef) {
         ThrowTypeError(MessageTemplate::kWasmTrapJSTypeError);
       } else {
-        dcheck(kind == ValueKind::kRefNull);
+        check(kind == ValueKind::kRefNull);
         return kWasmNull;
       }
     }
@@ -574,7 +574,7 @@ macro JSToWasmWrapperHelper(
         allocator.AllocFP64();
       } else {
         const retKind = retType & kValueTypeKindBitsMask;
-        dcheck(retKind == ValueKind::kRef || retKind == ValueKind::kRefNull);
+        check(retKind == ValueKind::kRef || retKind == ValueKind::kRefNull);
         // Reference return values will be processed later.
         hasRefReturns = true;
       }
@@ -874,7 +874,7 @@ macro WasmToJSObject(context: NativeContext, value: Object, retType: int32):
     // already been created.
     return runtime::WasmGenericWasmToJSObject(context, value);
   } else {
-    dcheck(paramKind == ValueKind::kRefNull);
+    check(paramKind == ValueKind::kRefNull);
     if (heapType == HeapType::kExtern || heapType == HeapType::kNoExtern ||
         heapType == HeapType::kExn || heapType == HeapType::kNoExn) {
       return UnsafeCast<JSAny>(value);
@@ -949,6 +949,8 @@ builtin JSToWasmHandleReturns(
         return I32PairToBigInt(lowWord, highWord);
       }
     } else {
+      const retKind = retType & kValueTypeKindBitsMask;
+      check(retKind == ValueKind::kRef || retKind == ValueKind::kRefNull);
       const ptr = %RawDownCast<RawPtr<uintptr>>(
           wrapperBuffer + kWrapperBufferGPReturnRegister1);
       const rawRef = *GetRefAt<uintptr>(ptr, 0);
@@ -1065,6 +1067,8 @@ builtin JSToWasmHandleReturns(
       const val = *RefCast<float64>(slot);
       fixedArray.objects[k] = Convert<Number>(val);
     } else {
+      const retKind = retType & kValueTypeKindBitsMask;
+      check(retKind == ValueKind::kRef || retKind == ValueKind::kRefNull);
       const value = fixedArray.objects[k];
       fixedArray.objects[k] = WasmToJSObject(jsContext, value, retType);
     }

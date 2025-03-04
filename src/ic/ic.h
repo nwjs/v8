@@ -64,7 +64,7 @@ class IC {
 
   static inline bool IsHandler(Tagged<MaybeObject> object);
 
-  // Nofity the IC system that a feedback has changed.
+  // Notify the IC system that a feedback has changed.
   static void OnFeedbackChanged(Isolate* isolate, Tagged<FeedbackVector> vector,
                                 FeedbackSlot slot, const char* reason);
 
@@ -84,9 +84,9 @@ class IC {
   bool ConfigureVectorState(IC::State new_state, DirectHandle<Object> key);
   // Configure the vector for MONOMORPHIC.
   void ConfigureVectorState(DirectHandle<Name> name, DirectHandle<Map> map,
-                            Handle<Object> handler);
+                            DirectHandle<Object> handler);
   void ConfigureVectorState(DirectHandle<Name> name, DirectHandle<Map> map,
-                            const MaybeObjectHandle& handler);
+                            const MaybeObjectDirectHandle& handler);
   // Configure the vector for POLYMORPHIC.
   void ConfigureVectorState(DirectHandle<Name> name, MapHandlesSpan maps,
                             MaybeObjectHandles* handlers);
@@ -98,18 +98,18 @@ class IC {
   void TraceIC(const char* type, DirectHandle<Object> name, State old_state,
                State new_state);
 
-  MaybeHandle<Object> TypeError(MessageTemplate, Handle<Object> object,
-                                Handle<Object> key);
-  MaybeHandle<Object> ReferenceError(Handle<Name> name);
+  MaybeDirectHandle<Object> TypeError(MessageTemplate, Handle<Object> object,
+                                      Handle<Object> key);
+  MaybeDirectHandle<Object> ReferenceError(Handle<Name> name);
 
-  void UpdateMonomorphicIC(const MaybeObjectHandle& handler,
+  void UpdateMonomorphicIC(const MaybeObjectDirectHandle& handler,
                            DirectHandle<Name> name);
-  bool UpdateMegaDOMIC(const MaybeObjectHandle& handler,
+  bool UpdateMegaDOMIC(const MaybeObjectDirectHandle& handler,
                        DirectHandle<Name> name);
   bool UpdatePolymorphicIC(DirectHandle<Name> name,
                            const MaybeObjectHandle& handler);
   void UpdateMegamorphicCache(DirectHandle<Map> map, DirectHandle<Name> name,
-                              const MaybeObjectHandle& handler);
+                              const MaybeObjectDirectHandle& handler);
 
   StubCache* stub_cache();
 
@@ -198,7 +198,7 @@ class LoadIC : public IC {
   }
 
   // If receiver is empty, use object as the receiver.
-  V8_WARN_UNUSED_RESULT MaybeHandle<Object> Load(
+  V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Load(
       Handle<JSAny> object, Handle<Name> name, bool update_feedback = true,
       DirectHandle<JSAny> receiver = DirectHandle<JSAny>());
 
@@ -220,8 +220,8 @@ class LoadGlobalIC : public LoadIC {
                FeedbackSlot slot, FeedbackSlotKind kind)
       : LoadIC(isolate, vector, slot, kind) {}
 
-  V8_WARN_UNUSED_RESULT MaybeHandle<Object> Load(Handle<Name> name,
-                                                 bool update_feedback = true);
+  V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Load(
+      Handle<Name> name, bool update_feedback = true);
 };
 
 class KeyedLoadIC : public LoadIC {
@@ -230,17 +230,16 @@ class KeyedLoadIC : public LoadIC {
               FeedbackSlot slot, FeedbackSlotKind kind)
       : LoadIC(isolate, vector, slot, kind) {}
 
-  V8_WARN_UNUSED_RESULT MaybeHandle<Object> Load(Handle<JSAny> object,
-                                                 Handle<Object> key);
+  V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Load(Handle<JSAny> object,
+                                                       Handle<Object> key);
 
  protected:
-  V8_WARN_UNUSED_RESULT MaybeHandle<Object> RuntimeLoad(
+  V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> RuntimeLoad(
       DirectHandle<JSAny> object, DirectHandle<Object> key,
       bool* is_found = nullptr);
 
-  V8_WARN_UNUSED_RESULT MaybeHandle<Object> LoadName(Handle<JSAny> object,
-                                                     DirectHandle<Object> key,
-                                                     Handle<Name> name);
+  V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> LoadName(
+      Handle<JSAny> object, DirectHandle<Object> key, Handle<Name> name);
 
   // receiver is HeapObject because it could be a String or a JSObject
   void UpdateLoadElement(DirectHandle<HeapObject> receiver,
@@ -268,8 +267,8 @@ class StoreIC : public IC {
     DCHECK(IsAnyStore());
   }
 
-  V8_WARN_UNUSED_RESULT MaybeHandle<Object> Store(
-      Handle<JSAny> object, Handle<Name> name, Handle<Object> value,
+  V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Store(
+      Handle<JSAny> object, Handle<Name> name, DirectHandle<Object> value,
       StoreOrigin store_origin = StoreOrigin::kNamed);
 
   bool LookupForWrite(LookupIterator* it, DirectHandle<Object> value,
@@ -294,8 +293,8 @@ class StoreGlobalIC : public StoreIC {
                 FeedbackSlot slot, FeedbackSlotKind kind)
       : StoreIC(isolate, vector, slot, kind) {}
 
-  V8_WARN_UNUSED_RESULT MaybeHandle<Object> Store(Handle<Name> name,
-                                                  Handle<Object> value);
+  V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Store(
+      Handle<Name> name, DirectHandle<Object> value);
 };
 
 enum KeyedStoreCheckMap { kDontCheckMap, kCheckMap };
@@ -318,9 +317,9 @@ class KeyedStoreIC : public StoreIC {
                FeedbackSlot slot, FeedbackSlotKind kind)
       : StoreIC(isolate, vector, slot, kind) {}
 
-  V8_WARN_UNUSED_RESULT MaybeHandle<Object> Store(Handle<JSAny> object,
-                                                  Handle<Object> name,
-                                                  Handle<Object> value);
+  V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Store(Handle<JSAny> object,
+                                                        Handle<Object> name,
+                                                        Handle<Object> value);
 
  protected:
   void UpdateStoreElement(Handle<Map> receiver_map,
@@ -328,8 +327,8 @@ class KeyedStoreIC : public StoreIC {
                           Handle<Map> new_receiver_map);
 
  private:
-  Handle<Map> ComputeTransitionedMap(Handle<Map> map,
-                                     TransitionMode transition_mode);
+  DirectHandle<Map> ComputeTransitionedMap(Handle<Map> map,
+                                           TransitionMode transition_mode);
 
   Handle<Object> StoreElementHandler(DirectHandle<Map> receiver_map,
                                      KeyedAccessStoreMode store_mode,
@@ -352,8 +351,9 @@ class StoreInArrayLiteralIC : public KeyedStoreIC {
     DCHECK(IsStoreInArrayLiteralICKind(kind()));
   }
 
-  MaybeHandle<Object> Store(DirectHandle<JSArray> array, Handle<Object> index,
-                            Handle<Object> value);
+  MaybeDirectHandle<Object> Store(DirectHandle<JSArray> array,
+                                  Handle<Object> index,
+                                  DirectHandle<Object> value);
 };
 
 }  // namespace internal

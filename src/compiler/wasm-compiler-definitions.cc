@@ -53,7 +53,7 @@ template <typename T>
 CallDescriptor* GetWasmCallDescriptor(Zone* zone, const Signature<T>* fsig,
                                       WasmCallKind call_kind,
                                       bool need_frame_state) {
-  // The extra here is to accomodate the instance object as first parameter
+  // The extra here is to accommodate the instance object as first parameter
   // and, when specified, the additional callable.
   bool extra_callable_param =
       call_kind == kWasmImportWrapper || call_kind == kWasmCapiFunction;
@@ -71,8 +71,7 @@ CallDescriptor* GetWasmCallDescriptor(Zone* zone, const Signature<T>* fsig,
   LinkageLocation target_loc = LinkageLocation::ForAnyRegister(target_type);
 
   CallDescriptor::Kind descriptor_kind;
-
-  uint64_t signature_hash = wasm::SignatureHasher::Hash(fsig);
+  uint64_t signature_hash = kInvalidWasmSignatureHash;
 
   switch (call_kind) {
     case kWasmFunction:
@@ -80,6 +79,7 @@ CallDescriptor* GetWasmCallDescriptor(Zone* zone, const Signature<T>* fsig,
       break;
     case kWasmIndirectFunction:
       descriptor_kind = CallDescriptor::kCallWasmFunctionIndirect;
+      signature_hash = wasm::SignatureHasher::Hash(fsig);
       break;
     case kWasmImportWrapper:
       descriptor_kind = CallDescriptor::kCallWasmImportWrapper;

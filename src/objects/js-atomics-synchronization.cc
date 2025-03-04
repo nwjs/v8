@@ -24,7 +24,7 @@ namespace {
 // TODO(v8:12547): Move this logic into a static method JSPromise::PerformThen
 // so that other callsites like this one can use it.
 // Set fulfill/reject handlers for a JSPromise object.
-MaybeHandle<JSReceiver> PerformPromiseThen(
+MaybeDirectHandle<JSReceiver> PerformPromiseThen(
     Isolate* isolate, DirectHandle<JSReceiver> promise,
     DirectHandle<Object> fulfill_handler,
     MaybeDirectHandle<JSFunction> maybe_reject_handler = {}) {
@@ -35,7 +35,7 @@ MaybeHandle<JSReceiver> PerformPromiseThen(
   }
   DirectHandle<Object> args[] = {fulfill_handler, reject_handler};
 
-  Handle<Object> then_result;
+  DirectHandle<Object> then_result;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, then_result,
       Execution::CallBuiltin(isolate, isolate->promise_then(), promise,
@@ -44,12 +44,13 @@ MaybeHandle<JSReceiver> PerformPromiseThen(
   return Cast<JSReceiver>(then_result);
 }
 
-MaybeHandle<Context> SetAsyncUnlockHandlers(
+MaybeDirectHandle<Context> SetAsyncUnlockHandlers(
     Isolate* isolate, DirectHandle<JSAtomicsMutex> mutex,
     DirectHandle<JSReceiver> waiting_for_callback_promise,
     DirectHandle<JSPromise> unlocked_promise) {
-  Handle<Context> handlers_context = isolate->factory()->NewBuiltinContext(
-      isolate->native_context(), JSAtomicsMutex::kAsyncContextLength);
+  DirectHandle<Context> handlers_context =
+      isolate->factory()->NewBuiltinContext(
+          isolate->native_context(), JSAtomicsMutex::kAsyncContextLength);
   handlers_context->set(JSAtomicsMutex::kMutexAsyncContextSlot, *mutex);
   handlers_context->set(JSAtomicsMutex::kUnlockedPromiseAsyncContextSlot,
                         *unlocked_promise);
@@ -512,10 +513,9 @@ Tagged<Object> JSSynchronizationPrimitive::NumWaitersForTesting(
 // TODO(lpardosixtos): Consider making and caching a canonical map for this
 // result object, like we do for the iterator result object.
 // static
-Handle<JSObject> JSAtomicsMutex::CreateResultObject(Isolate* isolate,
-                                                    DirectHandle<Object> value,
-                                                    bool success) {
-  Handle<JSObject> result =
+DirectHandle<JSObject> JSAtomicsMutex::CreateResultObject(
+    Isolate* isolate, DirectHandle<Object> value, bool success) {
+  DirectHandle<JSObject> result =
       isolate->factory()->NewJSObject(isolate->object_function());
   DirectHandle<Object> success_value = isolate->factory()->ToBoolean(success);
   JSObject::AddProperty(isolate, result, "value", value,
@@ -818,7 +818,7 @@ void JSAtomicsMutex::UnlockSlowPath(Isolate* requester,
 // 3. `unlocked_promise`, a promise that settles when the mutex is unlocked,
 //    either explicitly or by timeout. Returned by lockAsync.
 // static
-MaybeHandle<JSPromise> JSAtomicsMutex::LockOrEnqueuePromise(
+MaybeDirectHandle<JSPromise> JSAtomicsMutex::LockOrEnqueuePromise(
     Isolate* requester, DirectHandle<JSAtomicsMutex> mutex,
     DirectHandle<Object> callback, std::optional<base::TimeDelta> timeout) {
   Handle<JSPromise> internal_locked_promise =
@@ -889,7 +889,7 @@ bool JSAtomicsMutex::LockAsync(Isolate* requester,
 }
 
 // static
-Handle<JSPromise> JSAtomicsMutex::LockAsyncWrapperForWait(
+DirectHandle<JSPromise> JSAtomicsMutex::LockAsyncWrapperForWait(
     Isolate* requester, DirectHandle<JSAtomicsMutex> mutex) {
   Handle<JSPromise> internal_locked_promise =
       requester->factory()->NewJSPromise();
@@ -1284,7 +1284,7 @@ uint32_t JSAtomicsCondition::Notify(Isolate* requester,
 // 2. `lock_promise`, which will be resolved when the lock is acquired after
 //    waiting.
 // static
-MaybeHandle<JSReceiver> JSAtomicsCondition::WaitAsync(
+MaybeDirectHandle<JSReceiver> JSAtomicsCondition::WaitAsync(
     Isolate* requester, DirectHandle<JSAtomicsCondition> cv,
     DirectHandle<JSAtomicsMutex> mutex,
     std::optional<base::TimeDelta> timeout) {
@@ -1303,7 +1303,7 @@ MaybeHandle<JSReceiver> JSAtomicsCondition::WaitAsync(
           .set_map(requester->strict_function_without_prototype_map())
           .Build();
 
-  Handle<JSReceiver> lock_promise;
+  DirectHandle<JSReceiver> lock_promise;
 
   ASSIGN_RETURN_ON_EXCEPTION(
       requester, lock_promise,

@@ -848,7 +848,7 @@ v8::StartupData WarmUpSnapshotDataBlobInternal(
   }
   {
     v8::HandleScope handle_scope(isolate);
-    isolate->ContextDisposedNotification(false);
+    isolate->ContextDisposedNotification(v8::ContextDependants::kNoDependants);
     v8::Local<v8::Context> context = v8::Context::New(isolate);
     snapshot_creator.SetDefaultContext(context);
   }
@@ -1007,8 +1007,8 @@ size_t SnapshotCreatorImpl::AddData(Address object) {
   return index;
 }
 
-Handle<NativeContext> SnapshotCreatorImpl::context_at(size_t i) const {
-  return Handle<NativeContext>(contexts_[i].handle_location);
+DirectHandle<NativeContext> SnapshotCreatorImpl::context_at(size_t i) const {
+  return DirectHandle<NativeContext>::FromSlot(contexts_[i].handle_location);
 }
 
 namespace {

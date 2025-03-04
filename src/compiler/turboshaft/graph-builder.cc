@@ -35,6 +35,7 @@
 #include "src/compiler/turboshaft/explicit-truncation-reducer.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/opmasks.h"
 #include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/compiler/turboshaft/variable-reducer.h"
@@ -49,6 +50,13 @@ namespace v8::internal::compiler::turboshaft {
 #include "src/compiler/turboshaft/define-assembler-macros.inc"
 
 namespace {
+
+bool IsValidSmi(intptr_t c) {
+  Tagged<Object> as_obj = Tagged<Object>(c);
+  if (!IsSmi(as_obj)) return false;
+
+  return Smi::FromInt(Smi::ToInt(as_obj)).ptr() == static_cast<uintptr_t>(c);
+}
 
 struct GraphBuilder {
   Zone* phase_zone;
@@ -296,7 +304,7 @@ std::optional<BailoutReason> GraphBuilder::Run() {
         dominating_frame_state;
   }
 
-  if (source_positions->IsEnabled()) {
+  if (source_positions && source_positions->IsEnabled()) {
     for (OpIndex index : __ output_graph().AllOperationIndices()) {
       compiler::NodeId origin =
           __ output_graph().operation_origins()[index].DecodeTurbofanNodeId();
@@ -664,8 +672,6 @@ OpIndex GraphBuilder::Process(
       UNARY_CASE(RoundUint64ToFloat32, ChangeUint64ToFloat32)
       UNARY_CASE(RoundUint64ToFloat64, ChangeUint64ToFloat64)
       UNARY_CASE(TruncateFloat64ToFloat32, TruncateFloat64ToFloat32)
-      UNARY_CASE(TruncateFloat64ToFloat16RawBits,
-                 TruncateFloat64ToFloat16RawBits)
       UNARY_CASE(TruncateFloat64ToUint32,
                  TruncateFloat64ToUint32OverflowUndefined)
       UNARY_CASE(TruncateFloat64ToWord32, JSTruncateFloat64ToWord32)
@@ -680,6 +686,12 @@ OpIndex GraphBuilder::Process(
       UNARY_CASE(Float64ExtractLowWord32, Float64ExtractLowWord32)
       UNARY_CASE(Float64ExtractHighWord32, Float64ExtractHighWord32)
 #undef UNARY_CASE
+    case IrOpcode::kTruncateFloat64ToFloat16RawBits:
+      return __ Float16Change(Map(node->InputAt(0)),
+                              Float16ChangeOp::Kind::kToFloat16);
+    case IrOpcode::kChangeFloat16RawBitsToFloat64:
+      return __ Float16Change(Map(node->InputAt(0)),
+                              Float16ChangeOp::Kind::kToFloat64);
     case IrOpcode::kTruncateInt64ToInt32:
       return __ TruncateWord64ToWord32(Map(node->InputAt(0)));
     case IrOpcode::kTruncateFloat32ToInt32:
@@ -1142,6 +1154,11 @@ OpIndex GraphBuilder::Process(
           Map<Word32>(node->InputAt(0)), Map<Word64>(node->InputAt(1)),
           Map<Word64>(node->InputAt(2)), RegisterRepresentation::Word64(),
           BranchHint::kNone, SelectOp::Implementation::kCMove);
+    case IrOpcode::kFloat32Select:
+      return __ Select(
+          Map<Word32>(node->InputAt(0)), Map<Float32>(node->InputAt(1)),
+          Map<Float32>(node->InputAt(2)), RegisterRepresentation::Float32(),
+          BranchHint::kNone, SelectOp::Implementation::kCMove);
 
     case IrOpcode::kLoad:
     case IrOpcode::kLoadImmutable:
@@ -1317,7 +1334,7 @@ OpIndex GraphBuilder::Process(
         arguments.emplace_back(Map(node->InputAt(i)));
       }
 
-      OpIndex frame_state_idx = OpIndex::Invalid();
+      OptionalV<FrameState> frame_state_idx = OptionalV<FrameState>::Nullopt();
       if (call_descriptor->NeedsFrameState()) {
         compiler::FrameState frame_state{
             node->InputAt(static_cast<int>(call_descriptor->InputCount()))};
@@ -1530,6 +1547,18 @@ OpIndex GraphBuilder::Process(
 
       MemoryRepresentation rep =
           MemoryRepresentation::FromMachineType(machine_type);
+
+      if (const ConstantOp* value_cst =
+              __ Get(value).TryCast<Opmask::kWord64Constant>()) {
+        if (rep.value() == any_of(MemoryRepresentation::Enum::kAnyTagged,
+                                  MemoryRepresentation::Enum::kTaggedSigned)) {
+          // This is storing a Smi as a raw Word64. Instead, we'll convert the
+          // raw Word64 to a proper Smi.
+          if (IsValidSmi(value_cst->signed_integral())) {
+            value = __ SmiConstant(Tagged<Smi>(value_cst->signed_integral()));
+          }
+        }
+      }
 
       __ Store(object, value, kind, rep, access.write_barrier_kind,
                access.offset, initializing_transitioning,
@@ -1775,6 +1804,11 @@ OpIndex GraphBuilder::Process(
           __ LoadField<String>(Map<JSPrimitiveWrapper>(node->InputAt(0)),
                                AccessBuilder::ForJSPrimitiveWrapperValue());
       return __ StringLength(str);
+    }
+
+    case IrOpcode::kTypedArrayLength: {
+      ElementsKind elements_kind = OpParameter<ElementsKind>(node->op());
+      return __ TypedArrayLength(Map(node->InputAt(0)), elements_kind);
     }
 
     case IrOpcode::kStringIndexOf:
@@ -2330,12 +2364,28 @@ OpIndex GraphBuilder::Process(
           kind = LoadOp::Kind::RawAligned().Atomic().Protected();
           break;
       }
+      RegisterRepresentation result_rep =
+          RegisterRepresentation::FromMachineType(p.representation());
+      if (result_rep == RegisterRepresentation::Tagged()) {
+        // TODO(nicohartmann): Tagged loads are currently not supported by the
+        // instruction selectors, but are emitted by some tests.. We work around
+        // this using bitcasts, which is safe because atomic loads are not
+        // load-eliminated. We still should try to properly support tagged
+        // atomic loads eventually and remove this workaround.
+        result_rep = node->opcode() == IrOpcode::kWord32AtomicLoad
+                         ? RegisterRepresentation::Word32()
+                         : RegisterRepresentation::Word64();
+        return __ TaggedBitcast(
+            __ Load(base, offset, kind,
+                    MemoryRepresentation::FromRegisterRepresentation(result_rep,
+                                                                     true),
+                    result_rep, 0, 0),
+            result_rep, RegisterRepresentation::Tagged(),
+            TaggedBitcastOp::Kind::kAny);
+      }
       return __ Load(base, offset, kind,
                      MemoryRepresentation::FromMachineType(p.representation()),
-                     node->opcode() == IrOpcode::kWord32AtomicLoad
-                         ? RegisterRepresentation::Word32()
-                         : RegisterRepresentation::Word64(),
-                     0, 0);
+                     result_rep, 0, 0);
     }
 
     case IrOpcode::kWord32AtomicStore:

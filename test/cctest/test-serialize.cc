@@ -1175,12 +1175,6 @@ class AlternatingArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 
   void Free(void* data, size_t size) override { allocator_->Free(data, size); }
 
-  void* Reallocate(void* data, size_t old_length, size_t new_length) override {
-    START_ALLOW_USE_DEPRECATED()
-    return allocator_->Reallocate(data, old_length, new_length);
-    END_ALLOW_USE_DEPRECATED()
-  }
-
  private:
   bool allocation_fails_;
   v8::ArrayBuffer::Allocator* allocator_;
@@ -1254,15 +1248,15 @@ UNINITIALIZED_TEST(CustomSnapshotDataBlobDetachedArrayBuffer) {
   FreeCurrentEmbeddedBlob();
 }
 
-i::Handle<i::JSArrayBuffer> GetBufferFromTypedArray(
+i::DirectHandle<i::JSArrayBuffer> GetBufferFromTypedArray(
     v8::Local<v8::Value> typed_array) {
   CHECK(typed_array->IsTypedArray());
 
   i::DirectHandle<i::JSArrayBufferView> view =
       i::Cast<i::JSArrayBufferView>(v8::Utils::OpenDirectHandle(*typed_array));
 
-  return i::handle(i::Cast<i::JSArrayBuffer>(view->buffer()),
-                   view->GetIsolate());
+  return i::direct_handle(i::Cast<i::JSArrayBuffer>(view->buffer()),
+                          view->GetIsolate());
 }
 
 UNINITIALIZED_TEST(CustomSnapshotDataBlobOnOrOffHeapTypedArray) {
@@ -6199,6 +6193,71 @@ TEST(CachedCompileFunction) {
         fun->Call(env.local(), v8::Undefined(CcTest::isolate()), 1, &arg)
             .ToLocalChecked();
     CHECK_EQ(9, result->Int32Value(env.local()).FromJust());
+  }
+}
+
+TEST(InvalidCachedCompileFunction) {
+  DisableAlwaysOpt();
+  LocalContext env;
+  Isolate* isolate = CcTest::i_isolate();
+  isolate->compilation_cache()
+      ->DisableScriptAndEval();  // Disable same-isolate code cache.
+
+  v8::HandleScope scope(CcTest::isolate());
+
+  v8::Local<v8::String> source = v8_str("");
+  ScriptCompiler::CachedData* script_cache;
+  {
+    v8::ScriptCompiler::Source script_source(source);
+    v8::Local<v8::UnboundScript> script =
+        v8::ScriptCompiler::CompileUnboundScript(
+            reinterpret_cast<v8::Isolate*>(isolate), &script_source,
+            v8::ScriptCompiler::kEagerCompile)
+            .ToLocalChecked();
+    script_cache = v8::ScriptCompiler::CreateCodeCache(script);
+  }
+
+  ScriptCompiler::CachedData* fun_cache;
+  {
+    v8::ScriptCompiler::Source script_source(source, script_cache);
+    v8::Local<v8::Function> fun =
+        v8::ScriptCompiler::CompileFunction(
+            env.local(), &script_source, 0, nullptr, 0, nullptr,
+            v8::ScriptCompiler::kConsumeCodeCache)
+            .ToLocalChecked();
+    // Check that the cached data can be re-created.
+    fun_cache = v8::ScriptCompiler::CreateCodeCacheForFunction(fun);
+    // Check that the cached data without wrapped arguments is rejected.
+    CHECK(script_source.GetCachedData()->rejected);
+  }
+
+  {
+    DisallowCompilation no_compile_expected(isolate);
+    v8::ScriptCompiler::Source script_source(source, fun_cache);
+    v8::Local<v8::Function> fun =
+        v8::ScriptCompiler::CompileFunction(
+            env.local(), &script_source, 0, nullptr, 0, nullptr,
+            v8::ScriptCompiler::kConsumeCodeCache)
+            .ToLocalChecked();
+    v8::Local<v8::Value> result =
+        fun->Call(env.local(), v8::Undefined(CcTest::isolate()), 0, nullptr)
+            .ToLocalChecked();
+    CHECK(result->IsUndefined());
+    fun_cache = v8::ScriptCompiler::CreateCodeCacheForFunction(fun);
+  }
+
+  {
+    v8::ScriptCompiler::Source script_source(source, fun_cache);
+    v8::Local<v8::UnboundScript> script =
+        v8::ScriptCompiler::CompileUnboundScript(
+            reinterpret_cast<v8::Isolate*>(isolate), &script_source,
+            v8::ScriptCompiler::kConsumeCodeCache)
+            .ToLocalChecked();
+    // Check that the cached data can be re-created.
+    script_cache = v8::ScriptCompiler::CreateCodeCache(script);
+    // Check that the cached data with wrapped arguments is rejected.
+    CHECK(script_source.GetCachedData()->rejected);
+    delete script_cache;
   }
 }
 

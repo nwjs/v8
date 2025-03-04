@@ -419,6 +419,7 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
     BackendAllocator() {
       CHECK(i::Sandbox::current()->is_initialized());
       VirtualAddressSpace* vas = i::Sandbox::current()->address_space();
+      vas_ = vas;
       constexpr size_t max_backing_memory_size = 8ULL * i::GB;
       constexpr size_t min_backing_memory_size = 1ULL * i::GB;
       size_t backing_memory_size = max_backing_memory_size;
@@ -447,15 +448,15 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
       region_alloc_->set_on_merge_callback([this](i::Address start,
                                                   size_t size) {
         mutex_.AssertHeld();
-        VirtualAddressSpace* vas = i::Sandbox::current()->address_space();
         i::Address end = start + size;
         if (end == region_alloc_->end() &&
             start <= end_of_accessible_region_ - kChunkSize) {
           // Can shrink the accessible region.
           i::Address new_end_of_accessible_region = RoundUp(start, kChunkSize);
-          size_t size =
+          size_t size_to_decommit =
               end_of_accessible_region_ - new_end_of_accessible_region;
-          if (!vas->DecommitPages(new_end_of_accessible_region, size)) {
+          if (!vas_->DecommitPages(new_end_of_accessible_region,
+                                   size_to_decommit)) {
             i::V8::FatalProcessOutOfMemory(
                 nullptr, "ArrayBufferAllocator::BackendAllocator()");
           }
@@ -465,7 +466,7 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
           // accessible region doesn't change.
           i::Address chunk_start = RoundUp(start, kChunkSize);
           i::Address chunk_end = RoundDown(start + size, kChunkSize);
-          if (!vas->DiscardSystemPages(chunk_start, chunk_end - chunk_start)) {
+          if (!vas_->DiscardSystemPages(chunk_start, chunk_end - chunk_start)) {
             i::V8::FatalProcessOutOfMemory(
                 nullptr, "ArrayBufferAllocator::BackendAllocator()");
           }
@@ -477,8 +478,7 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
       // The sandbox may already have been torn down, in which case there's no
       // need to free any memory.
       if (i::Sandbox::current()->is_initialized()) {
-        VirtualAddressSpace* vas = i::Sandbox::current()->address_space();
-        vas->FreePages(region_alloc_->begin(), region_alloc_->size());
+        vas_->FreePages(region_alloc_->begin(), region_alloc_->size());
       }
     }
 
@@ -496,11 +496,10 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
       i::Address end = region + length;
       size_t length_to_memset = length;
       if (end > end_of_accessible_region_) {
-        VirtualAddressSpace* vas = i::Sandbox::current()->address_space();
         i::Address new_end_of_accessible_region = RoundUp(end, kChunkSize);
         size_t size = new_end_of_accessible_region - end_of_accessible_region_;
-        if (!vas->SetPagePermissions(end_of_accessible_region_, size,
-                                     PagePermissions::kReadWrite)) {
+        if (!vas_->SetPagePermissions(end_of_accessible_region_, size,
+                                      PagePermissions::kReadWrite)) {
           if (!region_alloc_->FreeRegion(region)) {
             i::V8::FatalProcessOutOfMemory(
                 nullptr, "ArrayBufferAllocator::BackendAllocator::Allocate()");
@@ -539,6 +538,7 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 
     std::unique_ptr<base::RegionAllocator> region_alloc_;
     size_t end_of_accessible_region_;
+    VirtualAddressSpace* vas_ = nullptr;
     base::SpinningMutex mutex_;
   };
 
@@ -556,15 +556,6 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
   }
 
   void Free(void* data, size_t) override { base::Free(data); }
-
-  void* Reallocate(void* data, size_t old_length, size_t new_length) override {
-    void* new_data = base::Realloc(data, new_length);
-    if (new_length > old_length) {
-      memset(reinterpret_cast<uint8_t*>(new_data) + old_length, 0,
-             new_length - old_length);
-    }
-    return new_data;
-  }
 };
 #endif  // V8_ENABLE_SANDBOX
 
@@ -4307,23 +4298,6 @@ bool v8::BackingStore::IsShared() const {
 
 bool v8::BackingStore::IsResizableByUserJavaScript() const {
   return reinterpret_cast<const i::BackingStore*>(this)->is_resizable_by_js();
-}
-
-// static
-std::unique_ptr<v8::BackingStore> v8::BackingStore::Reallocate(
-    v8::Isolate* v8_isolate, std::unique_ptr<v8::BackingStore> backing_store,
-    size_t byte_length) {
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
-  API_RCS_SCOPE(i_isolate, ArrayBuffer, BackingStore_Reallocate);
-  Utils::ApiCheck(byte_length <= i::JSArrayBuffer::kMaxByteLength,
-                  "v8::BackingStore::Reallocate", "byte_length is too large");
-  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  i::BackingStore* i_backing_store =
-      reinterpret_cast<i::BackingStore*>(backing_store.get());
-  if (!i_backing_store->Reallocate(i_isolate, byte_length)) {
-    i::V8::FatalProcessOutOfMemory(i_isolate, "v8::BackingStore::Reallocate");
-  }
-  return backing_store;
 }
 
 // static
@@ -8113,11 +8087,11 @@ namespace {
 // OrderedNameDictionary::Add returns MaybeHandle, NameDictionary::Add returns
 // Handle.
 template <typename T>
-i::Handle<T> ToHandle(i::Handle<T> h) {
+i::DirectHandle<T> ToHandle(i::Handle<T> h) {
   return h;
 }
 template <typename T>
-i::Handle<T> ToHandle(i::MaybeHandle<T> h) {
+i::DirectHandle<T> ToHandle(i::MaybeHandle<T> h) {
   return h.ToHandleChecked();
 }
 
@@ -8682,6 +8656,9 @@ FastIterateResult FastIterateArray(DirectHandle<JSArray> array,
       // These are never used by v8::Array instances.
       UNREACHABLE();
   }
+  // The input value of the switch is untrusted, so even if it's exhaustive, it
+  // can skip all cases and end up here, triggering UB since there's no return.
+  SBXCHECK(false);
 }
 
 }  // namespace internal
@@ -8837,9 +8814,9 @@ enum class SetAsArrayKind {
   kValues = i::JS_SET_VALUE_ITERATOR_TYPE
 };
 
-i::Handle<i::JSArray> MapAsArray(i::Isolate* i_isolate,
-                                 i::Tagged<i::Object> table_obj, int offset,
-                                 MapAsArrayKind kind) {
+i::DirectHandle<i::JSArray> MapAsArray(i::Isolate* i_isolate,
+                                       i::Tagged<i::Object> table_obj,
+                                       int offset, MapAsArrayKind kind) {
   i::Factory* factory = i_isolate->factory();
   i::DirectHandle<i::OrderedHashMap> table(
       i::Cast<i::OrderedHashMap>(table_obj), i_isolate);
@@ -8942,9 +8919,9 @@ Maybe<bool> Set::Delete(Local<Context> context, Local<Value> key) {
 }
 
 namespace {
-i::Handle<i::JSArray> SetAsArray(i::Isolate* i_isolate,
-                                 i::Tagged<i::Object> table_obj, int offset,
-                                 SetAsArrayKind kind) {
+i::DirectHandle<i::JSArray> SetAsArray(i::Isolate* i_isolate,
+                                       i::Tagged<i::Object> table_obj,
+                                       int offset, SetAsArrayKind kind) {
   i::Factory* factory = i_isolate->factory();
   i::DirectHandle<i::OrderedHashSet> table(
       i::Cast<i::OrderedHashSet>(table_obj), i_isolate);
@@ -9252,7 +9229,7 @@ Local<WasmMemoryMapDescriptor> WasmMemoryMapDescriptor::New(
 #if V8_ENABLE_WEBASSEMBLY
   CHECK(i::v8_flags.experimental_wasm_memory_control);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
-  i::Handle<i::WasmMemoryMapDescriptor> result =
+  i::DirectHandle<i::WasmMemoryMapDescriptor> result =
       i::WasmMemoryMapDescriptor::NewFromFileDescriptor(i_isolate, fd);
   return Utils::ToLocal(result);
 #else
@@ -9260,21 +9237,6 @@ Local<WasmMemoryMapDescriptor> WasmMemoryMapDescriptor::New(
                   "WebAssembly support is not enabled");
   UNREACHABLE();
 #endif
-}
-
-void* v8::ArrayBuffer::Allocator::Reallocate(void* data, size_t old_length,
-                                             size_t new_length) {
-  if (old_length == new_length) return data;
-  uint8_t* new_data =
-      reinterpret_cast<uint8_t*>(AllocateUninitialized(new_length));
-  if (new_data == nullptr) return nullptr;
-  size_t bytes_to_copy = std::min(old_length, new_length);
-  memcpy(new_data, data, bytes_to_copy);
-  if (new_length > bytes_to_copy) {
-    memset(new_data + bytes_to_copy, 0, new_length - bytes_to_copy);
-  }
-  Free(data, old_length);
-  return new_data;
 }
 
 // static
@@ -9364,6 +9326,11 @@ MaybeLocal<ArrayBuffer> v8::ArrayBuffer::MaybeNew(
     BackingStoreInitializationMode initialization_mode) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   API_RCS_SCOPE(i_isolate, ArrayBuffer, MaybeNew);
+  size_t max = i_isolate->array_buffer_allocator()->MaxAllocationSize();
+  DCHECK(max <= ArrayBuffer::kMaxByteLength);
+  if (byte_length > max) {
+    return {};
+  }
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i::MaybeDirectHandle<i::JSArrayBuffer> result =
       i_isolate->factory()->NewJSArrayBufferAndBackingStore(
@@ -9371,7 +9338,7 @@ MaybeLocal<ArrayBuffer> v8::ArrayBuffer::MaybeNew(
 
   i::DirectHandle<i::JSArrayBuffer> array_buffer;
   if (!result.ToHandle(&array_buffer)) {
-    return MaybeLocal<ArrayBuffer>();
+    return {};
   }
 
   return Utils::ToLocal(array_buffer);
@@ -9414,18 +9381,29 @@ Local<ArrayBuffer> v8::ArrayBuffer::New(
 
 std::unique_ptr<v8::BackingStore> v8::ArrayBuffer::NewBackingStore(
     Isolate* v8_isolate, size_t byte_length,
-    BackingStoreInitializationMode initialization_mode) {
+    BackingStoreInitializationMode initialization_mode,
+    BackingStoreOnFailureMode on_failure) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   API_RCS_SCOPE(i_isolate, ArrayBuffer, NewBackingStore);
-  CHECK_LE(byte_length, i::JSArrayBuffer::kMaxByteLength);
+  if (on_failure == BackingStoreOnFailureMode::kOutOfMemory) {
+    CHECK_LE(byte_length, i::JSArrayBuffer::kMaxByteLength);
+  } else if (byte_length > i::JSArrayBuffer::kMaxByteLength) {
+    DCHECK(on_failure == BackingStoreOnFailureMode::kReturnNull);
+    return {};
+  }
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   std::unique_ptr<i::BackingStoreBase> backing_store =
       i::BackingStore::Allocate(i_isolate, byte_length,
                                 i::SharedFlag::kNotShared,
                                 GetInitializedFlag(initialization_mode));
   if (!backing_store) {
-    i::V8::FatalProcessOutOfMemory(i_isolate,
-                                   "v8::ArrayBuffer::NewBackingStore");
+    if (on_failure == BackingStoreOnFailureMode::kOutOfMemory) {
+      i::V8::FatalProcessOutOfMemory(i_isolate,
+                                     "v8::ArrayBuffer::NewBackingStore");
+    } else {
+      DCHECK(on_failure == BackingStoreOnFailureMode::kReturnNull);
+      return {};
+    }
   }
   return std::unique_ptr<v8::BackingStore>(
       static_cast<v8::BackingStore*>(backing_store.release()));
@@ -9743,10 +9721,26 @@ Local<SharedArrayBuffer> v8::SharedArrayBuffer::New(
                                 GetInitializedFlag(initialization_mode));
 
   if (!backing_store) {
-    // TODO(jbroman): It may be useful in the future to provide a MaybeLocal
-    // version that throws an exception or otherwise does not crash.
     i::V8::FatalProcessOutOfMemory(i_isolate, "v8::SharedArrayBuffer::New");
   }
+
+  i::DirectHandle<i::JSArrayBuffer> obj =
+      i_isolate->factory()->NewJSSharedArrayBuffer(std::move(backing_store));
+  return Utils::ToLocalShared(obj);
+}
+
+MaybeLocal<SharedArrayBuffer> v8::SharedArrayBuffer::MaybeNew(
+    Isolate* v8_isolate, size_t byte_length,
+    BackingStoreInitializationMode initialization_mode) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  API_RCS_SCOPE(i_isolate, SharedArrayBuffer, New);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+
+  std::unique_ptr<i::BackingStore> backing_store =
+      i::BackingStore::Allocate(i_isolate, byte_length, i::SharedFlag::kShared,
+                                GetInitializedFlag(initialization_mode));
+
+  if (!backing_store) return {};
 
   i::DirectHandle<i::JSArrayBuffer> obj =
       i_isolate->factory()->NewJSSharedArrayBuffer(std::move(backing_store));
@@ -9771,20 +9765,31 @@ Local<SharedArrayBuffer> v8::SharedArrayBuffer::New(
 
 std::unique_ptr<v8::BackingStore> v8::SharedArrayBuffer::NewBackingStore(
     Isolate* v8_isolate, size_t byte_length,
-    BackingStoreInitializationMode initialization_mode) {
+    BackingStoreInitializationMode initialization_mode,
+    BackingStoreOnFailureMode on_failure) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   API_RCS_SCOPE(i_isolate, SharedArrayBuffer, NewBackingStore);
-  Utils::ApiCheck(
-      byte_length <= i::JSArrayBuffer::kMaxByteLength,
-      "v8::SharedArrayBuffer::NewBackingStore",
-      "Cannot construct SharedArrayBuffer, requested length is too big");
+  if (on_failure == BackingStoreOnFailureMode::kOutOfMemory) {
+    Utils::ApiCheck(
+        byte_length <= i::JSArrayBuffer::kMaxByteLength,
+        "v8::SharedArrayBuffer::NewBackingStore",
+        "Cannot construct SharedArrayBuffer, requested length is too big");
+  } else {
+    DCHECK(on_failure == BackingStoreOnFailureMode::kReturnNull);
+    if (byte_length > i::JSArrayBuffer::kMaxByteLength) return {};
+  }
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   std::unique_ptr<i::BackingStoreBase> backing_store =
       i::BackingStore::Allocate(i_isolate, byte_length, i::SharedFlag::kShared,
                                 GetInitializedFlag(initialization_mode));
   if (!backing_store) {
-    i::V8::FatalProcessOutOfMemory(i_isolate,
-                                   "v8::SharedArrayBuffer::NewBackingStore");
+    if (on_failure == BackingStoreOnFailureMode::kOutOfMemory) {
+      i::V8::FatalProcessOutOfMemory(i_isolate,
+                                     "v8::SharedArrayBuffer::NewBackingStore");
+    } else {
+      DCHECK(on_failure == BackingStoreOnFailureMode::kReturnNull);
+      return {};
+    }
   }
   return std::unique_ptr<v8::BackingStore>(
       static_cast<v8::BackingStore*>(backing_store.release()));
@@ -10030,7 +10035,7 @@ IsolateGroup& v8::IsolateGroup::operator=(IsolateGroup&& other) {
 
 HeapProfiler* Isolate::GetHeapProfiler() {
   i::HeapProfiler* heap_profiler =
-      reinterpret_cast<i::Isolate*>(this)->heap_profiler();
+      reinterpret_cast<i::Isolate*>(this)->heap()->heap_profiler();
   return reinterpret_cast<HeapProfiler*>(heap_profiler);
 }
 
@@ -10189,6 +10194,12 @@ CppHeap* Isolate::GetCppHeap() const {
   return i_isolate->heap()->cpp_heap();
 }
 
+void Isolate::SetReleaseCppHeapCallbackForTesting(
+    ReleaseCppHeapCallback callback) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  i_isolate->SetReleaseCppHeapCallback(callback);
+}
+
 void Isolate::SetGetExternallyAllocatedMemoryInBytesCallback(
     GetExternallyAllocatedMemoryInBytesCallback callback) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
@@ -10202,14 +10213,6 @@ void Isolate::TerminateExecution() {
 
 bool Isolate::IsExecutionTerminating() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
-#ifdef DEBUG
-  // This method might be called on a thread that's not bound to any Isolate
-  // and thus pointer compression schemes might have cage base value unset.
-  // Read-only roots accessors contain type DCHECKs which require access to
-  // V8 heap in order to check the object type. So, allow heap access here
-  // to let the checks work.
-  i::PtrComprCageAccessScope ptr_compr_cage_access_scope(i_isolate);
-#endif  // DEBUG
   return i_isolate->is_execution_terminating();
 }
 
@@ -10421,14 +10424,6 @@ void Isolate::Dispose() {
 
 void Isolate::DumpAndResetStats() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
-#ifdef DEBUG
-  // This method might be called on a thread that's not bound to any Isolate
-  // and thus pointer compression schemes might have cage base value unset.
-  // Read-only roots accessors contain type DCHECKs which require access to
-  // V8 heap in order to check the object type. So, allow heap access here
-  // to let the checks work.
-  i::PtrComprCageAccessScope ptr_compr_cage_access_scope(i_isolate);
-#endif  // DEBUG
   i_isolate->DumpAndResetStats();
 }
 
@@ -10592,7 +10587,7 @@ void Isolate::GetHeapStatistics(HeapStatistics* heap_statistics) {
   heap->FreeMainThreadLinearAllocationAreas();
 
   // The order of acquiring memory statistics is important here. We query in
-  // this order because of concurrent allocation: 1) used memory 2) comitted
+  // this order because of concurrent allocation: 1) used memory 2) committed
   // physical memory 3) committed memory. Therefore the condition used <=
   // committed physical <= committed should hold.
   heap_statistics->used_global_handles_size_ = heap->UsedGlobalHandlesSize();
@@ -10904,14 +10899,6 @@ void Isolate::LowMemoryNotification() {
     i::NestedTimedHistogramScope idle_notification_scope(
         i_isolate->counters()->gc_low_memory_notification());
     TRACE_EVENT0("v8", "V8.GCLowMemoryNotification");
-#ifdef DEBUG
-    // This method might be called on a thread that's not bound to any Isolate
-    // and thus pointer compression schemes might have cage base value unset.
-    // Read-only roots accessors contain type DCHECKs which require access to
-    // V8 heap in order to check the object type. So, allow heap access here
-    // to let the checks work.
-    i::PtrComprCageAccessScope ptr_compr_cage_access_scope(i_isolate);
-#endif  // DEBUG
     i_isolate->heap()->CollectAllAvailableGarbage(
         i::GarbageCollectionReason::kLowMemoryNotification);
   }
@@ -10919,6 +10906,10 @@ void Isolate::LowMemoryNotification() {
 
 int Isolate::ContextDisposedNotification(bool dependant_context) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  if (V8_UNLIKELY(i::v8_flags.trace_context_disposal)) {
+    i_isolate->PrintWithTimestamp("[context-disposal] Disposing %s context\n",
+                                  dependant_context ? "nested" : "top-level");
+  }
 #if V8_ENABLE_WEBASSEMBLY
   if (!dependant_context) {
     if (!i_isolate->context().is_null()) {
@@ -10932,8 +10923,15 @@ int Isolate::ContextDisposedNotification(bool dependant_context) {
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   i_isolate->AbortConcurrentOptimization(i::BlockingBehavior::kDontBlock);
-  // TODO(ahaas): move other non-heap activity out of the heap call.
   return i_isolate->heap()->NotifyContextDisposed(dependant_context);
+}
+
+void Isolate::ContextDisposedNotification(ContextDependants dependants) {
+  // TODO(mlippautz): Replace implementation with the old version of
+  // ContextDisposedNotification() that still has a return parameter.
+  START_ALLOW_USE_DEPRECATED()
+  ContextDisposedNotification(dependants == ContextDependants::kSomeDependants);
+  END_ALLOW_USE_DEPRECATED()
 }
 
 void Isolate::IsolateInForegroundNotification() {
@@ -10965,6 +10963,11 @@ void Isolate::SetBatterySaverMode(bool battery_saver_mode_enabled) {
   i_isolate->set_battery_saver_mode_enabled(battery_saver_mode_enabled);
 }
 
+void Isolate::SetMemorySaverMode(bool memory_saver_mode_enabled) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  i_isolate->set_memory_saver_mode_enabled(memory_saver_mode_enabled);
+}
+
 void Isolate::ClearCachesForTesting() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   i_isolate->AbortConcurrentOptimization(i::BlockingBehavior::kBlock);
@@ -10975,6 +10978,11 @@ void Isolate::ClearCachesForTesting() {
 void Isolate::SetIsLoading(bool is_loading) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   i_isolate->SetIsLoading(is_loading);
+}
+
+void Isolate::Freeze(bool is_frozen) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  i_isolate->Freeze(is_frozen);
 }
 
 void Isolate::IncreaseHeapLimitForDebugging() {
@@ -11736,8 +11744,12 @@ void* CpuProfilingOptions::raw_filter_context() const {
 void CpuProfiler::Dispose() { delete reinterpret_cast<i::CpuProfiler*>(this); }
 
 // static
-void CpuProfiler::CollectSample(Isolate* v8_isolate) {
-  i::CpuProfiler::CollectSample(reinterpret_cast<i::Isolate*>(v8_isolate));
+// |trace_id| is an optional identifier stored in the sample record used
+// to associate the sample with a trace event.
+void CpuProfiler::CollectSample(Isolate* v8_isolate,
+                                const std::optional<uint64_t> trace_id) {
+  i::CpuProfiler::CollectSample(reinterpret_cast<i::Isolate*>(v8_isolate),
+                                trace_id);
 }
 
 void CpuProfiler::SetSamplingInterval(int us) {
@@ -11964,12 +11976,12 @@ static i::HeapSnapshot* ToInternal(const HeapSnapshot* snapshot) {
 
 void HeapSnapshot::Delete() {
   i::Isolate* i_isolate = ToInternal(this)->profiler()->isolate();
-  if (i_isolate->heap_profiler()->GetSnapshotsCount() > 1 ||
-      i_isolate->heap_profiler()->IsTakingSnapshot()) {
+  if (i_isolate->heap()->heap_profiler()->GetSnapshotsCount() > 1 ||
+      i_isolate->heap()->heap_profiler()->IsTakingSnapshot()) {
     ToInternal(this)->Delete();
   } else {
     // If this is the last snapshot, clean up all accessory data as well.
-    i_isolate->heap_profiler()->DeleteAllSnapshots();
+    i_isolate->heap()->heap_profiler()->DeleteAllSnapshots();
   }
 }
 
@@ -12213,10 +12225,6 @@ V8_EXPORT v8::Local<v8::Value> GetFunctionTemplateData(
   UNREACHABLE();
 }
 }  // namespace api_internal
-
-void FastApiTypedArrayBase::ValidateIndex(size_t index) const {
-  DCHECK_LT(index, length_);
-}
 
 RegisterState::RegisterState()
     : pc(nullptr), sp(nullptr), fp(nullptr), lr(nullptr) {}
@@ -12755,9 +12763,8 @@ TryToCopyAndConvertArrayToCppBuffer<CTypeInfoBuilder<int32_t>::Build().GetId(),
                                     int32_t>(Local<Array> src, int32_t* dst,
                                              uint32_t max_length) {
   return CopyAndConvertArrayToCppBuffer<
-      CTypeInfo(CTypeInfo::Type::kInt32, CTypeInfo::SequenceType::kIsSequence)
-          .GetId(),
-      int32_t>(src, dst, max_length);
+      CTypeInfo(CTypeInfo::Type::kInt32).GetId(), int32_t>(src, dst,
+                                                           max_length);
 }
 
 template <>
@@ -12766,9 +12773,8 @@ TryToCopyAndConvertArrayToCppBuffer<CTypeInfoBuilder<uint32_t>::Build().GetId(),
                                     uint32_t>(Local<Array> src, uint32_t* dst,
                                               uint32_t max_length) {
   return CopyAndConvertArrayToCppBuffer<
-      CTypeInfo(CTypeInfo::Type::kUint32, CTypeInfo::SequenceType::kIsSequence)
-          .GetId(),
-      uint32_t>(src, dst, max_length);
+      CTypeInfo(CTypeInfo::Type::kUint32).GetId(), uint32_t>(src, dst,
+                                                             max_length);
 }
 
 template <>
@@ -12777,9 +12783,8 @@ TryToCopyAndConvertArrayToCppBuffer<CTypeInfoBuilder<float>::Build().GetId(),
                                     float>(Local<Array> src, float* dst,
                                            uint32_t max_length) {
   return CopyAndConvertArrayToCppBuffer<
-      CTypeInfo(CTypeInfo::Type::kFloat32, CTypeInfo::SequenceType::kIsSequence)
-          .GetId(),
-      float>(src, dst, max_length);
+      CTypeInfo(CTypeInfo::Type::kFloat32).GetId(), float>(src, dst,
+                                                           max_length);
 }
 
 template <>
@@ -12788,9 +12793,8 @@ TryToCopyAndConvertArrayToCppBuffer<CTypeInfoBuilder<double>::Build().GetId(),
                                     double>(Local<Array> src, double* dst,
                                             uint32_t max_length) {
   return CopyAndConvertArrayToCppBuffer<
-      CTypeInfo(CTypeInfo::Type::kFloat64, CTypeInfo::SequenceType::kIsSequence)
-          .GetId(),
-      double>(src, dst, max_length);
+      CTypeInfo(CTypeInfo::Type::kFloat64).GetId(), double>(src, dst,
+                                                            max_length);
 }
 
 }  // namespace v8

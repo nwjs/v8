@@ -42,8 +42,8 @@ class FunctionTester : public InitializedHandleScope {
   }
 
   template <typename T, typename... Args>
-  Handle<T> CallChecked(Args... args) {
-    Handle<Object> result = Call(args...).ToHandleChecked();
+  DirectHandle<T> CallChecked(Args... args) {
+    DirectHandle<Object> result = Call(args...).ToHandleChecked();
     return Cast<T>(result);
   }
 
@@ -106,15 +106,15 @@ class FunctionTester : public InitializedHandleScope {
   }
 
   Handle<JSFunction> NewFunction(const char* source);
-  Handle<JSObject> NewObject(const char* source);
+  DirectHandle<JSObject> NewObject(const char* source);
 
   Handle<String> Val(const char* string);
   Handle<Object> Val(double value);
-  Handle<Object> infinity();
-  Handle<Object> minus_infinity();
-  Handle<Object> nan();
+  DirectHandle<Object> infinity();
+  DirectHandle<Object> minus_infinity();
+  DirectHandle<Object> nan();
   Handle<Object> undefined();
-  Handle<Object> null();
+  DirectHandle<Object> null();
   Handle<Object> true_value();
   Handle<Object> false_value();
 

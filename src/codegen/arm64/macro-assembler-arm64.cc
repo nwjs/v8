@@ -1631,7 +1631,8 @@ void MacroAssembler::AssertFPCRState(Register fpcr) {
 
   // Settings left to their default values:
   //   - Assert that flush-to-zero is not set.
-  Tbnz(fpcr, FZ_offset, &unexpected_mode);
+  // TODO(leszeks): Reenable check based on isolate flag.
+  // Tbnz(fpcr, FZ_offset, &unexpected_mode);
   //   - Assert that the rounding mode is nearest-with-ties-to-even.
   static_assert(FPTieEven == 0);
   Tst(fpcr, RMode_mask);
@@ -2600,6 +2601,7 @@ void MacroAssembler::JumpJSFunction(Register function_object,
 
 void MacroAssembler::ResolveWasmCodePointer(Register target,
                                             uint64_t signature_hash) {
+  ASM_CODE_COMMENT(this);
   ExternalReference global_jump_table =
       ExternalReference::wasm_code_pointer_table();
   UseScratchRegisterScope temps(this);
@@ -2801,7 +2803,7 @@ void MacroAssembler::InvokePrologue(Register formal_parameter_count,
   B(le, &regular_invoke);
 
   // The stack pointer in arm64 needs to be 16-byte aligned. We might need to
-  // (1) add an extra padding or (2) remove (re-use) the extra padding already
+  // (1) add an extra padding or (2) remove (reuse) the extra padding already
   // in the stack. Let {slots_to_copy} be the number of slots (arguments) to
   // move up in the stack and let {slots_to_claim} be the number of extra stack
   // slots to claim.
@@ -3889,13 +3891,13 @@ void MacroAssembler::StoreSandboxedPointerField(Register value,
 
 void MacroAssembler::LoadExternalPointerField(Register destination,
                                               MemOperand field_operand,
-                                              ExternalPointerTag tag,
+                                              ExternalPointerTagRange tag_range,
                                               Register isolate_root) {
   DCHECK(!AreAliased(destination, isolate_root));
   ASM_CODE_COMMENT(this);
 #ifdef V8_ENABLE_SANDBOX
-  DCHECK_NE(tag, kExternalPointerNullTag);
-  DCHECK(!IsSharedExternalPointerType(tag));
+  DCHECK(!tag_range.IsEmpty());
+  DCHECK(!IsSharedExternalPointerType(tag_range));
   UseScratchRegisterScope temps(this);
   Register external_table = temps.AcquireX();
   if (isolate_root == no_reg) {
@@ -3910,12 +3912,28 @@ void MacroAssembler::LoadExternalPointerField(Register destination,
   Mov(destination, Operand(destination, LSR, kExternalPointerIndexShift));
   Ldr(destination, MemOperand(external_table, destination, LSL,
                               kExternalPointerTableEntrySizeLog2));
+
+  // We don't expect to see empty fields here. If this is ever needed, consider
+  // using an dedicated empty value entry for those tags instead (i.e. an entry
+  // with the right tag and nullptr payload).
+  DCHECK(!ExternalPointerCanBeEmpty(tag_range));
+
   // We need another scratch register for the 64-bit tag constant. Instead of
   // forcing the `And` to allocate a new temp register (which we may not have),
   // reuse the temp register that we used for the external pointer table base.
-  Register tag_reg = external_table;
-  Mov(tag_reg, Immediate(~tag));
-  And(destination, destination, tag_reg);
+  Register scratch = external_table;
+  if (tag_range.Size() == 1) {
+    // The common and simple case: we expect exactly one tag.
+    static_assert(kExternalPointerShiftedTagMask == 0x7f);
+    Ubfx(scratch, destination, kExternalPointerTagShift, 7);
+    Cmp(scratch, Immediate(tag_range.first));
+    SbxCheck(eq, AbortReason::kExternalPointerTagMismatch);
+    And(destination, destination, Immediate(kExternalPointerPayloadMask));
+  } else {
+    // Not currently supported. Implement once needed.
+    DCHECK_NE(tag_range, kAnyExternalPointerTagRange);
+    UNREACHABLE();
+  }
 #else
   Ldr(destination, field_operand);
 #endif  // V8_ENABLE_SANDBOX
@@ -4351,12 +4369,12 @@ void MacroAssembler::DebugBreak() { Debug("DebugBreak", 0, BREAK); }
 void MacroAssembler::Abort(AbortReason reason) {
   ASM_CODE_COMMENT(this);
   if (v8_flags.code_comments) {
-    RecordComment("Abort message: ");
-    RecordComment(GetAbortReason(reason));
+    RecordComment("Abort message:", SourceLocation{});
+    RecordComment(GetAbortReason(reason), SourceLocation{});
   }
 
-  // Avoid emitting call to builtin if requested.
-  if (trap_on_abort()) {
+  // Without debug code, save the code size and just trap.
+  if (!v8_flags.debug_code) {
     Brk(0);
     return;
   }

@@ -277,8 +277,11 @@ Reduction JSContextSpecialization::ReduceJSLoadScriptContext(Node* node) {
   DCHECK(concrete.object()->IsScriptContext());
   auto maybe_property =
       concrete.object()->GetScriptContextSideProperty(access.index());
-  auto property =
-      maybe_property ? maybe_property.value() : ContextSidePropertyCell::kOther;
+  if (!maybe_property) {
+    return SimplifyJSLoadScriptContext(
+        node, jsgraph()->ConstantNoHole(concrete, broker()), depth);
+  }
+  auto property = maybe_property.value();
   switch (property) {
     case ContextSidePropertyCell::kConst: {
       OptionalObjectRef maybe_value =
@@ -403,7 +406,8 @@ Reduction JSContextSpecialization::ReduceJSStoreContext(Node* node) {
 }
 
 Reduction JSContextSpecialization::ReduceJSStoreScriptContext(Node* node) {
-  DCHECK(v8_flags.const_tracking_let);
+  DCHECK(v8_flags.script_context_mutable_heap_number ||
+         v8_flags.const_tracking_let);
   DCHECK_EQ(IrOpcode::kJSStoreScriptContext, node->opcode());
 
   const ContextAccess& access = ContextAccessOf(node->op());
