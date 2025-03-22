@@ -10,7 +10,29 @@
 const babelTraverse = require('@babel/traverse').default;
 const babelTypes = require('@babel/types');
 
+const SKIP_LARGE_LOOP_MUTATION_PROB = 0.75;
+
+/**
+ * Container for any state that lives throughout one fuzz-test output
+ * generation. Can be used to collect information during parsing and
+ * use it later in mutators.
+ */
+class MutationContext {
+  constructor () {
+    this.asyncFunctions = new Set();
+    this.infiniteFunctions = new Set();
+    this.extraResources = new Set();
+    this.loopVariables = new Set();
+  }
+}
+
+const EMPTY_DEFAULT_CONTEXT = new MutationContext();
+
 class Mutator {
+  constructor() {
+    this.context = EMPTY_DEFAULT_CONTEXT;
+  }
+
   get visitor() {
     return null;
   }
@@ -36,7 +58,8 @@ class Mutator {
     babelTraverse(ast, visitor);
   }
 
-  mutate(source) {
+  mutate(source, context=EMPTY_DEFAULT_CONTEXT) {
+    this.context = context;
     if (Array.isArray(this.visitor)) {
       for (const visitor of this.visitor) {
         this._traverse(source.ast, visitor);
@@ -94,5 +117,7 @@ class Mutator {
 }
 
 module.exports = {
+  SKIP_LARGE_LOOP_MUTATION_PROB: SKIP_LARGE_LOOP_MUTATION_PROB,
   Mutator: Mutator,
+  MutationContext: MutationContext,
 }

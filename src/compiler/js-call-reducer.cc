@@ -2327,7 +2327,7 @@ struct PromiseCtorFrameStateParams {
 // but probably not worth the effort.
 FrameState CreateConstructInvokeStubFrameState(
     Node* node, Node* outer_frame_state, SharedFunctionInfoRef shared,
-    Node* context, CommonOperatorBuilder* common, Graph* graph) {
+    Node* context, CommonOperatorBuilder* common, TFGraph* graph) {
   const FrameStateFunctionInfo* state_info =
       common->CreateFrameStateFunctionInfo(FrameStateType::kConstructInvokeStub,
                                            1, 0, 0, shared.object(), {});
@@ -2353,7 +2353,7 @@ FrameState CreateConstructInvokeStubFrameState(
 
 FrameState PromiseConstructorFrameState(
     const PromiseCtorFrameStateParams& params, CommonOperatorBuilder* common,
-    Graph* graph) {
+    TFGraph* graph) {
   DCHECK_EQ(1,
             params.shared.internal_formal_parameter_count_without_receiver());
   return CreateConstructInvokeStubFrameState(
@@ -2423,9 +2423,17 @@ TNode<Object> PromiseBuiltinReducerAssembler::ReducePromiseConstructor(
   FrameState constructor_frame_state =
       PromiseConstructorFrameState(frame_state_params, common(), graph());
 
-  ThrowIfNotCallable(executor,
-                     PromiseConstructorLazyFrameState(frame_state_params,
-                                                      constructor_frame_state));
+  IfNot(ObjectIsCallable(executor))
+      .Then((_ {
+        JSCallRuntime2(
+            Runtime::kThrowTypeError,
+            SmiConstant(
+                Smi::FromEnum(MessageTemplate::kResolverNotAFunction).value()),
+            executor, context,
+            PromiseConstructorLazyFrameState(frame_state_params,
+                                             constructor_frame_state));
+      }))
+      .ExpectTrue();
 
   TNode<JSPromise> promise = CreatePromise(context);
 
@@ -4897,6 +4905,9 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
     case Builtin::kDataViewPrototypeGetInt32:
       return ReduceDataViewAccess(node, DataViewAccess::kGet,
                                   ExternalArrayType::kExternalInt32Array);
+    case Builtin::kDataViewPrototypeGetFloat16:
+      return ReduceDataViewAccess(node, DataViewAccess::kGet,
+                                  ExternalArrayType::kExternalFloat16Array);
     case Builtin::kDataViewPrototypeGetFloat32:
       return ReduceDataViewAccess(node, DataViewAccess::kGet,
                                   ExternalArrayType::kExternalFloat32Array);
@@ -4927,6 +4938,9 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
     case Builtin::kDataViewPrototypeSetInt32:
       return ReduceDataViewAccess(node, DataViewAccess::kSet,
                                   ExternalArrayType::kExternalInt32Array);
+    case Builtin::kDataViewPrototypeSetFloat16:
+      return ReduceDataViewAccess(node, DataViewAccess::kSet,
+                                  ExternalArrayType::kExternalFloat16Array);
     case Builtin::kDataViewPrototypeSetFloat32:
       return ReduceDataViewAccess(node, DataViewAccess::kSet,
                                   ExternalArrayType::kExternalFloat32Array);
@@ -9002,7 +9016,7 @@ CompilationDependencies* JSCallReducer::dependencies() const {
   return broker()->dependencies();
 }
 
-Graph* JSCallReducer::graph() const { return jsgraph()->graph(); }
+TFGraph* JSCallReducer::graph() const { return jsgraph()->graph(); }
 
 Isolate* JSCallReducer::isolate() const { return jsgraph()->isolate(); }
 

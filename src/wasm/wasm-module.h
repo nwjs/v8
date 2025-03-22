@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_WASM_MODULE_H_
+#define V8_WASM_WASM_MODULE_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
-
-#ifndef V8_WASM_WASM_MODULE_H_
-#define V8_WASM_WASM_MODULE_H_
 
 #include <map>
 #include <memory>
@@ -411,7 +411,7 @@ class V8_EXPORT_PRIVATE LazilyGeneratedNames {
  private:
   // Lazy loading must guard against concurrent modifications from multiple
   // {WasmModuleObject}s.
-  mutable base::SpinningMutex mutex_;
+  mutable base::Mutex mutex_;
   bool has_functions_{false};
   NameMap function_names_;
 };
@@ -435,7 +435,7 @@ class V8_EXPORT_PRIVATE AsmJsOffsetInformation {
   // The offset information table is decoded lazily, hence needs to be
   // protected against concurrent accesses.
   // Exactly one of the two fields below will be set at a time.
-  mutable base::SpinningMutex mutex_;
+  mutable base::Mutex mutex_;
 
   // Holds the encoded offset table bytes.
   base::OwnedVector<const uint8_t> encoded_offsets_;
@@ -448,7 +448,12 @@ class V8_EXPORT_PRIVATE AsmJsOffsetInformation {
 constexpr ModuleTypeIndex kNoSuperType = ModuleTypeIndex::Invalid();
 
 struct TypeDefinition {
-  enum Kind : int8_t { kFunction, kStruct, kArray };
+  enum Kind : int8_t {
+    kFunction = static_cast<int8_t>(RefTypeKind::kFunction),
+    kStruct = static_cast<int8_t>(RefTypeKind::kStruct),
+    kArray = static_cast<int8_t>(RefTypeKind::kArray),
+    kCont = static_cast<int8_t>(RefTypeKind::kCont),
+  };
 
   constexpr TypeDefinition(const FunctionSig* sig, ModuleTypeIndex supertype,
                            bool is_final, bool is_shared)
@@ -473,6 +478,15 @@ struct TypeDefinition {
         kind(kArray),
         is_final(is_final),
         is_shared(is_shared) {}
+
+  constexpr TypeDefinition(const ContType* type, ModuleTypeIndex supertype,
+                           bool is_final, bool is_shared)
+      : cont_type(type),
+        supertype{supertype},
+        kind(kCont),
+        is_final(is_final),
+        is_shared(is_shared) {}
+
   constexpr TypeDefinition() = default;
 
   bool operator==(const TypeDefinition& other) const {
@@ -494,6 +508,7 @@ struct TypeDefinition {
     const FunctionSig* function_sig = nullptr;
     const StructType* struct_type;
     const ArrayType* array_type;
+    const ContType* cont_type;
   };
   ModuleTypeIndex supertype{kNoSuperType};
   Kind kind = kFunction;
@@ -659,7 +674,7 @@ struct TypeFeedbackStorage {
   // - PGO deserializer: writes everything, currently not locked, relies on
   //   being called before multi-threading enters the picture.
   // - Deoptimizer: sets needs_reprocessing_after_deopt.
-  mutable base::SpinningMutex mutex;
+  mutable base::Mutex mutex;
 
   WellKnownImportsList well_known_imports;
 
@@ -805,15 +820,27 @@ struct V8_EXPORT_PRIVATE WasmModule {
     AddTypeForTesting(TypeDefinition(type, supertype, is_final, is_shared));
   }
 
+  void AddContTypeForTesting(const ContType* type, ModuleTypeIndex supertype,
+                             bool is_final, bool is_shared) {
+    DCHECK_NOT_NULL(type);
+    AddTypeForTesting(TypeDefinition(type, supertype, is_final, is_shared));
+  }
+
   // ================ Accessors ================================================
   bool has_type(ModuleTypeIndex index) const {
     return index.index < types.size();
   }
 
-  TypeDefinition type(ModuleTypeIndex index) const {
+  const TypeDefinition& type(ModuleTypeIndex index) const {
     size_t num_types = types.size();
     V8_ASSUME(index.index < num_types);
     return types[index.index];
+  }
+
+  HeapType heap_type(ModuleTypeIndex index) const {
+    const TypeDefinition& t = type(index);
+    return HeapType::Index(index, t.is_shared,
+                           static_cast<RefTypeKind>(t.kind));
   }
 
   CanonicalTypeIndex canonical_type_id(ModuleTypeIndex index) const {
@@ -827,8 +854,7 @@ struct V8_EXPORT_PRIVATE WasmModule {
     if (!type.has_index()) {
       return CanonicalValueType{type};
     }
-    return CanonicalValueType::FromIndex(type.kind(),
-                                         canonical_type_id(type.ref_index()));
+    return type.Canonicalize(canonical_type_id(type.ref_index()));
   }
 
   bool has_signature(ModuleTypeIndex index) const {
@@ -840,6 +866,11 @@ struct V8_EXPORT_PRIVATE WasmModule {
     size_t num_types = types.size();
     V8_ASSUME(index.index < num_types);
     return types[index.index].function_sig;
+  }
+
+  bool has_conttype(ModuleTypeIndex index) const {
+    return index.index < types.size() &&
+           types[index.index].kind == TypeDefinition::kCont;
   }
 
   CanonicalTypeIndex canonical_sig_id(ModuleTypeIndex index) const {
@@ -942,11 +973,11 @@ struct V8_EXPORT_PRIVATE WasmModule {
 #if V8_ENABLE_DRUMBRAKE
   void SetWasmInterpreter(
       std::shared_ptr<WasmInterpreterRuntime> interpreter) const {
-    base::SpinningMutexGuard lock(&interpreter_mutex_);
+    base::MutexGuard lock(&interpreter_mutex_);
     interpreter_ = interpreter;
   }
   mutable std::weak_ptr<WasmInterpreterRuntime> interpreter_;
-  mutable base::SpinningMutex interpreter_mutex_;
+  mutable base::Mutex interpreter_mutex_;
 #endif  // V8_ENABLE_DRUMBRAKE
 
   size_t EstimateStoredSize() const;                // No tracing.
@@ -1042,25 +1073,26 @@ V8_EXPORT_PRIVATE bool IsWasmCodegenAllowed(
 V8_EXPORT_PRIVATE DirectHandle<String> ErrorStringForCodegen(
     Isolate* isolate, DirectHandle<Context> context);
 
-Handle<JSObject> GetTypeForFunction(Isolate* isolate, const FunctionSig* sig,
-                                    bool for_exception = false);
-Handle<JSObject> GetTypeForGlobal(Isolate* isolate, bool is_mutable,
-                                  ValueType type);
-Handle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
-                                  std::optional<uint64_t> max_size, bool shared,
-                                  AddressType address_type);
-Handle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
-                                 uint32_t min_size,
-                                 std::optional<uint64_t> max_size,
-                                 AddressType address_type);
-Handle<JSArray> GetImports(Isolate* isolate,
-                           DirectHandle<WasmModuleObject> module);
-Handle<JSArray> GetExports(Isolate* isolate,
-                           DirectHandle<WasmModuleObject> module);
-Handle<JSArray> GetCustomSections(Isolate* isolate,
-                                  DirectHandle<WasmModuleObject> module,
-                                  DirectHandle<String> name,
-                                  ErrorThrower* thrower);
+DirectHandle<JSObject> GetTypeForFunction(Isolate* isolate,
+                                          const FunctionSig* sig,
+                                          bool for_exception = false);
+DirectHandle<JSObject> GetTypeForGlobal(Isolate* isolate, bool is_mutable,
+                                        ValueType type);
+DirectHandle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
+                                        std::optional<uint64_t> max_size,
+                                        bool shared, AddressType address_type);
+DirectHandle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
+                                       uint32_t min_size,
+                                       std::optional<uint64_t> max_size,
+                                       AddressType address_type);
+DirectHandle<JSArray> GetImports(Isolate* isolate,
+                                 DirectHandle<WasmModuleObject> module);
+DirectHandle<JSArray> GetExports(Isolate* isolate,
+                                 DirectHandle<WasmModuleObject> module);
+DirectHandle<JSArray> GetCustomSections(Isolate* isolate,
+                                        DirectHandle<WasmModuleObject> module,
+                                        DirectHandle<String> name,
+                                        ErrorThrower* thrower);
 
 // Get the source position from a given function index and byte offset,
 // for either asm.js or pure Wasm modules.

@@ -11,7 +11,9 @@
 #include "src/base/small-vector.h"
 #include "src/base/vector.h"
 #include "src/codegen/assembler-inl.h"
+#include "src/codegen/register-configuration.h"
 #include "src/codegen/tick-counter.h"
+#include "src/compiler/backend/register-allocation.h"
 #include "src/compiler/backend/spill-placer.h"
 #include "src/compiler/linkage.h"
 #include "src/strings/string-stream.h"
@@ -1502,6 +1504,19 @@ InstructionOperand* ConstraintBuilder::AllocateFixed(
   } else if (operand->HasFixedFPRegisterPolicy()) {
     DCHECK(IsFloatingPoint(rep));
     DCHECK_NE(InstructionOperand::kInvalidVirtualRegister, virtual_register);
+    if (rep == MachineRepresentation::kFloat16 ||
+        rep == MachineRepresentation::kFloat32) {
+      DCHECK(data()->config()->IsAllocatableFloatCode(
+          operand->fixed_register_index()));
+    } else if (rep == MachineRepresentation::kFloat64) {
+      DCHECK(data()->config()->IsAllocatableDoubleCode(
+          operand->fixed_register_index()));
+    } else if (rep == MachineRepresentation::kSimd128) {
+      DCHECK(data()->config()->IsAllocatableSimd128Code(
+          operand->fixed_register_index()));
+    } else {
+      UNREACHABLE();
+    }
     allocated = AllocatedOperand(AllocatedOperand::REGISTER, rep,
                                  operand->fixed_register_index());
   } else {

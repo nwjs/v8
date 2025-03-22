@@ -103,7 +103,8 @@ class MarkCompactCollector final {
   // Returns whether compaction is running.
   bool StartCompaction(StartCompactionMode mode);
 
-  void StartMarking();
+  void StartMarking(
+      std::shared_ptr<::heap::base::IncrementalMarkingSchedule> schedule = {});
 
   static inline bool IsOnEvacuationCandidate(Tagged<MaybeObject> obj) {
     return MemoryChunk::FromAddress(obj.ptr())->IsEvacuationCandidate();
@@ -391,7 +392,7 @@ class MarkCompactCollector final {
 
   Heap* const heap_;
 
-  base::SpinningMutex mutex_;
+  base::Mutex mutex_;
   base::Semaphore page_parallel_job_semaphore_{0};
 
 #ifdef DEBUG
@@ -429,7 +430,7 @@ class MarkCompactCollector final {
   NativeContextStats native_context_stats_;
 
   std::vector<GlobalHandleVector<DescriptorArray>> strong_descriptor_arrays_;
-  base::SpinningMutex strong_descriptor_arrays_mutex_;
+  base::Mutex strong_descriptor_arrays_mutex_;
 
   // Candidates for pages that should be evacuated.
   std::vector<PageMetadata*> evacuation_candidates_;
@@ -452,8 +453,6 @@ class MarkCompactCollector final {
   //   two bits are used, so it is okay if this counter overflows and wraps
   //   around.
   unsigned epoch_ = 0;
-
-  ResizeNewSpaceMode resize_new_space_ = ResizeNewSpaceMode::kNone;
 
   // Bytecode flushing is disabled when the code coverage mode is changed. Since
   // that can happen while a GC is happening and we need the

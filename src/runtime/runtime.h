@@ -341,7 +341,7 @@ namespace internal {
   F(DefineGetterPropertyUnchecked, 4, 1)                               \
   F(DefineSetterPropertyUnchecked, 4, 1)                               \
   F(DeleteProperty, 3, 1)                                              \
-  F(DisposeDisposableStack, 4, 1)                                      \
+  F(DisposeDisposableStack, 5, 1)                                      \
   F(GetDerivedMap, 2, 1)                                               \
   F(GetFunctionName, 1, 1)                                             \
   F(GetOwnPropertyDescriptorObject, 2, 1)                              \
@@ -699,7 +699,7 @@ namespace internal {
   F(WasmTableGrow, 3, 1)                      \
   F(WasmTableFill, 5, 1)                      \
   F(WasmJSToWasmObject, 2, 1)                 \
-  F(WasmGenericJSToWasmObject, 3, 1)          \
+  F(WasmGenericJSToWasmObject, 2, 1)          \
   F(WasmGenericWasmToJSObject, 1, 1)          \
   F(WasmCompileLazy, 2, 1)                    \
   F(WasmAllocateFeedbackVector, 3, 1)         \
@@ -734,6 +734,7 @@ namespace internal {
   F(WasmSubstring, 3, 1)
 
 #define FOR_EACH_INTRINSIC_WASM_TEST(F, I)                      \
+  F(BuildRefTypeBitfield, 2, 1)                                 \
   F(CheckIsOnCentralStack, 0, 1)                                \
   F(CountUnoptimizedWasmToJSWrapper, 1, 1)                      \
   F(DeserializeWasmModule, 2, 1)                                \
@@ -966,12 +967,12 @@ class Runtime : public AllStatic {
   // Perform a property store on object. If the key is a private name (i.e. this
   // is a private field assignment), this method throws if the private field
   // does not exist on object.
-  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   SetObjectProperty(Isolate* isolate, DirectHandle<JSAny> object,
                     DirectHandle<Object> key, DirectHandle<Object> value,
                     MaybeDirectHandle<JSAny> receiver, StoreOrigin store_origin,
                     Maybe<ShouldThrow> should_throw = Nothing<ShouldThrow>());
-  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   SetObjectProperty(Isolate* isolate, DirectHandle<JSAny> object,
                     DirectHandle<Object> key, DirectHandle<Object> value,
                     StoreOrigin store_origin,
@@ -980,9 +981,9 @@ class Runtime : public AllStatic {
   // Defines a property on object. If the key is a private name (i.e. this is a
   // private field definition), this method throws if the field already exists
   // on object.
-  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   DefineObjectOwnProperty(Isolate* isolate, DirectHandle<JSAny> object,
-                          DirectHandle<Object> key, Handle<Object> value,
+                          DirectHandle<Object> key, DirectHandle<Object> value,
                           StoreOrigin store_origin);
 
   // When "receiver" is not passed, it defaults to "lookup_start_object".
@@ -1000,7 +1001,7 @@ class Runtime : public AllStatic {
   // a getter, the getter will be called to set the value.
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   GetPrivateMember(Isolate* isolate, DirectHandle<JSReceiver> receiver,
-                   Handle<String> desc);
+                   DirectHandle<String> desc);
 
   // Look up for a private member with a name matching "desc" and set it to
   // "value". "desc" should be a #-prefixed string, in the case of private
@@ -1012,16 +1013,16 @@ class Runtime : public AllStatic {
   // be called to set the value.
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object>
   SetPrivateMember(Isolate* isolate, DirectHandle<JSReceiver> receiver,
-                   Handle<String> desc, DirectHandle<Object> value);
+                   DirectHandle<String> desc, DirectHandle<Object> value);
 
   V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object> HasProperty(
       Isolate* isolate, DirectHandle<Object> object, DirectHandle<Object> key);
 
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<JSArray>
-  GetInternalProperties(Isolate* isolate, Handle<Object>);
+  GetInternalProperties(Isolate* isolate, DirectHandle<Object>);
 
   V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object> ThrowIteratorError(
-      Isolate* isolate, Handle<Object> object);
+      Isolate* isolate, DirectHandle<Object> object);
 };
 
 class RuntimeState {

@@ -133,9 +133,16 @@ function isInWhileLoop(path) {
   return Boolean(whileStatement);
 }
 
-function _availableIdentifiers(path, filter) {
+function isInfiniteLoop(node) {
+  // Approximates if node is a trivial infinite while loop. Assumes that node
+  // is either a while or dowhile statement.
+  return (node.test &&
+          babelTypes.isLiteral(node.test) &&
+          node.test.value === true);
+}
+
+function* _availableIdentifierNamesGen(path, filter) {
   // TODO(ochang): Consider globals that aren't declared with let/var etc.
-  const available = new Array();
   const allBindings = path.scope.getAllBindings();
   for (const key of Object.keys(allBindings)) {
     if (!filter(key)) {
@@ -147,9 +154,15 @@ function _availableIdentifiers(path, filter) {
       continue;
     }
 
-    available.push(_identifier(key));
+    yield key;
   }
+}
 
+function _availableIdentifiers(path, filter) {
+  const available = new Array();
+  for (const name of _availableIdentifierNamesGen(path, filter)) {
+    available.push(_identifier(name));
+  }
   return available;
 }
 
@@ -159,6 +172,15 @@ function availableVariables(path) {
 
 function availableFunctions(path) {
   return _availableIdentifiers(path, isFunctionIdentifier);
+}
+
+function availableFunctionNames(path) {
+  const available = new Set([]);
+  for (const name of _availableIdentifierNamesGen(
+      path, isFunctionIdentifier)) {
+    available.add(name);
+  }
+  return available;
 }
 
 function randomVariable(path) {
@@ -338,6 +360,30 @@ function getOriginalPath(node) {
   return node.__path;
 }
 
+function getOriginalPath(node) {
+  // Original path is invalid in cloned nodes.
+  if (node !== node.__self) {
+    return undefined;
+  }
+  return node.__path;
+}
+
+function setLargeLoop(node) {
+  node.__is_large_loop = true;
+}
+
+function isLargeLoop(node) {
+  return Boolean(node.__is_large_loop);
+}
+
+function setContainsYield(node) {
+  node.__contains_yield = true;
+}
+
+function containsYield(node) {
+  return Boolean(node.__contains_yield);
+}
+
 // Estimate the size of a node in raw source characters.
 function isLargeNode(node) {
   // Ignore array holes inserted by us (null) or previously cloned nodes
@@ -352,12 +398,16 @@ module.exports = {
   callRandomFunction: callRandomFunction,
   concatFlags: concatFlags,
   concatPrograms: concatPrograms,
+  containsYield: containsYield,
   availableVariables: availableVariables,
   availableFunctions: availableFunctions,
+  availableFunctionNames: availableFunctionNames,
   randomFunction: randomFunction,
   randomVariable: randomVariable,
   isInForLoopCondition: isInForLoopCondition,
   isInWhileLoop: isInWhileLoop,
+  isInfiniteLoop: isInfiniteLoop,
+  isLargeLoop: isLargeLoop,
   isLargeNode: isLargeNode,
   isVariableIdentifier: isVariableIdentifier,
   isFunctionIdentifier: isFunctionIdentifier,
@@ -369,6 +419,8 @@ module.exports = {
   randomProperty: randomProperty,
   randomSeed: randomSeed,
   randomValue: randomValue,
+  setContainsYield: setContainsYield,
+  setLargeLoop: setLargeLoop,
   getOriginalPath: getOriginalPath,
   setOriginalPath: setOriginalPath,
   getSourceLoc: getSourceLoc,

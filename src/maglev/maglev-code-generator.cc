@@ -775,6 +775,7 @@ class MaglevCodeGeneratingNodeProcessor {
   }
 
   void PostProcessGraph(Graph* graph) {}
+  void PostProcessBasicBlock(BasicBlock* block) {}
   void PostPhiProcessing() {}
 
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
@@ -1108,6 +1109,7 @@ class SafepointingNodeProcessor {
 
   void PreProcessGraph(Graph* graph) {}
   void PostProcessGraph(Graph* graph) {}
+  void PostProcessBasicBlock(BasicBlock* block) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     return BlockProcessResult::kContinue;
   }
@@ -1503,6 +1505,15 @@ class MaglevFrameTranslationBuilder {
     translation_array_builder_->StoreLiteral(GetDeoptLiteral(*value));
   }
 
+  void BuildConsString(const VirtualObject* object,
+                       const InputLocation*& input_location,
+                       const VirtualObject::List& virtual_objects) {
+    auto cons_string = object->cons_string();
+    translation_array_builder_->StringConcat();
+    BuildNestedValue(cons_string.first(), input_location, virtual_objects);
+    BuildNestedValue(cons_string.second(), input_location, virtual_objects);
+  }
+
   void BuildFixedDoubleArray(uint32_t length,
                              compiler::FixedDoubleArrayRef array) {
     translation_array_builder_->BeginCapturedObject(length + 2);
@@ -1566,17 +1577,24 @@ class MaglevFrameTranslationBuilder {
       input_location += object->InputLocationSizeNeeded(virtual_objects);
       return;
     }
-    if (object->type() == VirtualObject::kFixedDoubleArray) {
-      return BuildFixedDoubleArray(object->double_elements_length(),
-                                   object->double_elements());
-    }
-    DCHECK_EQ(object->type(), VirtualObject::kDefault);
-    translation_array_builder_->BeginCapturedObject(object->slot_count() + 1);
-    translation_array_builder_->StoreLiteral(
-        GetDeoptLiteral(*object->map().object()));
-    for (uint32_t i = 0; i < object->slot_count(); i++) {
-      BuildNestedValue(object->get_by_index(i), input_location,
-                       virtual_objects);
+    switch (object->type()) {
+      case VirtualObject::kHeapNumber:
+        // Handled above.
+        UNREACHABLE();
+      case VirtualObject::kConsString:
+        return BuildConsString(object, input_location, virtual_objects);
+      case VirtualObject::kFixedDoubleArray:
+        return BuildFixedDoubleArray(object->double_elements_length(),
+                                     object->double_elements());
+      case VirtualObject::kDefault:
+        translation_array_builder_->BeginCapturedObject(object->slot_count() +
+                                                        1);
+        DCHECK(object->has_static_map());
+        translation_array_builder_->StoreLiteral(
+            GetDeoptLiteral(*object->map().object()));
+        object->ForEachDeoptInput([&](ValueNode* node) {
+          BuildNestedValue(node, input_location, virtual_objects);
+        });
     }
   }
 
@@ -1588,14 +1606,25 @@ class MaglevFrameTranslationBuilder {
     size_t input_locations_to_advance = 1;
     if (const InlinedAllocation* alloc = value->TryCast<InlinedAllocation>()) {
       VirtualObject* vobject = virtual_objects.FindAllocatedWith(alloc);
-      CHECK_NOT_NULL(vobject);
-      if (alloc->HasBeenElided()) {
-        input_location++;
-        BuildVirtualObject(vobject, input_location, virtual_objects);
-        return;
+      if (vobject) {
+        if (alloc->HasBeenElided()) {
+          input_location++;
+          BuildVirtualObject(vobject, input_location, virtual_objects);
+          return;
+        }
+        input_locations_to_advance +=
+            vobject->InputLocationSizeNeeded(virtual_objects);
+      } else {
+        // If the allocation isn't in the virtual object list, it's the
+        // return value from an (non-eager) inlined call. The value is escaping,
+        // as we don't have enough information for object materialization during
+        // deoptimization.
+        // TODO(victorgomes): Support eliding VOs returned by a non-eager
+        // inlined call.
+        DCHECK(v8_flags.maglev_non_eager_inlining);
+        DCHECK(alloc->HasEscaped());
+        DCHECK(alloc->is_returned_value_from_inline_call());
       }
-      input_locations_to_advance +=
-          vobject->InputLocationSizeNeeded(virtual_objects);
     }
     if (input_location->operand().IsConstant()) {
       translation_array_builder_->StoreLiteral(
@@ -1965,6 +1994,7 @@ MaybeHandle<Code> MaglevCodeGenerator::BuildCodeObject(
           .set_parameter_count(parameter_count())
           .set_deoptimization_data(deopt_data)
           .set_empty_source_position_table()
+          .set_inlined_bytecode_size(graph_->total_inlined_bytecode_size())
           .set_osr_offset(
               code_gen_state_.compilation_info()->toplevel_osr_offset());
 

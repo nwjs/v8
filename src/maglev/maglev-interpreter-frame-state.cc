@@ -564,10 +564,7 @@ void MergePointInterpreterFrameState::MergeVirtualObject(
     // No need to merge.
     return;
   }
-  // Currently, the graph builder will never change the VO map.
-  DCHECK(unmerged->map().equals(merged->map()));
-  DCHECK_EQ(merged->slot_count(), unmerged->slot_count());
-  DCHECK_EQ(merged->allocation(), unmerged->allocation());
+  DCHECK(unmerged->compatible_for_merge(merged));
 
   if (v8_flags.trace_maglev_graph_building) {
     std::cout << " - Merging VOS: "
@@ -579,19 +576,15 @@ void MergePointInterpreterFrameState::MergeVirtualObject(
               << "(unmerged)" << std::endl;
   }
 
-  VirtualObject* result = builder->CreateVirtualObjectForMerge(
-      unmerged->map(), unmerged->slot_count());
-  for (uint32_t i = 0; i < merged->slot_count(); i++) {
-    std::optional<ValueNode*> merged_value_opt = MergeVirtualObjectValue(
-        builder, unmerged_aspects, merged->get_by_index(i),
-        unmerged->get_by_index(i));
-    if (!merged_value_opt.has_value()) {
-      // Merge failed, we should escape the allocation instead.
-      unmerged->allocation()->ForceEscaping();
-      return;
-    }
-    result->set_by_index(i, merged_value_opt.value());
+  auto maybe_result = merged->Merge(
+      unmerged, builder->NewObjectId(), builder->zone(),
+      [&](ValueNode* a, ValueNode* b) {
+        return MergeVirtualObjectValue(builder, unmerged_aspects, a, b);
+      });
+  if (!maybe_result) {
+    return unmerged->allocation()->ForceEscaping();
   }
+  VirtualObject* result = *maybe_result;
   result->set_allocation(unmerged->allocation());
   result->Snapshot();
   unmerged->allocation()->UpdateObject(result);
@@ -951,7 +944,7 @@ ValueNode* FromInt32ToTagged(const MaglevGraphBuilder* builder,
     tagged = Node::New<Int32ToNumber>(builder->zone(), {value});
   }
 
-  predecessor->nodes().Add(tagged);
+  predecessor->nodes().push_back(tagged);
   builder->compilation_unit()->RegisterNodeInGraphLabeller(tagged);
   return tagged;
 }
@@ -970,7 +963,7 @@ ValueNode* FromUint32ToTagged(const MaglevGraphBuilder* builder,
     tagged = Node::New<Uint32ToNumber>(builder->zone(), {value});
   }
 
-  predecessor->nodes().Add(tagged);
+  predecessor->nodes().push_back(tagged);
   builder->compilation_unit()->RegisterNodeInGraphLabeller(tagged);
   return tagged;
 }
@@ -984,7 +977,7 @@ ValueNode* FromIntPtrToTagged(const MaglevGraphBuilder* builder,
 
   ValueNode* tagged = Node::New<IntPtrToNumber>(builder->zone(), {value});
 
-  predecessor->nodes().Add(tagged);
+  predecessor->nodes().push_back(tagged);
   builder->compilation_unit()->RegisterNodeInGraphLabeller(tagged);
   return tagged;
 }
@@ -1001,7 +994,7 @@ ValueNode* FromFloat64ToTagged(const MaglevGraphBuilder* builder,
       builder->zone(), {value},
       Float64ToTagged::ConversionMode::kCanonicalizeSmi);
 
-  predecessor->nodes().Add(tagged);
+  predecessor->nodes().push_back(tagged);
   builder->compilation_unit()->RegisterNodeInGraphLabeller(tagged);
   return tagged;
 }
@@ -1018,7 +1011,7 @@ ValueNode* FromHoleyFloat64ToTagged(const MaglevGraphBuilder* builder,
       builder->zone(), {value},
       HoleyFloat64ToTagged::ConversionMode::kCanonicalizeSmi);
 
-  predecessor->nodes().Add(tagged);
+  predecessor->nodes().push_back(tagged);
   builder->compilation_unit()->RegisterNodeInGraphLabeller(tagged);
   return tagged;
 }

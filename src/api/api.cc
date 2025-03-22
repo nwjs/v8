@@ -236,8 +236,6 @@ static ScriptOrigin GetScriptOriginForScript(
 // OOM error handler is called and execution is stopped.
 void i::V8::FatalProcessOutOfMemory(i::Isolate* i_isolate, const char* location,
                                     const OOMDetails& details) {
-  char last_few_messages[Heap::kTraceRingBufferSize + 1];
-  char js_stacktrace[Heap::kStacktraceBufferSize + 1];
   i::HeapStats heap_stats;
 
   if (i_isolate == nullptr) {
@@ -248,8 +246,6 @@ void i::V8::FatalProcessOutOfMemory(i::Isolate* i_isolate, const char* location,
     // If the Isolate is not available for the current thread we cannot retrieve
     // memory information from the Isolate. Write easy-to-recognize values on
     // the stack.
-    memset(last_few_messages, 0x0BADC0DE, Heap::kTraceRingBufferSize + 1);
-    memset(js_stacktrace, 0x0BADC0DE, Heap::kStacktraceBufferSize + 1);
     memset(&heap_stats, 0xBADC0DE, sizeof(heap_stats));
     // Give the embedder a chance to handle the condition. If it doesn't,
     // just crash.
@@ -258,73 +254,15 @@ void i::V8::FatalProcessOutOfMemory(i::Isolate* i_isolate, const char* location,
     UNREACHABLE();
   }
 
-  memset(last_few_messages, 0, Heap::kTraceRingBufferSize + 1);
-  memset(js_stacktrace, 0, Heap::kStacktraceBufferSize + 1);
+  memset(heap_stats.last_few_messages, 0, Heap::kTraceRingBufferSize + 1);
 
-  intptr_t start_marker;
-  heap_stats.start_marker = &start_marker;
-  size_t ro_space_size;
-  heap_stats.ro_space_size = &ro_space_size;
-  size_t ro_space_capacity;
-  heap_stats.ro_space_capacity = &ro_space_capacity;
-  size_t new_space_size;
-  heap_stats.new_space_size = &new_space_size;
-  size_t new_space_capacity;
-  heap_stats.new_space_capacity = &new_space_capacity;
-  size_t old_space_size;
-  heap_stats.old_space_size = &old_space_size;
-  size_t old_space_capacity;
-  heap_stats.old_space_capacity = &old_space_capacity;
-  size_t code_space_size;
-  heap_stats.code_space_size = &code_space_size;
-  size_t code_space_capacity;
-  heap_stats.code_space_capacity = &code_space_capacity;
-  size_t map_space_size;
-  heap_stats.map_space_size = &map_space_size;
-  size_t map_space_capacity;
-  heap_stats.map_space_capacity = &map_space_capacity;
-  size_t lo_space_size;
-  heap_stats.lo_space_size = &lo_space_size;
-  size_t code_lo_space_size;
-  heap_stats.code_lo_space_size = &code_lo_space_size;
-  size_t global_handle_count;
-  heap_stats.global_handle_count = &global_handle_count;
-  size_t weak_global_handle_count;
-  heap_stats.weak_global_handle_count = &weak_global_handle_count;
-  size_t pending_global_handle_count;
-  heap_stats.pending_global_handle_count = &pending_global_handle_count;
-  size_t near_death_global_handle_count;
-  heap_stats.near_death_global_handle_count = &near_death_global_handle_count;
-  size_t free_global_handle_count;
-  heap_stats.free_global_handle_count = &free_global_handle_count;
-  size_t memory_allocator_size;
-  heap_stats.memory_allocator_size = &memory_allocator_size;
-  size_t memory_allocator_capacity;
-  heap_stats.memory_allocator_capacity = &memory_allocator_capacity;
-  size_t malloced_memory;
-  heap_stats.malloced_memory = &malloced_memory;
-  size_t malloced_peak_memory;
-  heap_stats.malloced_peak_memory = &malloced_peak_memory;
-  size_t objects_per_type[LAST_TYPE + 1] = {0};
-  heap_stats.objects_per_type = objects_per_type;
-  size_t size_per_type[LAST_TYPE + 1] = {0};
-  heap_stats.size_per_type = size_per_type;
-  int os_error;
-  heap_stats.os_error = &os_error;
-  heap_stats.last_few_messages = last_few_messages;
-  heap_stats.js_stacktrace = js_stacktrace;
-  intptr_t end_marker;
-  heap_stats.end_marker = &end_marker;
   if (i_isolate->heap()->HasBeenSetUp()) {
-    // BUG(1718): Don't use the take_snapshot since we don't support
-    // HeapObjectIterator here without doing a special GC.
-    i_isolate->heap()->RecordStats(&heap_stats, false);
+    i_isolate->heap()->RecordStats(&heap_stats);
     if (!v8_flags.correctness_fuzzer_suppressions) {
-      char* first_newline = strchr(last_few_messages, '\n');
+      char* first_newline = strchr(heap_stats.last_few_messages, '\n');
       if (first_newline == nullptr || first_newline[1] == '\0')
-        first_newline = last_few_messages;
+        first_newline = heap_stats.last_few_messages;
       base::OS::PrintError("\n<--- Last few GCs --->\n%s\n", first_newline);
-      base::OS::PrintError("\n<--- JS stacktrace --->\n%s\n", js_stacktrace);
     }
   }
   Utils::ReportOOMFailure(i_isolate, location, details);
@@ -395,6 +333,10 @@ namespace {
 // ArrayBuffer backing stores need to be allocated inside the sandbox.
 class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
  public:
+  explicit ArrayBufferAllocator(i::IsolateGroup* group)
+      : sandbox_(group->sandbox()),
+        allocator_(group->GetSandboxedArrayBufferAllocator()) {}
+
   void* Allocate(size_t length) override {
     return allocator_->Allocate(length);
   }
@@ -407,142 +349,13 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
     return allocator_->Free(data);
   }
 
+  PageAllocator* GetPageAllocator() override {
+    return sandbox_->page_allocator();
+  }
+
  private:
-  // Backend allocator shared by all ArrayBufferAllocator instances. This way,
-  // there is a single region of virtual address space reserved inside the
-  // sandbox from which all ArrayBufferAllocators allocate their memory,
-  // instead of each allocator creating their own region, which may cause
-  // address space exhaustion inside the sandbox.
-  // TODO(chromium:1340224): replace this with a more efficient allocator.
-  class BackendAllocator {
-   public:
-    BackendAllocator() {
-      CHECK(i::Sandbox::current()->is_initialized());
-      VirtualAddressSpace* vas = i::Sandbox::current()->address_space();
-      vas_ = vas;
-      constexpr size_t max_backing_memory_size = 8ULL * i::GB;
-      constexpr size_t min_backing_memory_size = 1ULL * i::GB;
-      size_t backing_memory_size = max_backing_memory_size;
-      i::Address backing_memory_base = 0;
-      while (!backing_memory_base &&
-             backing_memory_size >= min_backing_memory_size) {
-        backing_memory_base = vas->AllocatePages(
-            VirtualAddressSpace::kNoHint, backing_memory_size, kChunkSize,
-            PagePermissions::kNoAccess);
-        if (!backing_memory_base) {
-          backing_memory_size /= 2;
-        }
-      }
-      if (!backing_memory_base) {
-        i::V8::FatalProcessOutOfMemory(
-            nullptr,
-            "Could not reserve backing memory for ArrayBufferAllocators");
-      }
-      DCHECK(IsAligned(backing_memory_base, kChunkSize));
-
-      region_alloc_ = std::make_unique<base::RegionAllocator>(
-          backing_memory_base, backing_memory_size, kAllocationGranularity);
-      end_of_accessible_region_ = region_alloc_->begin();
-
-      // Install an on-merge callback to discard or decommit unused pages.
-      region_alloc_->set_on_merge_callback([this](i::Address start,
-                                                  size_t size) {
-        mutex_.AssertHeld();
-        i::Address end = start + size;
-        if (end == region_alloc_->end() &&
-            start <= end_of_accessible_region_ - kChunkSize) {
-          // Can shrink the accessible region.
-          i::Address new_end_of_accessible_region = RoundUp(start, kChunkSize);
-          size_t size_to_decommit =
-              end_of_accessible_region_ - new_end_of_accessible_region;
-          if (!vas_->DecommitPages(new_end_of_accessible_region,
-                                   size_to_decommit)) {
-            i::V8::FatalProcessOutOfMemory(
-                nullptr, "ArrayBufferAllocator::BackendAllocator()");
-          }
-          end_of_accessible_region_ = new_end_of_accessible_region;
-        } else if (size >= 2 * kChunkSize) {
-          // Can discard pages. The pages stay accessible, so the size of the
-          // accessible region doesn't change.
-          i::Address chunk_start = RoundUp(start, kChunkSize);
-          i::Address chunk_end = RoundDown(start + size, kChunkSize);
-          if (!vas_->DiscardSystemPages(chunk_start, chunk_end - chunk_start)) {
-            i::V8::FatalProcessOutOfMemory(
-                nullptr, "ArrayBufferAllocator::BackendAllocator()");
-          }
-        }
-      });
-    }
-
-    ~BackendAllocator() {
-      // The sandbox may already have been torn down, in which case there's no
-      // need to free any memory.
-      if (i::Sandbox::current()->is_initialized()) {
-        vas_->FreePages(region_alloc_->begin(), region_alloc_->size());
-      }
-    }
-
-    BackendAllocator(const BackendAllocator&) = delete;
-    BackendAllocator& operator=(const BackendAllocator&) = delete;
-
-    void* Allocate(size_t length) {
-      base::SpinningMutexGuard guard(&mutex_);
-
-      length = RoundUp(length, kAllocationGranularity);
-      i::Address region = region_alloc_->AllocateRegion(length);
-      if (region == base::RegionAllocator::kAllocationFailure) return nullptr;
-
-      // Check if the memory is inside the accessible region. If not, grow it.
-      i::Address end = region + length;
-      size_t length_to_memset = length;
-      if (end > end_of_accessible_region_) {
-        i::Address new_end_of_accessible_region = RoundUp(end, kChunkSize);
-        size_t size = new_end_of_accessible_region - end_of_accessible_region_;
-        if (!vas_->SetPagePermissions(end_of_accessible_region_, size,
-                                      PagePermissions::kReadWrite)) {
-          if (!region_alloc_->FreeRegion(region)) {
-            i::V8::FatalProcessOutOfMemory(
-                nullptr, "ArrayBufferAllocator::BackendAllocator::Allocate()");
-          }
-          return nullptr;
-        }
-
-        // The pages that were inaccessible are guaranteed to be zeroed, so only
-        // memset until the previous end of the accessible region.
-        length_to_memset = end_of_accessible_region_ - region;
-        end_of_accessible_region_ = new_end_of_accessible_region;
-      }
-
-      void* mem = reinterpret_cast<void*>(region);
-      memset(mem, 0, length_to_memset);
-      return mem;
-    }
-
-    void Free(void* data) {
-      base::SpinningMutexGuard guard(&mutex_);
-      region_alloc_->FreeRegion(reinterpret_cast<i::Address>(data));
-    }
-
-    static BackendAllocator* SharedInstance() {
-      static base::LeakyObject<BackendAllocator> instance;
-      return instance.get();
-    }
-
-   private:
-    // Use a region allocator with a "page size" of 128 bytes as a reasonable
-    // compromise between the number of regions it has to manage and the amount
-    // of memory wasted due to rounding allocation sizes up to the page size.
-    static constexpr size_t kAllocationGranularity = 128;
-    // The backing memory's accessible region is grown in chunks of this size.
-    static constexpr size_t kChunkSize = 1 * i::MB;
-
-    std::unique_ptr<base::RegionAllocator> region_alloc_;
-    size_t end_of_accessible_region_;
-    VirtualAddressSpace* vas_ = nullptr;
-    base::SpinningMutex mutex_;
-  };
-
-  BackendAllocator* allocator_ = BackendAllocator::SharedInstance();
+  i::Sandbox* sandbox_ = nullptr;
+  i::SandboxedArrayBufferAllocator* allocator_ = nullptr;
 };
 
 #else
@@ -556,6 +369,10 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
   }
 
   void Free(void* data, size_t) override { base::Free(data); }
+
+  PageAllocator* GetPageAllocator() override {
+    return i::GetPlatformPageAllocator();
+  }
 };
 #endif  // V8_ENABLE_SANDBOX
 
@@ -991,6 +808,11 @@ SealHandleScope::~SealHandleScope() {
 bool Data::IsModule() const {
   return i::IsModule(*Utils::OpenDirectHandle(this));
 }
+
+bool Data::IsModuleRequest() const {
+  return i::IsModuleRequest(*Utils::OpenDirectHandle(this));
+}
+
 bool Data::IsFixedArray() const {
   return i::IsFixedArray(*Utils::OpenDirectHandle(this));
 }
@@ -3787,6 +3609,11 @@ bool Value::FullIsFalse() const {
   return i::IsFalse(object);
 }
 
+bool Value::IsPrimitive() const {
+  auto object = Utils::OpenDirectHandle(this);
+  return i::IsPrimitive(*object) && !IsPrivateSymbol(*object);
+}
+
 bool Value::IsFunction() const {
   return IsCallable(*Utils::OpenDirectHandle(this));
 }
@@ -4612,6 +4439,19 @@ Maybe<bool> Value::InstanceOf(v8::Local<v8::Context> context,
       !i::Object::InstanceOf(i_isolate, left, right).ToHandle(&result);
   RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
   return Just(i::IsTrue(*result, i_isolate));
+}
+
+uint32_t Value::GetHash() {
+  i::DisallowGarbageCollection no_gc;
+
+  auto self = Utils::OpenDirectHandle(this);
+  i::Tagged<i::Object> hash = i::Object::GetHash(*self);
+  if (IsSmi(hash)) return i::Cast<i::Smi>(hash).value();
+
+  i::DirectHandle<i::JSReceiver> obj = i::Cast<i::JSReceiver>(self);
+  auto i_isolate = obj->GetIsolate();
+  DCHECK_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+  return obj->GetOrCreateIdentityHash(i_isolate).value();
 }
 
 Maybe<bool> v8::Object::Set(v8::Local<v8::Context> context,
@@ -5800,9 +5640,10 @@ ScriptOrigin Function::GetScriptOrigin() const {
   auto self = Utils::OpenDirectHandle(this);
   if (!IsJSFunction(*self)) return v8::ScriptOrigin(Local<Value>());
   auto func = i::Cast<i::JSFunction>(self);
-  if (i::IsScript(func->shared()->script())) {
-    i::DirectHandle<i::Script> script(
-        i::Cast<i::Script>(func->shared()->script()), func->GetIsolate());
+  auto shared = func->shared();
+  if (i::IsScript(shared->script())) {
+    i::DirectHandle<i::Script> script(i::Cast<i::Script>(shared->script()),
+                                      func->GetIsolate());
     return GetScriptOriginForScript(func->GetIsolate(), script);
   }
   return v8::ScriptOrigin(Local<Value>());
@@ -5816,10 +5657,11 @@ int Function::GetScriptLineNumber() const {
     return kLineOffsetNotFound;
   }
   auto func = i::Cast<i::JSFunction>(self);
-  if (i::IsScript(func->shared()->script())) {
-    i::DirectHandle<i::Script> script(
-        i::Cast<i::Script>(func->shared()->script()), func->GetIsolate());
-    return i::Script::GetLineNumber(script, func->shared()->StartPosition());
+  auto shared = func->shared();
+  if (i::IsScript(shared->script())) {
+    i::DirectHandle<i::Script> script(i::Cast<i::Script>(shared->script()),
+                                      func->GetIsolate());
+    return i::Script::GetLineNumber(script, shared->StartPosition());
   }
   return kLineOffsetNotFound;
 }
@@ -5830,12 +5672,29 @@ int Function::GetScriptColumnNumber() const {
     return kLineOffsetNotFound;
   }
   auto func = i::Cast<i::JSFunction>(self);
-  if (i::IsScript(func->shared()->script())) {
-    i::DirectHandle<i::Script> script(
-        i::Cast<i::Script>(func->shared()->script()), func->GetIsolate());
-    return i::Script::GetColumnNumber(script, func->shared()->StartPosition());
+  auto shared = func->shared();
+  if (i::IsScript(shared->script())) {
+    i::DirectHandle<i::Script> script(i::Cast<i::Script>(shared->script()),
+                                      func->GetIsolate());
+    return i::Script::GetColumnNumber(script, shared->StartPosition());
   }
   return kLineOffsetNotFound;
+}
+
+Location Function::GetScriptLocation() const {
+  auto self = *Utils::OpenDirectHandle(this);
+  if (!IsJSFunction(self)) {
+    return {-1, -1};
+  }
+  auto func = i::Cast<i::JSFunction>(self);
+  auto shared = func->shared();
+  if (i::IsScript(shared->script())) {
+    i::DirectHandle<i::Script> script(i::Cast<i::Script>(shared->script()),
+                                      func->GetIsolate());
+    return {i::Script::GetLineNumber(script, shared->StartPosition()),
+            i::Script::GetColumnNumber(script, shared->StartPosition())};
+  }
+  return {-1, -1};
 }
 
 int Function::GetScriptStartPosition() const {
@@ -5844,8 +5703,9 @@ int Function::GetScriptStartPosition() const {
     return kLineOffsetNotFound;
   }
   auto func = i::Cast<i::JSFunction>(self);
-  if (i::IsScript(func->shared()->script())) {
-    return func->shared()->StartPosition();
+  auto shared = func->shared();
+  if (i::IsScript(shared->script())) {
+    return shared->StartPosition();
   }
   return kLineOffsetNotFound;
 }
@@ -5854,9 +5714,9 @@ int Function::ScriptId() const {
   auto self = *Utils::OpenDirectHandle(this);
   if (!IsJSFunction(self)) return v8::UnboundScript::kNoScriptId;
   auto func = i::Cast<i::JSFunction>(self);
-  if (!IsScript(func->shared()->script()))
-    return v8::UnboundScript::kNoScriptId;
-  return i::Cast<i::Script>(func->shared()->script())->id();
+  auto script = func->shared()->script();
+  if (!IsScript(script)) return v8::UnboundScript::kNoScriptId;
+  return i::Cast<i::Script>(script)->id();
 }
 
 Local<v8::Value> Function::GetBoundFunction() const {
@@ -6307,7 +6167,8 @@ void String::WriteOneByteV2(Isolate* v8_isolate, uint32_t offset,
 }
 
 size_t String::WriteUtf8V2(Isolate* v8_isolate, char* buffer, size_t capacity,
-                           int flags) const {
+                           int flags,
+                           size_t* processed_characters_return) const {
   auto str = Utils::OpenDirectHandle(this);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   API_RCS_SCOPE(i_isolate, String, WriteUtf8);
@@ -6319,7 +6180,8 @@ size_t String::WriteUtf8V2(Isolate* v8_isolate, char* buffer, size_t capacity,
   if (flags & String::WriteFlags::kReplaceInvalidUtf8) {
     i_flags |= i::String::Utf8EncodingFlag::kReplaceInvalid;
   }
-  return i::String::WriteUtf8(i_isolate, str, buffer, capacity, i_flags);
+  return i::String::WriteUtf8(i_isolate, str, buffer, capacity, i_flags,
+                              processed_characters_return);
 }
 
 namespace {
@@ -8366,10 +8228,10 @@ MaybeLocal<v8::RegExp> v8::RegExp::New(Local<Context> context,
                                        Local<String> pattern, Flags flags) {
   PREPARE_FOR_EXECUTION(context, RegExp, New);
   Local<v8::RegExp> result;
-  has_exception =
-      !ToLocal<RegExp>(i::JSRegExp::New(i_isolate, Utils::OpenHandle(*pattern),
-                                        static_cast<i::JSRegExp::Flags>(flags)),
-                       &result);
+  has_exception = !ToLocal<RegExp>(
+      i::JSRegExp::New(i_isolate, Utils::OpenDirectHandle(*pattern),
+                       static_cast<i::JSRegExp::Flags>(flags)),
+      &result);
   RETURN_ON_FAILED_EXECUTION(RegExp);
   RETURN_ESCAPED(result);
 }
@@ -8386,7 +8248,7 @@ MaybeLocal<v8::RegExp> v8::RegExp::NewWithBacktrackLimit(
   PREPARE_FOR_EXECUTION(context, RegExp, New);
   Local<v8::RegExp> result;
   has_exception = !ToLocal<RegExp>(
-      i::JSRegExp::New(i_isolate, Utils::OpenHandle(*pattern),
+      i::JSRegExp::New(i_isolate, Utils::OpenDirectHandle(*pattern),
                        static_cast<i::JSRegExp::Flags>(flags), backtrack_limit),
       &result);
   RETURN_ON_FAILED_EXECUTION(RegExp);
@@ -9241,8 +9103,25 @@ Local<WasmMemoryMapDescriptor> WasmMemoryMapDescriptor::New(
 
 // static
 v8::ArrayBuffer::Allocator* v8::ArrayBuffer::Allocator::NewDefaultAllocator() {
+#ifdef V8_ENABLE_SANDBOX
+  return new ArrayBufferAllocator(i::IsolateGroup::GetDefault());
+#else
   return new ArrayBufferAllocator();
+#endif
 }
+
+#if defined(V8_COMPRESS_POINTERS) && \
+    !defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)
+v8::ArrayBuffer::Allocator* v8::ArrayBuffer::Allocator::NewDefaultAllocator(
+    const IsolateGroup& group) {
+#ifdef V8_ENABLE_SANDBOX
+  return new ArrayBufferAllocator(group.isolate_group_);
+#else
+  return new ArrayBufferAllocator();
+#endif
+}
+#endif  // defined(V8_COMPRESS_POINTERS) &&
+        // !defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)
 
 bool v8::ArrayBuffer::IsDetachable() const {
   return Utils::OpenDirectHandle(this)->is_detachable();
@@ -11161,7 +11040,8 @@ bool Isolate::AddMessageListenerWithErrorLevel(MessageCallback that,
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i::HandleScope scope(i_isolate);
-  i::Handle<i::ArrayList> list = i_isolate->factory()->message_listeners();
+  i::DirectHandle<i::ArrayList> list =
+      i_isolate->factory()->message_listeners();
   i::DirectHandle<i::FixedArray> listener =
       i_isolate->factory()->NewFixedArray(3);
   i::DirectHandle<i::Foreign> foreign =
@@ -11256,6 +11136,11 @@ std::string Isolate::GetDefaultLocale() {
 #else
   return std::string();
 #endif
+}
+
+uint64_t Isolate::GetHashSeed() {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  return HashSeed(i_isolate);
 }
 
 #if defined(V8_ENABLE_ETW_STACK_WALKING)
@@ -12213,10 +12098,10 @@ V8_EXPORT v8::Local<v8::Value> GetFunctionTemplateData(
 
   } else if (i::IsJSFunction(*target)) {
     i::DirectHandle<i::JSFunction> target_func = i::Cast<i::JSFunction>(target);
-    if (target_func->shared()->IsApiFunction()) {
+    auto shared = target_func->shared();
+    if (shared->IsApiFunction()) {
       i::DirectHandle<i::Object> data(
-          target_func->shared()->api_func_data()->callback_data(kAcquireLoad),
-          i_isolate);
+          shared->api_func_data()->callback_data(kAcquireLoad), i_isolate);
       return Utils::ToLocal(data);
     }
   }
@@ -12614,8 +12499,7 @@ bool ValidateFunctionCallbackInfo(const FunctionCallbackInfo<T>& info) {
   auto* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
   CHECK_EQ(i_isolate, Isolate::Current());
   CHECK(!i_isolate->GetIncumbentContext().is_null());
-  CHECK(info.This()->IsValue());
-  CHECK(info.HolderSoonToBeDeprecated()->IsObject());
+  CHECK(info.This()->IsObject());
   CHECK(!info.Data().IsEmpty());
   CHECK(info.GetReturnValue().Get()->IsValue());
   return true;

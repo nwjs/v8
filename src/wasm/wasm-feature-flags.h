@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_WASM_FEATURE_FLAGS_H_
+#define V8_WASM_WASM_FEATURE_FLAGS_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
-
-#ifndef V8_WASM_WASM_FEATURE_FLAGS_H_
-#define V8_WASM_WASM_FEATURE_FLAGS_H_
 
 // Each entry in this file generates a V8 command-line flag with the prefix
 // "--experimental-wasm-".
@@ -70,7 +70,12 @@
   /* Memory Control proposal */                                                \
   /* https://github.com/WebAssembly/memory-control */                          \
   /* V8 side owner: ahaas */                                                   \
-  V(memory_control, "memory control", false)
+  V(memory_control, "memory control", false)                                   \
+                                                                               \
+  /* Core stack switching, main proposal */                                    \
+  /* https://github.com/WebAssembly/stack-switching */                         \
+  /* V8 side owner: fgm */                                                     \
+  V(wasmfx, "core stack switching", false)
 
 // #############################################################################
 // Staged features (disabled by default, but enabled via --wasm-staging (also
@@ -124,14 +129,7 @@
   /* https://github.com/WebAssembly/js-string-builtins */                      \
   /* V8 side owner: jkummerow */                                               \
   /* Shipped in v13.0 */                                                       \
-  V(imported_strings, "imported strings", true)                                \
-                                                                               \
-  /* Memory64 proposal. */                                                     \
-  /* https://github.com/WebAssembly/memory64 */                                \
-  /* V8 side owner: clemensb */                                                \
-  /* Staged in v11.2 */                                                        \
-  /* Shipped in v13.3 */                                                       \
-  V(memory64, "memory64", true)
+  V(imported_strings, "imported strings", true)
 
 // Combination of all available wasm feature flags.
 #define FOREACH_WASM_FEATURE_FLAG(V)        \

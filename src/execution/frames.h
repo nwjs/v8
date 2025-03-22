@@ -567,8 +567,8 @@ class V8_EXPORT_PRIVATE FrameSummary {
     int SourcePosition() const;
     int SourceStatementPosition() const { return SourcePosition(); }
     Handle<Script> script() const;
-    Handle<Context> native_context() const;
-    Handle<StackFrameInfo> CreateStackFrameInfo() const;
+    DirectHandle<Context> native_context() const;
+    DirectHandle<StackFrameInfo> CreateStackFrameInfo() const;
 
    private:
     Handle<WasmInstanceObject> wasm_instance_;
@@ -1850,11 +1850,6 @@ class StackFrameIteratorForProfiler : public StackFrameIteratorBase {
   void AdvanceOneFrame();
 
   bool IsValidStackAddress(Address addr) const {
-#if V8_ENABLE_WEBASSEMBLY
-    for (const std::unique_ptr<wasm::StackMemory>& stack : wasm_stacks_) {
-      if (stack->Contains(addr)) return true;
-    }
-#endif
     return low_bound_ <= addr && addr <= high_bound_;
   }
   bool IsValidState(const StackFrame::State& frame) const;

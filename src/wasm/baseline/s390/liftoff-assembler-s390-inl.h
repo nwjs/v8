@@ -1328,7 +1328,6 @@ void LiftoffAssembler::LoadCallerFrameSlot(LiftoffRegister dst,
 #endif
     }
     case kRef:
-    case kRtt:
     case kRefNull:
     case kI64: {
       LoadU64(dst.gp(), MemOperand(fp, offset));
@@ -1369,7 +1368,6 @@ void LiftoffAssembler::StoreCallerFrameSlot(LiftoffRegister src,
 #endif
     }
     case kRef:
-    case kRtt:
     case kRefNull:
     case kI64: {
       StoreU64(src.gp(), MemOperand(frame_pointer, offset));
@@ -1407,7 +1405,6 @@ void LiftoffAssembler::LoadReturnStackSlot(LiftoffRegister dst, int offset,
 #endif
     }
     case kRef:
-    case kRtt:
     case kRefNull:
     case kI64: {
       LoadU64(dst.gp(), MemOperand(sp, offset));
@@ -1450,7 +1447,6 @@ void LiftoffAssembler::MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
     case kI64:
     case kRefNull:
     case kRef:
-    case kRtt:
     case kF64:
       length = 8;
       break;
@@ -1509,7 +1505,6 @@ void LiftoffAssembler::Spill(int offset, LiftoffRegister reg, ValueKind kind) {
     case kI64:
     case kRefNull:
     case kRef:
-    case kRtt:
       StoreU64(reg.gp(), liftoff::GetStackSlot(offset));
       break;
     case kF32:
@@ -1559,7 +1554,6 @@ void LiftoffAssembler::Fill(LiftoffRegister reg, int offset, ValueKind kind) {
     case kI64:
     case kRef:
     case kRefNull:
-    case kRtt:
       LoadU64(reg.gp(), liftoff::GetStackSlot(offset));
       break;
     case kF32:
@@ -2240,7 +2234,6 @@ void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
         break;
       case kRef:
       case kRefNull:
-      case kRtt:
         DCHECK(cond == kEqual || cond == kNotEqual);
 #if defined(V8_COMPRESS_POINTERS)
         if (use_signed) {
@@ -2841,7 +2834,8 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
                                      Register offset_reg, uintptr_t offset_imm,
                                      LoadType type,
                                      LoadTransformationKind transform,
-                                     uint32_t* protected_load_pc) {
+                                     uint32_t* protected_load_pc,
+                                     bool i64_offset) {
   if (!is_int20(offset_imm)) {
     mov(ip, Operand(offset_imm));
     if (offset_reg != no_reg) {
@@ -3241,7 +3235,6 @@ void LiftoffAssembler::CallCWithStackBuffer(
       case kI64:
       case kRefNull:
       case kRef:
-      case kRtt:
         LoadU64(result_reg->gp(), MemOperand(sp));
         break;
       case kF32:
@@ -3392,7 +3385,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
           case kI32:
           case kRef:
           case kRefNull:
-          case kRtt:
           case kI64: {
             asm_->AllocateStackSpace(stack_decrement - kSystemPointerSize);
             UseScratchRegisterScope temps(asm_);
@@ -3439,7 +3431,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
           case kI32:
           case kRef:
           case kRefNull:
-          case kRtt:
             asm_->push(src.reg().gp());
             break;
           case kF32:

@@ -172,7 +172,7 @@ bool Map::IsDetached(Isolate* isolate) const {
 // static
 void Map::GeneralizeIfCanHaveTransitionableFastElementsKind(
     Isolate* isolate, InstanceType instance_type,
-    Representation* representation, Handle<FieldType>* field_type) {
+    Representation* representation, DirectHandle<FieldType>* field_type) {
   if (CanHaveFastTransitionableElementsKind(instance_type)) {
     // We don't support propagation of field generalization through elements
     // kind transitions because they are inserted into the transition tree
@@ -361,6 +361,17 @@ DirectHandle<Map> Map::AddMissingTransitionsForTesting(
     Isolate* isolate, DirectHandle<Map> split_map,
     DirectHandle<DescriptorArray> descriptors) {
   return AddMissingTransitions(isolate, split_map, descriptors);
+}
+
+InstanceType Map::instance_type() const {
+  // TODO(solanes, v8:7790, v8:11353, v8:11945): Make this and the setter
+  // non-atomic when TSAN sees the map's store synchronization.
+  return static_cast<InstanceType>(
+      RELAXED_READ_UINT16_FIELD(*this, kInstanceTypeOffset));
+}
+
+void Map::set_instance_type(InstanceType value) {
+  RELAXED_WRITE_UINT16_FIELD(*this, kInstanceTypeOffset, value);
 }
 
 int Map::UnusedPropertyFields() const {

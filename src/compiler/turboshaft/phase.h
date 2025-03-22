@@ -171,6 +171,7 @@ enum class TurboshaftPipelineKind { kJS, kWasm, kCSA, kTSABuiltin, kJSToWasm };
 
 class LoopUnrollingAnalyzer;
 class WasmRevecAnalyzer;
+class WasmShuffleAnalyzer;
 
 class V8_EXPORT_PRIVATE PipelineData {
   using BuiltinComponent = detail::BuiltinComponent;
@@ -297,6 +298,14 @@ class V8_EXPORT_PRIVATE PipelineData {
     } else {
       DCHECK(call_descriptor->CalleeSavedFPRegisters().is_empty());
     }
+  }
+
+  void InitializeInstructionComponentWithSequence(
+      InstructionSequence* sequence) {
+    DCHECK(!instruction_component_.has_value());
+    instruction_component_.emplace(zone_stats());
+    instruction_component_->sequence =
+        InstructionComponent::Pointer<InstructionSequence>(sequence);
   }
 
   void ClearInstructionComponent() {
@@ -437,6 +446,18 @@ class V8_EXPORT_PRIVATE PipelineData {
 
   void clear_wasm_revec_analyzer() { wasm_revec_analyzer_ = nullptr; }
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
+
+  WasmShuffleAnalyzer* wasm_shuffle_analyzer() const {
+    DCHECK_NOT_NULL(wasm_shuffle_analyzer_);
+    return wasm_shuffle_analyzer_;
+  }
+
+  void set_wasm_shuffle_analyzer(WasmShuffleAnalyzer* wasm_shuffle_analyzer) {
+    DCHECK_NULL(wasm_shuffle_analyzer_);
+    wasm_shuffle_analyzer_ = wasm_shuffle_analyzer;
+  }
+
+  void clear_wasm_shuffle_analyzer() { wasm_shuffle_analyzer_ = nullptr; }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   bool is_wasm() const {
@@ -507,6 +528,7 @@ class V8_EXPORT_PRIVATE PipelineData {
   const wasm::CanonicalSig* wasm_canonical_sig_ = nullptr;
   const wasm::WasmModule* wasm_module_ = nullptr;
   bool wasm_shared_ = false;
+  WasmShuffleAnalyzer* wasm_shuffle_analyzer_ = nullptr;
 #ifdef V8_ENABLE_WASM_SIMD256_REVEC
 
   WasmRevecAnalyzer* wasm_revec_analyzer_ = nullptr;

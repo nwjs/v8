@@ -30,6 +30,7 @@ class LoopOptimizationProcessor {
   void PreProcessGraph(Graph* graph) {}
   void PostPhiProcessing() {}
 
+  void PostProcessBasicBlock(BasicBlock* block) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     current_block = block;
     if (current_block->is_loop()) {
@@ -167,16 +168,13 @@ class LoopOptimizationProcessor {
 
 template <typename NodeT>
 constexpr bool CanBeStoreToNonEscapedObject() {
-  return std::is_same_v<NodeT, StoreMap> ||
-         std::is_same_v<NodeT, StoreTaggedFieldWithWriteBarrier> ||
-         std::is_same_v<NodeT, StoreTaggedFieldNoWriteBarrier> ||
-         std::is_same_v<NodeT, StoreTrustedPointerFieldWithWriteBarrier> ||
-         std::is_same_v<NodeT, StoreFloat64>;
+  return CanBeStoreToNonEscapedObject(NodeBase::opcode_of<NodeT>);
 }
 
 class AnyUseMarkingProcessor {
  public:
   void PreProcessGraph(Graph* graph) {}
+  void PostProcessBasicBlock(BasicBlock* block) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     return BlockProcessResult::kContinue;
   }
@@ -306,6 +304,7 @@ class DeadNodeSweepingProcessor {
 
   void PreProcessGraph(Graph* graph) {}
   void PostProcessGraph(Graph* graph) {}
+  void PostProcessBasicBlock(BasicBlock* block) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     return BlockProcessResult::kContinue;
   }

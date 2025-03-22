@@ -139,6 +139,7 @@ class MaterializedObjectStore;
 class Microtask;
 class MicrotaskQueue;
 class OptimizingCompileDispatcher;
+class OptimizingCompileTaskExecutor;
 class PersistentHandles;
 class PersistentHandlesList;
 class ReadOnlyArtifacts;
@@ -725,30 +726,28 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   base::RecursiveMutex* break_access() { return &break_access_; }
 
   // Shared mutex for allowing thread-safe concurrent reads of FeedbackVectors.
-  base::SpinningMutex* feedback_vector_access() {
-    return &feedback_vector_access_;
-  }
+  base::Mutex* feedback_vector_access() { return &feedback_vector_access_; }
 
   // Shared mutex for allowing thread-safe concurrent reads of
   // InternalizedStrings.
-  base::SpinningMutex* internalized_string_access() {
+  base::Mutex* internalized_string_access() {
     return &internalized_string_access_;
   }
 
   // Shared mutex for allowing thread-safe concurrent reads of TransitionArrays
   // of kind kFullTransitionArray.
-  base::SpinningMutex* full_transition_array_access() {
+  base::Mutex* full_transition_array_access() {
     return &full_transition_array_access_;
   }
 
   // Shared mutex for allowing thread-safe concurrent reads of
   // SharedFunctionInfos.
-  base::SpinningMutex* shared_function_info_access() {
+  base::Mutex* shared_function_info_access() {
     return &shared_function_info_access_;
   }
 
   // Protects (most) map update operations, see also MapUpdater.
-  base::SpinningMutex* map_updater_access() { return &map_updater_access_; }
+  base::Mutex* map_updater_access() { return &map_updater_access_; }
 
   // Protects JSObject boilerplate migrations (i.e. calls to MigrateInstance on
   // boilerplate objects; elements kind transitions are *not* protected).
@@ -758,7 +757,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // - if so, `boilerplate_migration_access` is locked before
   //   `map_updater_access`.
   // - backgrounds threads must use the same lock order to avoid deadlocks.
-  base::SpinningMutex* boilerplate_migration_access() {
+  base::Mutex* boilerplate_migration_access() {
     return &boilerplate_migration_access_;
   }
 
@@ -1705,6 +1704,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     DCHECK_NOT_NULL(optimizing_compile_dispatcher_);
     return optimizing_compile_dispatcher_;
   }
+
+  OptimizingCompileDispatcher* SetOptimizingCompileDispatcherForTesting(
+      OptimizingCompileDispatcher* dispatcher);
+
   // Flushes all pending concurrent optimization jobs from the optimizing
   // compile dispatcher's queue.
   void AbortConcurrentOptimization(BlockingBehavior blocking_behavior);
@@ -2256,7 +2259,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   }
   void set_trusted_pointer_publishing_scope(
       TrustedPointerPublishingScope* scope) {
+    DCHECK_NE((trusted_pointer_publishing_scope() == nullptr),
+              (scope == nullptr));
     isolate_data_.trusted_pointer_publishing_scope_ = scope;
+  }
+
+  Address code_pointer_table_base_address() {
+    return isolate_data_.code_pointer_table_base_address_;
   }
 #endif  // V8_ENABLE_SANDBOX
 
@@ -2321,11 +2330,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void SyncStackLimit();
 
-  // To be called when returning from {stack}, or when an exception crosses the
-  // stack boundary. This updates the {StackMemory} object and the global
-  // {wasm_stacks_} list. This does *not* update the ActiveContinuation root and
-  // the stack limit.
-  void RetireWasmStack(wasm::StackMemory* stack);
+  // Retires the stack owned by {continuation}, to be called when returning or
+  // throwing from this continuation.
+  // This updates the {StackMemory} state, removes it from the global
+  // {wasm_stacks_} vector and nulls the EPT entry. This does not update the
+  // {ActiveContinuation} root or the stack limit.
+  void RetireWasmStack(Tagged<WasmContinuationObject> continuation);
 #else
   bool IsOnCentralStack() { return true; }
 #endif
@@ -2379,7 +2389,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
       DirectHandle<FunctionTemplateInfo> function,
       v8::ExceptionContext callback_kind);
   void ReportExceptionPropertyCallback(DirectHandle<JSReceiver> holder,
-                                       Handle<Name> name,
+                                       DirectHandle<Name> name,
                                        v8::ExceptionContext callback_kind);
   void SetExceptionPropagationCallback(ExceptionPropagationCallback callback);
 
@@ -2402,7 +2412,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     if (v8_flags.memory_reducer_respects_frozen_state && IsFrozen()) {
       // We will either finalize an ongoing GC, or simply do a GC to reclaim
       // any unreachable memory.
-      heap()->FinalizeIncrementalMarkingAtomically(
+      heap()->FinalizeIncrementalMarkingAtomicallyIfRunning(
           i::GarbageCollectionReason::kFrozen);
       heap()->EnsureSweepingCompleted(
           Heap::SweepingForcedFinalizationMode::kUnifiedHeap);
@@ -2534,12 +2544,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   CompilationCache* compilation_cache_ = nullptr;
   std::shared_ptr<Counters> async_counters_;
   base::RecursiveMutex break_access_;
-  base::SpinningMutex feedback_vector_access_;
-  base::SpinningMutex internalized_string_access_;
-  base::SpinningMutex full_transition_array_access_;
-  base::SpinningMutex shared_function_info_access_;
-  base::SpinningMutex map_updater_access_;
-  base::SpinningMutex boilerplate_migration_access_;
+  base::Mutex feedback_vector_access_;
+  base::Mutex internalized_string_access_;
+  base::Mutex full_transition_array_access_;
+  base::Mutex shared_function_info_access_;
+  base::Mutex map_updater_access_;
+  base::Mutex boilerplate_migration_access_;
   V8FileLogger* v8_file_logger_ = nullptr;
   StubCache* load_stub_cache_ = nullptr;
   StubCache* store_stub_cache_ = nullptr;
@@ -2809,7 +2819,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool allow_atomics_wait_ = true;
   bool flush_denormals_ = false;
 
-  base::SpinningMutex managed_ptr_destructors_mutex_;
+  base::Mutex managed_ptr_destructors_mutex_;
   ManagedPtrDestructor* managed_ptr_destructors_head_ = nullptr;
 
   size_t total_regexp_code_generated_ = 0;
@@ -2833,7 +2843,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // TODO(kenton@cloudflare.com): This mutex can be removed if
   // thread_data_table_ is always accessed under the isolate lock. I do not
   // know if this is the case, so I'm preserving it for now.
-  base::SpinningMutex thread_data_table_mutex_;
+  base::Mutex thread_data_table_mutex_;
   ThreadDataTable thread_data_table_;
 
   // Stores the isolate containing the shared space.
@@ -2873,7 +2883,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   std::vector<MemoryRange> code_pages_buffer1_;
   std::vector<MemoryRange> code_pages_buffer2_;
   // The mutex only guards adding pages, the retrieval is signal safe.
-  base::SpinningMutex code_pages_mutex_;
+  base::Mutex code_pages_mutex_;
 
 #ifdef V8_ENABLE_WEBASSEMBLY
   wasm::WasmCodeLookupCache* wasm_code_look_up_cache_ = nullptr;
@@ -3080,7 +3090,7 @@ class StackTraceFailureMessage {
 template <>
 class V8_NODISCARD MutexGuardIfOffThread<Isolate> final {
  public:
-  MutexGuardIfOffThread(base::SpinningMutex* mutex, Isolate* isolate) {
+  MutexGuardIfOffThread(base::Mutex* mutex, Isolate* isolate) {
     DCHECK_NOT_NULL(mutex);
     DCHECK_NOT_NULL(isolate);
     DCHECK_EQ(ThreadId::Current(), isolate->thread_id());
@@ -3088,6 +3098,21 @@ class V8_NODISCARD MutexGuardIfOffThread<Isolate> final {
 
   MutexGuardIfOffThread(const MutexGuardIfOffThread&) = delete;
   MutexGuardIfOffThread& operator=(const MutexGuardIfOffThread&) = delete;
+};
+
+// Set the current isolate for the thread *without* entering the isolate. Used
+// e.g. by background GC threads to be able to access pointer tables.
+class V8_NODISCARD SetCurrentIsolateScope {
+ public:
+  explicit SetCurrentIsolateScope(Isolate* isolate)
+      : previous_isolate_(Isolate::TryGetCurrent()) {
+    Isolate::SetCurrent(isolate);
+  }
+
+  ~SetCurrentIsolateScope() { Isolate::SetCurrent(previous_isolate_); }
+
+ private:
+  Isolate* const previous_isolate_;
 };
 
 }  // namespace internal

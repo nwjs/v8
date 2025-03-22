@@ -3036,6 +3036,12 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
     __ leave();
   }
 
+  // Check we are actually jumping to an OSR code object. This among other
+  // things ensures that the object contains deoptimization data below.
+  __ movl(scratch, FieldOperand(maybe_target_code, Code::kOsrOffsetOffset));
+  __ cmpl(scratch, Immediate(BytecodeOffset::None().ToInt()));
+  __ SbxCheck(Condition::not_equal, AbortReason::kExpectedOsrCode);
+
   // Check the target has a matching parameter count. This ensures that the OSR
   // code will correctly tear down our frame when leaving.
   __ movzxwq(scratch,
@@ -3616,6 +3622,10 @@ void SwitchToAllocatedStack(MacroAssembler* masm, Register wasm_instance,
   // the parent frame.
   __ movq(original_fp, rbp);
   LoadTargetJumpBuffer(masm, target_continuation, wasm::JumpBuffer::Suspended);
+  // Return address slot. The builtin itself returns by switching to the parent
+  // jump buffer and does not actually use this slot, but it is read by the
+  // profiler.
+  __ Push(Immediate(kNullAddress));
   // Push the loaded rbp. We know it is null, because there is no frame yet,
   // so we could also push 0 directly. In any case we need to push it, because
   // this marks the base of the stack segment for the stack frame iterator.

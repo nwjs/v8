@@ -3353,7 +3353,7 @@ void MacroAssembler::CompareWord(Condition cond, Register dst, Register lhs,
   }
 }
 
-// Emulated condtional branches do not emit a nop in the branch delay slot.
+// Emulated conditional branches do not emit a nop in the branch delay slot.
 //
 // BRANCH_ARGS_CHECK checks that conditional jump arguments are correct.
 #define BRANCH_ARGS_CHECK(cond, rs, rt)                                  \
@@ -5366,7 +5366,7 @@ void MacroAssembler::Abort(AbortReason reason) {
   }
 
   // Without debug code, save the code size and just trap.
-  if (!v8_flags.debug_code) {
+  if (!v8_flags.debug_code || v8_flags.trap_on_abort) {
     stop();
     return;
   }

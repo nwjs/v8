@@ -210,25 +210,6 @@ inline Register ToRegister(MaglevAssembler* masm,
 }
 
 template <typename... Args>
-struct CountPushHelper;
-
-template <>
-struct CountPushHelper<> {
-  static int Count() { return 0; }
-};
-
-template <typename Arg, typename... Args>
-struct CountPushHelper<Arg, Args...> {
-  static int Count(Arg arg, Args... args) {
-    int arg_count = 1;
-    if constexpr (is_iterator_range<Arg>::value) {
-      arg_count = static_cast<int>(std::distance(arg.begin(), arg.end()));
-    }
-    return arg_count + CountPushHelper<Args...>::Count(args...);
-  }
-};
-
-template <typename... Args>
 struct PushAllHelper;
 
 template <>
@@ -236,16 +217,6 @@ struct PushAllHelper<> {
   static void Push(MaglevAssembler* masm) {}
   static void PushReverse(MaglevAssembler* masm) {}
 };
-
-template <typename... Args>
-inline void PushAll(MaglevAssembler* masm, Args... args) {
-  PushAllHelper<Args...>::Push(masm, args...);
-}
-
-template <typename... Args>
-inline void PushAllReverse(MaglevAssembler* masm, Args... args) {
-  PushAllHelper<Args...>::PushReverse(masm, args...);
-}
 
 inline void PushInput(MaglevAssembler* masm, const Input& input) {
   if (input.operand().IsConstant()) {
@@ -324,12 +295,12 @@ struct PushAllHelper<Arg, Args...> {
 
 template <typename... T>
 void MaglevAssembler::Push(T... vals) {
-  detail::PushAll(this, vals...);
+  detail::PushAllHelper<T...>::Push(this, vals...);
 }
 
 template <typename... T>
 void MaglevAssembler::PushReverse(T... vals) {
-  detail::PushAllReverse(this, vals...);
+  detail::PushAllHelper<T...>::PushReverse(this, vals...);
 }
 
 inline void MaglevAssembler::BindJumpTarget(Label* label) {
@@ -773,6 +744,13 @@ inline void MaglevAssembler::AndInt32(Register reg, int mask) {
 inline void MaglevAssembler::OrInt32(Register reg, int mask) {
   // OR won't touch the upper part of target register
   Or(reg, reg, Operand(mask));
+}
+
+inline void MaglevAssembler::AndInt32(Register reg, Register other) {
+  And(reg, reg, other);
+}
+inline void MaglevAssembler::OrInt32(Register reg, Register other) {
+  Or(reg, reg, other);
 }
 
 inline void MaglevAssembler::ShiftLeft(Register reg, int amount) {
@@ -1397,7 +1375,7 @@ inline void MaglevAssembler::PrepareCallCFunction(int num_reg_arguments,
 inline void MaglevAssembler::CallSelf() {
   DCHECK(allow_call());
   DCHECK(code_gen_state()->entry_label()->is_bound());
-  MacroAssembler::Branch(code_gen_state()->entry_label());
+  MacroAssembler::Call(code_gen_state()->entry_label());
 }
 
 inline void MaglevAssembler::Jump(Label* target, Label::Distance distance) {

@@ -50,7 +50,7 @@ void ConstantExpressionInterface::UnOp(FullDecoder* decoder, WasmOpcode opcode,
     case kExprExternConvertAny: {
       result->runtime_value =
           WasmValue(WasmToJSObject(isolate_, input.runtime_value.to_ref()),
-                    CanonicalValueType::RefMaybeNull(HeapType::kExtern,
+                    CanonicalValueType::RefMaybeNull(kWasmExternRef,
                                                      input.type.nullability()));
       break;
     }
@@ -60,7 +60,7 @@ void ConstantExpressionInterface::UnOp(FullDecoder* decoder, WasmOpcode opcode,
           WasmValue(JSToWasmObject(isolate_, input.runtime_value.to_ref(),
                                    kCanonicalAnyRef, &error_message)
                         .ToHandleChecked(),
-                    CanonicalValueType::RefMaybeNull(HeapType::kAny,
+                    CanonicalValueType::RefMaybeNull(kWasmAnyRef,
                                                      input.type.nullability()));
       break;
     }
@@ -122,13 +122,15 @@ void ConstantExpressionInterface::RefFunc(FullDecoder* decoder,
   if (!generate_value()) return;
   ModuleTypeIndex sig_index = module_->functions[function_index].sig_index;
   bool function_is_shared = module_->type(sig_index).is_shared;
-  CanonicalValueType type = CanonicalValueType::FromIndex(
-      kRef, module_->canonical_type_id(sig_index));
-  Handle<WasmFuncRef> func_ref = WasmTrustedInstanceData::GetOrCreateFuncRef(
-      isolate_,
-      function_is_shared ? shared_trusted_instance_data_
-                         : trusted_instance_data_,
-      function_index);
+  CanonicalValueType type =
+      CanonicalValueType::Ref(module_->canonical_type_id(sig_index),
+                              function_is_shared, RefTypeKind::kFunction);
+  DirectHandle<WasmFuncRef> func_ref =
+      WasmTrustedInstanceData::GetOrCreateFuncRef(
+          isolate_,
+          function_is_shared ? shared_trusted_instance_data_
+                             : trusted_instance_data_,
+          function_index);
   result->runtime_value = WasmValue(func_ref, type);
 }
 
@@ -146,9 +148,10 @@ void ConstantExpressionInterface::GlobalGet(FullDecoder* decoder, Value* result,
                           data->untagged_globals_buffer()->backing_store()) +
                           global.offset,
                       type)
-          : WasmValue(handle(data->tagged_globals_buffer()->get(global.offset),
-                             isolate_),
-                      type);
+          : WasmValue(
+                direct_handle(data->tagged_globals_buffer()->get(global.offset),
+                              isolate_),
+                type);
 }
 
 void ConstantExpressionInterface::StructNew(FullDecoder* decoder,
@@ -166,8 +169,7 @@ void ConstantExpressionInterface::StructNew(FullDecoder* decoder,
   }
   result->runtime_value = WasmValue(
       isolate_->factory()->NewWasmStruct(imm.struct_type, field_values, rtt),
-      CanonicalValueType::FromIndex(
-          kRef, decoder->module_->canonical_type_id(imm.index)));
+      decoder->module_->canonical_type(ValueType::Ref(imm.heap_type())));
 }
 
 void ConstantExpressionInterface::StringConst(FullDecoder* decoder,
@@ -184,12 +186,11 @@ void ConstantExpressionInterface::StringConst(FullDecoder* decoder,
       trusted_instance_data_->native_module()->wire_bytes();
   const base::Vector<const uint8_t> string_bytes = module_bytes.SubVector(
       literal.source.offset(), literal.source.end_offset());
-  Handle<String> string =
+  DirectHandle<String> string =
       isolate_->factory()
           ->NewStringFromUtf8(string_bytes, unibrow::Utf8Variant::kWtf8)
           .ToHandleChecked();
-  result->runtime_value =
-      WasmValue(string, CanonicalValueType::Ref(HeapType::kString));
+  result->runtime_value = WasmValue(string, kWasmRefString);
 }
 
 namespace {
@@ -215,7 +216,6 @@ WasmValue DefaultValueForType(ValueType type, Isolate* isolate,
                            : Cast<Object>(isolate->factory()->null_value()),
                        module->canonical_type(type));
     case kVoid:
-    case kRtt:
     case kRef:
     case kTop:
     case kBottom:
@@ -239,8 +239,7 @@ void ConstantExpressionInterface::StructNewDefault(
   }
   result->runtime_value = WasmValue(
       isolate_->factory()->NewWasmStruct(imm.struct_type, field_values, rtt),
-      CanonicalValueType::FromIndex(
-          kRef, decoder->module_->canonical_type_id(imm.index)));
+      decoder->module_->canonical_type(ValueType::Ref(imm.heap_type())));
 }
 
 void ConstantExpressionInterface::ArrayNew(FullDecoder* decoder,
@@ -262,8 +261,7 @@ void ConstantExpressionInterface::ArrayNew(FullDecoder* decoder,
       isolate_->factory()->NewWasmArray(imm.array_type->element_type(),
                                         length.runtime_value.to_u32(),
                                         initial_value.runtime_value, rtt),
-      CanonicalValueType::FromIndex(
-          kRef, decoder->module_->canonical_type_id(imm.index)));
+      decoder->module_->canonical_type(ValueType::Ref(imm.heap_type())));
 }
 
 void ConstantExpressionInterface::ArrayNewDefault(
@@ -293,8 +291,7 @@ void ConstantExpressionInterface::ArrayNewFixed(
   result->runtime_value = WasmValue(
       isolate_->factory()->NewWasmArrayFromElements(array_imm.array_type,
                                                     element_values, rtt),
-      CanonicalValueType::FromIndex(
-          kRef, decoder->module_->canonical_type_id(array_imm.index)));
+      decoder->module_->canonical_type(ValueType::Ref(array_imm.heap_type())));
 }
 
 // TODO(14034): These expressions are non-constant for now. There are plans to
@@ -323,8 +320,7 @@ void ConstantExpressionInterface::ArrayNewSegment(
     return;
   }
   CanonicalValueType element_type = rtt->wasm_type_info()->element_type();
-  CanonicalValueType result_type =
-      CanonicalValueType::FromIndex(kRef, rtt->wasm_type_info()->type_index());
+  CanonicalValueType result_type = rtt->wasm_type_info()->type();
   if (element_type.is_numeric()) {
     const WasmDataSegment& data_segment =
         module_->data_segments[segment_imm.index];
@@ -339,8 +335,9 @@ void ConstantExpressionInterface::ArrayNewSegment(
 
     Address source =
         data->data_segment_starts()->get(segment_imm.index) + offset;
-    Handle<WasmArray> array_value = isolate_->factory()->NewWasmArrayFromMemory(
-        length, rtt, element_type, source);
+    DirectHandle<WasmArray> array_value =
+        isolate_->factory()->NewWasmArrayFromMemory(length, rtt, element_type,
+                                                    source);
     result->runtime_value = WasmValue(array_value, result_type);
   } else {
     const wasm::WasmElemSegment* elem_segment =
@@ -356,7 +353,7 @@ void ConstantExpressionInterface::ArrayNewSegment(
       return;
     }
 
-    Handle<Object> array_object =
+    DirectHandle<Object> array_object =
         isolate_->factory()->NewWasmArrayFromElementSegment(
             trusted_instance_data_, shared_trusted_instance_data_,
             segment_imm.index, offset, length, rtt, element_type);
@@ -385,8 +382,8 @@ void ConstantExpressionInterface::RefI31(FullDecoder* decoder,
     shifted =
         static_cast<intptr_t>(raw << (kSmiTagSize + kSmiShiftSize + 1)) >> 1;
   }
-  result->runtime_value = WasmValue(handle(Tagged<Smi>(shifted), isolate_),
-                                    CanonicalValueType::Ref(HeapType::kI31));
+  result->runtime_value =
+      WasmValue(direct_handle(Tagged<Smi>(shifted), isolate_), kWasmRefI31);
 }
 
 void ConstantExpressionInterface::DoReturn(FullDecoder* decoder,

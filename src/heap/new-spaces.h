@@ -48,14 +48,7 @@ class SemiSpace final : public Space {
   static void Swap(SemiSpace* from, SemiSpace* to);
 
   SemiSpace(Heap* heap, SemiSpaceId semispace, size_t initial_capacity,
-            size_t maximum_capacity)
-      : Space(heap, NEW_SPACE, nullptr),
-        maximum_capacity_(RoundDown<PageMetadata::kPageSize>(maximum_capacity)),
-        minimum_capacity_(RoundDown<PageMetadata::kPageSize>(initial_capacity)),
-        target_capacity_(minimum_capacity_),
-        id_(semispace) {
-    DCHECK_GE(maximum_capacity, static_cast<size_t>(PageMetadata::kPageSize));
-  }
+            size_t minimum_capacity, size_t maximum_capacity);
   V8_EXPORT_PRIVATE ~SemiSpace();
 
   inline bool Contains(Tagged<HeapObject> o) const;
@@ -207,11 +200,11 @@ class SemiSpace final : public Space {
 
   bool EnsureCapacity(size_t capacity);
 
+  // The minimum capacity for the space. A space cannot shrink below this size.
+  const size_t minimum_capacity_ = 0;
   // The maximum capacity that can be used by this space. A space cannot grow
   // beyond that size.
   const size_t maximum_capacity_ = 0;
-  // The minimum capacity for the space. A space cannot shrink below this size.
-  const size_t minimum_capacity_ = 0;
   // The currently committed space capacity.
   size_t current_capacity_ = 0;
   // The targetted committed space capacity.
@@ -249,7 +242,7 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
 
   explicit NewSpace(Heap* heap);
 
-  base::SpinningMutex* mutex() { return &mutex_; }
+  base::Mutex* mutex() { return &mutex_; }
 
   inline bool Contains(Tagged<Object> o) const;
   inline bool Contains(Tagged<HeapObject> o) const;
@@ -268,11 +261,12 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
 
   virtual size_t Capacity() const = 0;
   virtual size_t TotalCapacity() const = 0;
+  virtual size_t MinimumCapacity() const = 0;
   virtual size_t MaximumCapacity() const = 0;
   virtual size_t AllocatedSinceLastGC() const = 0;
 
   // Grow the capacity of the space.
-  virtual void Grow() = 0;
+  virtual void Grow(size_t new_capacity) = 0;
 
   virtual void MakeIterable() = 0;
 
@@ -294,7 +288,7 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
  protected:
   static const int kAllocationBufferParkingThreshold = 4 * KB;
 
-  base::SpinningMutex mutex_;
+  base::Mutex mutex_;
 
   virtual void RemovePage(PageMetadata* page) = 0;
 };
@@ -316,6 +310,7 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
   }
 
   SemiSpaceNewSpace(Heap* heap, size_t initial_semispace_capacity,
+                    size_t min_semispace_capacity_,
                     size_t max_semispace_capacity);
 
   ~SemiSpaceNewSpace() final = default;
@@ -324,15 +319,15 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
 
   // Grow the capacity of the semispaces.  Assumes that they are not at
   // their maximum capacity.
-  void Grow() final;
+  void Grow(size_t new_capacity) final;
 
   // Shrink the capacity of the semispaces.
-  void Shrink();
+  void Shrink(size_t new_capacity);
 
   // Return the allocated bytes in the active semispace.
   size_t Size() const final;
 
-  size_t SizeOfObjects() const final { return Size() + QuarantinedSize(); }
+  size_t SizeOfObjects() const final { return Size(); }
 
   // Return the allocatable capacity of a semispace.
   size_t Capacity() const final {
@@ -373,8 +368,8 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
 
   // Return the available bytes without growing.
   size_t Available() const final {
-    DCHECK_GE(Capacity(), Size());
-    return Capacity() - Size();
+    DCHECK_GE(Capacity(), Size() - QuarantinedSize());
+    return Capacity() - (Size() - QuarantinedSize());
   }
 
   size_t ExternalBackingStoreBytes(ExternalBackingStoreType type) const final {
@@ -392,6 +387,12 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
   size_t MaximumCapacity() const final {
     DCHECK(to_space_.maximum_capacity() == from_space_.maximum_capacity());
     return to_space_.maximum_capacity();
+  }
+
+  // Returns the minimum capacity of a semispace.
+  size_t MinimumCapacity() const final {
+    DCHECK(to_space_.minimum_capacity() == from_space_.minimum_capacity());
+    return to_space_.minimum_capacity();
   }
 
   // Returns the initial capacity of a semispace.
@@ -556,18 +557,21 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
   // Creates an old space object. The constructor does not allocate pages
   // from OS.
   explicit PagedSpaceForNewSpace(Heap* heap, size_t initial_capacity,
-                                 size_t max_capacity);
+                                 size_t min_capacity, size_t max_capacity);
 
   void TearDown() { PagedSpaceBase::TearDown(); }
 
   // Grow the capacity of the space.
-  void Grow();
+  void Grow(size_t new_capacity);
 
   // Shrink the capacity of the space.
-  bool StartShrinking();
+  bool StartShrinking(size_t new_target_capacity);
   void FinishShrinking();
 
   size_t AllocatedSinceLastGC() const;
+
+  // Return the minimum capacity of the space.
+  size_t MinimumCapacity() const { return min_capacity_; }
 
   // Return the maximum capacity of the space.
   size_t MaximumCapacity() const { return max_capacity_; }
@@ -628,7 +632,7 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
  private:
   bool AllocatePage();
 
-  const size_t initial_capacity_;
+  const size_t min_capacity_;
   const size_t max_capacity_;
   size_t target_capacity_ = 0;
   size_t current_capacity_ = 0;
@@ -648,7 +652,8 @@ class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
     return static_cast<PagedNewSpace*>(space);
   }
 
-  PagedNewSpace(Heap* heap, size_t initial_capacity, size_t max_capacity);
+  PagedNewSpace(Heap* heap, size_t initial_capacity, size_t min_capacity,
+                size_t max_capacity);
 
   ~PagedNewSpace() final;
 
@@ -657,10 +662,12 @@ class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
   }
 
   // Grow the capacity of the space.
-  void Grow() final { paged_space_.Grow(); }
+  void Grow(size_t new_capacity) final { paged_space_.Grow(new_capacity); }
 
   // Shrink the capacity of the space.
-  bool StartShrinking() { return paged_space_.StartShrinking(); }
+  bool StartShrinking(size_t new_target_capacity) {
+    return paged_space_.StartShrinking(new_target_capacity);
+  }
   void FinishShrinking() { paged_space_.FinishShrinking(); }
 
   // Return the allocated bytes in the active space.
@@ -698,6 +705,11 @@ class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
 
   size_t AllocatedSinceLastGC() const final {
     return paged_space_.AllocatedSinceLastGC();
+  }
+
+  // Return the maximum capacity of the space.
+  size_t MinimumCapacity() const final {
+    return paged_space_.MinimumCapacity();
   }
 
   // Return the maximum capacity of the space.

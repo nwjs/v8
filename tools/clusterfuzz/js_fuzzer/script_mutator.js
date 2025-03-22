@@ -20,14 +20,20 @@ const sourceHelpers = require('./source_helpers.js');
 
 const { AddTryCatchMutator } = require('./mutators/try_catch.js');
 const { ArrayMutator } = require('./mutators/array_mutator.js');
+const { ContextAnalyzer } = require('./mutators/analyzer.js');
 const { CrossOverMutator } = require('./mutators/crossover_mutator.js');
 const { ExpressionMutator } = require('./mutators/expression_mutator.js');
 const { FunctionCallMutator } = require('./mutators/function_call_mutator.js');
 const { IdentifierNormalizer } = require('./mutators/normalizer.js');
+const { MutationContext } = require('./mutators/mutator.js');
 const { NumberMutator } = require('./mutators/number_mutator.js');
 const { ObjectMutator } = require('./mutators/object_mutator.js');
 const { VariableMutator } = require('./mutators/variable_mutator.js');
 const { VariableOrObjectMutator } = require('./mutators/variable_or_object_mutation.js');
+
+const CHAKRA_WASM_MODULE_BUILDER_REL = 'chakra/WasmSpec/testsuite/harness/wasm-module-builder.js'
+const CHAKRA_WASM_CONSTANTS_REL = 'chakra/WasmSpec/testsuite/harness/wasm-constants.js'
+const V8_WASM_MODULE_BUILDER_REL = 'v8/test/mjsunit/wasm/wasm-module-builder.js';
 
 const MAX_EXTRA_MUTATIONS = 5;
 
@@ -46,6 +52,16 @@ function defaultSettings() {
     SCRIPT_MUTATOR_EXTRA_MUTATIONS: 0.2,
     SCRIPT_MUTATOR_SHUFFLE: 0.2,
   };
+}
+
+/**
+ * Create a context with information, useful in subsequent analyses.
+ */
+function analyzeContext(source) {
+  const analyzer = new ContextAnalyzer();
+  const context = new MutationContext();
+  analyzer.mutate(source, context);
+  return context;
 }
 
 class Result {
@@ -137,25 +153,27 @@ class ScriptMutator {
     }
   }
 
-  _addJSTestStubsIfNeeded(dependencies, input) {
-    if (dependencies.has('jstest_stubs') ||
-        !input.absPath.includes('JSTests')) {
+  _addStubsIfNeeded(dependencies, input, baseName, corpusDir) {
+    if (dependencies.has(baseName) || !input.absPath.includes(corpusDir)) {
       return;
     }
-    dependencies.set(
-        'jstest_stubs', sourceHelpers.loadResource('jstest_stubs.js'));
+    dependencies.set(baseName, sourceHelpers.loadResource(baseName + '.js'));
+  }
+
+  _addJSTestStubsIfNeeded(dependencies, input) {
+    this._addStubsIfNeeded(dependencies, input, 'jstest_stubs', 'JSTests');
   }
 
   _addChakraStubsIfNeeded(dependencies, input) {
-    if (dependencies.has('chakra_stubs') ||
-        !input.absPath.includes('chakra')) {
-      return;
-    }
-    dependencies.set(
-        'chakra_stubs', sourceHelpers.loadResource('chakra_stubs.js'));
+    this._addStubsIfNeeded(dependencies, input, 'chakra_stubs', 'chakra');
   }
 
-  mutate(source) {
+  _addSpidermonkeyStubsIfNeeded(dependencies, input) {
+    this._addStubsIfNeeded(
+        dependencies, input, 'spidermonkey_stubs', 'spidermonkey');
+  }
+
+  mutate(source, context) {
     let mutators = this.mutators.slice();
     let annotations = [];
     if (random.choose(this.settings.SCRIPT_MUTATOR_SHUFFLE)){
@@ -175,12 +193,36 @@ class ScriptMutator {
     mutators.push(this.trycatch);
 
     for (const mutator of mutators) {
-      mutator.mutate(source);
+      mutator.mutate(source, context);
     }
 
     for (const annotation of annotations.reverse()) {
       sourceHelpers.annotateWithComment(source.ast, annotation);
     }
+  }
+
+  /**
+   * Particular dependencies have precedence over others due to duplicate
+   * variable declarations in their sources.
+   *
+   * This is currently only implemented for the wasm-module-builder, which
+   * lives in V8 and in an older version in the Chakra test suite. It could
+   * be generalized for other cases.
+   */
+  resolveCollisions(inputs) {
+    let hasWasmModuleBuilder = false;
+    inputs.forEach(input => {
+      hasWasmModuleBuilder |= input.dependentPaths.filter(
+          (x) => x.endsWith(V8_WASM_MODULE_BUILDER_REL)).length;
+    });
+    if (!hasWasmModuleBuilder) {
+      return;
+    }
+    inputs.forEach(input => {
+      input.dependentPaths = input.dependentPaths.filter(
+          (x) => !x.endsWith(CHAKRA_WASM_MODULE_BUILDER_REL) &&
+                 !x.endsWith(CHAKRA_WASM_CONSTANTS_REL));
+    });
   }
 
   // Returns parsed dependencies for inputs.
@@ -195,7 +237,8 @@ class ScriptMutator {
         // also need to load the dependencies they point to.
         this._addJSTestStubsIfNeeded(dependencies, input);
         this._addChakraStubsIfNeeded(dependencies, input);
-        this._addMjsunitIfNeeded(dependencies, input)
+        this._addMjsunitIfNeeded(dependencies, input);
+        this._addSpidermonkeyStubsIfNeeded(dependencies, input);
         this._addSpiderMonkeyShellIfNeeded(dependencies, input);
       } catch (e) {
         console.log(
@@ -221,6 +264,7 @@ class ScriptMutator {
 
   // Combines input dependencies with fuzzer resources.
   resolveDependencies(inputs) {
+    this.resolveCollisions(inputs);
     const dependencies = this.resolveInputDependencies(inputs);
 
     // Add stubs for non-standard functions in the beginning.
@@ -234,9 +278,8 @@ class ScriptMutator {
   }
 
   // Normalizes, combines and mutates multiple inputs.
-  mutateInputs(inputs) {
+  mutateInputs(inputs, dependencies) {
     const normalizerMutator = new IdentifierNormalizer();
-
     for (const [index, input] of inputs.entries()) {
       try {
         normalizerMutator.mutate(input);
@@ -251,7 +294,15 @@ class ScriptMutator {
     // Combine ASTs into one. This is so that mutations have more context to
     // cross over content between ASTs (e.g. variables).
     const combinedSource = common.concatPrograms(inputs);
-    this.mutate(combinedSource);
+
+    // First pass for context information, then run other mutators.
+    const context = analyzeContext(combinedSource);
+    this.mutate(combinedSource, context);
+
+    // Add extra resources determined during mutation.
+    for (const resource of context.extraResources.values()) {
+      dependencies.push(sourceHelpers.loadResource(resource));
+    }
 
     return combinedSource;
   }
@@ -263,7 +314,7 @@ class ScriptMutator {
     // 3) Generate code with dependency code prepended.
     // 4) Combine and filter flags from inputs.
     const dependencies = this.resolveDependencies(inputs);
-    const combinedSource = this.mutateInputs(inputs);
+    const combinedSource = this.mutateInputs(inputs, dependencies);
     const code = sourceHelpers.generateCode(combinedSource, dependencies);
     const allFlags = common.concatFlags(dependencies.concat([combinedSource]));
     const filteredFlags = exceptions.resolveContradictoryFlags(
@@ -273,6 +324,7 @@ class ScriptMutator {
 }
 
 module.exports = {
+  analyzeContext: analyzeContext,
   defaultSettings: defaultSettings,
   ScriptMutator: ScriptMutator,
 };

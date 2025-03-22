@@ -388,7 +388,13 @@ base::EnumSet<CodeFlushMode> GetCodeFlushMode(Isolate* isolate) {
     // doesn't do anything if either one of them isn't enabled.
     DCHECK(v8_flags.fuzzing || v8_flags.flush_baseline_code ||
            v8_flags.flush_bytecode);
-    code_flush_mode.Add(CodeFlushMode::kStressFlushCode);
+    code_flush_mode.Add(CodeFlushMode::kForceFlush);
+  }
+
+  if (isolate->heap()->IsLastResortGC() &&
+      (v8_flags.flush_code_based_on_time ||
+       v8_flags.flush_code_based_on_tab_visibility)) {
+    code_flush_mode.Add(CodeFlushMode::kForceFlush);
   }
 
   return code_flush_mode;
@@ -396,7 +402,8 @@ base::EnumSet<CodeFlushMode> GetCodeFlushMode(Isolate* isolate) {
 
 }  // namespace
 
-void MarkCompactCollector::StartMarking() {
+void MarkCompactCollector::StartMarking(
+    std::shared_ptr<::heap::base::IncrementalMarkingSchedule> schedule) {
   // The state for background thread is saved here and maintained for the whole
   // GC cycle. Both CppHeap and regular V8 heap will refer to this flag.
   use_background_threads_in_cycle_ = heap_->ShouldUseBackgroundThreads();
@@ -413,10 +420,9 @@ void MarkCompactCollector::StartMarking() {
 
   // CppHeap's marker must be initialized before the V8 marker to allow
   // exchanging of worklists.
-  if (heap_->cpp_heap()) {
+  if (auto* cpp_heap = CppHeap::From(heap_->cpp_heap())) {
     TRACE_GC(heap()->tracer(), GCTracer::Scope::MC_MARK_EMBEDDER_PROLOGUE);
-    CppHeap::From(heap_->cpp_heap())
-        ->InitializeMarking(CppHeap::CollectionType::kMajor);
+    cpp_heap->InitializeMarking(CppHeap::CollectionType::kMajor, schedule);
   }
 
   std::vector<Address> contexts =
@@ -486,6 +492,11 @@ void MarkCompactCollector::CollectGarbage() {
   MaybeEnableBackgroundThreadsInCycle(CallOrigin::kAtomicGC);
 
   MarkLiveObjects();
+
+  if (auto* cpp_heap = CppHeap::From(heap_->cpp_heap_)) {
+    cpp_heap->ProcessCrossThreadWeakness();
+  }
+
   // This will walk dead object graphs and so requires that all references are
   // still intact.
   RecordObjectStats();
@@ -765,8 +776,8 @@ void MarkCompactCollector::Prepare() {
     StartMarking();
     if (heap_->cpp_heap_) {
       TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_MARK_EMBEDDER_PROLOGUE);
-      // StartTracing immediately starts marking which requires V8 worklists to
-      // be set up.
+      // `StartMarking()` immediately starts marking which requires V8 worklists
+      // to be set up.
       CppHeap::From(heap_->cpp_heap_)->StartMarking();
     }
   }
@@ -874,23 +885,7 @@ void MarkCompactCollector::Finish() {
     if (!new_space->EnsureCurrentCapacity()) {
       heap_->FatalProcessOutOfMemory("NewSpace::EnsureCurrentCapacity");
     }
-    // With Minor MS we have already set the mode at the beginning of sweeping
-    // the young generation.
-    if (!v8_flags.minor_ms) {
-      DCHECK_EQ(Heap::ResizeNewSpaceMode::kNone, resize_new_space_);
-      resize_new_space_ = heap_->ShouldResizeNewSpace();
-    }
-    switch (resize_new_space_) {
-      case ResizeNewSpaceMode::kShrink:
-        heap_->ReduceNewSpaceSize();
-        break;
-      case ResizeNewSpaceMode::kGrow:
-        heap_->ExpandNewSpaceSize();
-        break;
-      case ResizeNewSpaceMode::kNone:
-        break;
-    }
-    resize_new_space_ = ResizeNewSpaceMode::kNone;
+    heap_->ResizeNewSpace();
   }
 
   TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_FINISH);
@@ -2246,7 +2241,7 @@ void MarkCompactCollector::PerformWrapperTracing() {
   if (!cpp_heap) return;
 
   TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_MARK_EMBEDDER_TRACING);
-  cpp_heap->AdvanceTracing(v8::base::TimeDelta::Max());
+  cpp_heap->AdvanceMarking(v8::base::TimeDelta::Max(), SIZE_MAX);
 }
 
 namespace {
@@ -2604,7 +2599,7 @@ class ParallelClearingJob final : public v8::JobTask {
   void Run(JobDelegate* delegate) override {
     std::unique_ptr<ClearingItem> item;
     {
-      base::SpinningMutexGuard guard(&items_mutex_);
+      base::MutexGuard guard(&items_mutex_);
       item = std::move(items_.back());
       items_.pop_back();
     }
@@ -2612,7 +2607,7 @@ class ParallelClearingJob final : public v8::JobTask {
   }
 
   size_t GetMaxConcurrency(size_t worker_count) const override {
-    base::SpinningMutexGuard guard(&items_mutex_);
+    base::MutexGuard guard(&items_mutex_);
     if (!v8_flags.parallel_weak_ref_clearing ||
         !collector_->UseBackgroundThreadsInCycle()) {
       return std::min<size_t>(items_.size(), 1);
@@ -2626,7 +2621,7 @@ class ParallelClearingJob final : public v8::JobTask {
 
  private:
   MarkCompactCollector* collector_;
-  mutable base::SpinningMutex items_mutex_;
+  mutable base::Mutex items_mutex_;
   std::vector<std::unique_ptr<ClearingItem>> items_;
 };
 
@@ -3766,7 +3761,7 @@ void MarkCompactCollector::RightTrimDescriptorArray(
 void MarkCompactCollector::RecordStrongDescriptorArraysForWeakening(
     GlobalHandleVector<DescriptorArray> strong_descriptor_arrays) {
   DCHECK(heap_->incremental_marking()->IsMajorMarking());
-  base::SpinningMutexGuard guard(&strong_descriptor_arrays_mutex_);
+  base::MutexGuard guard(&strong_descriptor_arrays_mutex_);
   strong_descriptor_arrays_.push_back(std::move(strong_descriptor_arrays));
 }
 
@@ -4089,7 +4084,7 @@ void MarkCompactCollector::RecordRelocSlot(Tagged<InstructionStream> host,
 
   // Access to TypeSlots need to be protected, since LocalHeaps might
   // publish code in the background thread.
-  std::optional<base::SpinningMutexGuard> opt_guard;
+  std::optional<base::MutexGuard> opt_guard;
   if (v8_flags.concurrent_sparkplug) {
     opt_guard.emplace(info.page_metadata->mutex());
   }
@@ -4306,7 +4301,7 @@ static inline SlotCallbackResult UpdateStrongOldToSharedSlot(
   return REMOVE_SLOT;
 }
 
-static inline void UpdateStrongCodeSlot(Tagged<HeapObject> host,
+static inline void UpdateStrongCodeSlot(IsolateForSandbox isolate,
                                         PtrComprCageBase cage_base,
                                         PtrComprCageBase code_cage_base,
                                         InstructionStreamSlot slot) {
@@ -4320,8 +4315,7 @@ static inline void UpdateStrongCodeSlot(Tagged<HeapObject> host,
         slot.address() - Code::kInstructionStreamOffset));
     Tagged<InstructionStream> instruction_stream =
         code->instruction_stream(code_cage_base);
-    code->UpdateInstructionStart(GetIsolateForSandbox(host),
-                                 instruction_stream);
+    code->UpdateInstructionStart(isolate, instruction_stream);
   }
 }
 
@@ -4333,7 +4327,7 @@ class PointersUpdatingVisitor final : public ObjectVisitorWithCageBases,
                                       public RootVisitor {
  public:
   explicit PointersUpdatingVisitor(Heap* heap)
-      : ObjectVisitorWithCageBases(heap) {}
+      : ObjectVisitorWithCageBases(heap), isolate_(heap->isolate()) {}
 
   void VisitPointer(Tagged<HeapObject> host, ObjectSlot p) override {
     UpdateStrongSlotInternal(cage_base(), p);
@@ -4359,7 +4353,7 @@ class PointersUpdatingVisitor final : public ObjectVisitorWithCageBases,
 
   void VisitInstructionStreamPointer(Tagged<Code> host,
                                      InstructionStreamSlot slot) override {
-    UpdateStrongCodeSlot(host, cage_base(), code_cage_base(), slot);
+    UpdateStrongCodeSlot(isolate_, cage_base(), code_cage_base(), slot);
   }
 
   void VisitRootPointer(Root root, const char* description,
@@ -4420,6 +4414,8 @@ class PointersUpdatingVisitor final : public ObjectVisitorWithCageBases,
                                         MaybeObjectSlot slot) {
     UpdateSlot(cage_base, slot);
   }
+
+  IsolateForSandbox isolate_;
 };
 
 static Tagged<String> UpdateReferenceInExternalStringTableEntry(
@@ -4996,7 +4992,7 @@ class EvacuationWeakObjectRetainer : public WeakObjectRetainer {
 
 void MarkCompactCollector::Evacuate() {
   TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_EVACUATE);
-  base::SpinningMutexGuard guard(heap_->relocation_mutex());
+  base::MutexGuard guard(heap_->relocation_mutex());
 
   {
     TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_EVACUATE_PROLOGUE);
@@ -5341,11 +5337,12 @@ class RememberedSetUpdatingItem : public UpdatingItem {
 #endif
     RememberedSet<TRUSTED_TO_CODE>::Iterate(
         chunk_,
-        [=](MaybeObjectSlot slot) {
-          Tagged<HeapObject> host = HeapObject::FromAddress(
-              slot.address() - Code::kInstructionStreamOffset);
-          DCHECK(IsCode(host, cage_base));
-          UpdateStrongCodeSlot(host, cage_base, code_cage_base,
+        [cage_base, code_cage_base,
+         isolate = IsolateForSandbox{heap_->isolate()}](MaybeObjectSlot slot) {
+          DCHECK(IsCode(HeapObject::FromAddress(slot.address() -
+                                                Code::kInstructionStreamOffset),
+                        cage_base));
+          UpdateStrongCodeSlot(isolate, cage_base, code_cage_base,
                                InstructionStreamSlot(slot.address()));
           // Always keep slot since all slots are dropped at once after
           // iteration.
@@ -5813,7 +5810,7 @@ void MarkCompactCollector::UpdatePointersInPointerTables() {
 
 void MarkCompactCollector::ReportAbortedEvacuationCandidateDueToOOM(
     Address failed_start, PageMetadata* page) {
-  base::SpinningMutexGuard guard(&mutex_);
+  base::MutexGuard guard(&mutex_);
   aborted_evacuation_candidates_due_to_oom_.push_back(
       std::make_pair(failed_start, page));
 }
@@ -5823,7 +5820,7 @@ void MarkCompactCollector::ReportAbortedEvacuationCandidateDueToFlags(
   MemoryChunk* chunk = page->Chunk();
   DCHECK(!chunk->IsFlagSet(MemoryChunk::COMPACTION_WAS_ABORTED));
   chunk->SetFlagSlow(MemoryChunk::COMPACTION_WAS_ABORTED);
-  base::SpinningMutexGuard guard(&mutex_);
+  base::MutexGuard guard(&mutex_);
   aborted_evacuation_candidates_due_to_flags_.push_back(
       std::make_pair(failed_start, page));
 }
@@ -5919,11 +5916,7 @@ void MarkCompactCollector::StartSweepNewSpace() {
 
   int will_be_swept = 0;
 
-  DCHECK_EQ(Heap::ResizeNewSpaceMode::kNone, resize_new_space_);
-  resize_new_space_ = heap_->ShouldResizeNewSpace();
-  if (resize_new_space_ == Heap::ResizeNewSpaceMode::kShrink) {
-    paged_space->StartShrinking();
-  }
+  heap_->StartResizeNewSpace();
 
   DCHECK(empty_new_space_pages_to_be_swept_.empty());
   for (auto it = paged_space->begin(); it != paged_space->end();) {

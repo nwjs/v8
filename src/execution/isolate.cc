@@ -248,8 +248,7 @@ std::atomic<uint32_t> current_embedded_blob_data_size_(0);
 // - sticky_embedded_blob_data_size_
 // - enable_embedded_blob_refcounting_
 // - current_embedded_blob_refs_
-base::LazySpinningMutex current_embedded_blob_refcount_mutex_ =
-    LAZY_SELFISH_MUTEX_INITIALIZER;
+base::LazyMutex current_embedded_blob_refcount_mutex_ = LAZY_MUTEX_INITIALIZER;
 
 const uint8_t* sticky_embedded_blob_code_ = nullptr;
 uint32_t sticky_embedded_blob_code_size_ = 0;
@@ -279,15 +278,13 @@ void SetStickyEmbeddedBlob(const uint8_t* code, uint32_t code_size,
 }  // namespace
 
 void DisableEmbeddedBlobRefcounting() {
-  base::SpinningMutexGuard guard(
-      current_embedded_blob_refcount_mutex_.Pointer());
+  base::MutexGuard guard(current_embedded_blob_refcount_mutex_.Pointer());
   enable_embedded_blob_refcounting_ = false;
 }
 
 void FreeCurrentEmbeddedBlob() {
   CHECK(!enable_embedded_blob_refcounting_);
-  base::SpinningMutexGuard guard(
-      current_embedded_blob_refcount_mutex_.Pointer());
+  base::MutexGuard guard(current_embedded_blob_refcount_mutex_.Pointer());
 
   if (StickyEmbeddedBlobCode() == nullptr) return;
 
@@ -539,7 +536,7 @@ Isolate::FindOrAllocatePerThreadDataForThisThread() {
   ThreadId thread_id = ThreadId::Current();
   PerIsolateThreadData* per_thread = nullptr;
   {
-    base::SpinningMutexGuard lock_guard(&thread_data_table_mutex_);
+    base::MutexGuard lock_guard(&thread_data_table_mutex_);
     per_thread = thread_data_table_.Lookup(thread_id);
     if (per_thread == nullptr) {
       if (v8_flags.adjust_os_scheduling_parameters) {
@@ -558,7 +555,7 @@ void Isolate::DiscardPerThreadDataForThisThread() {
   if (thread_id.IsValid()) {
     DCHECK_NE(thread_manager_->mutex_owner_.load(std::memory_order_relaxed),
               thread_id);
-    base::SpinningMutexGuard lock_guard(&thread_data_table_mutex_);
+    base::MutexGuard lock_guard(&thread_data_table_mutex_);
     PerIsolateThreadData* per_thread = thread_data_table_.Lookup(thread_id);
     if (per_thread) {
       DCHECK(!per_thread->thread_state_);
@@ -576,7 +573,7 @@ Isolate::PerIsolateThreadData* Isolate::FindPerThreadDataForThread(
     ThreadId thread_id) {
   PerIsolateThreadData* per_thread = nullptr;
   {
-    base::SpinningMutexGuard lock_guard(&thread_data_table_mutex_);
+    base::MutexGuard lock_guard(&thread_data_table_mutex_);
     per_thread = thread_data_table_.Lookup(thread_id);
   }
   return per_thread;
@@ -1888,6 +1885,12 @@ Tagged<Object> Isolate::StackOverflow() {
     FATAL("Aborting on stack overflow");
   }
 
+#if USE_SIMULATOR
+  // Adjust the stack limit back to the real limit in case it was temporarily
+  // modified to reflect an overflow in the C stack (see
+  // AdjustStackLimitForSimulator).
+  stack_guard()->ResetStackLimitForSimulator();
+#endif
   DisallowJavascriptExecution no_js(this);
   HandleScope scope(this);
 
@@ -2325,9 +2328,7 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
       } else {
         // We reached the base of the wasm stack. Follow the chain of
         // continuations to find the parent stack and reset the iterator.
-        wasm::StackMemory* stack =
-            reinterpret_cast<wasm::StackMemory*>(iter.continuation()->stack());
-        RetireWasmStack(stack);
+        RetireWasmStack(iter.continuation());
         iter.Advance();
         wasm::StackMemory* parent =
             reinterpret_cast<wasm::StackMemory*>(iter.continuation()->stack());
@@ -3730,7 +3731,7 @@ char* Isolate::RestoreThread(char* from) {
 }
 
 void Isolate::ReleaseSharedPtrs() {
-  base::SpinningMutexGuard lock(&managed_ptr_destructors_mutex_);
+  base::MutexGuard lock(&managed_ptr_destructors_mutex_);
   while (managed_ptr_destructors_head_) {
     ManagedPtrDestructor* l = managed_ptr_destructors_head_;
     ManagedPtrDestructor* n = nullptr;
@@ -3755,7 +3756,7 @@ bool Isolate::IsBuiltinTableHandleLocation(Address* handle_location) {
 }
 
 void Isolate::RegisterManagedPtrDestructor(ManagedPtrDestructor* destructor) {
-  base::SpinningMutexGuard lock(&managed_ptr_destructors_mutex_);
+  base::MutexGuard lock(&managed_ptr_destructors_mutex_);
   DCHECK_NULL(destructor->prev_);
   DCHECK_NULL(destructor->next_);
   if (managed_ptr_destructors_head_) {
@@ -3766,7 +3767,7 @@ void Isolate::RegisterManagedPtrDestructor(ManagedPtrDestructor* destructor) {
 }
 
 void Isolate::UnregisterManagedPtrDestructor(ManagedPtrDestructor* destructor) {
-  base::SpinningMutexGuard lock(&managed_ptr_destructors_mutex_);
+  base::MutexGuard lock(&managed_ptr_destructors_mutex_);
   if (destructor->prev_) {
     destructor->prev_->next_ = destructor->next_;
   } else {
@@ -3796,7 +3797,7 @@ bool Isolate::IsOnCentralStack() {
 
 void Isolate::AddSharedWasmMemory(
     DirectHandle<WasmMemoryObject> memory_object) {
-  Handle<WeakArrayList> shared_wasm_memories =
+  DirectHandle<WeakArrayList> shared_wasm_memories =
       factory()->shared_wasm_memories();
   shared_wasm_memories = WeakArrayList::Append(
       this, shared_wasm_memories, MaybeObjectDirectHandle::Weak(memory_object));
@@ -3857,7 +3858,9 @@ void Isolate::UpdateCentralStackInfo() {
   }
 }
 
-void Isolate::RetireWasmStack(wasm::StackMemory* stack) {
+void Isolate::RetireWasmStack(Tagged<WasmContinuationObject> continuation) {
+  wasm::StackMemory* stack =
+      reinterpret_cast<wasm::StackMemory*>(continuation->stack());
   stack->jmpbuf()->state = wasm::JumpBuffer::Retired;
   size_t index = stack->index();
   // We can only return from a stack that was still in the global list.
@@ -3873,6 +3876,10 @@ void Isolate::RetireWasmStack(wasm::StackMemory* stack) {
   for (size_t i = 0; i < wasm_stacks().size(); ++i) {
     SLOW_DCHECK(wasm_stacks()[i]->index() == i);
   }
+#if V8_ENABLE_SANDBOX
+  continuation->set_stack(this, kNullAddress);
+  continuation->set_jmpbuf(this, kNullAddress);
+#endif
   stack_pool().Add(std::move(stack_ptr));
 }
 
@@ -3919,18 +3926,18 @@ class TracingAccountingAllocator : public AccountingAllocator {
 
  protected:
   void TraceAllocateSegmentImpl(v8::internal::Segment* segment) override {
-    base::SpinningMutexGuard lock(&mutex_);
+    base::MutexGuard lock(&mutex_);
     UpdateMemoryTrafficAndReportMemoryUsage(segment->total_size());
   }
 
   void TraceZoneCreationImpl(const Zone* zone) override {
-    base::SpinningMutexGuard lock(&mutex_);
+    base::MutexGuard lock(&mutex_);
     active_zones_.insert(zone);
     nesting_depth_++;
   }
 
   void TraceZoneDestructionImpl(const Zone* zone) override {
-    base::SpinningMutexGuard lock(&mutex_);
+    base::MutexGuard lock(&mutex_);
 #ifdef V8_ENABLE_PRECISE_ZONE_STATS
     if (v8_flags.trace_zone_type_stats) {
       type_stats_.MergeWith(zone->type_stats());
@@ -4036,7 +4043,7 @@ class TracingAccountingAllocator : public AccountingAllocator {
   Isolate* const isolate_;
   std::atomic<size_t> nesting_depth_{0};
 
-  base::SpinningMutex mutex_;
+  base::Mutex mutex_;
   std::unordered_set<const Zone*> active_zones_;
 #ifdef V8_ENABLE_PRECISE_ZONE_STATS
   TypeStats type_stats_;
@@ -4191,93 +4198,100 @@ Isolate::Isolate(IsolateGroup* isolate_group)
 
 void Isolate::CheckIsolateLayout() {
 #ifdef V8_ENABLE_SANDBOX
-  CHECK_EQ(static_cast<int>(OFFSET_OF(ExternalPointerTable, base_)),
-           Internals::kExternalPointerTableBasePointerOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(TrustedPointerTable, base_)),
-           Internals::kTrustedPointerTableBasePointerOffset);
-  CHECK_EQ(static_cast<int>(sizeof(ExternalPointerTable)),
-           Internals::kExternalPointerTableSize);
-  CHECK_EQ(static_cast<int>(sizeof(ExternalPointerTable)),
-           ExternalPointerTable::kSize);
-  CHECK_EQ(static_cast<int>(sizeof(TrustedPointerTable)),
-           Internals::kTrustedPointerTableSize);
-  CHECK_EQ(static_cast<int>(sizeof(TrustedPointerTable)),
-           TrustedPointerTable::kSize);
+  static_assert(static_cast<int>(OFFSET_OF(ExternalPointerTable, base_)) ==
+                Internals::kExternalPointerTableBasePointerOffset);
+  static_assert(static_cast<int>(OFFSET_OF(TrustedPointerTable, base_)) ==
+                Internals::kTrustedPointerTableBasePointerOffset);
+  static_assert(static_cast<int>(sizeof(ExternalPointerTable)) ==
+                Internals::kExternalPointerTableSize);
+  static_assert(static_cast<int>(sizeof(TrustedPointerTable)) ==
+                Internals::kTrustedPointerTableSize);
 #endif
 
-  CHECK_EQ(OFFSET_OF(Isolate, isolate_data_), 0);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.stack_guard_)),
-           Internals::kIsolateStackGuardOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.is_marking_flag_)),
-           Internals::kVariousBooleanFlagsOffset);
-  CHECK_EQ(
-      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.error_message_param_)),
-      Internals::kErrorMessageParamOffset);
-  CHECK_EQ(static_cast<int>(
-               OFFSET_OF(Isolate, isolate_data_.builtin_tier0_entry_table_)),
-           Internals::kBuiltinTier0EntryTableOffset);
-  CHECK_EQ(
-      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.builtin_tier0_table_)),
-      Internals::kBuiltinTier0TableOffset);
-  CHECK_EQ(
-      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.new_allocation_info_)),
-      Internals::kNewAllocationInfoOffset);
-  CHECK_EQ(
-      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.old_allocation_info_)),
-      Internals::kOldAllocationInfoOffset);
-  CHECK_EQ(static_cast<int>(
-               OFFSET_OF(Isolate, isolate_data_.fast_c_call_caller_fp_)),
-           Internals::kIsolateFastCCallCallerFpOffset);
-  CHECK_EQ(static_cast<int>(
-               OFFSET_OF(Isolate, isolate_data_.fast_c_call_caller_pc_)),
-           Internals::kIsolateFastCCallCallerPcOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.cage_base_)),
-           Internals::kIsolateCageBaseOffset);
-  CHECK_EQ(static_cast<int>(
-               OFFSET_OF(Isolate, isolate_data_.long_task_stats_counter_)),
-           Internals::kIsolateLongTaskStatsCounterOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.stack_guard_)),
-           Internals::kIsolateStackGuardOffset);
+  static_assert(OFFSET_OF(Isolate, isolate_data_) == 0);
+  static_assert(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.stack_guard_)) ==
+      Internals::kIsolateStackGuardOffset);
+  static_assert(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.is_marking_flag_)) ==
+      Internals::kVariousBooleanFlagsOffset);
+  static_assert(static_cast<int>(
+                    OFFSET_OF(Isolate, isolate_data_.error_message_param_)) ==
+                Internals::kErrorMessageParamOffset);
+  static_assert(static_cast<int>(OFFSET_OF(
+                    Isolate, isolate_data_.builtin_tier0_entry_table_)) ==
+                Internals::kBuiltinTier0EntryTableOffset);
+  static_assert(static_cast<int>(
+                    OFFSET_OF(Isolate, isolate_data_.builtin_tier0_table_)) ==
+                Internals::kBuiltinTier0TableOffset);
+  static_assert(static_cast<int>(
+                    OFFSET_OF(Isolate, isolate_data_.new_allocation_info_)) ==
+                Internals::kNewAllocationInfoOffset);
+  static_assert(static_cast<int>(
+                    OFFSET_OF(Isolate, isolate_data_.old_allocation_info_)) ==
+                Internals::kOldAllocationInfoOffset);
+  static_assert(static_cast<int>(
+                    OFFSET_OF(Isolate, isolate_data_.fast_c_call_caller_fp_)) ==
+                Internals::kIsolateFastCCallCallerFpOffset);
+  static_assert(static_cast<int>(
+                    OFFSET_OF(Isolate, isolate_data_.fast_c_call_caller_pc_)) ==
+                Internals::kIsolateFastCCallCallerPcOffset);
+  static_assert(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.cage_base_)) ==
+      Internals::kIsolateCageBaseOffset);
+  static_assert(static_cast<int>(OFFSET_OF(
+                    Isolate, isolate_data_.long_task_stats_counter_)) ==
+                Internals::kIsolateLongTaskStatsCounterOffset);
+  static_assert(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.stack_guard_)) ==
+      Internals::kIsolateStackGuardOffset);
 
-  CHECK_EQ(
-      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.thread_local_top_)),
+  static_assert(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.thread_local_top_)) ==
       Internals::kIsolateThreadLocalTopOffset);
-  CHECK_EQ(
-      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.handle_scope_data_)),
+  static_assert(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.handle_scope_data_)) ==
       Internals::kIsolateHandleScopeDataOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.embedder_data_)),
-           Internals::kIsolateEmbedderDataOffset);
+  static_assert(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.embedder_data_)) ==
+      Internals::kIsolateEmbedderDataOffset);
 #ifdef V8_COMPRESS_POINTERS
-  CHECK_EQ(static_cast<int>(
-               OFFSET_OF(Isolate, isolate_data_.external_pointer_table_)),
-           Internals::kIsolateExternalPointerTableOffset);
+  static_assert(static_cast<int>(OFFSET_OF(
+                    Isolate, isolate_data_.external_pointer_table_)) ==
+                Internals::kIsolateExternalPointerTableOffset);
 
-  CHECK_EQ(static_cast<int>(OFFSET_OF(
-               Isolate, isolate_data_.shared_external_pointer_table_)),
-           Internals::kIsolateSharedExternalPointerTableAddressOffset);
+  static_assert(static_cast<int>(OFFSET_OF(
+                    Isolate, isolate_data_.shared_external_pointer_table_)) ==
+                Internals::kIsolateSharedExternalPointerTableAddressOffset);
 #endif
 #ifdef V8_ENABLE_SANDBOX
-  CHECK_EQ(
-      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.trusted_cage_base_)),
+  static_assert(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.trusted_cage_base_)) ==
       Internals::kIsolateTrustedCageBaseOffset);
 
-  CHECK_EQ(static_cast<int>(
-               OFFSET_OF(Isolate, isolate_data_.trusted_pointer_table_)),
-           Internals::kIsolateTrustedPointerTableOffset);
+  static_assert(static_cast<int>(
+                    OFFSET_OF(Isolate, isolate_data_.trusted_pointer_table_)) ==
+                Internals::kIsolateTrustedPointerTableOffset);
 
-  CHECK_EQ(static_cast<int>(
-               OFFSET_OF(Isolate, isolate_data_.shared_trusted_pointer_table_)),
-           Internals::kIsolateSharedTrustedPointerTableAddressOffset);
+  static_assert(static_cast<int>(OFFSET_OF(
+                    Isolate, isolate_data_.shared_trusted_pointer_table_)) ==
+                Internals::kIsolateSharedTrustedPointerTableAddressOffset);
+
+  static_assert(static_cast<int>(OFFSET_OF(
+                    Isolate, isolate_data_.code_pointer_table_base_address_)) ==
+                Internals::kIsolateCodePointerTableBaseAddressOffset);
 #endif
-  CHECK_EQ(static_cast<int>(
-               OFFSET_OF(Isolate, isolate_data_.api_callback_thunk_argument_)),
-           Internals::kIsolateApiCallbackThunkArgumentOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(
-               Isolate, isolate_data_.continuation_preserved_embedder_data_)),
-           Internals::kContinuationPreservedEmbedderDataOffset);
+  static_assert(static_cast<int>(OFFSET_OF(
+                    Isolate, isolate_data_.api_callback_thunk_argument_)) ==
+                Internals::kIsolateApiCallbackThunkArgumentOffset);
+  static_assert(
+      static_cast<int>(OFFSET_OF(
+          Isolate, isolate_data_.continuation_preserved_embedder_data_)) ==
+      Internals::kContinuationPreservedEmbedderDataOffset);
 
-  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.roots_table_)),
-           Internals::kIsolateRootsOffset);
+  static_assert(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.roots_table_)) ==
+      Internals::kIsolateRootsOffset);
 
   CHECK(IsAligned(reinterpret_cast<Address>(&isolate_data_),
                   kIsolateDataAlignment));
@@ -4592,7 +4606,7 @@ void Isolate::Deinit() {
 #endif  // V8_ENABLE_LEAPTIERING
 
   {
-    base::SpinningMutexGuard lock_guard(&thread_data_table_mutex_);
+    base::MutexGuard lock_guard(&thread_data_table_mutex_);
     thread_data_table_.RemoveAllThreads();
   }
 }
@@ -4833,7 +4847,7 @@ void Isolate::NotifyExceptionPropagationCallback() {
             Utils::OpenDirectHandle(*callback_info->Holder());
         Handle<Object> maybe_name =
             PropertyCallbackArguments::GetPropertyKeyHandle(*callback_info);
-        Handle<Name> name =
+        DirectHandle<Name> name =
             IsSmi(*maybe_name)
                 ? factory()->SizeToString(
                       PropertyCallbackArguments::GetPropertyIndex(
@@ -4885,7 +4899,7 @@ void Isolate::NotifyExceptionPropagationCallback() {
       ApiAccessorExitFrame* frame = ApiAccessorExitFrame::cast(it.frame());
 
       DirectHandle<Object> holder(frame->holder(), this);
-      Handle<Name> name(frame->property_name(), this);
+      DirectHandle<Name> name(frame->property_name(), this);
       DCHECK(IsJSReceiver(*holder));
 
       // Currently we call only ApiGetters from JS code.
@@ -4958,7 +4972,7 @@ void Isolate::ReportExceptionFunctionCallback(
 }
 
 void Isolate::ReportExceptionPropertyCallback(
-    DirectHandle<JSReceiver> holder, Handle<Name> name,
+    DirectHandle<JSReceiver> holder, DirectHandle<Name> name,
     v8::ExceptionContext exception_context) {
   DCHECK_NOT_NULL(exception_propagation_callback_);
 
@@ -5050,8 +5064,7 @@ void Isolate::InitializeDefaultEmbeddedBlob() {
   uint32_t data_size = DefaultEmbeddedBlobDataSize();
 
   if (StickyEmbeddedBlobCode() != nullptr) {
-    base::SpinningMutexGuard guard(
-        current_embedded_blob_refcount_mutex_.Pointer());
+    base::MutexGuard guard(current_embedded_blob_refcount_mutex_.Pointer());
     // Check again now that we hold the lock.
     if (StickyEmbeddedBlobCode() != nullptr) {
       code = StickyEmbeddedBlobCode();
@@ -5070,8 +5083,7 @@ void Isolate::InitializeDefaultEmbeddedBlob() {
 }
 
 void Isolate::CreateAndSetEmbeddedBlob() {
-  base::SpinningMutexGuard guard(
-      current_embedded_blob_refcount_mutex_.Pointer());
+  base::MutexGuard guard(current_embedded_blob_refcount_mutex_.Pointer());
 
   PrepareBuiltinSourcePositionMap();
 
@@ -5166,8 +5178,7 @@ void Isolate::TearDownEmbeddedBlob() {
   CHECK_EQ(CurrentEmbeddedBlobCode(), StickyEmbeddedBlobCode());
   CHECK_EQ(CurrentEmbeddedBlobData(), StickyEmbeddedBlobData());
 
-  base::SpinningMutexGuard guard(
-      current_embedded_blob_refcount_mutex_.Pointer());
+  base::MutexGuard guard(current_embedded_blob_refcount_mutex_.Pointer());
   current_embedded_blob_refs_--;
   if (current_embedded_blob_refs_ == 0 && enable_embedded_blob_refcounting_) {
     // We own the embedded blob and are the last holder. Free it.
@@ -5684,7 +5695,8 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
     builtins_constants_table_builder_ = new BuiltinsConstantsTableBuilder(this);
 
     if (v8_flags.concurrent_builtin_generation) {
-      optimizing_compile_dispatcher_ = new OptimizingCompileDispatcher(this);
+      optimizing_compile_dispatcher_ = new OptimizingCompileDispatcher(
+          this, isolate_group_->optimizing_compile_task_executor());
       optimizing_compile_dispatcher_->set_finalize(false);
     }
 
@@ -5708,11 +5720,13 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   // embedded blob setup).
   init_memcopy_functions();
 
-  if (v8_flags.trace_turbo || v8_flags.trace_turbo_graph ||
-      v8_flags.turbo_profiling) {
+  if ((v8_flags.trace_turbo || v8_flags.trace_turbo_graph ||
+       v8_flags.turbo_profiling) &&
+      !v8_flags.concurrent_turbo_tracing) {
     PrintF("Concurrent recompilation has been disabled for tracing.\n");
   } else if (OptimizingCompileDispatcher::Enabled()) {
-    optimizing_compile_dispatcher_ = new OptimizingCompileDispatcher(this);
+    optimizing_compile_dispatcher_ = new OptimizingCompileDispatcher(
+        this, isolate_group_->optimizing_compile_task_executor());
   }
 
   // Initialize before deserialization since collections may occur,
@@ -5924,6 +5938,11 @@ void Isolate::Exit() {
 
   // Reinit the current thread for the isolate it was running before this one.
   SetIsolateThreadLocals(previous_isolate, previous_thread_data);
+}
+
+OptimizingCompileDispatcher* Isolate::SetOptimizingCompileDispatcherForTesting(
+    OptimizingCompileDispatcher* dispatcher) {
+  return std::exchange(optimizing_compile_dispatcher_, dispatcher);
 }
 
 std::unique_ptr<PersistentHandles> Isolate::NewPersistentHandles() {
@@ -6140,7 +6159,7 @@ void Isolate::MaybeInitializeVectorListFromHeap() {
   }
 
   // Add collected feedback vectors to the root list lest we lose them to GC.
-  Handle<ArrayList> list =
+  DirectHandle<ArrayList> list =
       ArrayList::New(this, static_cast<int>(vectors.size()));
   for (const auto& vector : vectors) list = ArrayList::Add(this, list, vector);
   SetFeedbackVectorsForProfilingTools(*list);
@@ -6202,7 +6221,7 @@ void Isolate::UpdateProtectorsOnSetPrototype(
 
 void Isolate::UpdateTypedArrayLengthLookupChainProtectorOnSetPrototype(
     DirectHandle<JSObject> object) {
-  if (IsJSTypedArrayPrototype(*object) &&
+  if ((IsJSTypedArrayPrototype(*object) || IsJSTypedArray(*object)) &&
       Protectors::IsTypedArrayLengthLookupChainIntact(this)) {
     Protectors::InvalidateTypedArrayLengthLookupChain(this);
   }
@@ -7332,7 +7351,7 @@ bool Overlapping(const MemoryRange& a, const MemoryRange& b) {
 #endif  // DEBUG
 
 void Isolate::AddCodeMemoryRange(MemoryRange range) {
-  base::SpinningMutexGuard guard(&code_pages_mutex_);
+  base::MutexGuard guard(&code_pages_mutex_);
   std::vector<MemoryRange>* old_code_pages = GetCodePages();
   DCHECK_NOT_NULL(old_code_pages);
 #ifdef DEBUG
@@ -7585,8 +7604,7 @@ void DefaultWasmAsyncResolvePromiseCallback(
 
 // Mutex used to ensure that the dispatch table entries for builtins are only
 // initialized once.
-base::LazySpinningMutex read_only_dispatch_entries_mutex_ =
-    LAZY_SELFISH_MUTEX_INITIALIZER;
+base::LazyMutex read_only_dispatch_entries_mutex_ = LAZY_MUTEX_INITIALIZER;
 
 void Isolate::InitializeBuiltinJSDispatchTable() {
 #ifdef V8_ENABLE_LEAPTIERING
@@ -7595,7 +7613,7 @@ void Isolate::InitializeBuiltinJSDispatchTable() {
   // patch it up here. Also, we need a mutex so the shared read only heaps space
   // is not initialized multiple times. This must be blocking as no isolate
   // should be allowed to proceed until the table is initialized.
-  base::SpinningMutexGuard guard(read_only_dispatch_entries_mutex_.Pointer());
+  base::MutexGuard guard(read_only_dispatch_entries_mutex_.Pointer());
   JSDispatchTable* jdt = IsolateGroup::current()->js_dispatch_table();
 
   bool needs_initialization =
@@ -7628,10 +7646,9 @@ void Isolate::InitializeBuiltinJSDispatchTable() {
           parameter_count);
 #else
       CHECK_LT(idx, JSBuiltinDispatchHandleRoot::kTableSize);
-      isolate_data_.builtin_dispatch_table()[idx] =
-          jdt->AllocateAndInitializeEntry(
-              read_only_heap_->js_dispatch_table_space(), parameter_count,
-              code);
+      JSDispatchHandle handle = jdt->AllocateAndInitializeEntry(
+          read_only_heap_->js_dispatch_table_space(), parameter_count, code);
+      isolate_data_.builtin_dispatch_table()[idx] = handle;
 #endif  // V8_STATIC_DISPATCH_HANDLES_BOOL
     }
   }

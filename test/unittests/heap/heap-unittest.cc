@@ -236,7 +236,7 @@ TEST_F(HeapTest, HeapLayout) {
 namespace {
 void ShrinkNewSpace(NewSpace* new_space) {
   if (!v8_flags.minor_ms) {
-    SemiSpaceNewSpace::From(new_space)->Shrink();
+    new_space->heap()->ReduceNewSpaceSizeForTesting();
     return;
   }
   // MinorMS shrinks the space as part of sweeping. Here we fake a GC cycle, in
@@ -251,7 +251,7 @@ void ShrinkNewSpace(NewSpace* new_space) {
                      GarbageCollectionReason::kTesting, "heap unittest",
                      GCTracer::MarkingType::kAtomic);
   tracer->StartAtomicPause();
-  paged_new_space->StartShrinking();
+  paged_new_space->StartShrinking(paged_new_space->MinimumCapacity());
   for (auto it = paged_new_space->begin();
        it != paged_new_space->end() &&
        (paged_new_space->ShouldReleaseEmptyPage());) {
@@ -457,7 +457,7 @@ TEST_F(HeapTest, RememberedSet_InsertOnPromotingObjectToOld) {
     SimulateFullSpace(new_space, &handles);
     IsolateSafepointScope scope(heap);
     // New empty pages should remain in new space.
-    new_space->Grow();
+    heap->ExpandNewSpaceSizeForTesting();
     CHECK(new_space->EnsureCurrentCapacity());
   }
   InvokeMinorGC();
@@ -788,11 +788,45 @@ TEST_F(HeapTest, Regress364396306) {
 }
 #endif  // defined(V8_COMPRESS_POINTERS) && defined(V8_ENABLE_SANDBOX)
 
+TEST_F(HeapTest,
+       PinningScavengerDoesntMoveObjectReachableFromStackNoPromotion) {
+  if (v8_flags.single_generation) return;
+  if (v8_flags.minor_ms) return;
+  if (!v8_flags.scavenger_pinning_objects) return;
+  v8_flags.scavenger_precise_pinning_objects = false;
+  v8_flags.scavenger_promote_quarantined_pages = false;
+  ManualGCScope manual_gc_scope(isolate());
+
+  DirectHandle<HeapObject> number =
+      isolate()->factory()->NewHeapNumber<AllocationType::kYoung>(42);
+
+  Address number_address = number->address();
+
+  CHECK(HeapLayout::InYoungGeneration(*number));
+
+  for (int i = 0; i < 10; i++) {
+    InvokeMinorGC();
+    CHECK(HeapLayout::InYoungGeneration(*number));
+    CHECK_EQ(number_address, number->address());
+  }
+
+  // `number` is already in the intermediate generation. A stackless GC should
+  // now move it to old gen.
+  {
+    DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+        isolate()->heap());
+    InvokeMinorGC();
+  }
+  CHECK(!HeapLayout::InYoungGeneration(*number));
+  CHECK_NE(number_address, number->address());
+}
+
 TEST_F(HeapTest, PinningScavengerDoesntMoveObjectReachableFromStack) {
   if (v8_flags.single_generation) return;
   if (v8_flags.minor_ms) return;
   if (!v8_flags.scavenger_pinning_objects) return;
   v8_flags.scavenger_precise_pinning_objects = false;
+  v8_flags.scavenger_promote_quarantined_pages = true;
   ManualGCScope manual_gc_scope(isolate());
 
   DirectHandle<HeapObject> number =

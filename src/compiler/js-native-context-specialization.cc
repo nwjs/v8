@@ -396,10 +396,13 @@ Handle<String> JSNativeContextSpecialization::Concatenate(
                            *left, broker()->local_isolate_or_isolate()) ||
                        SharedStringAccessGuardIfNeeded::IsNeeded(
                            *right, broker()->local_isolate_or_isolate());
-  SharedStringAccessGuardIfNeeded access_guard(
-      require_guard ? broker()->local_isolate_or_isolate() : nullptr);
 
-  if (left->IsOneByteRepresentation() && right->IsOneByteRepresentation()) {
+  // Check string representation of both strings. This does not require the
+  // SharedStringAccessGuardIfNeeded as the representation is stable.
+  const bool result_is_one_byte_string =
+      left->IsOneByteRepresentation() && right->IsOneByteRepresentation();
+
+  if (result_is_one_byte_string) {
     // {left} and {right} are 1-byte ==> the result will be 1-byte.
     // Note that we need a canonical handle, because we insert in
     // {created_strings_} the handle's address, which is kinda meaningless if
@@ -412,6 +415,8 @@ Handle<String> JSNativeContextSpecialization::Concatenate(
             .ToHandleChecked());
     created_strings_.insert(flat);
     DisallowGarbageCollection no_gc;
+    SharedStringAccessGuardIfNeeded access_guard(
+        require_guard ? broker()->local_isolate_or_isolate() : nullptr);
     String::WriteToFlat(*left, flat->GetChars(no_gc, access_guard), 0,
                         left->length(), access_guard);
     String::WriteToFlat(*right,
@@ -429,6 +434,8 @@ Handle<String> JSNativeContextSpecialization::Concatenate(
             .ToHandleChecked());
     created_strings_.insert(flat);
     DisallowGarbageCollection no_gc;
+    SharedStringAccessGuardIfNeeded access_guard(
+        require_guard ? broker()->local_isolate_or_isolate() : nullptr);
     String::WriteToFlat(*left, flat->GetChars(no_gc, access_guard), 0,
                         left->length(), access_guard);
     String::WriteToFlat(*right,
@@ -1612,6 +1619,15 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
         lookup_start_object = effect =
             graph()->NewNode(common()->TypeGuard(Type::StringWrapper()),
                              lookup_start_object, effect, control);
+      } else if (HasOnlyNonResizableTypedArrayMaps(
+                     broker(), access_info.lookup_start_object_maps())) {
+        // In order to be able to use TypedArrayLength, we need a TypeGuard
+        // when all input maps are TypedArray maps. We need this only when
+        // all maps are non-RAB/GSAB maps, since TypedArrayLength only handles
+        // non-RAB/GSAB maps.
+        lookup_start_object = effect =
+            graph()->NewNode(common()->TypeGuard(Type::TypedArray()),
+                             lookup_start_object, effect, control);
       }
 
     } else if (!access_builder.TryBuildStringCheck(
@@ -1661,6 +1677,15 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
         // should be a rare case.
         lookup_start_object = receiver = effect =
             graph()->NewNode(common()->TypeGuard(Type::StringWrapper()),
+                             lookup_start_object, effect, control);
+      } else if (HasOnlyNonResizableTypedArrayMaps(
+                     broker(), access_info.lookup_start_object_maps())) {
+        // In order to be able to use TypedArrayLength, we need a TypeGuard
+        // when all input maps are TypedArray maps. We need this only when
+        // all maps are non-RAB/GSAB maps, since TypedArrayLength only handles
+        // non-RAB/GSAB maps.
+        lookup_start_object = receiver = effect =
+            graph()->NewNode(common()->TypeGuard(Type::TypedArray()),
                              lookup_start_object, effect, control);
       }
     } else {
@@ -1804,6 +1829,18 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
                          receiver_is_lookup_start);
           this_lookup_start_object = this_effect =
               graph()->NewNode(common()->TypeGuard(Type::StringWrapper()),
+                               lookup_start_object, this_effect, this_control);
+          if (receiver_is_lookup_start) {
+            this_receiver = this_lookup_start_object;
+          }
+        } else if (HasOnlyNonResizableTypedArrayMaps(
+                       broker(), lookup_start_object_maps)) {
+          bool receiver_is_lookup_start =
+              this_lookup_start_object == this_receiver;
+          DCHECK_IMPLIES(access_mode != AccessMode::kLoad,
+                         receiver_is_lookup_start);
+          this_lookup_start_object = this_effect =
+              graph()->NewNode(common()->TypeGuard(Type::TypedArray()),
                                lookup_start_object, this_effect, this_control);
           if (receiver_is_lookup_start) {
             this_receiver = this_lookup_start_object;
@@ -3255,6 +3292,7 @@ JSNativeContextSpecialization::BuildPropertyStore(
       case MachineRepresentation::kSimd128:
       case MachineRepresentation::kSimd256:
       case MachineRepresentation::kMapWord:
+      case MachineRepresentation::kFloat16RawBits:
         UNREACHABLE();
     }
     // Check if we need to perform a transitioning store.
@@ -3939,11 +3977,6 @@ JSNativeContextSpecialization::
             simplified()->LoadTypedElement(external_array_type),
             buffer_or_receiver, base_pointer, external_pointer, index, effect,
             control);
-
-        if (external_array_type == kExternalFloat16Array) {
-          value =
-              graph()->NewNode(simplified()->Float16RawBitsToNumber(), value);
-        }
       }
       break;
     }
@@ -3973,8 +4006,6 @@ JSNativeContextSpecialization::
       // might want to change that at some point.
       if (external_array_type == kExternalUint8ClampedArray) {
         value = graph()->NewNode(simplified()->NumberToUint8Clamped(), value);
-      } else if (external_array_type == kExternalFloat16Array) {
-        value = graph()->NewNode(simplified()->NumberToFloat16RawBits(), value);
       }
 
       if (situation == kHandleOOB_SmiAndRangeCheckComputed) {
@@ -4282,7 +4313,7 @@ JSNativeContextSpecialization::ReleaseEffectAndControlFromAssembler(
   return {gasm->effect(), gasm->control()};
 }
 
-Graph* JSNativeContextSpecialization::graph() const {
+TFGraph* JSNativeContextSpecialization::graph() const {
   return jsgraph()->graph();
 }
 

@@ -536,6 +536,7 @@
   'regress/wasm/regress-1449208': [SKIP],
   'regress/wasm/regress-crbug-1047368': [SKIP],
   'regress/wasm/regress-crbug-1463219': [SKIP],
+  'regress/wasm/regress-385256127': [SKIP],
   'wasm/imported-function-types': [SKIP],
   'wasm/loop-unrolling': [SKIP],
   'wasm/reference-tables': [SKIP],
@@ -631,6 +632,7 @@
   'regress/wasm/regress-9017': [SKIP],
   'regress/wasm/regress-350779988': [SKIP],
   'regress/wasm/regress-366350772': [SKIP],
+  'wasm/denormals': [SKIP],
   'wasm/deopt/*': [SKIP],
   'wasm/enter-debug-state': [SKIP],
   'wasm/liftoff-trap-handler': [SKIP],
@@ -740,10 +742,11 @@
   'regress/wasm/regress-354324155*': [SKIP],
   'regress/wasm/regress-360044696': [SKIP],
   'regress/wasm/regress-360052650': [SKIP],
-  'regress/wasm/regress-373702823': [SKIP],
   'regress/wasm/regress-361369297': [SKIP],
   'regress/wasm/regress-361611472': [SKIP],
   'regress/wasm/regress-368241691': [SKIP],
+  'regress/wasm/regress-373702823': [SKIP],
+  'regress/wasm/regress-383356864': [SKIP],
   'regress/wasm/regress-crbug-1507751': [SKIP],
   'wasm/bit-shift-right': [SKIP],
   'wasm/bounds-check-turbofan': [SKIP],
@@ -780,6 +783,12 @@
   'wasm/module-memory': [SKIP],
 
  }],  # has_wasm_interpreter and variant == jitless and arch == arm64
+
+##############################################################################
+# --experimental-wasm-simd-opt, only supported on arm64
+['arch != arm64', {
+  'wasm/redundant-shuffle-lanes': [SKIP],
+}],
 
 ##############################################################################
 ['has_jitless', {
@@ -883,6 +892,9 @@
 
   # Tests ICU-specific behavior.
   'regress/regress-crbug-1414292': [SKIP],
+
+  # Requires ICU for toLocaleString()
+  'regress/regress-398067539': [SKIP],
 }],  # 'not i18n'
 
 ##############################################################################
@@ -916,6 +928,7 @@
   'wasm/simd-lane-memory64': [SKIP],
   'regress/regress-1320641': [SKIP],
   'regress/regress-354626177': [SKIP],
+  'regress/wasm/regress-398439335': [SKIP],
 
   # Float parameters are not supported in the fast api on these platforms
   'wasm/fast-api-calls-with-wellknown-imports-floats': [SKIP],
@@ -924,6 +937,10 @@
   # Needs a huge Uint8Array.
   'regress/regress-1432470': [SKIP],
   'wasm/imported-dataview-bytelength': [SKIP],
+
+  # Needs 64-bit integer add.
+  'additive-safe-int-feedback': [SKIP],
+  'regress-398879933': [SKIP],
 
   # Needs 64-bit number register support
   'compiler/fast-api-calls-64-bit-integer-values': [SKIP],
@@ -1253,6 +1270,12 @@
 
   # MIPS64 port doesn't support maglev yet.
   'turboshaft/maglev-frontend/*': [SKIP],
+
+  # Flush to zero is not supported yet.
+  'd8/flush-denormals-flag': [SKIP],
+  'd8/flush-denormals-helper': [SKIP],
+  'd8/flush-denormals-worker': [SKIP],
+  'wasm/denormals': [SKIP]
 }],  # 'arch == mips64el or arch == mips64'
 
 ##############################################################################
@@ -1264,6 +1287,12 @@
 
   # Loong64 port doesn't support maglev yet.
   'turboshaft/maglev-frontend/*': [SKIP],
+
+  # Flush to zero is not supported yet.
+  'd8/flush-denormals-flag': [SKIP],
+  'd8/flush-denormals-helper': [SKIP],
+  'd8/flush-denormals-worker': [SKIP],
+  'wasm/denormals': [SKIP]
 }],  # 'arch == loong64'
 
 ##############################################################################
@@ -1373,6 +1402,9 @@
 
   # Suspect to stress other tests when run in background.
   'huge-typedarrays': [PASS, HEAVY, NO_VARIANTS],
+
+  # TODO(thibaudm): investigate timeout.
+  'regress/wasm/regress-392928805': [SKIP]
 }],  # 'system == windows'
 
 ##############################################################################
@@ -1533,6 +1565,9 @@
 
   # BUG(v8:13433)
   'compiler/array-slice-clone': [SKIP],
+
+  # Times out with asan.
+  'wasm/max-wasm-functions': [PASS, ['asan', SKIP]],
 }],  # 'gc_fuzzer'
 
 ##############################################################################
@@ -1685,6 +1720,7 @@
   # Flush to zero is not supported yet.
   'd8/flush-denormals-flag': [SKIP],
   'd8/flush-denormals-helper': [SKIP],
+  'd8/flush-denormals-worker': [SKIP],
   'wasm/denormals': [SKIP]
 }],  # arch in [ppc64, s390x]'
 
@@ -1834,7 +1870,7 @@
 }],  # variant == turboshaft
 
 ##############################################################################
-['variant == stress and (arch == arm or arch == arm64) and simulator_run', {
+['variant == stress and (arch == arm or arch == arm64 or arch == loong64 or arch == mips64el) and simulator_run', {
   # Slow tests: https://crbug.com/v8/7783
   'es6/large-classes-properties': [SKIP],
   'generated-transition-stub': [SKIP],
@@ -1842,7 +1878,7 @@
 }],  # variant == stress and (arch == arm or arch == arm64) and simulator_run
 
 ##############################################################################
-['variant in (nooptimization, jitless) and arch in (arm, arm64) and simulator_run', {
+['variant in (nooptimization, jitless) and arch in (arm, arm64, loong64, mips64el) and simulator_run', {
   # Slow tests: https://crbug.com/v8/7783
   'regress/regress-crbug-319860': [SKIP],
 
@@ -1954,6 +1990,8 @@
   # which in turn can lead to different deopt behavior.
   'compiler/number-abs': [SKIP],
   'compiler/number-toboolean': [SKIP],
+  'additive-safe-int-feedback': [SKIP],
+  'regress-398879933': [SKIP],
   # Type assertions block the propagation of word64 truncation useinfo,
   # leading to differences in representation selection.
   'compiler/bigint-multiply-truncate': [SKIP],
@@ -2040,6 +2078,10 @@
 
   # https://crbug.com/v8/13181
   'maglev/get-template-object': [SKIP],
+
+  # Flaky and failing under this variant. https://crbug.com/380912397
+  'regress/regress-372298921': [SKIP],
+  'regress/regress-333926321': [SKIP],
 }],  # variant == stress_snapshot and arch == x64
 
 ##############################################################################
@@ -2114,6 +2156,7 @@
   'wasm/multi-value-simd': [SKIP],
   'wasm/js-to-wasm-invalid-sig': [SKIP],
   'wasm/shuffles': [SKIP],
+  'wasm/redundant-shuffle-lanes': [SKIP],
   'wasm/simd-*': [SKIP],
   'wasm/turboshaft/array-new-unreachable': [SKIP],
   'wasm/turboshaft/reduction-shuffle': [SKIP],
@@ -2171,6 +2214,8 @@
   'regress/wasm/regress-379811148': [SKIP],
   'regress/wasm/regress-381120595': [SKIP],
   'regress/wasm/regress-384549252': [SKIP],
+  'regress/wasm/regress-395214627': [SKIP],
+  'regress/wasm/regress-398439335': [SKIP],
   'regress/wasm/regress-crbug-1338980': [SKIP],
   'regress/wasm/regress-crbug-1355070': [SKIP],
   'regress/wasm/regress-crbug-1356718': [SKIP],
@@ -2258,7 +2303,7 @@
 }], # conservative_stack_scanning
 
 ##############################################################################
-['arch != x64 and arch != arm64 and arch != ia32 and arch != arm and arch != riscv64 and arch != loong64 and arch != ppc64', {
+['arch != x64 and arch != arm64 and arch != ia32 and arch != arm and arch != riscv64 and arch != loong64 and arch != ppc64 and arch != s390x', {
   # Stack switching is not supported on all platforms.
   'wasm/stack-switching': [SKIP],
   'wasm/stack-switching-conditional': [SKIP],
@@ -2274,8 +2319,10 @@
   'regress/wasm/regress-349640002': [SKIP],
   'regress/wasm/regress-364667545': [SKIP],
   'regress/wasm/regress-361123483': [SKIP],
-  'regress/wasm/regress-361717714': [SKIP]
-}],  # (arch != x64 and arch != arm64 and arch != ia32 and arch != arm and arch != riscv64 and arch != loong64 and arch != ppc64)
+  'regress/wasm/regress-361717714': [SKIP],
+  'regress/wasm/regress-365376497': [SKIP],
+  'regress/wasm/regress-381917890': [SKIP]
+}],  # (arch != x64 and arch != arm64 and arch != ia32 and arch != arm and arch != riscv64 and arch != loong64 and arch != ppc64 and arch != s390x)
 
 ##############################################################################
 ['arch != arm64 and arch != x64 and arch != arm and arch != ia32 and arch != loong64 and arch != riscv64 and arch != ppc64', {
@@ -2460,6 +2507,9 @@
   # worth it.
   'regress/regress-map-invalidation-2': [FAIL],
   'turboshaft/extras-cped': [SKIP],
+  # Maglev does not support additive safe ints.
+  'additive-safe-int-feedback': [SKIP],
+  'regress-398879933': [SKIP],
 }], # variant in (stress_maglev, stress_maglev_future, stress_maglev_no_turbofan, maglev_no_turbofan, turbolev)
 
 ['(variant in (stress_maglev, stress_maglev_future, stress_maglev_no_turbofan, maglev_no_turbofan, turbolev)) and (arch != arm)', {
@@ -2612,7 +2662,25 @@
 
 ['variant == stress_pinning_scavenger', {
   'regress/regress-12657': [SKIP],
+  'regress/regress-678917': [SKIP],
   'maglev/regress-1407606': [SKIP],
 }],  # variant == stress_pinning_scavenger
+
+['variant in [jit_fuzzing, jit_fuzzing_maglev]', {
+  # Extremely slow tests.
+  'regress/wasm/regress-808848': [SKIP],
+  'shared-memory/*': [SKIP],
+  'typedarray-growablesharedarraybuffer-atomics': [SKIP],
+
+  # Hangs.
+  'wasm/futex': [SKIP],
+
+  # Slow tests.
+  'wasm/max-params': [PASS, SLOW],
+
+  # Negative tests are not supported, because we pass --no-fail.
+  'bugs/*': [SKIP],
+  'es6/unicode-regexp-ignore-case-noi18n': [SKIP],
+}],  # variant in [jit_fuzzing, jit_fuzzing_maglev]
 
 ]

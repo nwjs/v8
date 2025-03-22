@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_WASM_IMPORT_WRAPPER_CACHE_H_
+#define V8_WASM_WASM_IMPORT_WRAPPER_CACHE_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
-
-#ifndef V8_WASM_WASM_IMPORT_WRAPPER_CACHE_H_
-#define V8_WASM_WASM_IMPORT_WRAPPER_CACHE_H_
 
 #include <unordered_map>
 
@@ -63,7 +63,7 @@ class WasmImportWrapperCache {
 
    private:
     WasmImportWrapperCache* const cache_;
-    base::SpinningMutexGuard guard_;
+    base::MutexGuard guard_;
   };
 
   WasmImportWrapperCache() = default;
@@ -97,7 +97,7 @@ class WasmImportWrapperCache {
 
  private:
   std::unique_ptr<WasmCodeAllocator> code_allocator_;
-  mutable base::SpinningMutex mutex_;
+  mutable base::Mutex mutex_;
   std::unordered_map<CacheKey, WasmCode*, CacheKeyHash> entry_map_;
   // Lookup support. The map key is the instruction start address.
   std::map<Address, WasmCode*> codes_;

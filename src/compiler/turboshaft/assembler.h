@@ -2620,6 +2620,14 @@ class TurboshaftAssemblerOpInterface
         input, frame_state, ChangeOrDeoptOp::Kind::kFloat64ToUint32,
         minus_zero_mode, feedback));
   }
+  V<Word64> ChangeFloat64ToAdditiveSafeIntegerOrDeopt(
+      V<Float64> input, V<turboshaft::FrameState> frame_state,
+      CheckForMinusZeroMode minus_zero_mode, const FeedbackSource& feedback) {
+    return V<Word64>::Cast(
+        ChangeOrDeopt(input, frame_state,
+                      ChangeOrDeoptOp::Kind::kFloat64ToAdditiveSafeInteger,
+                      minus_zero_mode, feedback));
+  }
   V<Word64> ChangeFloat64ToInt64OrDeopt(V<Float64> input,
                                         V<turboshaft::FrameState> frame_state,
                                         CheckForMinusZeroMode minus_zero_mode,
@@ -4623,11 +4631,6 @@ class TurboshaftAssemblerOpInterface
     return ReduceIfReachableLoadStackArgument(base, index);
   }
 
-  V<Float64OrWord32> Float16Change(V<Float64OrWord32> input,
-                                   Float16ChangeOp::Kind op) {
-    return ReduceIfReachableFloat16Change(input, op);
-  }
-
   void StoreTypedElement(OpIndex buffer, V<Object> base, V<WordPtr> external,
                          V<WordPtr> index, OpIndex value,
                          ExternalArrayType array_type) {
@@ -4771,12 +4774,6 @@ class TurboshaftAssemblerOpInterface
         table, key,
         FindOrderedHashEntryOp::Kind::kFindOrderedHashMapEntryForInt32Key);
   }
-  V<Object> SpeculativeNumberBinop(V<Object> left, V<Object> right,
-                                   V<turboshaft::FrameState> frame_state,
-                                   SpeculativeNumberBinopOp::Kind kind) {
-    return ReduceIfReachableSpeculativeNumberBinop(left, right, frame_state,
-                                                   kind);
-  }
 
   V<Object> LoadRoot(RootIndex root_index) {
     Isolate* isolate = __ data() -> isolate();
@@ -4863,6 +4860,14 @@ class TurboshaftAssemblerOpInterface
   OpIndex GlobalSet(V<WasmTrustedInstanceData> trusted_instance_data,
                     V<Any> value, const wasm::WasmGlobal* global) {
     return ReduceIfReachableGlobalSet(trusted_instance_data, value, global);
+  }
+
+  V<HeapObject> RootConstant(RootIndex index) {
+    return ReduceIfReachableRootConstant(index);
+  }
+
+  V<Word32> IsRootConstant(V<Object> input, RootIndex index) {
+    return ReduceIfReachableIsRootConstant(input, index);
   }
 
   V<HeapObject> Null(wasm::ValueType type) {
@@ -5023,8 +5028,9 @@ class TurboshaftAssemblerOpInterface
   }
 
   V<Simd128> Simd128Shuffle(V<Simd128> left, V<Simd128> right,
+                            Simd128ShuffleOp::Kind kind,
                             const uint8_t shuffle[kSimd128Size]) {
-    return ReduceIfReachableSimd128Shuffle(left, right, shuffle);
+    return ReduceIfReachableSimd128Shuffle(left, right, kind, shuffle);
   }
 
   // SIMD256

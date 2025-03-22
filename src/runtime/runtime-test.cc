@@ -219,13 +219,13 @@ RUNTIME_FUNCTION(Runtime_DeoptimizeFunction) {
   if (!IsJSFunction(*function_object)) return CrashUnlessFuzzing(isolate);
   auto function = Cast<JSFunction>(function_object);
 
-  if (function->IsTieringRequestedOrInProgress(isolate)) {
+  if (function->IsTieringRequestedOrInProgress()) {
     if (function->tiering_in_progress()) {
       // Abort optimization so that calling DeoptimizeFunction on a function
       // currently being optimized ends up with a non-optimized function.
       isolate->AbortConcurrentOptimization(BlockingBehavior::kBlock);
     }
-    function->ResetTieringRequests(isolate);
+    function->ResetTieringRequests();
   }
 
   if (function->HasAttachedOptimizedCode(isolate)) {
@@ -641,7 +641,7 @@ namespace {
 
 void FinalizeOptimization(Isolate* isolate) {
   DCHECK(isolate->concurrent_recompilation_enabled());
-  isolate->optimizing_compile_dispatcher()->AwaitCompileTasks();
+  isolate->optimizing_compile_dispatcher()->WaitUntilCompilationJobsDone();
   isolate->optimizing_compile_dispatcher()->InstallOptimizedFunctions();
   isolate->optimizing_compile_dispatcher()->set_finalize(true);
 
@@ -1013,7 +1013,7 @@ RUNTIME_FUNCTION(Runtime_GetFunctionForCurrentFrame) {
 
 RUNTIME_FUNCTION(Runtime_DisableOptimizationFinalization) {
   if (isolate->concurrent_recompilation_enabled()) {
-    isolate->optimizing_compile_dispatcher()->AwaitCompileTasks();
+    isolate->optimizing_compile_dispatcher()->WaitUntilCompilationJobsDone();
     isolate->optimizing_compile_dispatcher()->InstallOptimizedFunctions();
     isolate->stack_guard()->ClearInstallCode();
     isolate->optimizing_compile_dispatcher()->set_finalize(false);
@@ -1023,7 +1023,7 @@ RUNTIME_FUNCTION(Runtime_DisableOptimizationFinalization) {
 
 RUNTIME_FUNCTION(Runtime_WaitForBackgroundOptimization) {
   if (isolate->concurrent_recompilation_enabled()) {
-    isolate->optimizing_compile_dispatcher()->AwaitCompileTasks();
+    isolate->optimizing_compile_dispatcher()->WaitUntilCompilationJobsDone();
 #if V8_ENABLE_MAGLEV
     if (isolate->maglev_concurrent_dispatcher()->is_enabled()) {
       isolate->maglev_concurrent_dispatcher()->AwaitCompileJobs();
@@ -1159,7 +1159,7 @@ RUNTIME_FUNCTION(Runtime_ClearFunctionFeedback) {
   function->ClearAllTypeFeedbackInfoForTesting();
   // Typically tests use this function to start from scratch. Thus, we should
   // also clear tiering requests.
-  function->ResetTieringRequests(isolate);
+  function->ResetTieringRequests();
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -1963,27 +1963,30 @@ RUNTIME_FUNCTION(Runtime_EnableCodeLoggingForTesting) {
   // {true} on {is_listening_to_code_events()}. Feel free to add assertions to
   // any method to further test the code logging callbacks.
   class NoopListener final : public LogEventListener {
-    void CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
+    void CodeCreateEvent(CodeTag tag, DirectHandle<AbstractCode> code,
                          const char* name) final {}
-    void CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
-                         Handle<Name> name) final {}
-    void CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
-                         Handle<SharedFunctionInfo> shared,
-                         Handle<Name> script_name) final {}
-    void CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
-                         Handle<SharedFunctionInfo> shared,
-                         Handle<Name> script_name, int line, int column) final {
-    }
+    void CodeCreateEvent(CodeTag tag, DirectHandle<AbstractCode> code,
+                         DirectHandle<Name> name) final {}
+    void CodeCreateEvent(CodeTag tag, DirectHandle<AbstractCode> code,
+                         DirectHandle<SharedFunctionInfo> shared,
+                         DirectHandle<Name> script_name) final {}
+    void CodeCreateEvent(CodeTag tag, DirectHandle<AbstractCode> code,
+                         DirectHandle<SharedFunctionInfo> shared,
+                         DirectHandle<Name> script_name, int line,
+                         int column) final {}
 #if V8_ENABLE_WEBASSEMBLY
     void CodeCreateEvent(CodeTag tag, const wasm::WasmCode* code,
                          wasm::WasmName name, const char* source_url,
                          int code_offset, int script_id) final {}
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-    void CallbackEvent(Handle<Name> name, Address entry_point) final {}
-    void GetterCallbackEvent(Handle<Name> name, Address entry_point) final {}
-    void SetterCallbackEvent(Handle<Name> name, Address entry_point) final {}
-    void RegExpCodeCreateEvent(Handle<AbstractCode> code, Handle<String> source,
+    void CallbackEvent(DirectHandle<Name> name, Address entry_point) final {}
+    void GetterCallbackEvent(DirectHandle<Name> name,
+                             Address entry_point) final {}
+    void SetterCallbackEvent(DirectHandle<Name> name,
+                             Address entry_point) final {}
+    void RegExpCodeCreateEvent(DirectHandle<AbstractCode> code,
+                               DirectHandle<String> source,
                                RegExpFlags flags) final {}
     void CodeMoveEvent(Tagged<InstructionStream> from,
                        Tagged<InstructionStream> to) final {}
@@ -1992,12 +1995,12 @@ RUNTIME_FUNCTION(Runtime_EnableCodeLoggingForTesting) {
     void SharedFunctionInfoMoveEvent(Address from, Address to) final {}
     void NativeContextMoveEvent(Address from, Address to) final {}
     void CodeMovingGCEvent() final {}
-    void CodeDisableOptEvent(Handle<AbstractCode> code,
-                             Handle<SharedFunctionInfo> shared) final {}
-    void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind, Address pc,
-                        int fp_to_sp_delta) final {}
-    void CodeDependencyChangeEvent(Handle<Code> code,
-                                   Handle<SharedFunctionInfo> shared,
+    void CodeDisableOptEvent(DirectHandle<AbstractCode> code,
+                             DirectHandle<SharedFunctionInfo> shared) final {}
+    void CodeDeoptEvent(DirectHandle<Code> code, DeoptimizeKind kind,
+                        Address pc, int fp_to_sp_delta) final {}
+    void CodeDependencyChangeEvent(DirectHandle<Code> code,
+                                   DirectHandle<SharedFunctionInfo> shared,
                                    const char* reason) final {}
     void WeakCodeClearEvent() final {}
 
@@ -2018,8 +2021,8 @@ RUNTIME_FUNCTION(Runtime_NewRegExpWithBacktrackLimit) {
     return CrashUnlessFuzzing(isolate);
   }
 
-  Handle<String> pattern = args.at<String>(0);
-  Handle<String> flags_string = args.at<String>(1);
+  DirectHandle<String> pattern = args.at<String>(0);
+  DirectHandle<String> flags_string = args.at<String>(1);
   int backtrack_limit = args.smi_value_at(2);
   if (backtrack_limit < 0) {
     return CrashUnlessFuzzing(isolate);

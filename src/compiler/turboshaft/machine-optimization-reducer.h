@@ -973,6 +973,8 @@ class MachineOptimizationReducer : public Next {
             // HeapObject & 1 => 1  ("& 1" is a Smi-check)
             if (TryMatchHeapObject(left)) {
               return __ WordConstant(1, rep);
+            } else if (__ Get(left).template Is<Opmask::kSmiConstant>()) {
+              return __ WordConstant(0, rep);
             }
           }
 
@@ -2069,7 +2071,8 @@ class MachineOptimizationReducer : public Next {
         [this](V<Simd128> maybe_shuffle) -> const Simd128ShuffleOp* {
       if (const Simd128ShuffleOp* shuffle =
               matcher_.TryCast<Simd128ShuffleOp>(maybe_shuffle)) {
-        if (shuffle->left() == shuffle->right()) {
+        if (shuffle->kind == Simd128ShuffleOp::Kind::kI8x16 &&
+            shuffle->left() == shuffle->right()) {
           return shuffle;
         }
       }

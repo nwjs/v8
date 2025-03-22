@@ -30,8 +30,7 @@ bool IsValidCodePoint(Isolate* isolate, DirectHandle<Object> value) {
     return false;
   }
 
-  if (Object::NumberValue(
-          *Object::ToInteger(isolate, value).ToHandleChecked()) !=
+  if (Object::IntegerValue(isolate, value).ToChecked() !=
       Object::NumberValue(*value)) {
     return false;
   }
@@ -345,7 +344,7 @@ V8_WARN_UNUSED_RESULT static Tagged<Object> ConvertCase(
   // character is also ASCII.  This is currently the case, but it
   // might break in the future if we implement more context and locale
   // dependent upper/lower conversions.
-  if (s->IsOneByteRepresentation()) {
+  if (String::IsOneByteRepresentationUnderneath(*s)) {
     // Same length as input.
     DirectHandle<SeqOneByteString> result =
         isolate->factory()->NewRawOneByteString(length).ToHandleChecked();

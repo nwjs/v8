@@ -91,7 +91,9 @@ enum class IsolateFieldId : uint8_t;
   V(trusted_pointer_table_base_address,                         \
     "Isolate::trusted_pointer_table_base_address()")            \
   V(shared_trusted_pointer_table_base_address,                  \
-    "Isolate::shared_trusted_pointer_table_base_address()")
+    "Isolate::shared_trusted_pointer_table_base_address()")     \
+  V(code_pointer_table_base_address,                            \
+    "Isolate::code_pointer_table_base_address()")
 #else
 #define EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_SANDBOX(V)
 #endif  // V8_ENABLE_SANDBOX
@@ -234,6 +236,7 @@ enum class IsolateFieldId : uint8_t;
     "v8_flags.script_context_mutable_heap_number")                             \
   V(script_context_mutable_heap_int32_flag,                                    \
     "v8_flags.script_context_mutable_heap_int32")                              \
+  V(additive_safe_int_feedback_flag, "v8_flags.additive_safe_int_feedback")    \
   V(external_one_byte_string_get_chars, "external_one_byte_string_get_chars")  \
   V(external_two_byte_string_get_chars, "external_two_byte_string_get_chars")  \
   V(smi_lexicographic_compare_function, "smi_lexicographic_compare_function")  \
@@ -486,13 +489,21 @@ enum class IsolateFieldId : uint8_t;
 #endif  // V8_INTL_SUPPORT
 
 #ifdef V8_ENABLE_SANDBOX
-#define EXTERNAL_REFERENCE_LIST_SANDBOX(V)                        \
-  V(sandbox_base_address, "Sandbox::base()")                      \
-  V(sandbox_end_address, "Sandbox::end()")                        \
-  V(empty_backing_store_buffer, "EmptyBackingStoreBuffer()")      \
-  V(code_pointer_table_address,                                   \
-    "IsolateGroup::current()->code_pointer_table()")              \
+#ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
+#define EXTERNAL_REFERENCE_LIST_SANDBOX(V)                   \
+  V(sandbox_base_address, "Sandbox::base()")                 \
+  V(sandbox_end_address, "Sandbox::end()")                   \
+  V(empty_backing_store_buffer, "EmptyBackingStoreBuffer()") \
   V(memory_chunk_metadata_table_address, "MemoryChunkMetadata::Table()")
+#else
+#define EXTERNAL_REFERENCE_LIST_SANDBOX(V)                               \
+  V(sandbox_base_address, "Sandbox::base()")                             \
+  V(sandbox_end_address, "Sandbox::end()")                               \
+  V(empty_backing_store_buffer, "EmptyBackingStoreBuffer()")             \
+  V(memory_chunk_metadata_table_address, "MemoryChunkMetadata::Table()") \
+  V(global_code_pointer_table_base_address,                              \
+    "IsolateGroup::current()->code_pointer_table()")
+#endif  // V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
 #else
 #define EXTERNAL_REFERENCE_LIST_SANDBOX(V)
 #endif  // V8_ENABLE_SANDBOX
@@ -617,6 +628,8 @@ class ExternalReference {
 #undef DECL_EXTERNAL_REFERENCE
 
   V8_EXPORT_PRIVATE static ExternalReference isolate_address();
+  V8_EXPORT_PRIVATE static ExternalReference
+  address_of_code_pointer_table_base_address();
   V8_EXPORT_PRIVATE static ExternalReference jslimit_address();
 
   V8_EXPORT_PRIVATE V8_NOINLINE static ExternalReference

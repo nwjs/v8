@@ -1071,9 +1071,6 @@
   'intl402/DateTimeFormat/timezone-not-canonicalized': [FAIL],
 
   # https://issues.chromium.org/u/0/issues/42204365
-  'language/module-code/source-phase-import/import-source-binding-name': [FAIL],
-  'language/module-code/source-phase-import/import-source-binding-name-2': [FAIL],
-  'language/module-code/source-phase-import/import-source-newlines': [FAIL],
 
   # https://issues.chromium.org/u/1/issues/368208157
   'built-ins/RegExp/property-escapes/generated/Alphabetic': [FAIL],
@@ -1535,6 +1532,16 @@
   '*': [SKIP],  # only relevant for mjsunit tests.
 }],
 
+################################################################################
+# Test expectations should be updated because of crbug.com/381805376
+[ALWAYS, {
+  'staging/sm/Iterator/prototype/every/check-fn-after-getting-iterator': [SKIP],
+  'staging/sm/Iterator/prototype/find/check-fn-after-getting-iterator': [SKIP],
+  'staging/sm/Iterator/prototype/forEach/check-fn-after-getting-iterator': [SKIP],
+  'staging/sm/Iterator/prototype/reduce/check-fn-after-getting-iterator': [SKIP],
+  'staging/sm/Iterator/prototype/some/check-fn-after-getting-iterator': [SKIP],
+}],
+
 ####
 # import test262@6396ebde0316639292530460d1ef961fd9bbe0d4
 [ALWAYS, {
@@ -1676,7 +1683,6 @@
   'built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-calendar-iso-string': [SKIP],
   'built-ins/Temporal/ZonedDateTime/prototype/withCalendar/calendar-iso-string': [SKIP],
   'built-ins/TypedArray/from/iterated-array-changed-by-tonumber': [FAIL],
-  'built-ins/TypedArray/prototype/includes/index-compared-against-initial-length': [FAIL],
   'built-ins/TypedArray/prototype/values/make-in-bounds-after-exhausted': [FAIL],
   'built-ins/TypedArray/prototype/values/make-out-of-bounds-after-exhausted': [FAIL],
   'intl402/Temporal/PlainMonthDay/prototype/toLocaleString/dateStyle': [SKIP],
@@ -2184,11 +2190,6 @@
   'built-ins/Uint8Array/prototype/setFromHex/subarray': [FAIL],
   'built-ins/Uint8Array/prototype/setFromHex/target-size': [FAIL],
   'built-ins/Uint8Array/prototype/setFromHex/writes-up-to-error': [FAIL],
-  'built-ins/Uint8Array/prototype/toHex/descriptor': [FAIL],
-  'built-ins/Uint8Array/prototype/toHex/length': [FAIL],
-  'built-ins/Uint8Array/prototype/toHex/name': [FAIL],
-  'built-ins/Uint8Array/prototype/toHex/nonconstructor': [FAIL],
-  'built-ins/Uint8Array/prototype/toHex/results': [FAIL],
   'intl402/Temporal/ZonedDateTime/from/zoneddatetime-sub-minute-offset': [FAIL],
   'intl402/Temporal/ZonedDateTime/prototype/toPlainDateTime/basic': [FAIL],
   'intl402/Temporal/ZonedDateTime/prototype/toPlainDateTime/dst': [FAIL],
@@ -2200,26 +2201,6 @@
 ####
 # Roll-watcher patch
 [ALWAYS, {
-  'built-ins/RegExp/escape/cross-realm': [SKIP],
-  'built-ins/RegExp/escape/escaped-control-characters': [SKIP],
-  'built-ins/RegExp/escape/escaped-lineterminator': [SKIP],
-  'built-ins/RegExp/escape/escaped-otherpunctuators': [SKIP],
-  'built-ins/RegExp/escape/escaped-solidus-character-mixed': [SKIP],
-  'built-ins/RegExp/escape/escaped-solidus-character-simple': [SKIP],
-  'built-ins/RegExp/escape/escaped-surrogates': [SKIP],
-  'built-ins/RegExp/escape/escaped-syntax-characters-mixed': [SKIP],
-  'built-ins/RegExp/escape/escaped-syntax-characters-simple': [SKIP],
-  'built-ins/RegExp/escape/escaped-utf16encodecodepoint': [SKIP],
-  'built-ins/RegExp/escape/escaped-whitespace': [SKIP],
-  'built-ins/RegExp/escape/initial-char-escape': [SKIP],
-  'built-ins/RegExp/escape/is-function': [SKIP],
-  'built-ins/RegExp/escape/length': [SKIP],
-  'built-ins/RegExp/escape/name': [SKIP],
-  'built-ins/RegExp/escape/non-string-inputs': [SKIP],
-  'built-ins/RegExp/escape/not-a-constructor': [SKIP],
-  'built-ins/RegExp/escape/not-escaped': [SKIP],
-  'built-ins/RegExp/escape/not-escaped-underscore': [SKIP],
-  'built-ins/RegExp/escape/prop-desc': [SKIP],
   'built-ins/TypedArray/prototype/reduce/resizable-buffer-grow-mid-iteration': [SKIP],
   'built-ins/TypedArray/prototype/reduce/resizable-buffer-shrink-mid-iteration': [SKIP],
   'harness/asyncHelpers-throwsAsync-func-throws-sync': [SKIP],
@@ -2511,7 +2492,6 @@
   'staging/sm/extensions/DataView-construct-arguments-detaching': [FAIL],
   'staging/sm/extensions/DataView-set-arguments-detaching': [FAIL],
   'staging/sm/extensions/element-setting-ToNumber-detaches': [FAIL],
-  'staging/sm/extensions/inc-dec-functioncall': [FAIL],
   'staging/sm/extensions/recursion': [FAIL],
   'staging/sm/extensions/regress-650753': [FAIL],
   'staging/sm/extensions/typedarray-copyWithin-arguments-detaching': [FAIL],
@@ -2533,7 +2513,6 @@
   'staging/sm/regress/regress-563221': [FAIL],
   'staging/sm/regress/regress-592556-c35': [FAIL],
   'staging/sm/regress/regress-596103': [FAIL],
-  'staging/sm/regress/regress-609617': [FAIL],
   'staging/sm/statements/for-in-with-gc-and-unvisited-deletion': [FAIL],
   'staging/sm/statements/property-reference-self-assignment': [FAIL],
   'staging/sm/Temporal/Calendar/compare-to-datetimeformat': [FAIL],
@@ -2633,4 +2612,104 @@
 # end import test262@e7a84b0a090ca86cc05f2e90116115c8c2a7c059
 ###
 
+####
+# import test262@bc5c14176e2b11a78859571eb693f028c8822458
+[ALWAYS, {
+ 'annexB/built-ins/RegExp/RegExp-trailing-escape-BMP': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-arrow-import-catch-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-async-arrow-function-await-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-async-arrow-function-return-await-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-async-function-await-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-async-function-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-async-function-return-await-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-async-gen-await-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-async-gen-return-await-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-block-import-catch-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-block-labeled-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-do-while-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-else-import-catch-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-function-import-catch-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-if-import-catch-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/nested-while-import-catch-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/catch/top-level-import-catch-import-defer-specifier-tostring-abrupt-rejects': [SKIP],
+ 'language/expressions/dynamic-import/import-defer/import-defer-async-module/main': [SKIP],
+ 'language/expressions/dynamic-import/import-defer/import-defer-transitive-async-module/main': [SKIP],
+ 'language/expressions/dynamic-import/import-defer/sync-dependency-of-deferred-async-module/main': [SKIP],
+ 'language/expressions/dynamic-import/import-defer/sync/main': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-arrow-assignment-expression-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-arrow-assignment-expression-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-arrow-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-arrow-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-arrow-function-await-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-arrow-function-await-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-arrow-function-return-await-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-arrow-function-return-await-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-function-await-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-function-await-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-function-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-function-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-function-return-await-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-function-return-await-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-gen-await-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-async-gen-await-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-block-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-block-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-block-labeled-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-block-labeled-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-do-while-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-do-while-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-else-braceless-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-else-braceless-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-else-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-else-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-function-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-function-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-function-return-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-function-return-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-if-braceless-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-if-braceless-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-if-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-if-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-while-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-while-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-with-expression-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-with-expression-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-with-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/nested-with-import-defer-script-code-valid': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/top-level-import-defer-empty-str-is-valid-assign-expr': [SKIP],
+ 'language/expressions/dynamic-import/syntax/valid/top-level-import-defer-script-code-valid': [SKIP],
+}],
+# end import test262@bc5c14176e2b11a78859571eb693f028c8822458
+###
+
+####
+# import test262@44d71fbe7dccabcc071cbe66cc4b105d896d3c2a
+[ALWAYS, {
+ 'built-ins/NativeErrors/SuppressedError/order-of-args-evaluation': [SKIP],
+ 'built-ins/Temporal/PlainMonthDay/prototype/equals/argument-string-invalid': [SKIP],
+ 'built-ins/Temporal/PlainDate/prototype/era/branding': [SKIP],
+ 'built-ins/Temporal/PlainDate/prototype/era/prop-desc': [SKIP],
+ 'built-ins/Temporal/PlainDate/prototype/eraYear/branding': [SKIP],
+ 'built-ins/Temporal/PlainDate/prototype/eraYear/prop-desc': [SKIP],
+ 'built-ins/Temporal/PlainDateTime/prototype/era/branding': [SKIP],
+ 'built-ins/Temporal/PlainDateTime/prototype/era/prop-desc': [SKIP],
+ 'built-ins/Temporal/PlainDateTime/prototype/eraYear/branding': [SKIP],
+ 'built-ins/Temporal/PlainDateTime/prototype/eraYear/prop-desc': [SKIP],
+ 'built-ins/Temporal/PlainYearMonth/prototype/era/branding': [SKIP],
+ 'built-ins/Temporal/PlainYearMonth/prototype/era/prop-desc': [SKIP],
+ 'built-ins/Temporal/PlainYearMonth/prototype/eraYear/branding': [SKIP],
+ 'built-ins/Temporal/PlainYearMonth/prototype/eraYear/prop-desc': [SKIP],
+ 'built-ins/Temporal/ZonedDateTime/prototype/era/branding': [SKIP],
+ 'built-ins/Temporal/ZonedDateTime/prototype/era/prop-desc': [SKIP],
+ 'built-ins/Temporal/ZonedDateTime/prototype/eraYear/branding': [SKIP],
+ 'built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc': [SKIP],
+ 'intl402/DurationFormat/prototype/format/taint-temporal-duration-prototype': [SKIP],
+ 'intl402/DurationFormat/prototype/format/temporal-duration-string-arg': [SKIP],
+ 'intl402/DurationFormat/prototype/formatToParts/taint-temporal-duration-prototype': [SKIP],
+ 'intl402/DurationFormat/prototype/formatToParts/temporal-duration-string-arg': [SKIP],
+ 'intl402/Locale/getters': [SKIP],
+ 'intl402/Temporal/Duration/prototype/toLocaleString/returns-same-results-as-DurationFormat': [SKIP],
+}],
+# end import test262@44d71fbe7dccabcc071cbe66cc4b105d896d3c2a
+###
 ]

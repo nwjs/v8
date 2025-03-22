@@ -290,7 +290,7 @@ void MinorMarkSweepCollector::PerformWrapperTracing() {
 
   TRACE_GC(heap_->tracer(), GCTracer::Scope::MINOR_MS_MARK_EMBEDDER_TRACING);
   local_marking_worklists()->PublishCppHeapObjects();
-  cpp_heap->AdvanceTracing(v8::base::TimeDelta::Max());
+  cpp_heap->AdvanceMarking(v8::base::TimeDelta::Max(), SIZE_MAX);
 }
 
 MinorMarkSweepCollector::~MinorMarkSweepCollector() = default;
@@ -398,17 +398,7 @@ void MinorMarkSweepCollector::Finish() {
 
   {
     TRACE_GC(heap_->tracer(), GCTracer::Scope::MINOR_MS_FINISH_ENSURE_CAPACITY);
-    switch (resize_new_space_) {
-      case ResizeNewSpaceMode::kShrink:
-        heap_->ReduceNewSpaceSize();
-        break;
-      case ResizeNewSpaceMode::kGrow:
-        heap_->ExpandNewSpaceSize();
-        break;
-      case ResizeNewSpaceMode::kNone:
-        break;
-    }
-    resize_new_space_ = ResizeNewSpaceMode::kNone;
+    heap_->ResizeNewSpace();
 
     if (!v8_flags.sticky_mark_bits &&
         !heap_->new_space()->EnsureCurrentCapacity()) {
@@ -437,6 +427,9 @@ void MinorMarkSweepCollector::CollectGarbage() {
   is_in_atomic_pause_.store(true, std::memory_order_relaxed);
 
   MarkLiveObjects();
+  if (auto* cpp_heap = CppHeap::From(heap_->cpp_heap_)) {
+    cpp_heap->ProcessCrossThreadWeakness();
+  }
   ClearNonLiveReferences();
 #ifdef VERIFY_HEAP
   if (v8_flags.verify_heap) {
@@ -546,7 +539,7 @@ void MinorMarkSweepCollector::ClearNonLiveReferences() {
       isolate->traced_handles()->ResetYoungDeadNodes(
           &IsUnmarkedObjectInYoungGeneration);
     } else {
-      isolate->traced_handles()->ProcessYoungObjects(
+      isolate->traced_handles()->ProcessWeakYoungObjects(
           nullptr, &IsUnmarkedObjectInYoungGeneration);
     }
   }
@@ -915,11 +908,7 @@ bool MinorMarkSweepCollector::StartSweepNewSpace() {
   int will_be_swept = 0;
   bool has_promoted_pages = false;
 
-  DCHECK_EQ(Heap::ResizeNewSpaceMode::kNone, resize_new_space_);
-  resize_new_space_ = heap_->ShouldResizeNewSpace();
-  if (resize_new_space_ == Heap::ResizeNewSpaceMode::kShrink) {
-    paged_space->StartShrinking();
-  }
+  heap_->StartResizeNewSpace();
 
   for (auto it = paged_space->begin(); it != paged_space->end();) {
     PageMetadata* p = *(it++);
@@ -969,8 +958,6 @@ void MinorMarkSweepCollector::StartSweepNewSpaceWithStickyBits() {
   paged_space->ClearAllocatorState();
 
   int will_be_swept = 0;
-
-  DCHECK_EQ(Heap::ResizeNewSpaceMode::kNone, resize_new_space_);
 
   for (auto it = paged_space->begin(); it != paged_space->end();) {
     PageMetadata* p = *(it++);

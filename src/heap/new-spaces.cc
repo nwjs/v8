@@ -7,6 +7,7 @@
 #include <atomic>
 #include <optional>
 
+#include "src/base/macros.h"
 #include "src/common/globals.h"
 #include "src/flags/flags.h"
 #include "src/heap/allocation-observer.h"
@@ -57,6 +58,23 @@ bool SemiSpace::EnsureCurrentCapacity() {
   return true;
 }
 
+SemiSpace::SemiSpace(Heap* heap, SemiSpaceId semispace, size_t initial_capacity,
+                     size_t minimum_capacity, size_t maximum_capacity)
+    : Space(heap, NEW_SPACE, nullptr),
+      minimum_capacity_(minimum_capacity),
+      maximum_capacity_(maximum_capacity),
+      target_capacity_(initial_capacity),
+      id_(semispace) {
+  DCHECK(IsAligned(target_capacity_, PageMetadata::kPageSize));
+  DCHECK(IsAligned(minimum_capacity_, PageMetadata::kPageSize));
+  DCHECK(IsAligned(maximum_capacity_, PageMetadata::kPageSize));
+
+  DCHECK_GE(minimum_capacity_, static_cast<size_t>(PageMetadata::kPageSize));
+
+  DCHECK_LE(minimum_capacity_, target_capacity_);
+  DCHECK_LE(target_capacity_, maximum_capacity_);
+}
+
 SemiSpace::~SemiSpace() {
   // Properly uncommit memory to keep the allocator counters in sync.
   if (IsCommitted()) {
@@ -68,9 +86,10 @@ bool SemiSpace::EnsureCapacity(size_t capacity) {
   DCHECK_IMPLIES(!IsCommitted(), CommittedMemory() == 0);
   const size_t quarantined_pages =
       id_ == kToSpace ? quarantined_pages_count_ : 0;
-  const int num_pages =
-      static_cast<int>((capacity / PageMetadata::kPageSize) -
-                       memory_chunk_list_.size() + quarantined_pages);
+  const int pages_available_for_allocation =
+      static_cast<int>(memory_chunk_list_.size() - quarantined_pages);
+  const int num_pages = static_cast<int>((capacity / PageMetadata::kPageSize)) -
+                        pages_available_for_allocation;
   if (num_pages >= 0) {
     for (int pages_added = 0; pages_added < num_pages; pages_added++) {
       if (!AllocateFreshPage()) {
@@ -147,7 +166,6 @@ bool SemiSpace::AllocateFreshPage() {
     return false;
   }
   memory_chunk_list_.PushBack(new_page);
-  CHECK(new_page->IsLivenessClear());
   IncrementCommittedPhysicalMemory(new_page->CommittedPhysicalMemory());
   AccountCommitted(PageMetadata::kPageSize);
   heap()->CreateFillerObjectAt(new_page->area_start(),
@@ -443,12 +461,13 @@ void NewSpace::PromotePageToOldSpace(PageMetadata* page) {
 
 SemiSpaceNewSpace::SemiSpaceNewSpace(Heap* heap,
                                      size_t initial_semispace_capacity,
+                                     size_t min_semispace_capacity,
                                      size_t max_semispace_capacity)
     : NewSpace(heap),
       to_space_(heap, kToSpace, initial_semispace_capacity,
-                max_semispace_capacity),
+                min_semispace_capacity, max_semispace_capacity),
       from_space_(heap, kFromSpace, initial_semispace_capacity,
-                  max_semispace_capacity) {
+                  min_semispace_capacity, max_semispace_capacity) {
   DCHECK(initial_semispace_capacity <= max_semispace_capacity);
   if (!to_space_.Commit()) {
     DCHECK(!to_space_.IsCommitted());
@@ -458,13 +477,10 @@ SemiSpaceNewSpace::SemiSpaceNewSpace(Heap* heap,
   ResetCurrentSpace();
 }
 
-void SemiSpaceNewSpace::Grow() {
+void SemiSpaceNewSpace::Grow(size_t new_capacity) {
   heap()->safepoint()->AssertActive();
-  // Double the semispace size but only up to maximum capacity.
-  DCHECK(TotalCapacity() < MaximumCapacity());
-  size_t new_capacity = std::min(
-      MaximumCapacity(),
-      static_cast<size_t>(v8_flags.semi_space_growth_factor) * TotalCapacity());
+  DCHECK_LT(TotalCapacity(), MaximumCapacity());
+  DCHECK_LE(new_capacity, MaximumCapacity());
   if (to_space_.GrowTo(new_capacity)) {
     // Only grow from space if we managed to grow to-space.
     if (!from_space_.GrowTo(new_capacity)) {
@@ -480,15 +496,12 @@ void SemiSpaceNewSpace::set_age_mark_to_top() {
   to_space_.set_age_mark(allocation_top());
 }
 
-void SemiSpaceNewSpace::Shrink() {
-  size_t new_capacity = std::max(InitialTotalCapacity(), 2 * Size());
-  size_t rounded_new_capacity =
-      ::RoundUp(new_capacity, PageMetadata::kPageSize);
-  if (rounded_new_capacity < TotalCapacity()) {
-    to_space_.ShrinkTo(rounded_new_capacity);
+void SemiSpaceNewSpace::Shrink(size_t new_capacity) {
+  if (new_capacity < TotalCapacity()) {
+    to_space_.ShrinkTo(new_capacity);
     // Only shrink from-space if we managed to shrink to-space.
     if (from_space_.IsCommitted()) from_space_.Reset();
-    from_space_.ShrinkTo(rounded_new_capacity);
+    from_space_.ShrinkTo(new_capacity);
   }
   DCHECK_SEMISPACE_ALLOCATION_TOP(allocation_top(), to_space_);
   if (!from_space_.IsCommitted()) return;
@@ -512,6 +525,7 @@ bool SemiSpaceNewSpace::EnsureCurrentCapacity() {
 
 void SemiSpaceNewSpace::ResetCurrentSpace() {
   to_space_.Reset();
+  quarantined_size_ = 0;
   // Clear all mark-bits in the to-space.
   for (PageMetadata* p : to_space_) {
     if (!v8_flags.separate_gc_phases) {
@@ -721,7 +735,8 @@ size_t SemiSpaceNewSpace::Size() const {
   size_t top = allocation_top();
 
   DCHECK_GE(top, to_space_.page_low());
-  return (to_space_.current_capacity() - PageMetadata::kPageSize) /
+  return QuarantinedSize() +
+         (to_space_.current_capacity() - PageMetadata::kPageSize) /
              PageMetadata::kPageSize *
              MemoryChunkLayout::AllocatableMemoryInDataPage() +
          static_cast<size_t>(top - to_space_.page_low());
@@ -881,14 +896,20 @@ void SemiSpaceNewSpace::MoveQuarantinedPage(MemoryChunk* chunk) {
 
 PagedSpaceForNewSpace::PagedSpaceForNewSpace(Heap* heap,
                                              size_t initial_capacity,
+                                             size_t min_capacity,
                                              size_t max_capacity)
     : PagedSpaceBase(heap, NEW_SPACE, NOT_EXECUTABLE,
                      FreeList::CreateFreeListForNewSpace(),
                      CompactionSpaceKind::kNone),
-      initial_capacity_(RoundDown(initial_capacity, PageMetadata::kPageSize)),
-      max_capacity_(RoundDown(max_capacity, PageMetadata::kPageSize)),
-      target_capacity_(initial_capacity_) {
-  DCHECK_LE(initial_capacity_, max_capacity_);
+      min_capacity_(min_capacity),
+      max_capacity_(max_capacity),
+      target_capacity_(initial_capacity) {
+  DCHECK(IsAligned(target_capacity_, PageMetadata::kPageSize));
+  DCHECK(IsAligned(min_capacity_, PageMetadata::kPageSize));
+  DCHECK(IsAligned(max_capacity_, PageMetadata::kPageSize));
+
+  DCHECK_LE(min_capacity_, target_capacity_);
+  DCHECK_LE(target_capacity_, max_capacity_);
 }
 
 PageMetadata* PagedSpaceForNewSpace::InitializePage(
@@ -910,21 +931,15 @@ PageMetadata* PagedSpaceForNewSpace::InitializePage(
   return page;
 }
 
-void PagedSpaceForNewSpace::Grow() {
+void PagedSpaceForNewSpace::Grow(size_t new_capacity) {
   heap()->safepoint()->AssertActive();
-  // Double the space size but only up to maximum capacity.
-  DCHECK(TotalCapacity() < MaximumCapacity());
-  target_capacity_ =
-      std::min(MaximumCapacity(),
-               RoundUp(static_cast<size_t>(v8_flags.semi_space_growth_factor) *
-                           TotalCapacity(),
-                       PageMetadata::kPageSize));
+  DCHECK_LT(TotalCapacity(), MaximumCapacity());
+  DCHECK_LE(new_capacity, MaximumCapacity());
+  target_capacity_ = new_capacity;
 }
 
-bool PagedSpaceForNewSpace::StartShrinking() {
+bool PagedSpaceForNewSpace::StartShrinking(size_t new_target_capacity) {
   DCHECK(heap()->tracer()->IsInAtomicPause());
-  size_t new_target_capacity =
-      RoundUp(std::max(initial_capacity_, 2 * Size()), PageMetadata::kPageSize);
   if (new_target_capacity > target_capacity_) return false;
   target_capacity_ = new_target_capacity;
   return true;
@@ -1018,8 +1033,9 @@ void PagedSpaceForNewSpace::Verify(Isolate* isolate,
 // PagedNewSpace implementation
 
 PagedNewSpace::PagedNewSpace(Heap* heap, size_t initial_capacity,
-                             size_t max_capacity)
-    : NewSpace(heap), paged_space_(heap, initial_capacity, max_capacity) {}
+                             size_t min_capacity, size_t max_capacity)
+    : NewSpace(heap),
+      paged_space_(heap, initial_capacity, min_capacity, max_capacity) {}
 
 PagedNewSpace::~PagedNewSpace() {
   paged_space_.TearDown();

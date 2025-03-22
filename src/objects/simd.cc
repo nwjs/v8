@@ -445,6 +445,184 @@ uintptr_t ArrayIndexOfIncludesDouble(Address array_start, uintptr_t array_len,
       array_start, array_len, from_index, search_element);
 }
 
+// http://0x80.pl/notesen/2014-09-21-convert-to-hex.html
+namespace {
+
+char NibbleToHex(uint8_t nibble) {
+  const char correction = 'a' - '0' - 10;
+  const char c = nibble + '0';
+  uint8_t temp = 128 - 10 + nibble;
+  uint8_t msb = temp & 0x80;
+  uint8_t mask = msb - (msb >> 7);
+  return c + (mask & correction);
+}
+
+void Uint8ArrayToHexSlow(const char* bytes, size_t length,
+                         DirectHandle<SeqOneByteString> string_output) {
+  int index = 0;
+  for (size_t i = 0; i < length; i++) {
+    uint8_t byte = bytes[i];
+    uint8_t high = byte >> 4;
+    uint8_t low = byte & 0x0F;
+
+    string_output->SeqOneByteStringSet(index++, NibbleToHex(high));
+    string_output->SeqOneByteStringSet(index++, NibbleToHex(low));
+  }
+}
+
+inline uint16_t ByteToHex(uint8_t byte) {
+  const uint16_t correction = (('a' - '0' - 10) << 8) + ('a' - '0' - 10);
+#if V8_TARGET_BIG_ENDIAN
+  const uint16_t nibbles = (byte << 4) + (byte & 0xF);
+#else
+  const uint16_t nibbles = ((byte & 0xF) << 8) + (byte >> 4);
+#endif
+  const uint16_t chars = nibbles + 0x3030;
+  const uint16_t temp = 0x8080 - 0x0A0A + nibbles;
+  const uint16_t msb = temp & 0x8080;
+  const uint16_t mask = msb - (msb >> 7);
+  return chars + (mask & correction);
+}
+
+V8_ALLOW_UNUSED void HandleRemainingNibbles(const char* bytes, uint8_t* output,
+                                            size_t length, size_t i) {
+  uint16_t* output_pairs = reinterpret_cast<uint16_t*>(output) + i;
+  bytes += i;
+  size_t rest = length & 0x7;
+  for (i = 0; i < rest; i++) {
+    *(output_pairs++) = ByteToHex(*bytes++);
+  }
+}
+
+/**
+The following procedure converts 16 nibbles at a time:
+
+uint8_t nine[9]         = packed_byte(9);
+uint8_t ascii0[9]       = packed_byte('0');
+uint8_t correction[9]   = packed_byte('a' - 10 - '0');
+
+// assembler
+movdqu    nibbles_x_16, %xmm0
+movdqa    %xmm0, %xmm1
+
+// convert to ASCII
+paddb     ascii0, %xmm1
+
+// make mask
+pcmpgtb   nine, %xmm0
+
+// correct result
+pand      correction, %xmm0
+paddb     %xmm1, %xmm0
+
+// save result...
+*/
+
+#ifdef __SSE3__
+void Uint8ArrayToHexFastWithSSE(const char* bytes, uint8_t* output,
+                                size_t length) {
+  size_t i;
+  size_t index = 0;
+  alignas(16) uint8_t nibbles_buffer[16];
+  for (i = 0; i + 8 <= length; i += 8) {
+    index = 0;
+    for (size_t j = i; j < i + 8; j++) {
+      nibbles_buffer[index++] = bytes[j] >> 4;    // High nibble
+      nibbles_buffer[index++] = bytes[j] & 0x0F;  // Low nibble
+    }
+
+    // Load data into SSE registers
+    __m128i nibbles =
+        _mm_load_si128(reinterpret_cast<__m128i*>(nibbles_buffer));
+    __m128i nine = _mm_set1_epi8(9);
+    __m128i ascii_0 = _mm_set1_epi8('0');
+    __m128i correction = _mm_set1_epi8('a' - 10 - '0');
+
+    // Make a copy for ASCII conversion
+    __m128i ascii_result = _mm_add_epi8(nibbles, ascii_0);
+
+    // Create a mask for values greater than 9
+    __m128i mask = _mm_cmpgt_epi8(nibbles, nine);
+
+    // Apply correction
+    __m128i corrected_result = _mm_and_si128(mask, correction);
+    corrected_result = _mm_add_epi8(ascii_result, corrected_result);
+
+    // Store the result
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(&output[i * 2]),
+                     corrected_result);
+  }
+
+  HandleRemainingNibbles(bytes, output, length, i);
+}
+#endif
+
+#ifdef NEON64
+void Uint8ArrayToHexFastWithNeon(const char* bytes, uint8_t* output,
+                                 size_t length) {
+  size_t i;
+  size_t index = 0;
+  alignas(16) uint8_t nibbles_buffer[16];
+  for (i = 0; i + 8 <= length; i += 8) {
+    index = 0;
+    for (size_t j = i; j < i + 8; j++) {
+      nibbles_buffer[index++] = bytes[j] >> 4;    // High nibble
+      nibbles_buffer[index++] = bytes[j] & 0x0F;  // Low nibble
+    }
+
+    // Load data into NEON registers
+    uint8x16_t nibbles = vld1q_u8(nibbles_buffer);
+    uint8x16_t nine = vdupq_n_u8(9);
+    uint8x16_t ascii0 = vdupq_n_u8('0');
+    uint8x16_t correction = vdupq_n_u8('a' - 10 - '0');
+
+    // Make a copy for ASCII conversion
+    uint8x16_t ascii_result = vaddq_u8(nibbles, ascii0);
+
+    // Create a mask for values greater than 9
+    uint8x16_t mask = vcgtq_u8(nibbles, nine);
+
+    // Apply correction
+    uint8x16_t corrected_result = vandq_u8(mask, correction);
+    corrected_result = vaddq_u8(ascii_result, corrected_result);
+
+    // Store the result
+    vst1q_u8(&output[i * 2], corrected_result);
+  }
+
+  HandleRemainingNibbles(bytes, output, length, i);
+}
+#endif
+}  // namespace
+
+Tagged<Object> Uint8ArrayToHex(const char* bytes, size_t length,
+                               DirectHandle<SeqOneByteString> string_output) {
+#ifdef __SSE3__
+  if (get_vectorization_kind() == SimdKinds::kAVX2 ||
+      get_vectorization_kind() == SimdKinds::kSSE) {
+    {
+      DisallowGarbageCollection no_gc;
+      Uint8ArrayToHexFastWithSSE(bytes, string_output->GetChars(no_gc), length);
+    }
+    return *string_output;
+  }
+#endif
+
+#ifdef NEON64
+  if (get_vectorization_kind() == SimdKinds::kNeon) {
+    {
+      DisallowGarbageCollection no_gc;
+      Uint8ArrayToHexFastWithNeon(bytes, string_output->GetChars(no_gc),
+                                  length);
+    }
+    return *string_output;
+  }
+#endif
+
+  Uint8ArrayToHexSlow(bytes, length, string_output);
+  return *string_output;
+}
+
 #ifdef NEON64
 #undef NEON64
 #endif

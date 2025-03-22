@@ -508,6 +508,10 @@ class ObjectPinningVisitorBase : public RootVisitor {
     DCHECK(!HasWeakHeapObjectTag(object));
     DCHECK(!MapWord::IsPacked(object.ptr()));
     DCHECK(!HeapLayout::IsSelfForwarded(object));
+    if (IsAllocationMemento(object)) {
+      // Don't pin allocation mementos since they should not survive a GC.
+      return;
+    }
     if (scavenger_.PromoteIfLargeObject(object)) {
       // Large objects are not moved and thus don't require pinning. Instead,
       // we scavenge large pages eagerly to keep them from being reclaimed (if
@@ -695,7 +699,8 @@ void RestoreAndQuarantinePinnedObjects(SemiSpaceNewSpace& new_space,
     std::vector<std::pair<Address, size_t>>& pinned_objects_and_sizes =
         it.second;
     DCHECK(chunk->IsFromPage());
-    if (new_space.ShouldPageBePromoted(chunk->address())) {
+    if (v8_flags.scavenger_promote_quarantined_pages &&
+        new_space.ShouldPageBePromoted(chunk->address())) {
       new_space.PromotePageToOldSpace(
           static_cast<PageMetadata*>(chunk->Metadata()));
       DCHECK(!chunk->InYoungGeneration());
@@ -855,7 +860,7 @@ void ScavengerCollector::CollectGarbage() {
       GlobalHandlesWeakRootsUpdatingVisitor visitor;
       isolate_->global_handles()->ProcessWeakYoungObjects(
           &visitor, &IsUnscavengedHeapObjectSlot);
-      isolate_->traced_handles()->ProcessYoungObjects(
+      isolate_->traced_handles()->ProcessWeakYoungObjects(
           &visitor, &IsUnscavengedHeapObjectSlot);
     }
 
@@ -957,17 +962,7 @@ void ScavengerCollector::CollectGarbage() {
   // Update how much has survived scavenge.
   heap_->IncrementYoungSurvivorsCounter(heap_->SurvivedYoungObjectSize());
 
-  const auto resize_mode = heap_->ShouldResizeNewSpace();
-  switch (resize_mode) {
-    case Heap::ResizeNewSpaceMode::kShrink:
-      heap_->ReduceNewSpaceSize();
-      break;
-    case Heap::ResizeNewSpaceMode::kGrow:
-      heap_->ExpandNewSpaceSize();
-      break;
-    case Heap::ResizeNewSpaceMode::kNone:
-      break;
-  }
+  heap_->ResizeNewSpace();
 }
 
 void ScavengerCollector::SweepArrayBufferExtensions() {
@@ -1330,7 +1325,7 @@ void Scavenger::CheckOldToNewSlotForSharedTyped(
     const uintptr_t offset = chunk->Offset(slot_address);
     DCHECK_LT(offset, static_cast<uintptr_t>(TypedSlotSet::kMaxOffset));
 
-    base::SpinningMutexGuard guard(page->mutex());
+    base::MutexGuard guard(page->mutex());
     RememberedSet<OLD_TO_SHARED>::InsertTyped(page, slot_type,
                                               static_cast<uint32_t>(offset));
   }
@@ -1345,7 +1340,10 @@ bool Scavenger::PromoteIfLargeObject(Tagged<HeapObject> object) {
 void Scavenger::PushPinnedObject(Tagged<HeapObject> object, Tagged<Map> map) {
   DCHECK(HeapLayout::IsSelfForwarded(object));
   int object_size = object->SizeFromMap(map);
-  if (heap_->semi_space_new_space()->ShouldPageBePromoted(object->address())) {
+  PretenuringHandler::UpdateAllocationSite(heap_, map, object, object_size,
+                                           &local_pretenuring_feedback_);
+  if (v8_flags.scavenger_promote_quarantined_pages &&
+      heap_->semi_space_new_space()->ShouldPageBePromoted(object->address())) {
     local_promoted_list_.Push({object, map, object_size});
     promoted_size_ += object_size;
   } else {

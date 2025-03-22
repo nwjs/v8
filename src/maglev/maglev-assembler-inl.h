@@ -965,6 +965,21 @@ inline void MaglevAssembler::StringLength(Register result, Register string) {
                   sizeof(int32_t));
 }
 
+inline void MaglevAssembler::LoadThinStringValue(Register result,
+                                                 Register string) {
+  if (v8_flags.slow_debug_code) {
+    TemporaryRegisterScope temps(this);
+    Register scratch = temps.AcquireScratch();
+    LoadInstanceType(scratch, string);
+    Label ok;
+    static_assert(base::bits::CountPopulation(kThinStringTagBit) == 1);
+    TestInt32AndJumpIfAnySet(scratch, kThinStringTagBit, &ok);
+    Abort(AbortReason::kUnexpectedValue);
+    bind(&ok);
+  }
+  LoadTaggedField(result, string, offsetof(ThinString, actual_));
+}
+
 void MaglevAssembler::LoadMapForCompare(Register dst, Register obj) {
 #ifdef V8_COMPRESS_POINTERS
   MacroAssembler::LoadCompressedMap(dst, obj);

@@ -5,27 +5,19 @@
 #ifndef V8_SANDBOX_ISOLATE_INL_H_
 #define V8_SANDBOX_ISOLATE_INL_H_
 
-#include "src/execution/isolate.h"
+#include "src/sandbox/isolate.h"
+// Include the non-inl header before the rest of the headers.
+
+#include "src/execution/isolate-inl.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/objects/heap-object.h"
 #include "src/sandbox/external-pointer-table-inl.h"
 #include "src/sandbox/indirect-pointer-tag.h"
-#include "src/sandbox/isolate.h"
 
-namespace v8 {
-namespace internal {
-
-template <typename IsolateT>
-IsolateForSandbox::IsolateForSandbox(IsolateT* isolate)
-#ifdef V8_ENABLE_SANDBOX
-    : isolate_(isolate->ForSandbox()) {
-}
-#else
-{
-}
-#endif
+namespace v8::internal {
 
 #ifdef V8_ENABLE_SANDBOX
+
 ExternalPointerTable& IsolateForSandbox::GetExternalPointerTableFor(
     ExternalPointerTagRange tag_range) {
   IsolateForPointerCompression isolate(isolate_);
@@ -59,35 +51,17 @@ TrustedPointerTable::Space* IsolateForSandbox::GetTrustedPointerTableSpaceFor(
              : isolate_->heap()->trusted_pointer_space();
 }
 
-inline ExternalPointerTag IsolateForSandbox::GetExternalPointerTableTagFor(
+ExternalPointerTag IsolateForSandbox::GetExternalPointerTableTagFor(
     Tagged<HeapObject> witness, ExternalPointerHandle handle) {
   DCHECK(!HeapLayout::InWritableSharedSpace(witness));
   return isolate_->external_pointer_table().GetTag(handle);
 }
 
-TrustedPointerPublishingScope*
-IsolateForSandbox::GetTrustedPointerPublishingScope() {
-  return isolate_->trusted_pointer_publishing_scope();
-}
-
-void IsolateForSandbox::SetTrustedPointerPublishingScope(
-    TrustedPointerPublishingScope* scope) {
-  DCHECK((isolate_->trusted_pointer_publishing_scope() == nullptr) !=
-         (scope == nullptr));
-  isolate_->set_trusted_pointer_publishing_scope(scope);
+V8_INLINE IsolateForSandbox GetCurrentIsolateForSandbox() {
+  return Isolate::Current();
 }
 
 #endif  // V8_ENABLE_SANDBOX
-
-template <typename IsolateT>
-IsolateForPointerCompression::IsolateForPointerCompression(IsolateT* isolate)
-#ifdef V8_COMPRESS_POINTERS
-    : isolate_(isolate->ForSandbox()) {
-}
-#else
-{
-}
-#endif
 
 #ifdef V8_COMPRESS_POINTERS
 
@@ -132,7 +106,6 @@ IsolateForPointerCompression::GetCppHeapPointerTableSpace() {
 
 #endif  // V8_COMPRESS_POINTERS
 
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal
 
 #endif  // V8_SANDBOX_ISOLATE_INL_H_

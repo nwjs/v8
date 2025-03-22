@@ -159,23 +159,26 @@ struct JSBuiltinDispatchHandleRoot {
   ISOLATE_DATA_FIELDS_LEAPTIERING(V)
 
 #ifdef V8_COMPRESS_POINTERS
-#define ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)                             \
-  V(ExternalPointerTable, ExternalPointerTable::kSize, external_pointer_table) \
-  V(SharedExternalPointerTable, kSystemPointerSize,                            \
-    shared_external_pointer_table)                                             \
-  V(CppHeapPointerTable, CppHeapPointerTable::kSize, cpp_heap_pointer_table)
+#define ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)      \
+  V(ExternalPointerTable, sizeof(ExternalPointerTable), \
+    external_pointer_table)                             \
+  V(SharedExternalPointerTable, kSystemPointerSize,     \
+    shared_external_pointer_table)                      \
+  V(CppHeapPointerTable, sizeof(CppHeapPointerTable), cpp_heap_pointer_table)
 #else
 #define ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)
 #endif  // V8_COMPRESS_POINTERS
 
 #ifdef V8_ENABLE_SANDBOX
-#define ISOLATE_DATA_FIELDS_SANDBOX(V)                                      \
-  V(TrustedCageBase, kSystemPointerSize, trusted_cage_base)                 \
-  V(TrustedPointerTable, TrustedPointerTable::kSize, trusted_pointer_table) \
-  V(SharedTrustedPointerTable, kSystemPointerSize,                          \
-    shared_trusted_pointer_table)                                           \
-  V(TrustedPointerPublishingScope, kSystemPointerSize,                      \
-    trusted_pointer_publishing_scope)
+#define ISOLATE_DATA_FIELDS_SANDBOX(V)                                       \
+  V(TrustedCageBase, kSystemPointerSize, trusted_cage_base)                  \
+  V(TrustedPointerTable, sizeof(TrustedPointerTable), trusted_pointer_table) \
+  V(SharedTrustedPointerTable, kSystemPointerSize,                           \
+    shared_trusted_pointer_table)                                            \
+  V(TrustedPointerPublishingScope, kSystemPointerSize,                       \
+    trusted_pointer_publishing_scope)                                        \
+  V(CodePointerTableBaseAddress, kSystemPointerSize,                         \
+    code_pointer_table_base_address)
 #else
 #define ISOLATE_DATA_FIELDS_SANDBOX(V)
 #endif  // V8_ENABLE_SANDBOX
@@ -225,7 +228,9 @@ class IsolateData final {
         stack_guard_(isolate)
 #ifdef V8_ENABLE_SANDBOX
         ,
-        trusted_cage_base_(group->GetTrustedPtrComprCageBase())
+        trusted_cage_base_(group->GetTrustedPtrComprCageBase()),
+        code_pointer_table_base_address_(
+            group->code_pointer_table()->base_address())
 #endif
   {
   }
@@ -488,6 +493,8 @@ class IsolateData final {
   TrustedPointerTable trusted_pointer_table_;
   TrustedPointerTable* shared_trusted_pointer_table_ = nullptr;
   TrustedPointerPublishingScope* trusted_pointer_publishing_scope_ = nullptr;
+
+  const Address code_pointer_table_base_address_;
 #endif  // V8_ENABLE_SANDBOX
 
   // This is a storage for an additional argument for the Api callback thunk

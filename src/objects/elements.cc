@@ -939,8 +939,8 @@ class ElementsAccessorBase : public InternalElementsAccessor {
     return MaybeDirectHandle<FixedArrayBase>(new_elements);
   }
 
-  static Maybe<bool> TransitionElementsKindImpl(DirectHandle<JSObject> object,
-                                                DirectHandle<Map> to_map) {
+  static void TransitionElementsKindImpl(DirectHandle<JSObject> object,
+                                         DirectHandle<Map> to_map) {
     Isolate* isolate = object->GetIsolate();
     DirectHandle<Map> from_map(object->map(), isolate);
     ElementsKind from_kind = from_map->elements_kind();
@@ -965,12 +965,15 @@ class ElementsAccessorBase : public InternalElementsAccessor {
             (IsSmiElementsKind(from_kind) && IsDoubleElementsKind(to_kind)) ||
             (IsDoubleElementsKind(from_kind) && IsObjectElementsKind(to_kind)));
         uint32_t capacity = static_cast<uint32_t>(object->elements()->length());
-        DirectHandle<FixedArrayBase> elements;
-        ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-            object->GetIsolate(), elements,
+        // Since the max length of FixedArray and FixedDoubleArray is the same,
+        // we can safely assume that element conversion with the same capacity
+        // will succeed.
+        static_assert(FixedArray::kMaxLength == FixedDoubleArray::kMaxLength);
+        DCHECK_LE(capacity, FixedArray::kMaxLength);
+        DirectHandle<FixedArrayBase> elements =
             ConvertElementsWithCapacity(object, from_elements, from_kind,
-                                        capacity),
-            Nothing<bool>());
+                                        capacity)
+                .ToHandleChecked();
         JSObject::SetMapAndElements(object, to_map, elements);
       }
       if (v8_flags.trace_elements_transitions) {
@@ -979,7 +982,6 @@ class ElementsAccessorBase : public InternalElementsAccessor {
             direct_handle(object->elements(), isolate));
       }
     }
-    return Just(true);
   }
 
   static Maybe<bool> GrowCapacityAndConvertImpl(DirectHandle<JSObject> object,
@@ -1028,9 +1030,9 @@ class ElementsAccessorBase : public InternalElementsAccessor {
     return Just(true);
   }
 
-  Maybe<bool> TransitionElementsKind(DirectHandle<JSObject> object,
-                                     DirectHandle<Map> map) final {
-    return Subclass::TransitionElementsKindImpl(object, map);
+  void TransitionElementsKind(DirectHandle<JSObject> object,
+                              DirectHandle<Map> map) final {
+    Subclass::TransitionElementsKindImpl(object, map);
   }
 
   Maybe<bool> GrowCapacityAndConvert(DirectHandle<JSObject> object,
@@ -1050,9 +1052,9 @@ class ElementsAccessorBase : public InternalElementsAccessor {
                                               object->GetIsolate());
     uint32_t new_capacity = JSObject::NewElementsCapacity(index + 1);
     DCHECK(static_cast<uint32_t>(old_elements->length()) < new_capacity);
-    const uint32_t kMaxLength = IsDoubleElementsKind(kind())
-                                    ? FixedDoubleArray::kMaxLength
-                                    : FixedArray::kMaxLength;
+    static_assert(FixedArray::kMaxLength == FixedDoubleArray::kMaxLength);
+    constexpr uint32_t kMaxLength = FixedArray::kMaxLength;
+
     if (new_capacity > kMaxLength) {
       return Just(false);
     }
@@ -3266,6 +3268,12 @@ class FastHoleyDoubleElementsAccessor
 
 enum IsSharedBuffer : bool { kShared = true, kUnshared = false };
 
+constexpr bool IsFloat16RawBitsZero(uint16_t x) {
+  // IEEE754 comparison returns true for 0 == -0, even though they are two
+  // different bit patterns.
+  return (x & ~0x8000) == 0;
+}
+
 // Super class for all external element arrays.
 template <ElementsKind Kind, typename ElementType>
 class TypedElementsAccessor
@@ -3596,23 +3604,18 @@ class TypedElementsAccessor
     DisallowGarbageCollection no_gc;
     Tagged<JSTypedArray> typed_array = Cast<JSTypedArray>(*receiver);
 
-    if (typed_array->WasDetached()) {
-      return Just(IsUndefined(*value, isolate) && length > start_from);
-    }
-
     bool out_of_bounds = false;
     size_t new_length = typed_array->GetLengthOrOutOfBounds(out_of_bounds);
     if (V8_UNLIKELY(out_of_bounds)) {
       return Just(IsUndefined(*value, isolate) && length > start_from);
     }
 
-    if (IsUndefined(*value, isolate) && length > new_length) {
-      return Just(true);
-    }
-
     // Prototype has no elements, and not searching for the hole --- limit
     // search to backing store length.
     if (new_length < length) {
+      if (IsUndefined(*value, isolate) && length > start_from) {
+        return Just(true);
+      }
       length = new_length;
     }
 
@@ -3649,7 +3652,14 @@ class TypedElementsAccessor
           }
           return Just(false);
         }
+      } else if (IsFloat16TypedArrayElementsKind(Kind) && search_value == 0) {
+        for (size_t k = start_from; k < length; ++k) {
+          ElementType elem_k = AccessorClass::GetImpl(data_ptr + k, is_shared);
+          if (IsFloat16RawBitsZero(elem_k)) return Just(true);
+        }
+        return Just(false);
       }
+
       if (AccessorClass::ToTypedSearchValue(search_value,
                                             &typed_search_value)) {
         return Just(false);
@@ -3687,6 +3697,7 @@ class TypedElementsAccessor
       length = typed_array_length;
     }
 
+    auto is_shared = typed_array->buffer()->is_shared() ? kShared : kUnshared;
     ElementType typed_search_value;
 
     ElementType* data_ptr =
@@ -3707,6 +3718,12 @@ class TypedElementsAccessor
         if (std::isnan(search_value)) {
           return Just<int64_t>(-1);
         }
+      } else if (IsFloat16TypedArrayElementsKind(Kind) && search_value == 0) {
+        for (size_t k = start_from; k < length; ++k) {
+          ElementType elem_k = AccessorClass::GetImpl(data_ptr + k, is_shared);
+          if (IsFloat16RawBitsZero(elem_k)) return Just<int64_t>(k);
+        }
+        return Just<int64_t>(-1);
       }
       if (AccessorClass::ToTypedSearchValue(search_value,
                                             &typed_search_value)) {
@@ -3714,7 +3731,6 @@ class TypedElementsAccessor
       }
     }
 
-    auto is_shared = typed_array->buffer()->is_shared() ? kShared : kUnshared;
     for (size_t k = start_from; k < length; ++k) {
       ElementType elem_k = AccessorClass::GetImpl(data_ptr + k, is_shared);
       if (elem_k == typed_search_value) return Just<int64_t>(k);
@@ -3727,6 +3743,7 @@ class TypedElementsAccessor
                                              size_t start_from) {
     DisallowGarbageCollection no_gc;
     Tagged<JSTypedArray> typed_array = Cast<JSTypedArray>(*receiver);
+    auto is_shared = typed_array->buffer()->is_shared() ? kShared : kUnshared;
 
     DCHECK(!typed_array->IsDetachedOrOutOfBounds());
 
@@ -3770,9 +3787,14 @@ class TypedElementsAccessor
     }
 
     size_t k = start_from;
-    auto is_shared = typed_array->buffer()->is_shared() ? kShared : kUnshared;
     do {
       ElementType elem_k = AccessorClass::GetImpl(data_ptr + k, is_shared);
+      if constexpr (IsFloat16TypedArrayElementsKind(Kind)) {
+        if (IsFloat16RawBitsZero(typed_search_value) &&
+            IsFloat16RawBitsZero(elem_k)) {
+          return Just<int64_t>(k);
+        }
+      }
       if (elem_k == typed_search_value) return Just<int64_t>(k);
     } while (k-- != 0);
     return Just<int64_t>(-1);
@@ -4035,10 +4057,11 @@ class TypedElementsAccessor
       for (size_t i = 0; i < length; i++) {
         Tagged<Object> elem = source_store->get(static_cast<int>(i));
         ElementType elem_k;
-        if (IsFloat16TypedArrayElementsKind(Kind))
+        if (IsFloat16TypedArrayElementsKind(Kind)) {
           elem_k = fp16_ieee_from_fp32_value(Smi::ToInt(elem));
-        else
+        } else {
           elem_k = FromScalar(Smi::ToInt(elem));
+        }
         SetImpl(dest_data + i, elem_k, destination_shared);
       }
       return true;
@@ -4050,10 +4073,11 @@ class TypedElementsAccessor
         } else {
           Tagged<Object> elem = source_store->get(static_cast<int>(i));
           ElementType elem_k;
-          if (IsFloat16TypedArrayElementsKind(Kind))
+          if (IsFloat16TypedArrayElementsKind(Kind)) {
             elem_k = fp16_ieee_from_fp32_value(Smi::ToInt(elem));
-          else
+          } else {
             elem_k = FromScalar(Smi::ToInt(elem));
+          }
           SetImpl(dest_data + i, elem_k, destination_shared);
         }
       }
@@ -4769,8 +4793,8 @@ class SloppyArgumentsElementsAccessor
     }
   }
 
-  static Maybe<bool> TransitionElementsKindImpl(DirectHandle<JSObject> object,
-                                                DirectHandle<Map> map) {
+  static void TransitionElementsKindImpl(DirectHandle<JSObject> object,
+                                         DirectHandle<Map> map) {
     UNREACHABLE();
   }
 

@@ -15,8 +15,11 @@ const common = require('./common.js');
 const random = require('../random.js');
 const mutator = require('./mutator.js');
 
+const variableMutator = require('../mutators/variable_mutator.js');
+
 const MAX_MUTATION_RECURSION_DEPTH = 5;
 
+const CHOOSE_MAJOR_GC_PROB = 0.7;
 
 // Stub for testing.
 function chooseCallGC() {
@@ -29,7 +32,11 @@ function chooseCallGC() {
 function maybeGCTemplate(expression) {
   let templ = expression;
   if (module.exports.chooseCallGC()) {
-    templ += ', __callGC()';
+    if (random.choose(CHOOSE_MAJOR_GC_PROB)){
+      templ += ', __callGC(true)';
+    } else {
+      templ += ', __callGC(false)';
+    }
   }
   return babelTemplate(templ);
 }
@@ -102,6 +109,12 @@ class VariableOrObjectMutator extends mutator.Mutator {
         return mutations;
       }
 
+      // Don't assign to loop variables.
+      if (this.context.loopVariables.has(randomVar.name) &&
+          random.choose(variableMutator.SKIP_LOOP_VAR_PROB)) {
+        return mutations;
+      }
+
       mutations.push(template({
         VAR: randomVar,
         IDENTIFIER: randVarOrObject,
@@ -142,6 +155,13 @@ class VariableOrObjectMutator extends mutator.Mutator {
     const thisMutator = this;
 
     return {
+      ForStatement(path) {
+        // Var/obj mutations in large loops often lead to timeouts.
+        if (common.isLargeLoop(path.node) &&
+            random.choose(mutator.SKIP_LARGE_LOOP_MUTATION_PROB)) {
+          path.skip();
+        }
+      },
       ExpressionStatement(path) {
         if (!random.choose(settings.ADD_VAR_OR_OBJ_MUTATIONS)) {
           return;

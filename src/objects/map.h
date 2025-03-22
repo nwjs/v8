@@ -566,7 +566,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // fields with HeapObject representation and "Any" type back to "Class" type.
   static inline void GeneralizeIfCanHaveTransitionableFastElementsKind(
       Isolate* isolate, InstanceType instance_type,
-      Representation* representation, Handle<FieldType>* field_type);
+      Representation* representation, DirectHandle<FieldType>* field_type);
 
   V8_EXPORT_PRIVATE static Handle<Map> PrepareForDataProperty(
       Isolate* isolate, Handle<Map> old_map, InternalIndex descriptor_number,
@@ -771,13 +771,13 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
       Isolate* isolate, DirectHandle<Map> map, Descriptor* descriptor,
       TransitionFlag flag);
 
-  static MaybeObjectHandle WrapFieldType(Handle<FieldType> type);
+  static MaybeObjectDirectHandle WrapFieldType(DirectHandle<FieldType> type);
   V8_EXPORT_PRIVATE static Tagged<FieldType> UnwrapFieldType(
       Tagged<MaybeObject> wrapped_type);
 
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Map> CopyWithField(
       Isolate* isolate, DirectHandle<Map> map, DirectHandle<Name> name,
-      Handle<FieldType> type, PropertyAttributes attributes,
+      DirectHandle<FieldType> type, PropertyAttributes attributes,
       PropertyConstness constness, Representation representation,
       TransitionFlag flag);
 
@@ -789,7 +789,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // Returns a new map with all transitions dropped from the given map and
   // the ElementsKind set.
   static DirectHandle<Map> TransitionElementsTo(Isolate* isolate,
-                                                Handle<Map> map,
+                                                DirectHandle<Map> map,
                                                 ElementsKind to_kind);
 
   static std::optional<Tagged<Map>> TryAsElementsKind(Isolate* isolate,
@@ -1108,20 +1108,6 @@ inline bool IsNullOrUndefinedMap(Tagged<Map> map);
 inline bool IsPrimitiveMap(Tagged<Map> map);
 inline bool IsSpecialReceiverMap(Tagged<Map> map);
 inline bool IsCustomElementsReceiverMap(Tagged<Map> map);
-
-// Define the instance type accessors in the `.h` instead of `-inl.h` to avoid
-// a circular dependency with the instance-type-inl.h header.
-
-InstanceType Map::instance_type() const {
-  // TODO(solanes, v8:7790, v8:11353, v8:11945): Make this and the setter
-  // non-atomic when TSAN sees the map's store synchronization.
-  return static_cast<InstanceType>(
-      RELAXED_READ_UINT16_FIELD(*this, kInstanceTypeOffset));
-}
-
-void Map::set_instance_type(InstanceType value) {
-  RELAXED_WRITE_UINT16_FIELD(*this, kInstanceTypeOffset, value);
-}
 
 }  // namespace v8::internal
 

@@ -229,8 +229,10 @@ DirectHandle<ClosureFeedbackCellArray> ClosureFeedbackCellArray::New(
 #ifdef V8_ENABLE_LEAPTIERING
     uint16_t parameter_count =
         shared->feedback_metadata()->GetCreateClosureParameterCount(i);
-    Tagged<Code> initial_code = *BUILTIN_CODE(isolate, CompileLazy);
-    cell->allocate_dispatch_handle(isolate, parameter_count, initial_code);
+    auto initial_code = BUILTIN_CODE(isolate, CompileLazy);
+    FeedbackCell::AllocateAndInstallJSDispatchHandle(
+        cell, FeedbackCell::kDispatchHandleOffset, isolate, parameter_count,
+        initial_code);
 #endif
     cells.push_back(cell);
   }
@@ -376,7 +378,7 @@ void FeedbackVector::AddToVectorsForProfilingTools(
     Isolate* isolate, DirectHandle<FeedbackVector> vector) {
   DCHECK(!isolate->is_best_effort_code_coverage());
   if (!vector->shared_function_info()->IsSubjectToDebugging()) return;
-  Handle<ArrayList> list = Cast<ArrayList>(
+  DirectHandle<ArrayList> list = Cast<ArrayList>(
       isolate->factory()->feedback_vectors_for_profiling_tools());
   list = ArrayList::Add(isolate, list, vector);
   isolate->SetFeedbackVectorsForProfilingTools(*list);
@@ -560,7 +562,7 @@ void NexusConfig::SetFeedbackPair(Tagged<FeedbackVector> vector,
                                   WriteBarrierMode mode_extra) const {
   CHECK(can_write());
   CHECK_GT(vector->length(), start_slot.WithOffset(1).ToInt());
-  base::SpinningMutexGuard mutex_guard(isolate()->feedback_vector_access());
+  base::MutexGuard mutex_guard(isolate()->feedback_vector_access());
   vector->Set(start_slot, feedback, mode);
   vector->Set(start_slot.WithOffset(1), feedback_extra, mode_extra);
 }
@@ -568,8 +570,8 @@ void NexusConfig::SetFeedbackPair(Tagged<FeedbackVector> vector,
 std::pair<Tagged<MaybeObject>, Tagged<MaybeObject>>
 NexusConfig::GetFeedbackPair(Tagged<FeedbackVector> vector,
                              FeedbackSlot slot) const {
-  base::SpinningMutexGuardIf guard(isolate()->feedback_vector_access(),
-                                   mode() == BackgroundThread);
+  base::MutexGuardIf guard(isolate()->feedback_vector_access(),
+                           mode() == BackgroundThread);
   Tagged<MaybeObject> feedback = vector->Get(slot);
   Tagged<MaybeObject> feedback_extra = vector->Get(slot.WithOffset(1));
   return std::make_pair(feedback, feedback_extra);

@@ -228,7 +228,7 @@ void FeedbackVector::set_log_next_execution(bool value) {
 }
 
 Tagged<Code> FeedbackVector::optimized_code(IsolateForSandbox isolate) const {
-  Tagged<MaybeObject> slot = maybe_optimized_code();
+  Tagged<MaybeWeak<HeapObject>> slot = maybe_optimized_code();
   DCHECK(slot.IsWeakOrCleared());
   Tagged<HeapObject> heap_object;
   Tagged<Code> code;
@@ -377,6 +377,8 @@ BinaryOperationHint BinaryOperationHintFromFeedback(int type_feedback) {
       return BinaryOperationHint::kSignedSmall;
     case BinaryOperationFeedback::kSignedSmallInputs:
       return BinaryOperationHint::kSignedSmallInputs;
+    case BinaryOperationFeedback::kAdditiveSafeInteger:
+      return BinaryOperationHint::kAdditiveSafeInteger;
     case BinaryOperationFeedback::kNumber:
       return BinaryOperationHint::kNumber;
     case BinaryOperationFeedback::kNumberOrOddball:

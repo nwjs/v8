@@ -79,7 +79,7 @@ TestingModuleBuilder::TestingModuleBuilder(
 
   instance_object_ = InitInstanceObject();
   trusted_instance_data_ =
-      handle(instance_object_->trusted_data(isolate_), isolate_);
+      direct_handle(instance_object_->trusted_data(isolate_), isolate_);
   DirectHandle<FixedArray> tables(isolate_->factory()->NewFixedArray(0));
   trusted_instance_data_->set_tables(*tables);
 
@@ -226,7 +226,7 @@ uint32_t TestingModuleBuilder::AddFunction(const FunctionSig* sig,
 void TestingModuleBuilder::InitializeWrapperCache() {
   TypeCanonicalizer::PrepareForCanonicalTypeId(
       isolate_, test_module_->MaxCanonicalTypeIndex());
-  Handle<FixedArray> maps = isolate_->factory()->NewFixedArray(
+  DirectHandle<FixedArray> maps = isolate_->factory()->NewFixedArray(
       static_cast<int>(test_module_->types.size()));
   for (uint32_t index = 0; index < test_module_->types.size(); index++) {
     // TODO(14616): Support shared types.
@@ -236,7 +236,7 @@ void TestingModuleBuilder::InitializeWrapperCache() {
   trusted_instance_data_->set_managed_object_maps(*maps);
 }
 
-Handle<JSFunction> TestingModuleBuilder::WrapCode(uint32_t index) {
+DirectHandle<JSFunction> TestingModuleBuilder::WrapCode(uint32_t index) {
   InitializeWrapperCache();
   DirectHandle<WasmFuncRef> func_ref =
       WasmTrustedInstanceData::GetOrCreateFuncRef(
@@ -262,19 +262,18 @@ void TestingModuleBuilder::AddIndirectFunctionTable(
           ? Cast<HeapObject>(isolate_->factory()->wasm_null())
           : Cast<HeapObject>(isolate_->factory()->null_value());
   CanonicalValueType canonical_type = test_module_->canonical_type(table.type);
+  DirectHandle<WasmDispatchTable> dispatch_table;
   DirectHandle<WasmTableObject> table_obj = WasmTableObject::New(
       isolate_,
       direct_handle(instance_object_->trusted_data(isolate_), isolate_),
       table.type, canonical_type, table.initial_size, table.has_maximum_size,
       table.maximum_size, value,
       // TODO(clemensb): Make this configurable.
-      wasm::AddressType::kI32);
-  DirectHandle<WasmDispatchTable> dispatch_table(
-      table_obj->trusted_dispatch_table(isolate_), isolate_);
+      wasm::AddressType::kI32, &dispatch_table);
   WasmDispatchTable::AddUse(isolate_, dispatch_table, trusted_instance_data_,
                             table_index);
   {
-    // Allocate the dispatch table.
+    // Store the shortcut to the dispatch table.
     DirectHandle<ProtectedFixedArray> old_dispatch_tables{
         trusted_instance_data_->dispatch_tables(), isolate_};
     DCHECK_EQ(table_index, old_dispatch_tables->length());
@@ -431,7 +430,7 @@ const WasmGlobal* TestingModuleBuilder::AddGlobal(ValueType type) {
   return &test_module_->globals.back();
 }
 
-Handle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
+DirectHandle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
   // In this test setup, the NativeModule gets allocated before functions get
   // added. The tiering budget array, which gets allocated in the NativeModule
   // constructor, therefore does not have slots for functions that get added
@@ -469,8 +468,8 @@ Handle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
       WasmTrustedInstanceData::New(isolate_, module_object, false);
   // TODO(42204563): Avoid crashing if the instance object is not available.
   CHECK(trusted_data->has_instance_object());
-  Handle<WasmInstanceObject> instance_object =
-      handle(trusted_data->instance_object(), isolate_);
+  DirectHandle<WasmInstanceObject> instance_object(
+      trusted_data->instance_object(), isolate_);
   trusted_data->set_tags_table(ReadOnlyRoots{isolate_}.empty_fixed_array());
   trusted_data->set_globals_start(globals_data_);
   DirectHandle<FixedArray> feedback_vector =

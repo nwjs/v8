@@ -1040,8 +1040,8 @@ WasmCode* NativeModule::AddCodeForTesting(DirectHandle<Code> code,
   const size_t relocation_size = code->relocation_size();
   base::OwnedVector<uint8_t> reloc_info =
       base::OwnedCopyOf(code->relocation_start(), relocation_size);
-  DirectHandle<TrustedByteArray> source_pos_table(
-      code->source_position_table(), code->instruction_stream()->GetIsolate());
+  DirectHandle<TrustedByteArray> source_pos_table(code->source_position_table(),
+                                                  Isolate::Current());
   int source_pos_len = source_pos_table->length();
   base::OwnedVector<uint8_t> source_pos =
       base::OwnedCopyOf(source_pos_table->begin(), source_pos_len);
@@ -2204,7 +2204,7 @@ void WasmCodeManager::Decommit(base::AddressRegion region) {
 
 void WasmCodeManager::AssignRange(base::AddressRegion region,
                                   NativeModule* native_module) {
-  base::SpinningMutexGuard lock(&native_modules_mutex_);
+  base::MutexGuard lock(&native_modules_mutex_);
   lookup_map_.insert(std::make_pair(
       region.begin(), std::make_pair(region.end(), native_module)));
 }
@@ -2515,7 +2515,7 @@ std::shared_ptr<NativeModule> WasmCodeManager::NewNativeModule(
   TRACE_HEAP("New NativeModule %p: Mem: 0x%" PRIxPTR ",+%zu\n", ret.get(),
              start, size);
 
-  base::SpinningMutexGuard lock(&native_modules_mutex_);
+  base::MutexGuard lock(&native_modules_mutex_);
   lookup_map_.insert(std::make_pair(start, std::make_pair(end, ret.get())));
   return ret;
 }
@@ -2525,7 +2525,7 @@ void NativeModule::SampleCodeSize(Counters* counters) const {
   int code_size_mb = static_cast<int>(code_size / MB);
 #if V8_ENABLE_DRUMBRAKE
   if (v8_flags.wasm_jitless) {
-    base::SpinningMutexGuard lock(&module_->interpreter_mutex_);
+    base::MutexGuard lock(&module_->interpreter_mutex_);
     if (auto interpreter = module_->interpreter_.lock()) {
       code_size_mb = static_cast<int>(interpreter->TotalBytecodeSize() / MB);
     }
@@ -2798,7 +2798,7 @@ NamesProvider* NativeModule::GetNamesProvider() {
 }
 
 size_t NativeModule::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(NativeModule, 480);
+  UPDATE_WHEN_CLASS_CHANGES(NativeModule, 456);
   size_t result = sizeof(NativeModule);
   result += module_->EstimateCurrentMemoryConsumption();
 
@@ -2866,7 +2866,7 @@ void NativeModule::PrintCurrentMemoryConsumptionEstimate() const {
 
 void WasmCodeManager::FreeNativeModule(
     base::Vector<VirtualMemory> owned_code_space, size_t committed_size) {
-  base::SpinningMutexGuard lock(&native_modules_mutex_);
+  base::MutexGuard lock(&native_modules_mutex_);
   for (auto& code_space : owned_code_space) {
     DCHECK(code_space.IsReserved());
     TRACE_HEAP("VMem Release: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n",
@@ -2892,7 +2892,7 @@ void WasmCodeManager::FreeNativeModule(
 }
 
 NativeModule* WasmCodeManager::LookupNativeModule(Address pc) const {
-  base::SpinningMutexGuard lock(&native_modules_mutex_);
+  base::MutexGuard lock(&native_modules_mutex_);
   if (lookup_map_.empty()) return nullptr;
 
   auto iter = lookup_map_.upper_bound(pc);

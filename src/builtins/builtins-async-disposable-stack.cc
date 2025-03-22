@@ -53,7 +53,7 @@ BUILTIN(AsyncDisposableStackOnRejected) {
               kOuterPromise))),
       isolate);
 
-  Handle<Object> rejection_error = args.at(1);
+  DirectHandle<Object> rejection_error = args.at(1);
   // (TODO:rezvan): Pass the correct pending message.
   DirectHandle<Object> message(isolate->pending_message(), isolate);
   DCHECK(isolate->is_catchable_by_javascript(*rejection_error));
@@ -94,12 +94,11 @@ BUILTIN(AsyncDisposeFromSyncDispose) {
   MaybeDirectHandle<Object> result =
       Execution::Call(isolate, sync_method, receiver, {});
 
-  DirectHandle<Object> result_handle;
-
-  if (result.ToHandle(&result_handle)) {
+  if (!result.is_null()) {
     //        e. Perform ? Call(promiseCapability.[[Resolve]], undefined, «
     //        undefined »).
-    JSPromise::Resolve(promise, result_handle).ToHandleChecked();
+    JSPromise::Resolve(promise, isolate->factory()->undefined_value())
+        .ToHandleChecked();
   } else {
     Tagged<Object> exception = isolate->exception();
     if (!isolate->is_catchable_by_javascript(exception)) {

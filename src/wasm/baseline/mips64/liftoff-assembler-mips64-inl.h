@@ -89,7 +89,6 @@ inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, MemOperand src,
     case kI64:
     case kRef:
     case kRefNull:
-    case kRtt:
       assm->Ld(dst.gp(), src);
       break;
     case kF32:
@@ -118,7 +117,6 @@ inline void Store(LiftoffAssembler* assm, MemOperand dst, LiftoffRegister src,
     case kI64:
     case kRefNull:
     case kRef:
-    case kRtt:
       assm->Usd(src.gp(), dst);
       break;
     case kF32:
@@ -150,7 +148,6 @@ inline void push(LiftoffAssembler* assm, LiftoffRegister reg, ValueKind kind) {
     case kI64:
     case kRefNull:
     case kRef:
-    case kRtt:
       assm->push(reg.gp());
       break;
     case kF32:
@@ -1064,7 +1061,6 @@ void LiftoffAssembler::MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
     case kI64:
     case kRefNull:
     case kRef:
-    case kRtt:
     case kF64:
       Ld(scratch, liftoff::GetStackSlot(src_offset));
       Sd(scratch, liftoff::GetStackSlot(dst_offset));
@@ -1101,7 +1097,6 @@ void LiftoffAssembler::Spill(int offset, LiftoffRegister reg, ValueKind kind) {
     case kI64:
     case kRef:
     case kRefNull:
-    case kRtt:
       Sd(reg.gp(), dst);
       break;
     case kF32:
@@ -2152,10 +2147,12 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
                                      Register offset_reg, uintptr_t offset_imm,
                                      LoadType type,
                                      LoadTransformationKind transform,
-                                     uint32_t* protected_load_pc) {
+                                     uint32_t* protected_load_pc,
+                                     bool i64_offset) {
   UseScratchRegisterScope temps(this);
   Register scratch = temps.Acquire();
-  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm);
+  MemOperand src_op =
+      liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm, i64_offset);
   MSARegister dst_msa = dst.fp().toW();
   *protected_load_pc = pc_offset();
   MachineType memtype = type.mem_type();

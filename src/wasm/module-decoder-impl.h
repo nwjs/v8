@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_MODULE_DECODER_IMPL_H_
+#define V8_WASM_MODULE_DECODER_IMPL_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
-
-#ifndef V8_WASM_MODULE_DECODER_IMPL_H_
-#define V8_WASM_MODULE_DECODER_IMPL_H_
 
 #include "src/base/platform/wrappers.h"
 #include "src/logging/counters.h"
@@ -549,6 +549,7 @@ class ModuleDecoderImpl : public Decoder {
       case kWasmFunctionTypeCode:    return "func";
       case kWasmStructTypeCode:      return "struct";
       case kWasmArrayTypeCode:       return "array";
+      case kWasmContTypeCode:        return "cont";
       default:                       return "unknown";
         // clang-format on
     }
@@ -573,7 +574,7 @@ class ModuleDecoderImpl : public Decoder {
     if (tracer_) tracer_->Description(TypeKindName(kind));
     switch (kind) {
       case kWasmFunctionTypeCode: {
-        const FunctionSig* sig = consume_sig(&module_->signature_zone, shared);
+        const FunctionSig* sig = consume_sig(&module_->signature_zone);
         if (sig == nullptr) {
           CHECK(!ok());
           return {};
@@ -582,8 +583,7 @@ class ModuleDecoderImpl : public Decoder {
       }
       case kWasmStructTypeCode: {
         module_->is_wasm_gc = true;
-        const StructType* type =
-            consume_struct(&module_->signature_zone, shared);
+        const StructType* type = consume_struct(&module_->signature_zone);
         if (type == nullptr) {
           CHECK(!ok());
           return {};
@@ -592,11 +592,29 @@ class ModuleDecoderImpl : public Decoder {
       }
       case kWasmArrayTypeCode: {
         module_->is_wasm_gc = true;
-        const ArrayType* type = consume_array(&module_->signature_zone, shared);
+        const ArrayType* type = consume_array(&module_->signature_zone);
         if (type == nullptr) {
           CHECK(!ok());
           return {};
         }
+        return {type, kNoSuperType, is_final, shared};
+      }
+      case kWasmContTypeCode: {
+        if (!enabled_features_.has_wasmfx()) {
+          error(pc() - 1,
+                "core stack switching not enabled (enable with "
+                "--experimental-wasm-wasmfx)");
+        }
+
+        auto pos = pc();
+        HeapType hp = consume_heap_type();
+
+        if (!hp.is_index()) {
+          error(pos, "cont type must refer to a signature index");
+          return {};
+        }
+
+        ContType* type = module_->signature_zone.New<ContType>(hp.ref_index());
         return {type, kNoSuperType, is_final, shared};
       }
       default:
@@ -644,6 +662,7 @@ class ModuleDecoderImpl : public Decoder {
     TypeCanonicalizer* type_canon = GetTypeCanonicalizer();
     uint32_t types_count = consume_count("types count", kV8MaxWasmTypes);
 
+    // First pass: perform the actual decoding of the wire bytes.
     for (uint32_t i = 0; ok() && i < types_count; ++i) {
       TRACE("DecodeType[%d] module+%d\n", i, static_cast<int>(pc_ - start_));
       uint8_t kind = read_u8<Decoder::FullValidationTag>(pc(), "type kind");
@@ -672,6 +691,7 @@ class ModuleDecoderImpl : public Decoder {
           module_->types[initial_size + j] = type;
         }
         if (failed()) return;
+
         type_canon->AddRecursiveGroup(module_.get(), group_size);
         if (tracer_) {
           tracer_->Description("end of rec. group");
@@ -695,31 +715,118 @@ class ModuleDecoderImpl : public Decoder {
       }
     }
 
-    // Check validity of explicitly defined supertypes and propagate subtyping
-    // depth.
+    // Second pass: now that we know the entire type section, check its
+    // validity and initialize additional data:
+    // - check supertype validity
+    // - propagate subtyping depths
+    // - validate is_shared bits and set up RefTypeKind fields
     const WasmModule* module = module_.get();
     for (uint32_t i = 0; ok() && i < module_->types.size(); ++i) {
-      ModuleTypeIndex explicit_super = module_->supertype(ModuleTypeIndex{i});
-      if (!explicit_super.valid()) continue;
+      TypeDefinition& type_def = module_->types[i];
+      bool is_shared = type_def.is_shared;
+      switch (type_def.kind) {
+        case TypeDefinition::kFunction: {
+          base::Vector<const ValueType> all = type_def.function_sig->all();
+          size_t count = all.size();
+          ValueType* storage = const_cast<ValueType*>(all.begin());
+          for (uint32_t j = 0; j < count; j++) {
+            value_type_reader::Populate(&storage[j], module);
+            ValueType type = storage[j];
+            if (is_shared && !type.is_shared()) {
+              DCHECK(v8_flags.experimental_wasm_shared);
+              uint32_t retcount =
+                  static_cast<uint32_t>(type_def.function_sig->return_count());
+              const char* param_or_return =
+                  j < retcount ? "return" : "parameter";
+              uint32_t index = j < retcount ? j : j - retcount;
+              // TODO(42204563): {pc_} isn't very accurate, it's pointing at
+              // the end of the type section. If we care, we'll have to
+              // store each type's offset temporarily.
+              errorf(pc_,
+                     "Shared signature types must have shared %s types, "
+                     "actual type %s for %s %d",
+                     param_or_return, type.name().c_str(), param_or_return,
+                     index);
+              return;
+            }
+          }
+          break;
+        }
+        case TypeDefinition::kStruct: {
+          size_t count = type_def.struct_type->field_count();
+          ValueType* storage =
+              const_cast<ValueType*>(type_def.struct_type->fields().begin());
+          for (uint32_t j = 0; j < count; j++) {
+            value_type_reader::Populate(&storage[j], module);
+            ValueType type = storage[j];
+            if (is_shared && !type.is_shared()) {
+              errorf(pc_,
+                     "Shared struct type must have shared field types, actual "
+                     "type %s for field %d",
+                     type.name().c_str(), j);
+              return;
+            }
+          }
+          break;
+        }
+        case TypeDefinition::kArray: {
+          value_type_reader::Populate(
+              const_cast<ArrayType*>(type_def.array_type)
+                  ->element_type_writable_ptr(),
+              module);
+          ValueType type = type_def.array_type->element_type();
+          if (is_shared && !type.is_shared()) {
+            errorf(pc_,
+                   "Shared array type must have shared element type, actual "
+                   "type %s",
+                   type.name().c_str());
+            return;
+          }
+          break;
+        }
+        case TypeDefinition::kCont: {
+          ModuleTypeIndex contfun_typeid =
+              type_def.cont_type->contfun_typeindex();
+          const TypeDefinition contfun_type =
+              module_->types[contfun_typeid.index];
+          if (contfun_type.kind != TypeDefinition::kFunction) {
+            errorf(
+                pc_,
+                "cont type must refer to a signature index, actual type is %s",
+                module_->heap_type(contfun_typeid).name().c_str());
+            return;
+          }
+          if (is_shared && !contfun_type.is_shared) {
+            errorf(pc_,
+                   "Shared cont type must refer to a shared signature, actual "
+                   "type is %s",
+                   module_->heap_type(contfun_typeid).name().c_str());
+            return;
+          }
+          break;
+        }
+      }
+      ModuleTypeIndex explicit_super = type_def.supertype;
+      if (!explicit_super.valid()) continue;  // No supertype.
       DCHECK_LT(explicit_super.index, i);  // Checked during decoding.
       uint32_t depth = module->type(explicit_super).subtyping_depth + 1;
-      module_->types[i].subtyping_depth = depth;
+      type_def.subtyping_depth = depth;
       DCHECK_GE(depth, 0);
       if (depth > kV8MaxRttSubtypingDepth) {
         errorf("type %u: subtyping depth is greater than allowed", i);
-        continue;
+        return;
       }
       // This check is technically redundant; we include for the improved error
       // message.
       if (module->type(explicit_super).is_final) {
         errorf("type %u extends final type %u", i, explicit_super.index);
-        continue;
+        return;
       }
       if (!ValidSubtypeDefinition(ModuleTypeIndex{i}, explicit_super, module,
                                   module)) {
         errorf("type %u has invalid explicit supertype %u", i,
                explicit_super.index);
-        continue;
+        return;
       }
     }
   }
@@ -765,7 +872,7 @@ class ModuleDecoderImpl : public Decoder {
           // ===== Imported table ==============================================
           import->index = static_cast<uint32_t>(module_->tables.size());
           const uint8_t* type_position = pc();
-          ValueType type = consume_value_type();
+          ValueType type = consume_value_type(module_.get());
           if (!type.is_object_reference()) {
             errorf(type_position, "Invalid table type %s", type.name().c_str());
             break;
@@ -827,7 +934,7 @@ class ModuleDecoderImpl : public Decoder {
         case kExternalGlobal: {
           // ===== Imported global =============================================
           import->index = static_cast<uint32_t>(module_->globals.size());
-          ValueType type = consume_value_type();
+          ValueType type = consume_value_type(module_.get());
           auto [mutability, shared] = consume_global_flags();
           if (V8_UNLIKELY(failed())) break;
           if (V8_UNLIKELY(shared && !IsShared(type, module_.get()))) {
@@ -929,7 +1036,7 @@ class ModuleDecoderImpl : public Decoder {
         type_position++;
       }
 
-      ValueType table_type = consume_value_type();
+      ValueType table_type = consume_value_type(module_.get());
       if (!table_type.is_object_reference()) {
         error(type_position, "Only reference types can be used as table types");
         break;
@@ -1023,7 +1130,7 @@ class ModuleDecoderImpl : public Decoder {
       TRACE("DecodeGlobal[%d] module+%d\n", i, static_cast<int>(pc_ - start_));
       if (tracer_) tracer_->GlobalOffset(pc_offset());
       const uint8_t* pos = pc_;
-      ValueType type = consume_value_type();
+      ValueType type = consume_value_type(module_.get());
       auto [mutability, shared] = consume_global_flags();
       if (failed()) return;
       if (shared && !IsShared(type, module_.get())) {
@@ -1612,16 +1719,16 @@ class ModuleDecoderImpl : public Decoder {
           uint32_t br_dir = inner.consume_u8("branch direction");
           TRACE("DecodeBranchHints[%d][%d] module+%d\n", func_idx, br_off,
                 static_cast<int>(inner.pc() - inner.start()));
-          WasmBranchHint hint;
+          BranchHint hint;
           switch (br_dir) {
             case 0:
-              hint = WasmBranchHint::kUnlikely;
+              hint = BranchHint::kFalse;
               break;
             case 1:
-              hint = WasmBranchHint::kLikely;
+              hint = BranchHint::kTrue;
               break;
             default:
-              hint = WasmBranchHint::kNoHint;
+              hint = BranchHint::kNone;
               inner.errorf(inner.pc(), "Invalid branch hint %#x", br_dir);
               break;
           }
@@ -1784,8 +1891,7 @@ class ModuleDecoderImpl : public Decoder {
     pc_ = start_;
     expect_u8("type form", kWasmFunctionTypeCode);
     WasmFunction function;
-    const bool is_shared = false;
-    function.sig = consume_sig(zone, is_shared);
+    function.sig = consume_sig(zone);
     function.code = {off(pc_), static_cast<uint32_t>(end_ - pc_)};
 
     if (!ok()) return FunctionResult{std::move(error_)};
@@ -1807,8 +1913,7 @@ class ModuleDecoderImpl : public Decoder {
                                                        const uint8_t* start) {
     pc_ = start;
     if (!expect_u8("type form", kWasmFunctionTypeCode)) return nullptr;
-    const bool is_shared = false;
-    const FunctionSig* result = consume_sig(zone, is_shared);
+    const FunctionSig* result = consume_sig(zone);
     return ok() ? result : nullptr;
   }
 
@@ -1884,7 +1989,7 @@ class ModuleDecoderImpl : public Decoder {
     ModuleTypeIndex sig_index{consume_u32v("signature index")};
     if (tracer_) tracer_->Bytes(pos, static_cast<uint32_t>(pc_ - pos));
     if (!module->has_signature(sig_index)) {
-      errorf(pos, "no signature at index %u (%d types)", sig_index,
+      errorf(pos, "no signature at index %u (%d types)", sig_index.index,
              static_cast<int>(module->types.size()));
       *sig = nullptr;
       return {};
@@ -2006,13 +2111,6 @@ class ModuleDecoderImpl : public Decoder {
       }
     }
 
-    if (limits.is_64bit() && !enabled_features_.has_memory64()) {
-      errorf(pc() - 1,
-             "invalid %s limits flags 0x%x (enable with "
-             "--experimental-wasm-memory64)",
-             limits_type == kMemory ? "memory" : "table", limits.flags);
-    }
-
     if (tracer_) {
       if (limits.is_shared()) tracer_->Description(" shared");
       if (limits.is_64bit()) {
@@ -2054,7 +2152,7 @@ class ModuleDecoderImpl : public Decoder {
     bool mutability = flags & 0b1;
     bool shared = flags & 0b10;
     if (tracer_) {
-      tracer_->Bytes(pc_, 1);  // The flags byte.
+      tracer_->Bytes(pc_ - 1, 1);  // The flags byte.
       if (shared) tracer_->Description(" shared");
       tracer_->Description(mutability ? " mutable" : " immutable");
     }
@@ -2174,9 +2272,12 @@ class ModuleDecoderImpl : public Decoder {
             errorf(pc() + 1, "function index %u out of bounds", index);
             return {};
           }
-          ValueType type = ValueType::Ref(module->functions[index].sig_index);
+          ModuleTypeIndex functype{module->functions[index].sig_index};
+          bool functype_is_shared = module->type(functype).is_shared;
+          ValueType type = ValueType::Ref(functype, functype_is_shared,
+                                          RefTypeKind::kFunction);
           TYPE_CHECK(type)
-          if (V8_UNLIKELY(is_shared && !IsShared(type, module))) {
+          if (V8_UNLIKELY(is_shared && !type.is_shared())) {
             error(pc(), "ref.func does not have a shared type");
             return {};
           }
@@ -2196,6 +2297,7 @@ class ModuleDecoderImpl : public Decoder {
         value_type_reader::ValidateHeapType<FullValidationTag>(this, pc_,
                                                                module, type);
         if (V8_UNLIKELY(failed())) return {};
+        value_type_reader::Populate(&type, module);
         if (V8_LIKELY(lookahead(1 + length, kExprEnd))) {
           TYPE_CHECK(ValueType::RefNull(type))
           if (V8_UNLIKELY(is_shared &&
@@ -2208,7 +2310,7 @@ class ModuleDecoderImpl : public Decoder {
                                            ValueType::RefNull(type));
           }
           consume_bytes(length + 2);
-          return ConstantExpression::RefNull(type.representation());
+          return ConstantExpression::RefNull(type);
         }
         break;
       }
@@ -2281,7 +2383,9 @@ class ModuleDecoderImpl : public Decoder {
     return val != 0;
   }
 
-  ValueType consume_value_type() {
+  // Pass a {module} to get a pre-{Populate()}d ValueType. That's safe
+  // when the module's type section has already been fully decoded.
+  ValueType consume_value_type(const WasmModule* module = nullptr) {
     auto [result, length] =
         value_type_reader::read_value_type<FullValidationTag>(
             this, pc_,
@@ -2289,12 +2393,30 @@ class ModuleDecoderImpl : public Decoder {
                                            : WasmEnabledFeatures::None());
     value_type_reader::ValidateValueType<FullValidationTag>(
         this, pc_, module_.get(), result);
+    if (ok() && module) value_type_reader::Populate(&result, module);
     if (tracer_) {
       tracer_->Bytes(pc_, length);
       tracer_->Description(result);
     }
     consume_bytes(length, "value type");
     return result;
+  }
+
+  HeapType consume_heap_type() {
+    auto [heap_type, length] =
+        value_type_reader::read_heap_type<FullValidationTag>(
+            this, pc_,
+            module_->origin == kWasmOrigin ? enabled_features_
+                                           : WasmEnabledFeatures::None());
+
+    value_type_reader::ValidateHeapType<FullValidationTag>(
+        this, pc_, module_.get(), heap_type);
+    if (tracer_) {
+      tracer_->Bytes(pc_, length);
+      tracer_->Description(heap_type);
+    }
+    consume_bytes(length, "heap type");
+    return heap_type;
   }
 
   ValueType consume_storage_type() {
@@ -2312,7 +2434,7 @@ class ModuleDecoderImpl : public Decoder {
     }
   }
 
-  const FunctionSig* consume_sig(Zone* zone, bool is_shared) {
+  const FunctionSig* consume_sig(Zone* zone) {
     if (tracer_) tracer_->NextLine();
     // Parse parameter types.
     uint32_t param_count =
@@ -2322,17 +2444,7 @@ class ModuleDecoderImpl : public Decoder {
     // storage later.
     base::SmallVector<ValueType, 8> params{param_count};
     for (uint32_t i = 0; i < param_count; ++i) {
-      const uint8_t* pos = pc_;
-      ValueType param_type = consume_value_type();
-      if (is_shared && !IsShared(param_type, module_.get())) {
-        CHECK(v8_flags.experimental_wasm_shared);
-        errorf(pos,
-               "Shared signature types must have shared parameter types, "
-               "actual type %s for parameter %i",
-               param_type.name().c_str(), i);
-        return nullptr;
-      }
-      params[i] = param_type;
+      params[i] = consume_value_type();
       if (tracer_) tracer_->NextLineIfFull();
     }
     if (tracer_) tracer_->NextLineIfNonEmpty();
@@ -2347,17 +2459,7 @@ class ModuleDecoderImpl : public Decoder {
     // Note: Returns come first in the signature storage.
     std::copy_n(params.begin(), param_count, sig_storage + return_count);
     for (uint32_t i = 0; i < return_count; ++i) {
-      const uint8_t* pos = pc_;
-      ValueType return_type = consume_value_type();
-      if (is_shared && !IsShared(return_type, module_.get())) {
-        CHECK(v8_flags.experimental_wasm_shared || !ok());
-        errorf(pos,
-               "Shared signature types must have shared return types, actual "
-               "type %s for return %i",
-               return_type.name().c_str(), i);
-        return nullptr;
-      }
-      sig_storage[i] = return_type;
+      sig_storage[i] = consume_value_type();
       if (tracer_) tracer_->NextLineIfFull();
     }
     if (tracer_) tracer_->NextLineIfNonEmpty();
@@ -2365,24 +2467,14 @@ class ModuleDecoderImpl : public Decoder {
     return zone->New<FunctionSig>(return_count, param_count, sig_storage);
   }
 
-  const StructType* consume_struct(Zone* zone, bool is_shared) {
+  const StructType* consume_struct(Zone* zone) {
     uint32_t field_count =
         consume_count(", field count", kV8MaxWasmStructFields);
     if (failed()) return nullptr;
     ValueType* fields = zone->AllocateArray<ValueType>(field_count);
     bool* mutabilities = zone->AllocateArray<bool>(field_count);
     for (uint32_t i = 0; ok() && i < field_count; ++i) {
-      const uint8_t* pos = pc_;
-      ValueType field_type = consume_storage_type();
-      if (is_shared && !IsShared(field_type, module_.get())) {
-        CHECK(v8_flags.experimental_wasm_shared);
-        errorf(pos,
-               "Shared struct type must have shared field types, actual type "
-               "%s for field %i",
-               field_type.name().c_str(), i);
-        return nullptr;
-      }
-      fields[i] = field_type;
+      fields[i] = consume_storage_type();
       mutabilities[i] = consume_mutability();
       if (tracer_) tracer_->NextLine();
     }
@@ -2394,16 +2486,8 @@ class ModuleDecoderImpl : public Decoder {
     return result;
   }
 
-  const ArrayType* consume_array(Zone* zone, bool is_shared) {
-    const uint8_t* pos = pc_;
+  const ArrayType* consume_array(Zone* zone) {
     ValueType element_type = consume_storage_type();
-    if (is_shared && !IsShared(element_type, module_.get())) {
-      CHECK(v8_flags.experimental_wasm_shared);
-      errorf(pos,
-             "Shared array type must have shared element type, actual type %s",
-             element_type.name().c_str());
-      return nullptr;
-    }
     bool mutability = consume_mutability();
     if (tracer_) tracer_->NextLine();
     if (failed()) return nullptr;
@@ -2516,7 +2600,7 @@ class ModuleDecoderImpl : public Decoder {
         type = kWasmFuncRef;
       } else {
         if (tracer_) tracer_->Description(" element type:");
-        type = consume_value_type();
+        type = consume_value_type(module_.get());
         if (failed()) return {};
       }
     } else {
@@ -2638,9 +2722,12 @@ class ModuleDecoderImpl : public Decoder {
     if (failed()) return index;
     DCHECK_NOT_NULL(func);
     DCHECK_EQ(index, func->func_index);
-    ValueType entry_type = ValueType::Ref(func->sig_index);
+    ValueType entry_type =
+        ValueType::Ref(func->sig_index, module->type(func->sig_index).is_shared,
+                       RefTypeKind::kFunction);
     if (V8_LIKELY(expected == kWasmFuncRef &&
                   !v8_flags.experimental_wasm_shared)) {
+      DCHECK(module->type(func->sig_index).kind == TypeDefinition::kFunction);
       DCHECK(IsSubtypeOf(entry_type, expected, module));
     } else if (V8_UNLIKELY(!IsSubtypeOf(entry_type, expected, module))) {
       errorf(initial_pc,

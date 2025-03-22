@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_STRUCT_TYPES_H_
+#define V8_WASM_STRUCT_TYPES_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
-
-#ifndef V8_WASM_STRUCT_TYPES_H_
-#define V8_WASM_STRUCT_TYPES_H_
 
 #include "src/base/iterator.h"
 #include "src/base/macros.h"
@@ -289,6 +289,8 @@ class ArrayType : public ArrayTypeBase {
   }
 
   ValueType element_type() const { return rep_; }
+  // Only for the ModuleDecoder, to finish populating the type.
+  ValueType* element_type_writable_ptr() { return &rep_; }
 
  private:
   ValueType rep_;
@@ -312,6 +314,40 @@ class CanonicalArrayType : public ArrayTypeBase {
   CanonicalValueType rep_;
 };
 
+class ContType : public ZoneObject {
+ public:
+  constexpr explicit ContType(ModuleTypeIndex idx) : index_(idx) {}
+
+  bool operator==(const ContType& other) const {
+    return index_ == other.index_;
+  }
+  bool operator!=(const ContType& other) const {
+    return index_ != other.index_;
+  }
+
+  ModuleTypeIndex contfun_typeindex() const { return index_; }
+
+ private:
+  // TODO(jkummerow): Consider storing a HeapType instead.
+  ModuleTypeIndex index_;
+};
+
+class CanonicalContType : public ZoneObject {
+ public:
+  explicit CanonicalContType(CanonicalTypeIndex idx) : index_(idx) {}
+
+  bool operator==(const CanonicalContType& other) const {
+    return index_ == other.index_;
+  }
+  bool operator!=(const CanonicalContType& other) const {
+    return index_ != other.index_;
+  }
+
+  CanonicalTypeIndex contfun_typeindex() const { return index_; }
+
+ private:
+  CanonicalTypeIndex index_;
+};
 }  // namespace v8::internal::wasm
 
 #endif  // V8_WASM_STRUCT_TYPES_H_

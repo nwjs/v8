@@ -263,6 +263,22 @@ selects.config_setting_group(
     ],
 )
 
+selects.config_setting_group(
+    name = "webassembly_on_posix",
+    match_all = [
+        "@v8//bazel/config:is_posix",
+        ":is_v8_enable_webassembly",
+    ],
+)
+
+selects.config_setting_group(
+    name = "webassembly_on_windows",
+    match_all = [
+        "@v8//bazel/config:is_windows",
+        ":is_v8_enable_webassembly",
+    ],
+)
+
 v8_flag(
     name = "v8_jitless",
     default = False,
@@ -2374,6 +2390,7 @@ filegroup(
         "src/sandbox/external-pointer-table.cc",
         "src/sandbox/external-pointer-table.h",
         "src/sandbox/external-pointer-table-inl.h",
+        "src/sandbox/cppheap-pointer.h",
         "src/sandbox/cppheap-pointer-inl.h",
         "src/sandbox/cppheap-pointer-table.cc",
         "src/sandbox/cppheap-pointer-table.h",
@@ -2489,6 +2506,7 @@ filegroup(
         "src/tracing/trace-event.cc",
         "src/tracing/trace-event.h",
         "src/tracing/trace-event-no-perfetto.h",
+        "src/tracing/trace-id.h",
         "src/tracing/traced-value.cc",
         "src/tracing/traced-value.h",
         "src/tracing/tracing-category-observer.cc",
@@ -2541,8 +2559,6 @@ filegroup(
         "src/zone/zone-type-traits.h",
         "src/zone/zone-utils.h",
         "third_party/rapidhash-v8/rapidhash.h",
-        "third_party/simdutf/simdutf.cpp",
-        "third_party/simdutf/simdutf.h",
         "third_party/siphash/halfsiphash.cc",
         "third_party/siphash/halfsiphash.h",
         "third_party/utf8-decoder/utf8-decoder.h",
@@ -2767,11 +2783,11 @@ filegroup(
             "src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h",
         ],
     }) + select({
-        "@v8//bazel/config:is_posix": [
+        ":webassembly_on_posix": [
             "src/trap-handler/handler-inside-posix.cc",
             "src/trap-handler/handler-outside-posix.cc",
         ],
-        "@v8//bazel/config:is_windows": [
+        ":webassembly_on_windows": [
             "src/trap-handler/handler-inside-win.cc",
             "src/trap-handler/handler-inside-win.h",
             "src/trap-handler/handler-outside-win.cc",
@@ -2801,12 +2817,14 @@ filegroup(
             "src/maglev/maglev-compilation-unit.h",
             "src/maglev/maglev-compiler.h",
             "src/maglev/maglev-concurrent-dispatcher.h",
+            "src/maglev/maglev-deopt-frame-visitor.h",
             "src/maglev/maglev-graph-builder.h",
             "src/maglev/maglev-graph-labeller.h",
             "src/maglev/maglev-graph-printer.h",
             "src/maglev/maglev-graph-processor.h",
             "src/maglev/maglev-graph-verifier.h",
             "src/maglev/maglev-graph.h",
+            "src/maglev/maglev-inlining.h",
             "src/maglev/maglev-interpreter-frame-state.h",
             "src/maglev/maglev-ir-inl.h",
             "src/maglev/maglev-ir.h",
@@ -3121,8 +3139,6 @@ filegroup(
         "src/compiler/backend/unwinding-info-writer.h",
         "src/compiler/basic-block-instrumentor.cc",
         "src/compiler/basic-block-instrumentor.h",
-        "src/compiler/branch-condition-duplicator.cc",
-        "src/compiler/branch-condition-duplicator.h",
         "src/compiler/branch-elimination.cc",
         "src/compiler/branch-elimination.h",
         "src/compiler/bytecode-analysis.cc",
@@ -3156,8 +3172,6 @@ filegroup(
         "src/compiler/csa-load-elimination.h",
         "src/compiler/dead-code-elimination.cc",
         "src/compiler/dead-code-elimination.h",
-        "src/compiler/decompression-optimizer.cc",
-        "src/compiler/decompression-optimizer.h",
         "src/compiler/diamond.h",
         "src/compiler/escape-analysis.cc",
         "src/compiler/escape-analysis.h",
@@ -3346,7 +3360,6 @@ filegroup(
         "src/compiler/turboshaft/explicit-truncation-reducer.h",
         "src/compiler/turboshaft/fast-api-call-lowering-reducer.h",
         "src/compiler/turboshaft/fast-hash.h",
-        "src/compiler/turboshaft/float16-lowering-reducer.h",
         "src/compiler/turboshaft/field-macro.inc",
         "src/compiler/turboshaft/graph.cc",
         "src/compiler/turboshaft/graph.h",
@@ -3531,6 +3544,10 @@ filegroup(
             "src/compiler/turboshaft/wasm-optimize-phase.h",
             "src/compiler/turboshaft/wasm-turboshaft-compiler.cc",
             "src/compiler/turboshaft/wasm-turboshaft-compiler.h",
+            "src/compiler/turboshaft/wasm-shuffle-reducer.cc",
+            "src/compiler/turboshaft/wasm-shuffle-reducer.h",
+            "src/compiler/turboshaft/wasm-simd-phase.cc",
+            "src/compiler/turboshaft/wasm-simd-phase.h",
             "src/compiler/wasm-address-reassociation.cc",
             "src/compiler/wasm-address-reassociation.h",
             "src/compiler/wasm-call-descriptors.cc",
@@ -3562,6 +3579,7 @@ filegroup(
         "//conditions:default": [
             "src/maglev/maglev-basic-block.h",
             "src/maglev/maglev-code-gen-state.h",
+            "src/maglev/maglev-deopt-frame-visitor.h",
             "src/maglev/maglev-compilation-info.cc",
             "src/maglev/maglev-compilation-info.h",
             "src/maglev/maglev-compilation-unit.cc",
@@ -3574,6 +3592,7 @@ filegroup(
             "src/maglev/maglev-graph-printer.h",
             "src/maglev/maglev-graph-processor.h",
             "src/maglev/maglev-graph-verifier.h",
+            "src/maglev/maglev-inlining.h",
             "src/maglev/maglev-interpreter-frame-state.cc",
             "src/maglev/maglev-interpreter-frame-state.h",
             "src/maglev/maglev-ir.cc",
@@ -4144,7 +4163,6 @@ py_binary(
         "third_party/inspector_protocol/templates/TypeBuilder_h.template",
     ],
     imports = ["third_party/inspector_protocol/"],
-    python_version = "PY3",
     deps = [
         requirement("jinja2"),
     ],
@@ -4572,7 +4590,6 @@ py_test(
         "//testing/pybase",
     ] + glob(["test/**"]) + glob(["tools/**/*.js"]) + glob(["tools/**/*.mjs"]),
     main = "tools/run-tests.py",
-    python_version = "PY3",
     tags = [
         # Disable sanitizers, as they don't work in general in V8.
         "nosan",
@@ -4611,7 +4628,6 @@ py_test(
         "//testing/pybase",
     ] + glob(["test/**"]) + glob(["tools/**/*.js"]) + glob(["tools/**/*.mjs"]),
     main = "tools/run-tests.py",
-    python_version = "PY3",
     tags = [
         # Disable sanitizers, as they don't work in general in V8.
         "nosan",

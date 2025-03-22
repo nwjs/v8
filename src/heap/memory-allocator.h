@@ -65,7 +65,7 @@ class MemoryAllocator {
     }
 
     MutablePageMetadata* TryGetPooled() {
-      base::SpinningMutexGuard guard(&mutex_);
+      base::MutexGuard guard(&mutex_);
       if (pooled_chunks_.empty()) return nullptr;
       MutablePageMetadata* chunk = pooled_chunks_.back();
       pooled_chunks_.pop_back();
@@ -80,7 +80,7 @@ class MemoryAllocator {
    private:
     MemoryAllocator* const allocator_;
     std::vector<MutablePageMetadata*> pooled_chunks_;
-    mutable base::SpinningMutex mutex_;
+    mutable base::Mutex mutex_;
 
     friend class MemoryAllocator;
   };
@@ -190,7 +190,7 @@ class MemoryAllocator {
   // Checks if an allocated MemoryChunk was intended to be used for executable
   // memory.
   bool IsMemoryChunkExecutable(MutablePageMetadata* chunk) {
-    base::SpinningMutexGuard guard(&executable_memory_mutex_);
+    base::MutexGuard guard(&executable_memory_mutex_);
     return executable_memory_.find(chunk) != executable_memory_.end();
   }
 #endif  // DEBUG
@@ -236,6 +236,10 @@ class MemoryAllocator {
   // Return the normal or large page that contains this address, if it is owned
   // by this heap, otherwise a nullptr.
   V8_EXPORT_PRIVATE const MemoryChunk* LookupChunkContainingAddress(
+      Address addr) const;
+  // This version can be used when all threads are either parked or in a
+  // safepoint. In that case we can skip taking a mutex.
+  V8_EXPORT_PRIVATE const MemoryChunk* LookupChunkContainingAddressInSafepoint(
       Address addr) const;
 
   // Insert and remove normal and large pages that are owned by this heap.
@@ -370,14 +374,14 @@ class MemoryAllocator {
 
 #ifdef DEBUG
   void RegisterExecutableMemoryChunk(MutablePageMetadata* chunk) {
-    base::SpinningMutexGuard guard(&executable_memory_mutex_);
+    base::MutexGuard guard(&executable_memory_mutex_);
     DCHECK(chunk->Chunk()->IsFlagSet(MemoryChunk::IS_EXECUTABLE));
     DCHECK_EQ(executable_memory_.find(chunk), executable_memory_.end());
     executable_memory_.insert(chunk);
   }
 
   void UnregisterExecutableMemoryChunk(MutablePageMetadata* chunk) {
-    base::SpinningMutexGuard guard(&executable_memory_mutex_);
+    base::MutexGuard guard(&executable_memory_mutex_);
     DCHECK_NE(executable_memory_.find(chunk), executable_memory_.end());
     executable_memory_.erase(chunk);
   }
@@ -434,7 +438,7 @@ class MemoryAllocator {
   // This data structure is used only in DCHECKs.
   std::unordered_set<MutablePageMetadata*, base::hash<MutablePageMetadata*>>
       executable_memory_;
-  base::SpinningMutex executable_memory_mutex_;
+  base::Mutex executable_memory_mutex_;
 #endif  // DEBUG
 
   // Allocated normal and large pages are stored here, to be used during
@@ -443,7 +447,7 @@ class MemoryAllocator {
       normal_pages_;
   std::set<const MemoryChunk*> large_pages_;
 
-  mutable base::SpinningMutex chunks_mutex_;
+  mutable base::Mutex chunks_mutex_;
 
   V8_EXPORT_PRIVATE static size_t commit_page_size_;
   V8_EXPORT_PRIVATE static size_t commit_page_size_bits_;

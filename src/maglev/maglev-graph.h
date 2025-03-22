@@ -20,6 +20,8 @@ using BlockConstIterator = ZoneVector<BasicBlock*>::const_iterator;
 using BlockConstReverseIterator =
     ZoneVector<BasicBlock*>::const_reverse_iterator;
 
+struct MaglevCallerDetails;
+
 class Graph final : public ZoneObject {
  public:
   static Graph* New(Zone* zone, bool is_osr) {
@@ -38,14 +40,18 @@ class Graph final : public ZoneObject {
         float_(zone),
         external_references_(zone),
         parameters_(zone),
+        inlineable_calls_(zone),
         allocations_escape_map_(zone),
         allocations_elide_map_(zone),
         register_inputs_(),
         constants_(zone),
         trusted_constants_(zone),
         inlined_functions_(zone),
+        node_buffer_(zone),
         is_osr_(is_osr),
-        scope_infos_(zone) {}
+        scope_infos_(zone) {
+    node_buffer_.reserve(32);
+  }
 
   BasicBlock* operator[](int i) { return blocks_[i]; }
   const BasicBlock* operator[](int i) const { return blocks_[i]; }
@@ -112,6 +118,12 @@ class Graph final : public ZoneObject {
     return external_references_;
   }
   ZoneVector<InitialValue*>& parameters() { return parameters_; }
+
+  ZoneVector<MaglevCallerDetails*>& inlineable_calls() {
+    return inlineable_calls_;
+  }
+
+  ZoneVector<Node*>& node_buffer() { return node_buffer_; }
 
   // Running JS2, 99.99% of the cases, we have less than 2 dependencies.
   using SmallAllocationVector = SmallZoneVector<InlinedAllocation*, 2>;
@@ -220,6 +232,8 @@ class Graph final : public ZoneObject {
     scope_infos_[context] = scope_info;
   }
 
+  Zone* zone() const { return blocks_.zone(); }
+
  private:
   uint32_t tagged_stack_slots_ = kMaxUInt32;
   uint32_t untagged_stack_slots_ = kMaxUInt32;
@@ -236,6 +250,7 @@ class Graph final : public ZoneObject {
   ZoneMap<uint64_t, Float64Constant*> float_;
   ZoneMap<Address, ExternalConstant*> external_references_;
   ZoneVector<InitialValue*> parameters_;
+  ZoneVector<MaglevCallerDetails*> inlineable_calls_;
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_escape_map_;
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_elide_map_;
   RegList register_inputs_;
@@ -244,6 +259,7 @@ class Graph final : public ZoneObject {
       trusted_constants_;
   ZoneVector<OptimizedCompilationInfo::InlinedFunctionHolder>
       inlined_functions_;
+  ZoneVector<Node*> node_buffer_;
   bool has_recursive_calls_ = false;
   int total_inlined_bytecode_size_ = 0;
   int total_peeled_bytecode_size_ = 0;

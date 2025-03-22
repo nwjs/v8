@@ -144,6 +144,12 @@ class Object : public AllStatic {
   V8_EXPORT_PRIVATE static bool ToInt32(Tagged<Object> obj, int32_t* value);
   static inline bool ToUint32(Tagged<Object> obj, uint32_t* value);
 
+  // ES6 section 7.1.5 ToIntegerOrInfinity
+  template <typename T, template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+  V8_WARN_UNUSED_RESULT static inline Maybe<double> IntegerValue(
+      Isolate* isolate, HandleType<T> input);
+
   static inline Representation OptimalRepresentation(
       Tagged<Object> obj, PtrComprCageBase cage_base);
 
@@ -159,8 +165,9 @@ class Object : public AllStatic {
 
   static inline bool FilterKey(Tagged<Object> obj, PropertyFilter filter);
 
-  static Handle<FieldType> OptimalType(Tagged<Object> obj, Isolate* isolate,
-                                       Representation representation);
+  static DirectHandle<FieldType> OptimalType(Tagged<Object> obj,
+                                             Isolate* isolate,
+                                             Representation representation);
 
   V8_EXPORT_PRIVATE static Handle<UnionOf<JSAny, Hole>> NewStorageFor(
       Isolate* isolate, Handle<UnionOf<JSAny, Hole>> object,

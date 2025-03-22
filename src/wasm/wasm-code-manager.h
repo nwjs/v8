@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_WASM_WASM_CODE_MANAGER_H_
+#define V8_WASM_WASM_CODE_MANAGER_H_
+
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
-
-#ifndef V8_WASM_WASM_CODE_MANAGER_H_
-#define V8_WASM_WASM_CODE_MANAGER_H_
 
 #include <atomic>
 #include <map>
@@ -1191,7 +1191,7 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   // and updated after each GC.
   std::atomic<size_t> critical_committed_code_space_;
 
-  mutable base::SpinningMutex native_modules_mutex_;
+  mutable base::Mutex native_modules_mutex_;
 
   //////////////////////////////////////////////////////////////////////////////
   // Protected by {native_modules_mutex_}:

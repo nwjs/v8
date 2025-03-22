@@ -57,7 +57,6 @@ inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, Register base,
     case kI32:
     case kRefNull:
     case kRef:
-    case kRtt:
       assm->mov(dst.gp(), src);
       break;
     case kI64:
@@ -92,7 +91,6 @@ inline void Store(LiftoffAssembler* assm, Register base, int32_t offset,
     case kI32:
     case kRefNull:
     case kRef:
-    case kRtt:
       assm->mov(dst, src.gp());
       break;
     case kI64:
@@ -123,7 +121,6 @@ inline void push(LiftoffAssembler* assm, LiftoffRegister reg, ValueKind kind,
     case kI32:
     case kRef:
     case kRefNull:
-    case kRtt:
       assm->AllocateStackSpace(padding);
       assm->push(reg.gp());
       break;
@@ -1377,7 +1374,6 @@ void LiftoffAssembler::Spill(int offset, LiftoffRegister reg, ValueKind kind) {
     case kI32:
     case kRefNull:
     case kRef:
-    case kRtt:
       mov(dst, reg.gp());
       break;
     case kI64:
@@ -2653,7 +2649,6 @@ void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
     switch (kind) {
       case kRef:
       case kRefNull:
-      case kRtt:
         DCHECK(cond == kEqual || cond == kNotEqual);
         [[fallthrough]];
       case kI32:
@@ -2934,7 +2929,8 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
                                      Register offset_reg, uintptr_t offset_imm,
                                      LoadType type,
                                      LoadTransformationKind transform,
-                                     uint32_t* protected_load_pc) {
+                                     uint32_t* protected_load_pc,
+                                     bool i64_offset) {
   DCHECK_LE(offset_imm, std::numeric_limits<int32_t>::max());
   Operand src_op{src_addr, offset_reg, times_1,
                  static_cast<int32_t>(offset_imm)};
