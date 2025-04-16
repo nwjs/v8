@@ -317,9 +317,9 @@ declare_args() {
       (target_is_simulator || arm_control_flow_integrity != "none")
 
   # Enable heap reservation of size 4GB. Only possible for 64bit archs.
-  cppgc_enable_caged_heap =
-      v8_current_cpu == "x64" || v8_current_cpu == "arm64" ||
-      v8_current_cpu == "loong64" || v8_current_cpu == "riscv64"
+  cppgc_enable_caged_heap = false
+  #    v8_current_cpu == "x64" || v8_current_cpu == "arm64" ||
+  #    v8_current_cpu == "loong64" || v8_current_cpu == "riscv64"
 
   # Enables additional heap verification phases and checks.
   cppgc_enable_verify_heap = ""
@@ -1111,7 +1111,7 @@ if (cppgc_enable_caged_heap) {
   # Pointer compression regresses binary size on Fuchsia by about 300K.
   # However, the change improves Oilpan memory by 15-20% (2-4% of PMF),
   # which is beneficial for memory-impoverished platforms.
-  cppgc_enable_pointer_compression = true
+  cppgc_enable_pointer_compression = false
 }
 if (cppgc_enable_young_generation) {
   enabled_external_cppgc_defines += [ "CPPGC_YOUNG_GENERATION" ]
