@@ -6,6 +6,7 @@
 
 #include <optional>
 
+#include "include/cppgc/allocation.h"
 #include "include/v8-fast-api-calls.h"
 #include "src/api/api-inl.h"
 #include "src/base/bits.h"
@@ -602,7 +603,7 @@ FUNCTION_REFERENCE(ensure_valid_return_address,
 #endif  // V8_ENABLE_CET_SHADOW_STACK
 
 #ifdef V8_ENABLE_WEBASSEMBLY
-FUNCTION_REFERENCE(wasm_sync_stack_limit, wasm::sync_stack_limit)
+FUNCTION_REFERENCE(wasm_switch_stacks, wasm::switch_stacks)
 FUNCTION_REFERENCE(wasm_return_switch, wasm::return_switch)
 FUNCTION_REFERENCE(wasm_switch_to_the_central_stack,
                    wasm::switch_to_the_central_stack)
@@ -719,18 +720,22 @@ ExternalReference ExternalReference::wasm_code_pointer_table() {
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace {
-void* allocate_buffer_impl(size_t size) {
-  void* result = new uint8_t[size];
+class GCedBuffer final : public cppgc::GarbageCollected<GCedBuffer> {
+ public:
+  void Trace(cppgc::Visitor* visitor) const {}
+};
+
+void* allocate_buffer_impl(Isolate* isolate, size_t size) {
+  void* result = cppgc::MakeGarbageCollected<GCedBuffer>(
+      isolate->heap()->cpp_heap()->GetAllocationHandle(),
+      cppgc::AdditionalBytes(size));
   CHECK_NOT_NULL(result);
   return result;
 }
 
-void deallocate_buffer_impl(uint8_t buffer[]) { delete[] buffer; }
 }  // namespace
 
 FUNCTION_REFERENCE(allocate_buffer, allocate_buffer_impl)
-
-FUNCTION_REFERENCE(deallocate_buffer, deallocate_buffer_impl)
 
 static void f64_acos_wrapper(Address data) {
   double input = ReadUnalignedValue<double>(data);

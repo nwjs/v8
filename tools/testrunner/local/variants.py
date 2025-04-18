@@ -44,8 +44,16 @@ ALL_VARIANT_FLAGS = {
         "--maglev", "--no-turbofan", "--stress-maglev",
         "--optimize-on-next-call-optimizes-to-maglev"
     ]],
-    "stress_pinning_scavenger": [[
-        "--scavenger-pinning-objects", "--stress-scavenger-pinning-objects"
+    "stress_maglev_non_eager_inlining": [[
+        "--maglev", "--stress-maglev", "--maglev-non-eager-inlining",
+        "--optimize-on-next-call-optimizes-to-maglev"
+    ]],
+    "conservative_pinning": [[
+        "--scavenger-conservative-object-pinning",
+        "--stress-scavenger-conservative-object-pinning"
+    ]],
+    "precise_pinning": [[
+        "--precise-object-pinning", "--scavenger-precise-object-pinning"
     ]],
     # We test both the JS and Wasm Turboshaft pipelines under the same variant.
     # For extended Wasm Turboshaft coverage, we add --no-liftoff to the options.
@@ -95,6 +103,9 @@ ALL_VARIANT_FLAGS = {
     "stress_concurrent_inlining": [["--stress-concurrent-inlining"]],
     "stress_js_bg_compile_wasm_code_gc": [[
         "--stress-background-compile", "--stress-wasm-code-gc"
+    ]],
+    "stress_maglev_tests_with_turbofan": [[
+        "--turbofan", "--optimize-maglev-optimizes-to-turbofan"
     ]],
     "stress_wasm_stack_switching": [["--stress-wasm-stack-switching"]],
     "stress_incremental_marking": [["--stress-incremental-marking"]],
@@ -146,6 +157,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         "--track-field-types",
         "--stress-concurrent-inlining",
         "--script-context-mutable-heap-number",
+        "--experimental-wasm-shared",
     ],
     "slow_path": ["--no-force-slow-path"],
     "stress_concurrent_allocation": [
@@ -185,6 +197,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         "--stress-concurrent-inlining",
     ],
     "stress_maglev": ["--jitless"],
+    "stress_maglev_non_eager_inlining": ["--jitless"],
     "stress_maglev_future": ["--jitless", "--no-maglev", "--no-maglev-future"],
     "stress_maglev_no_turbofan": [
         "--jitless",
@@ -193,6 +206,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         "--always-turbofan",
         "--stress-concurrent-inlining",
     ],
+    "stress_maglev_tests_with_turbofan": ["--jitless"],
     "always_sparkplug": ["--jitless", "--no-sparkplug"],
     "always_sparkplug_and_stress_regexp_jit": ["--jitless", "--no-sparkplug"],
     "code_serializer": [
@@ -230,6 +244,7 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
         "--dump_wasm_module",
         "--enable_testing_opcode_in_wasm",
         "--gc_verbose",
+        "--no-wasm-opt",
         "--print_ast",
         "--print_break_location",
         "--print_global_handles",

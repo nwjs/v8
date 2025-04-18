@@ -9,6 +9,9 @@
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
 
+#include "src/wasm/wasm-objects.h"
+// Include the non-inl header before the rest of the headers.
+
 #include <type_traits>
 
 #include "src/base/memory.h"
@@ -26,7 +29,6 @@
 #include "src/roots/roots.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-module.h"
-#include "src/wasm/wasm-objects.h"
 #include "third_party/fp16/src/include/fp16.h"
 
 #if V8_ENABLE_DRUMBRAKE
@@ -752,6 +754,14 @@ ObjectSlot WasmStruct::RawField(int raw_offset) {
   return ObjectSlot(RawFieldAddress(raw_offset));
 }
 
+inline Tagged<Map> WasmStruct::get_described_rtt() const {
+  return TaggedField<Map, kHeaderSize>::load(*this);
+}
+
+void WasmStruct::set_described_rtt(Tagged<Map> rtt) {
+  TaggedField<Object, kHeaderSize>::store(*this, rtt);
+}
+
 wasm::CanonicalTypeIndex WasmArray::type_index(Tagged<Map> map) {
   DCHECK_EQ(WASM_ARRAY_TYPE, map->instance_type());
   Tagged<WasmTypeInfo> type_info = map->wasm_type_info();
@@ -815,9 +825,6 @@ int WasmArray::DecodeElementSizeFromMap(Tagged<Map> map) {
 TRUSTED_POINTER_ACCESSORS(WasmTagObject, trusted_data, WasmTrustedInstanceData,
                           kTrustedDataOffset,
                           kWasmTrustedInstanceDataIndirectPointerTag)
-
-EXTERNAL_POINTER_ACCESSORS(WasmContinuationObject, jmpbuf, Address,
-                           kJmpbufOffset, kWasmContinuationJmpbufTag)
 
 EXTERNAL_POINTER_ACCESSORS(WasmContinuationObject, stack, Address, kStackOffset,
                            kWasmStackMemoryTag)

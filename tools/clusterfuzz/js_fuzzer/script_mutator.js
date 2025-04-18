@@ -8,8 +8,12 @@
 
 'use strict';
 
+const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+
+const babelTraverse = require('@babel/traverse').default;
+const babelTypes = require('@babel/types');
 
 const common = require('./mutators/common.js');
 const db = require('./db.js');
@@ -20,6 +24,7 @@ const sourceHelpers = require('./source_helpers.js');
 
 const { AddTryCatchMutator } = require('./mutators/try_catch.js');
 const { ArrayMutator } = require('./mutators/array_mutator.js');
+const { ClosureRemover } = require('./mutators/closure_remover.js');
 const { ContextAnalyzer } = require('./mutators/analyzer.js');
 const { CrossOverMutator } = require('./mutators/crossover_mutator.js');
 const { ExpressionMutator } = require('./mutators/expression_mutator.js');
@@ -51,6 +56,11 @@ function defaultSettings() {
     MUTATE_VARIABLES: 0.075,
     SCRIPT_MUTATOR_EXTRA_MUTATIONS: 0.2,
     SCRIPT_MUTATOR_SHUFFLE: 0.2,
+    // Probability to remove certain types of closures: Anonymous parameterless
+    // functions calling themselves, but not referencing themselves. These
+    // appear often appear in test input and subsequent mutations are more
+    // likely without these closures.
+    TRANSFORM_CLOSURES: 0.2,
   };
 }
 
@@ -75,16 +85,18 @@ class ScriptMutator {
   constructor(settings, db_path=undefined) {
     // Use process.cwd() to bypass pkg's snapshot filesystem.
     this.mutateDb = new db.MutateDb(db_path || path.join(process.cwd(), 'db'));
+    this.crossover = new CrossOverMutator(settings, this.mutateDb);
     this.mutators = [
       new ArrayMutator(settings),
       new ObjectMutator(settings),
       new VariableMutator(settings),
       new NumberMutator(settings),
-      new CrossOverMutator(settings, this.mutateDb),
+      this.crossover,
       new ExpressionMutator(settings),
       new FunctionCallMutator(settings),
       new VariableOrObjectMutator(settings),
     ];
+    this.closures = new ClosureRemover(settings);
     this.trycatch = new AddTryCatchMutator(settings);
     this.settings = settings;
   }
@@ -189,6 +201,9 @@ class ScriptMutator {
       }
     }
 
+    // We always remove certain closures first.
+    mutators.unshift(this.closures);
+
     // Try-catch wrapping should always be the last mutation.
     mutators.push(this.trycatch);
 
@@ -277,6 +292,10 @@ class ScriptMutator {
     return dependencies;
   }
 
+  concatInputs(inputs) {
+    return common.concatPrograms(inputs);
+  }
+
   // Normalizes, combines and mutates multiple inputs.
   mutateInputs(inputs, dependencies) {
     const normalizerMutator = new IdentifierNormalizer();
@@ -293,7 +312,7 @@ class ScriptMutator {
 
     // Combine ASTs into one. This is so that mutations have more context to
     // cross over content between ASTs (e.g. variables).
-    const combinedSource = common.concatPrograms(inputs);
+    const combinedSource = this.concatInputs(inputs);
 
     // First pass for context information, then run other mutators.
     const context = analyzeContext(combinedSource);
@@ -323,8 +342,84 @@ class ScriptMutator {
   }
 }
 
+/**
+ * Script mutator that only generates files depending on the
+ * wasm-module-builder with appropriate mutations.
+ */
+class WasmScriptMutator extends ScriptMutator {
+  constructor(settings, db_path) {
+    super(settings, db_path);
+
+    // Decrease cross-over and object mutations. Cross-over rarely
+    // works well with Wasm. Object mutations might easily invalidate the
+    // Wasm modules.
+    this.settings.MUTATE_CROSSOVER_INSERT = 0.01;
+    this.settings.MUTATE_OBJECTS = 0.05;
+
+    // Increase number, variable and function-call mutations, which often
+    // leave the underlying wasm-module-builder structures intact.
+    this.settings.MUTATE_NUMBERS = 0.1;
+    this.settings.MUTATE_VARIABLES = 0.1;
+    this.settings.MUTATE_FUNCTION_CALLS = 0.15;
+
+    // High likelihood to drop closures, as many wasm-module-builder cases
+    // are wrapped with those. After the transformation, subsequent
+    // mutations have more impact on the resulting code.
+    this.settings.TRANSFORM_CLOSURES = 0.5;
+  }
+
+  get runnerClass() {
+    return runner.RandomWasmCorpusRunner;
+  }
+}
+
+/**
+ * Script mutator that only inserts one cross-over expression from the DB to
+ * validate.
+ */
+class CrossScriptMutator extends ScriptMutator {
+
+  // We don't do any mutations except a deterministic insertion of one
+  // snippet into a predefined place in a template.
+  mutate(source, context) {
+    // The __expression was pinned to the expression in the FixtureRunner.
+    assert(source.__expression);
+    const crossover = this.crossover;
+    let done = false;
+    babelTraverse(source.ast, {
+      ExpressionStatement(path) {
+        if (done || !path.node.expression ||
+            !babelTypes.isCallExpression(path.node.expression)) {
+          return;
+        }
+        // Avoid infinite loops if there's an expression statement in the
+        // inserted expression.
+        done = true;
+        path.insertAfter(crossover.createInsertion(path, source.__expression));
+      }
+    });
+  }
+
+  // This mutator has only one input to which the __expression was pinned.
+  concatInputs(inputs) {
+    assert(inputs.length == 1);
+    return inputs[0];
+  }
+
+  // No dependencies needed for simple snippet evaluation.
+  resolveDependencies() {
+    return [];
+  }
+
+  get runnerClass() {
+    return runner.FixtureRunner;
+  }
+}
+
 module.exports = {
   analyzeContext: analyzeContext,
   defaultSettings: defaultSettings,
+  CrossScriptMutator: CrossScriptMutator,
   ScriptMutator: ScriptMutator,
+  WasmScriptMutator: WasmScriptMutator,
 };

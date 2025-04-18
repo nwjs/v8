@@ -25,6 +25,7 @@
 #include "src/base/platform/platform-posix.h"
 #include "src/builtins/builtins.h"
 #include "src/common/globals.h"
+#include "src/common/ptr-compr.h"
 #include "src/common/thread-local-storage.h"
 #include "src/debug/interface-types.h"
 #include "src/execution/execution.h"
@@ -425,6 +426,15 @@ class WaiterQueueNode;
       DCHECK((isolate)->has_exception());                     \
       return value;                                           \
     }                                                         \
+  } while (false)
+
+#define MAYBE_RETURN_FAILURE_ON_EXCEPTION(isolate, call) \
+  do {                                                   \
+    Isolate* __isolate__ = (isolate);                    \
+    if ((call).IsNothing()) {                            \
+      DCHECK((__isolate__)->has_exception());            \
+      return ReadOnlyRoots(__isolate__).exception();     \
+    }                                                    \
   } while (false)
 
 #define MAYBE_ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, dst, call, value) \
@@ -964,7 +974,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
       v8::Isolate::AbortOnUncaughtExceptionCallback callback);
 
   enum PrintStackMode { kPrintStackConcise, kPrintStackVerbose };
-  void PrintCurrentStackTrace(std::ostream& out);
+  void PrintCurrentStackTrace(std::ostream& out,
+                              PrintCurrentStackTraceFilterCallback
+                                  should_include_frame_callback = nullptr);
   void PrintStack(StringStream* accumulator,
                   PrintStackMode mode = kPrintStackVerbose);
   void PrintStack(FILE* out, PrintStackMode mode = kPrintStackVerbose);
@@ -1730,13 +1742,16 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void DumpAndResetStats();
   void DumpAndResetBuiltinsProfileData();
 
-  void* stress_deopt_count_address() { return &stress_deopt_count_; }
+  uint64_t* stress_deopt_count_address() { return &stress_deopt_count_; }
 
   void set_force_slow_path(bool v) { force_slow_path_ = v; }
   bool force_slow_path() const { return force_slow_path_; }
   bool* force_slow_path_address() { return &force_slow_path_; }
 
   bool jitless() const { return jitless_; }
+
+  void set_stack_size(size_t v) { stack_size_ = v; }
+  size_t stack_size() { return stack_size_; }
 
   base::RandomNumberGenerator* random_number_generator();
 
@@ -1849,14 +1864,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void SetReleaseCppHeapCallback(v8::Isolate::ReleaseCppHeapCallback callback);
 
   void RunReleaseCppHeapCallback(std::unique_ptr<v8::CppHeap> cpp_heap);
-
-  void SetAtomicsWaitCallback(v8::Isolate::AtomicsWaitCallback callback,
-                              void* data);
-  void RunAtomicsWaitCallback(v8::Isolate::AtomicsWaitEvent event,
-                              DirectHandle<JSArrayBuffer> array_buffer,
-                              size_t offset_in_bytes, int64_t value,
-                              double timeout_in_ms,
-                              AtomicsWaitWakeHandle* stop_handle);
 
   void SetPromiseHook(PromiseHook hook);
   void RunPromiseHook(PromiseHookType type, DirectHandle<JSPromise> promise,
@@ -2324,11 +2331,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   std::vector<std::unique_ptr<wasm::StackMemory>>& wasm_stacks() {
     return wasm_stacks_;
   }
-  // Update the thread local's Stack object so that it is aware of the new stack
-  // start and the inactive stacks.
-  void UpdateCentralStackInfo();
 
-  void SyncStackLimit();
+  // Sets the new stack limit, updates the central stack info and checks the
+  // validity of the switch.
+  void SwitchStacks(Tagged<WasmContinuationObject> source_continuation,
+                    Tagged<WasmContinuationObject> target_continuation);
 
   // Retires the stack owned by {continuation}, to be called when returning or
   // throwing from this continuation.
@@ -2418,6 +2425,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
           Heap::SweepingForcedFinalizationMode::kUnifiedHeap);
     }
   }
+
+  static void IterateRegistersAndStackOfSimulator(
+      ::heap::base::StackVisitor* visitor);
+
+  std::shared_ptr<v8::TaskRunner> task_runner() const { return task_runner_; }
 
  private:
   explicit Isolate(IsolateGroup* isolate_group);
@@ -2591,9 +2603,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   DateCache* date_cache_ = nullptr;
   base::RandomNumberGenerator* random_number_generator_ = nullptr;
   base::RandomNumberGenerator* fuzzer_rng_ = nullptr;
-  v8::Isolate::AtomicsWaitCallback atomics_wait_callback_ = nullptr;
   v8::Isolate::ReleaseCppHeapCallback release_cpp_heap_callback_ = nullptr;
-  void* atomics_wait_callback_data_ = nullptr;
   PromiseHook promise_hook_ = nullptr;
   HostImportModuleDynamicallyCallback host_import_module_dynamically_callback_ =
       nullptr;
@@ -2727,7 +2737,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   std::unique_ptr<PersistentHandlesList> persistent_handles_list_;
 
   // Counts deopt points if deopt_every_n_times is enabled.
-  unsigned int stress_deopt_count_ = 0;
+  uint64_t stress_deopt_count_ = 0;
 
   bool force_slow_path_ = false;
 
@@ -2800,6 +2810,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   v8::ArrayBuffer::Allocator* array_buffer_allocator_ = nullptr;
   std::shared_ptr<v8::ArrayBuffer::Allocator> array_buffer_allocator_shared_;
   size_t array_buffer_max_size_ = 0;
+
+  std::shared_ptr<v8::TaskRunner> task_runner_;
 
   FutexWaitListNode futex_wait_list_node_;
 
@@ -2885,6 +2897,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // The mutex only guards adding pages, the retrieval is signal safe.
   base::Mutex code_pages_mutex_;
 
+  // Stack size set with ResourceConstraints or Isolate::SetStackLimit, in
+  // bytes. This is initialized with value of --stack-size.
+  size_t stack_size_;
 #ifdef V8_ENABLE_WEBASSEMBLY
   wasm::WasmCodeLookupCache* wasm_code_look_up_cache_ = nullptr;
   std::vector<std::unique_ptr<wasm::StackMemory>> wasm_stacks_;
@@ -3064,26 +3079,31 @@ class StackTraceFailureMessage {
   enum StackTraceMode { kIncludeStackTrace, kDontIncludeStackTrace };
 
   explicit StackTraceFailureMessage(Isolate* isolate, StackTraceMode mode,
-                                    void* ptr1 = nullptr, void* ptr2 = nullptr,
-                                    void* ptr3 = nullptr, void* ptr4 = nullptr,
-                                    void* ptr5 = nullptr, void* ptr6 = nullptr);
+                                    const Address* ptrs, size_t ptrs_count);
+
+  explicit StackTraceFailureMessage(Isolate* isolate, StackTraceMode mode,
+                                    std::initializer_list<Address> ptrs)
+      : StackTraceFailureMessage(isolate, mode, ptrs.begin(), ptrs.size()) {}
+
+  explicit StackTraceFailureMessage(Isolate* isolate, StackTraceMode mode,
+                                    std::initializer_list<void*> ptrs)
+      : StackTraceFailureMessage(isolate, mode,
+                                 reinterpret_cast<const Address*>(ptrs.begin()),
+                                 ptrs.size()) {}
 
   V8_NOINLINE void Print() volatile;
 
   static const uintptr_t kStartMarker = 0xdecade30;
-  static const uintptr_t kEndMarker = 0xdecade31;
+  static const uintptr_t kMiddleMarker = 0xdecade33;
+  static const uintptr_t kEndMarker = 0xdecade36;
   static const int kStacktraceBufferSize = 32 * KB;
 
   uintptr_t start_marker_ = kStartMarker;
-  void* isolate_;
-  void* ptr1_;
-  void* ptr2_;
-  void* ptr3_;
-  void* ptr4_;
-  void* ptr5_;
-  void* ptr6_;
-  void* code_objects_[4];
-  char js_stack_trace_[kStacktraceBufferSize];
+  Isolate* isolate_;
+  Address ptrs_[64] = {};
+  uintptr_t middle_marker_ = kMiddleMarker;
+  Address code_objects_[4] = {};
+  char js_stack_trace_[kStacktraceBufferSize] = {};
   uintptr_t end_marker_ = kEndMarker;
 };
 
@@ -3102,16 +3122,16 @@ class V8_NODISCARD MutexGuardIfOffThread<Isolate> final {
 
 // Set the current isolate for the thread *without* entering the isolate. Used
 // e.g. by background GC threads to be able to access pointer tables.
-class V8_NODISCARD SetCurrentIsolateScope {
+// This subsumes a `PtrComprCageAccessScope` which is needed in the same
+// contexts in order to be able to access on-heap objects.
+class V8_NODISCARD SetCurrentIsolateScope final {
  public:
-  explicit SetCurrentIsolateScope(Isolate* isolate)
-      : previous_isolate_(Isolate::TryGetCurrent()) {
-    Isolate::SetCurrent(isolate);
-  }
+  explicit inline SetCurrentIsolateScope(Isolate* isolate);
 
-  ~SetCurrentIsolateScope() { Isolate::SetCurrent(previous_isolate_); }
+  inline ~SetCurrentIsolateScope();
 
  private:
+  V8_NO_UNIQUE_ADDRESS PtrComprCageAccessScope ptr_compr_cage_access_scope_;
   Isolate* const previous_isolate_;
 };
 

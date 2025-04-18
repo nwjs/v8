@@ -124,13 +124,15 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
       TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                    "V8.Maglev.Inlining");
 
-      MaglevInliner inliner(local_isolate, graph);
-      inliner.Run();
+      MaglevInliner inliner(compilation_info, graph);
+      inliner.Run(is_tracing_enabled);
 
-      if (is_tracing_enabled && v8_flags.print_maglev_graphs) {
-        std::cout << "\nAfter inlining" << std::endl;
-        PrintGraph(std::cout, compilation_info, graph);
-      }
+      // TODO(victorgomes): We need to remove all identity nodes before
+      // PhiRepresentationSelector. Since Identity has different semantics
+      // there. Check if we can remove the identity nodes during
+      // PhiRepresentationSelector instead.
+      GraphProcessor<SweepIdentityNodes, /* visit_identity_nodes */ true> sweep;
+      sweep.ProcessGraph(graph);
     }
 
 #ifdef DEBUG
@@ -211,33 +213,38 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
 #endif
 
   {
-    // Preprocessing for register allocation and code gen:
-    //   - Remove dead nodes
-    //   - Collect input/output location constraints
-    //   - Find the maximum number of stack arguments passed to calls
-    //   - Collect use information, for SSA liveness and next-use distance.
-    //   - Mark
-    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
-                 "V8.Maglev.NodeProcessing");
-    GraphMultiProcessor<DeadNodeSweepingProcessor,
-                        ValueLocationConstraintProcessor, MaxCallDepthProcessor,
-                        LiveRangeAndNextUseProcessor,
-                        DecompressedUseMarkingProcessor>
-        processor(DeadNodeSweepingProcessor{compilation_info},
-                  LiveRangeAndNextUseProcessor{compilation_info});
-    processor.ProcessGraph(graph);
-  }
+    RegallocInfo regalloc_info;
+    {
+      // Preprocessing for register allocation and code gen:
+      //   - Remove dead nodes
+      //   - Collect input/output location constraints
+      //   - Find the maximum number of stack arguments passed to calls
+      //   - Collect use information, for SSA liveness and next-use distance.
+      //   - Mark
+      TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                   "V8.Maglev.NodeProcessing");
+      GraphMultiProcessor<DeadNodeSweepingProcessor,
+                          ValueLocationConstraintProcessor,
+                          MaxCallDepthProcessor, LiveRangeAndNextUseProcessor,
+                          DecompressedUseMarkingProcessor>
+          processor(DeadNodeSweepingProcessor{compilation_info},
+                    LiveRangeAndNextUseProcessor{compilation_info, graph,
+                                                 &regalloc_info});
+      processor.ProcessGraph(graph);
+    }
 
-  if (is_tracing_enabled && v8_flags.print_maglev_graphs) {
-    UnparkedScopeIfOnBackground unparked_scope(local_isolate->heap());
-    std::cout << "After register allocation pre-processing" << std::endl;
-    PrintGraph(std::cout, compilation_info, graph);
-  }
+    if (is_tracing_enabled && v8_flags.print_maglev_graphs) {
+      UnparkedScopeIfOnBackground unparked_scope(local_isolate->heap());
+      std::cout << "After register allocation pre-processing" << std::endl;
+      PrintGraph(std::cout, compilation_info, graph);
+    }
 
-  {
-    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
-                 "V8.Maglev.RegisterAllocation");
-    StraightForwardRegisterAllocator allocator(compilation_info, graph);
+    {
+      TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                   "V8.Maglev.RegisterAllocation");
+      StraightForwardRegisterAllocator allocator(compilation_info, graph,
+                                                 &regalloc_info);
+    }
 
     if (is_tracing_enabled &&
         (v8_flags.print_maglev_graph || v8_flags.print_maglev_graphs)) {

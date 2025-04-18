@@ -60,6 +60,7 @@ class ClassNameAsHeapObjectNameScope;
 
 namespace heap::base {
 class Stack;
+class StackVisitor;
 }  // namespace heap::base
 
 namespace v8 {
@@ -598,7 +599,7 @@ class Heap final {
   int NextScriptId();
   int NextDebuggingId();
   int NextStackTraceId();
-  inline int GetNextTemplateSerialNumber();
+  inline uint32_t GetNextTemplateSerialNumber();
 
   void SetSerializedObjects(Tagged<HeapObject> objects);
   void SetSerializedGlobalProxySizes(Tagged<FixedArray> sizes);
@@ -999,8 +1000,11 @@ class Heap final {
   void IterateStackRoots(RootVisitor* v);
 
   void IterateConservativeStackRoots(
-      RootVisitor* v,
+      RootVisitor* root_visitor,
       IterateRootsMode roots_mode = IterateRootsMode::kMainIsolate);
+  void IterateConservativeStackRoots(::heap::base::StackVisitor* stack_visitor);
+
+  void IterateRootsForPrecisePinning(RootVisitor* visitor);
 
   // ===========================================================================
   // Remembered set API. =======================================================
@@ -1259,9 +1263,6 @@ class Heap final {
   V8_EXPORT_PRIVATE size_t OldGenerationCapacity() const;
 
   base::Mutex* heap_expansion_mutex() { return &heap_expansion_mutex_; }
-
-  // Returns the amount of memory currently held alive by the pool.
-  size_t CommittedMemoryOfPool();
 
   // Returns the amount of memory currently committed for the heap.
   size_t CommittedMemory();
@@ -1645,6 +1646,8 @@ class Heap final {
     return new_space() || v8_flags.sticky_mark_bits;
   }
 
+  bool IsNewSpaceAllowedToGrowAboveTargetCapacity() const;
+
  private:
   class AllocationTrackerForDebugging;
 
@@ -1814,6 +1817,8 @@ class Heap final {
   void AddToRingBuffer(const char* string);
   void GetFromRingBuffer(char* buffer);
 
+  static constexpr int kRetainMapEntrySize = 2;
+
   void CompactRetainedMaps(Tagged<WeakArrayList> retained_maps);
 
   void CollectGarbageOnMemoryPressure();
@@ -1948,7 +1953,7 @@ class Heap final {
 
   void ResetOldGenerationAndGlobalAllocationLimit();
 
-  bool always_allocate() { return always_allocate_scope_count_ != 0; }
+  bool always_allocate() const { return always_allocate_scope_count_ != 0; }
 
   bool ShouldExpandOldGenerationOnSlowAllocation(LocalHeap* local_heap,
                                                  AllocationOrigin origin);

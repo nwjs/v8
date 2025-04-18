@@ -314,9 +314,9 @@ static void VisitBinop(InstructionSelectorT* selector, OpIndex node,
 }
 
 void InstructionSelectorT::VisitStackSlot(OpIndex node) {
-  StackSlotRepresentation rep = this->stack_slot_representation_of(node);
-  int slot =
-      frame_->AllocateSpillSlot(rep.size(), rep.alignment(), rep.is_tagged());
+  const StackSlotOp& stack_slot = Cast<StackSlotOp>(node);
+  int slot = frame_->AllocateSpillSlot(stack_slot.size, stack_slot.alignment,
+                                       stack_slot.is_tagged);
   OperandGenerator g(this);
 
   Emit(kArchStackSlot, g.DefineAsRegister(node),
@@ -755,24 +755,25 @@ void InstructionSelectorT::VisitInt64Mul(OpIndex node) {
 void InstructionSelectorT::VisitInt32Div(OpIndex node) {
   Mips64OperandGeneratorT g(this);
 
-  auto binop = this->word_binop_view(node);
-  Emit(kMips64Div, g.DefineSameAsFirst(node), g.UseRegister(binop.left()),
-       g.UseRegister(binop.right()));
+  auto [left, right] = Inputs<WordBinopOp>(node);
+  Emit(kMips64Div, g.DefineSameAsFirst(node), g.UseRegister(left),
+       g.UseRegister(right));
 }
 
 void InstructionSelectorT::VisitUint32Div(OpIndex node) {
   Mips64OperandGeneratorT g(this);
-  auto binop = this->word_binop_view(node);
-  Emit(kMips64DivU, g.DefineSameAsFirst(node), g.UseRegister(binop.left()),
-       g.UseRegister(binop.right()));
+
+  auto [left, right] = Inputs<WordBinopOp>(node);
+  Emit(kMips64DivU, g.DefineSameAsFirst(node), g.UseRegister(left),
+       g.UseRegister(right));
 }
 
 void InstructionSelectorT::VisitInt32Mod(OpIndex node) {
   Mips64OperandGeneratorT g(this);
 
-  auto binop = this->word_binop_view(node);
-  Emit(kMips64Mod, g.DefineSameAsFirst(node), g.UseRegister(binop.left()),
-       g.UseRegister(binop.right()));
+  auto [left, right] = Inputs<WordBinopOp>(node);
+  Emit(kMips64Mod, g.DefineSameAsFirst(node), g.UseRegister(left),
+       g.UseRegister(right));
 }
 
 void InstructionSelectorT::VisitUint32Mod(OpIndex node) {
@@ -781,16 +782,18 @@ void InstructionSelectorT::VisitUint32Mod(OpIndex node) {
 
 void InstructionSelectorT::VisitInt64Div(OpIndex node) {
   Mips64OperandGeneratorT g(this);
-  auto binop = this->word_binop_view(node);
-  Emit(kMips64Ddiv, g.DefineSameAsFirst(node), g.UseRegister(binop.left()),
-       g.UseRegister(binop.right()));
+
+  auto [left, right] = Inputs<WordBinopOp>(node);
+  Emit(kMips64Ddiv, g.DefineSameAsFirst(node), g.UseRegister(left),
+       g.UseRegister(right));
 }
 
 void InstructionSelectorT::VisitUint64Div(OpIndex node) {
   Mips64OperandGeneratorT g(this);
-  auto binop = this->word_binop_view(node);
-  Emit(kMips64DdivU, g.DefineSameAsFirst(node), g.UseRegister(binop.left()),
-       g.UseRegister(binop.right()));
+
+  auto [left, right] = Inputs<WordBinopOp>(node);
+  Emit(kMips64DdivU, g.DefineSameAsFirst(node), g.UseRegister(left),
+       g.UseRegister(right));
 }
 
 void InstructionSelectorT::VisitInt64Mod(OpIndex node) {
@@ -1774,7 +1777,7 @@ void VisitAtomicExchange(InstructionSelectorT* selector, OpIndex node,
                          ArchOpcode opcode, AtomicWidth width) {
   using OpIndex = OpIndex;
   Mips64OperandGeneratorT g(selector);
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
   OpIndex value = atomic_op.value();
@@ -1800,10 +1803,10 @@ void VisitAtomicCompareExchange(InstructionSelectorT* selector, OpIndex node,
                                 ArchOpcode opcode, AtomicWidth width) {
   using OpIndex = OpIndex;
   Mips64OperandGeneratorT g(selector);
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
-  OpIndex old_value = atomic_op.expected();
+  OpIndex old_value = atomic_op.expected().value();
   OpIndex new_value = atomic_op.value();
 
   AddressingMode addressing_mode = kMode_MRI;
@@ -1828,7 +1831,7 @@ void VisitAtomicBinop(InstructionSelectorT* selector, OpIndex node,
                       ArchOpcode opcode, AtomicWidth width) {
   using OpIndex = OpIndex;
   Mips64OperandGeneratorT g(selector);
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
   OpIndex value = atomic_op.value();

@@ -85,7 +85,6 @@ void PrintFunctionCallbackInfo(Address* implicit_args, Address* js_args,
      << "\n - return_value: " << AS_OBJ(implicit_args[FCA::kReturnValueIndex])
      << "\n - target: " << AS_OBJ(implicit_args[FCA::kTargetIndex])
      << "\n - new_target: " << AS_OBJ(implicit_args[FCA::kNewTargetIndex])
-     << "\n - holder: " << AS_OBJ(implicit_args[FCA::kHolderIndex])
 
      << "\n - argc: " << length  //
      << "\n - receiver: " << AS_OBJ(js_args[0]);
@@ -1192,7 +1191,8 @@ void AccessorInfo::AccessorInfoPrint(std::ostream& os) {
 
 void FunctionTemplateInfo::FunctionTemplateInfoPrint(std::ostream& os) {
   TorqueGeneratedFunctionTemplateInfo<
-      FunctionTemplateInfo, TemplateInfo>::FunctionTemplateInfoPrint(os);
+      FunctionTemplateInfo,
+      TemplateInfoWithProperties>::FunctionTemplateInfoPrint(os);
 
   Isolate* isolate;
   if (GetIsolateFromHeapObject(*this, &isolate)) {
@@ -1206,7 +1206,15 @@ void FunctionTemplateInfo::FunctionTemplateInfoPrint(std::ostream& os) {
     os << "\n - maybe_redirected_callback: " << kUnavailableString;
   }
 
+  os << "\n - serial_number: ";
+  if (serial_number() == kUninitializedSerialNumber) {
+    os << "n/a";
+  } else {
+    os << serial_number();
+  }
   os << "\n --- flags: ";
+  if (is_cacheable()) os << "\n - is_cacheable";
+  if (should_promote_to_read_only()) os << "\n - should_promote_to_read_only";
   if (is_object_template_call_handler()) {
     os << "\n - is_object_template_call_handler";
   }
@@ -2600,6 +2608,9 @@ void WasmStruct::WasmStructPrint(std::ostream& os) {
   const wasm::CanonicalStructType* struct_type =
       wasm::GetTypeCanonicalizer()->LookupStruct(
           map()->wasm_type_info()->type_index());
+  if (struct_type->is_descriptor()) {
+    os << "\n - describes RTT: " << Brief(get_described_rtt());
+  }
   os << "\n - fields (" << struct_type->field_count() << "):";
   for (uint32_t i = 0; i < struct_type->field_count(); i++) {
     wasm::CanonicalValueType field = struct_type->field(i);
@@ -2744,7 +2755,6 @@ void WasmArray::WasmArrayPrint(std::ostream& os) {
 void WasmContinuationObject::WasmContinuationObjectPrint(std::ostream& os) {
   PrintHeader(os, "WasmContinuationObject");
   os << "\n - parent: " << parent();
-  os << "\n - jmpbuf: " << jmpbuf();
   os << "\n - stack: " << stack();
   os << "\n";
 }
@@ -2756,7 +2766,6 @@ void WasmSuspenderObject::WasmSuspenderObjectPrint(std::ostream& os) {
   os << "\n - promise: " << promise();
   os << "\n - resume: " << resume();
   os << "\n - reject: " << reject();
-  os << "\n - state: " << state();
   os << "\n";
 }
 
@@ -4162,8 +4171,7 @@ inline i::Tagged<i::Object> GetObjectFromRaw(void* object) {
 //
 // The following functions are used by our gdb macros.
 //
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern i::Tagged<i::Object> _v8_internal_Get_Object(
+V8_DEBUGGING_EXPORT extern i::Tagged<i::Object> _v8_internal_Get_Object(
     void* object) {
   return GetObjectFromRaw(object);
 }
@@ -4181,7 +4189,7 @@ V8_EXPORT_PRIVATE extern i::Tagged<i::Object> _v8_internal_Get_Object(
 //   0xe8300005309: [String] in ReadOnlySpace: #null
 //
 #define AS_HELPER_DEF(Type, ...)                                              \
-  V8_DONT_STRIP_SYMBOL V8_EXPORT_PRIVATE auto& _As_##Type(i::Address ptr) {   \
+  V8_DEBUGGING_EXPORT auto& _As_##Type(i::Address ptr) {                      \
     i::Tagged<i::Type> tagged = UncheckedCast<i::Type>(                       \
         GetObjectFromRaw(reinterpret_cast<void*>(ptr)));                      \
     /* _As_XXX(..) functions provide storage for TaggedOperatorArrowRef<T> */ \
@@ -4191,8 +4199,7 @@ V8_EXPORT_PRIVATE extern i::Tagged<i::Object> _v8_internal_Get_Object(
     result = tagged.operator->();                                             \
     return result;                                                            \
   }                                                                           \
-  V8_DONT_STRIP_SYMBOL V8_EXPORT_PRIVATE auto& _As_##Type(                    \
-      i::Tagged<i::HeapObject>& obj) {                                        \
+  V8_DEBUGGING_EXPORT auto& _As_##Type(i::Tagged<i::HeapObject>& obj) {       \
     return _As_##Type(obj.ptr());                                             \
   }
 
@@ -4201,24 +4208,22 @@ HEAP_OBJECT_TRUSTED_TYPE_LIST(AS_HELPER_DEF)
 ODDBALL_LIST(AS_HELPER_DEF)
 #undef AS_HELPER_DEF
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_Object(void* object) {
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_Object(void* object) {
   i::AllowHandleDereference allow_deref;
   i::AllowHandleUsageOnAllThreads allow_deref_all_threads;
   i::Print(GetObjectFromRaw(object));
 }
 
 // Used by lldb_visualizers.py to create a representation of a V8 object.
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern std::string _v8_internal_Print_Object_To_String(
+V8_DEBUGGING_EXPORT extern std::string _v8_internal_Print_Object_To_String(
     void* object) {
   std::stringstream strm;
   i::Print(GetObjectFromRaw(object), strm);
   return strm.str();
 }
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_LoadHandler(void* object) {
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_LoadHandler(
+    void* object) {
 #ifdef OBJECT_PRINT
   i::StdoutStream os;
   i::LoadHandler::PrintHandler(GetObjectFromRaw(object), os);
@@ -4226,8 +4231,8 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_LoadHandler(void* object) {
 #endif
 }
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_StoreHandler(void* object) {
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_StoreHandler(
+    void* object) {
 #ifdef OBJECT_PRINT
   i::StdoutStream os;
   i::StoreHandler::PrintHandler(GetObjectFromRaw(object), os);
@@ -4235,8 +4240,7 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_StoreHandler(void* object) {
 #endif
 }
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_Code(void* object) {
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_Code(void* object) {
   i::Address address = reinterpret_cast<i::Address>(object);
   i::Isolate* isolate = i::Isolate::Current();
 
@@ -4272,17 +4276,15 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Code(void* object) {
 }
 
 #ifdef V8_ENABLE_LEAPTIERING
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_Dispatch_Handle(
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_Dispatch_Handle(
     uint32_t handle) {
   i::IsolateGroup::current()->js_dispatch_table()->PrintEntry(
       i::JSDispatchHandle(handle));
 }
 #endif  // V8_ENABLE_LEAPTIERING
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_OnlyCode(void* object,
-                                                          size_t range_limit) {
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_OnlyCode(
+    void* object, size_t range_limit) {
   i::Address address = reinterpret_cast<i::Address>(object);
   i::Isolate* isolate = i::Isolate::Current();
 
@@ -4311,8 +4313,7 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_OnlyCode(void* object,
 #endif
 }
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_StackTrace() {
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_StackTrace() {
   i::Isolate* isolate = i::Isolate::Current();
   isolate->PrintStack(stdout);
 }
@@ -4329,8 +4330,7 @@ struct StackTraceDebugDetails {
 }  // namespace _v8_internal_debugonly
 
 // Used by lldb_visualizers.py to create a representation of the V8 stack.
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern std::vector<
+V8_DEBUGGING_EXPORT extern std::vector<
     _v8_internal_debugonly::StackTraceDebugDetails>
 _v8_internal_Expand_StackTrace(i::Isolate* isolate) {
   std::vector<_v8_internal_debugonly::StackTraceDebugDetails> stack;
@@ -4364,8 +4364,7 @@ _v8_internal_Expand_StackTrace(i::Isolate* isolate) {
   return stack;
 }
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_TransitionTree(
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_TransitionTree(
     void* object, bool start_at_root = false) {
   i::Tagged<i::Object> o(GetObjectFromRaw(object));
   if (!IsMap(o)) {
@@ -4381,8 +4380,8 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_TransitionTree(
   }
 }
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_Object_MarkBit(void* object) {
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_Object_MarkBit(
+    void* object) {
 #ifdef OBJECT_PRINT
   const auto mark_bit =
       v8::internal::MarkBit::From(reinterpret_cast<i::Address>(object));
@@ -4394,16 +4393,14 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Object_MarkBit(void* object) {
 #endif
 }
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE void _v8_internal_Print_FunctionCallbackInfo(
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_FunctionCallbackInfo(
     void* function_callback_info) {
 #ifdef OBJECT_PRINT
   i::PrintFunctionCallbackInfo(function_callback_info);
 #endif
 }
 
-V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE void _v8_internal_Print_PropertyCallbackInfo(
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_PropertyCallbackInfo(
     void* property_callback_info) {
 #ifdef OBJECT_PRINT
   i::PrintPropertyCallbackInfo(property_callback_info);

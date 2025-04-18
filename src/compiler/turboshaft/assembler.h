@@ -3298,7 +3298,7 @@ class TurboshaftAssemblerOpInterface
     int cache_location = index - kMinParameterIndex;
     DCHECK_GE(cache_location, 0);
     if (static_cast<size_t>(cache_location) >= cached_parameters_.size()) {
-      cached_parameters_.resize_and_init(cache_location + 1);
+      cached_parameters_.resize(cache_location + 1, {});
     }
     OpIndex& cached_param = cached_parameters_[cache_location];
     if (!cached_param.valid()) {
@@ -4715,8 +4715,8 @@ class TurboshaftAssemblerOpInterface
     return ReduceIfReachableSameValue(left, right, mode);
   }
 
-  V<Word32> Float64SameValue(V<Float64> left, V<Float64> right) {
-    return ReduceIfReachableFloat64SameValue(left, right);
+  V<Word32> Float64SameValue(ConstOrV<Float64> left, ConstOrV<Float64> right) {
+    return ReduceIfReachableFloat64SameValue(resolve(left), resolve(right));
   }
 
   OpIndex FastApiCall(V<turboshaft::FrameState> frame_state,
@@ -5032,6 +5032,15 @@ class TurboshaftAssemblerOpInterface
                             const uint8_t shuffle[kSimd128Size]) {
     return ReduceIfReachableSimd128Shuffle(left, right, kind, shuffle);
   }
+
+#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+  V<Simd256> Simd128LoadPairDeinterleave(
+      V<WordPtr> base, V<WordPtr> index, LoadOp::Kind load_kind,
+      Simd128LoadPairDeinterleaveOp::Kind kind) {
+    return ReduceIfReachableSimd128LoadPairDeinterleave(base, index, load_kind,
+                                                        kind);
+  }
+#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 
   // SIMD256
 #if V8_ENABLE_WASM_SIMD256_REVEC

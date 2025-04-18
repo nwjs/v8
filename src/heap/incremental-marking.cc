@@ -143,6 +143,9 @@ void IncrementalMarking::Start(GarbageCollector garbage_collector,
   // might change across multiple invocations (its internal state could be
   // updated concurrently from another thread between invocations).
   CHECK(CanBeStarted());
+  // The "current isolate" must be set correctly so we can access pointer
+  // tables.
+  DCHECK_EQ(isolate(), Isolate::TryGetCurrent());
 
   if (V8_UNLIKELY(v8_flags.trace_incremental_marking)) {
     const size_t old_generation_size_mb =
@@ -989,11 +992,13 @@ void IncrementalMarking::Step(v8::base::TimeDelta max_duration,
       (!v8_flags.incremental_marking_unified_schedule ||
        (cpp_heap_marked_bytes < marked_bytes_limit))) {
     const auto v8_start = v8::base::TimeTicks::Now();
+    const size_t v8_marked_bytes_limit =
+        v8_flags.incremental_marking_unified_schedule
+            ? marked_bytes_limit - cpp_heap_marked_bytes
+            : marked_bytes_limit;
     std::tie(v8_marked_bytes, std::ignore) =
         major_collector_->ProcessMarkingWorklist(
-            max_duration - cpp_heap_duration,
-            marked_bytes_limit - cpp_heap_marked_bytes,
-            MarkCompactCollector::MarkingWorklistProcessingMode::kDefault);
+            max_duration - cpp_heap_duration, v8_marked_bytes_limit);
     v8_time = v8::base::TimeTicks::Now() - v8_start;
     heap_->tracer()->AddIncrementalMarkingStep(v8_time.InMillisecondsF(),
                                                v8_marked_bytes);

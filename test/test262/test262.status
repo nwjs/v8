@@ -208,6 +208,9 @@
   # https://bugs.chromium.org/p/v8/issues/detail?id=12209
   'intl402/Intl/supportedValuesOf/collations-accepted-by-Collator': [FAIL],
 
+  # https://github.com/tc39/test262/pull/4417
+  'intl402/Locale/prototype/getWeekInfo/output-object-keys': [FAIL],
+
   # https://bugs.chromium.org/p/v8/issues/detail?id=7831
   'language/statements/generators/generator-created-after-decl-inst': [FAIL],
   'language/expressions/generators/generator-created-after-decl-inst': [FAIL],
@@ -226,9 +229,6 @@
 
   # https://bugs.chromium.org/p/v8/issues/detail?id=10381
   'built-ins/Array/prototype/concat/arg-length-near-integer-limit': [FAIL],
-
-  # https://bugs.chromium.org/p/v8/issues/detail?id=10383
-  'built-ins/RegExp/prototype/Symbol.replace/fn-invoke-args-empty-result': [FAIL],
 
   # https://crbug.com/v8/10789
   'built-ins/Function/prototype/toString/built-in-function-object': [FAIL],
@@ -264,9 +264,6 @@
   'language/identifier-resolution/assign-to-global-undefined': [FAIL],
 
   # https://bugs.chromium.org/p/v8/issues/detail?id=13174
-  'built-ins/RegExp/prototype/Symbol.match/flags-tostring-error': [FAIL],
-  'built-ins/RegExp/prototype/Symbol.match/get-flags-err': [FAIL],
-  'built-ins/RegExp/prototype/Symbol.match/get-unicode-error': [FAIL],
   'built-ins/RegExp/prototype/Symbol.replace/flags-tostring-error': [FAIL],
   'built-ins/RegExp/prototype/Symbol.replace/get-flags-err': [FAIL],
   'built-ins/RegExp/prototype/Symbol.replace/get-unicode-error': [FAIL],
@@ -284,7 +281,6 @@
 
   # UBSan complain about static_cast<int32_t> from double in AddISODate()
 
-  'staging/Intl402/Temporal/old/addition-across-lunisolar-leap-months': [FAIL],
   'staging/Intl402/Temporal/old/date-time-format': [FAIL],
   'staging/Intl402/Temporal/old/datetime-toLocaleString': [FAIL],
   'staging/Intl402/Temporal/old/date-toLocaleString': [FAIL],
@@ -293,7 +289,6 @@
   'staging/Intl402/Temporal/old/instant-toLocaleString': [FAIL],
   'staging/Intl402/Temporal/old/japanese-era': [FAIL],
   'staging/Intl402/Temporal/old/monthday-toLocaleString': [FAIL],
-  'staging/Intl402/Temporal/old/non-iso-calendars': [FAIL],
   'staging/Intl402/Temporal/old/yearmonth-toLocaleString': [FAIL],
 
   # intl402
@@ -1056,16 +1051,6 @@
   'built-ins/ShadowRealm/prototype/evaluate/globalthis-ordinary-object': [FAIL],
   'built-ins/ShadowRealm/prototype/importValue/throws-if-exportname-not-string': [FAIL],
 
-  # https://bugs.chromium.org/p/v8/issues/detail?id=12524
-  'built-ins/Date/prototype/setHours/arg-coercion-order': [FAIL],
-  'built-ins/Date/prototype/setMinutes/arg-coercion-order': [FAIL],
-  'built-ins/Date/prototype/setMonth/arg-coercion-order': [FAIL],
-  'built-ins/Date/prototype/setSeconds/arg-coercion-order': [FAIL],
-  'built-ins/Date/prototype/setUTCHours/arg-coercion-order': [FAIL],
-  'built-ins/Date/prototype/setUTCMinutes/arg-coercion-order': [FAIL],
-  'built-ins/Date/prototype/setUTCMonth/arg-coercion-order': [FAIL],
-  'built-ins/Date/prototype/setUTCSeconds/arg-coercion-order': [FAIL],
-
   # https://bugs.chromium.org/p/v8/issues/detail?id=14288
   'intl402/DateTimeFormat/timezone-case-insensitive': [FAIL],
   'intl402/DateTimeFormat/timezone-not-canonicalized': [FAIL],
@@ -1508,9 +1493,6 @@
 ##############################################################################
 ['variant == jitless', {
   # https://crbug.com/v8/7777
-  'built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-plus-quantifier-flags-u': [SKIP],
-  'built-ins/RegExp/CharacterClassEscapes/character-class-non-whitespace-class-escape-plus-quantifier-flags-u': [SKIP],
-  'built-ins/RegExp/CharacterClassEscapes/character-class-non-word-class-escape-plus-quantifier-flags-u': [SKIP],
 }], # variant == jitless
 
 ['variant == no_wasm_traps', {
@@ -2159,14 +2141,6 @@
   'built-ins/Temporal/ZonedDateTime/prototype/toPlainDateTime/limits': [FAIL],
   'built-ins/Temporal/ZonedDateTime/prototype/toPlainDateTime/negative-epochnanoseconds': [FAIL],
   'built-ins/Temporal/ZonedDateTime/prototype/toPlainDateTime/pre-epoch': [FAIL],
-  'built-ins/Uint8Array/fromHex/descriptor': [FAIL],
-  'built-ins/Uint8Array/fromHex/ignores-receiver': [FAIL],
-  'built-ins/Uint8Array/fromHex/illegal-characters': [FAIL],
-  'built-ins/Uint8Array/fromHex/length': [FAIL],
-  'built-ins/Uint8Array/fromHex/name': [FAIL],
-  'built-ins/Uint8Array/fromHex/nonconstructor': [FAIL],
-  'built-ins/Uint8Array/fromHex/odd-length-input': [FAIL],
-  'built-ins/Uint8Array/fromHex/results': [FAIL],
   'built-ins/Uint8Array/prototype/setFromBase64/alphabet': [FAIL],
   'built-ins/Uint8Array/prototype/setFromBase64/descriptor': [FAIL],
   'built-ins/Uint8Array/prototype/setFromBase64/detached-buffer': [FAIL],
@@ -2484,7 +2458,6 @@
   'staging/sm/class/superCallOrder': [FAIL],
   'staging/sm/class/superPropOrdering': [FAIL],
   'staging/sm/DataView/detach-after-construction': [FAIL],
-  'staging/sm/Date/setTime-argument-shortcircuiting': [FAIL],
   'staging/sm/eval/redeclared-arguments-in-param-expression-eval': [FAIL],
   'staging/sm/expressions/short-circuit-compound-assignment-property-key-evaluation': [FAIL],
   'staging/sm/extensions/ArrayBuffer-slice-arguments-detaching': [FAIL],
@@ -2506,8 +2479,6 @@
   'staging/sm/lexical-environment/var-in-catch-body-annex-b-eval': [FAIL],
   'staging/sm/object/clear-dictionary-accessor-getset': [FAIL],
   'staging/sm/object/values-entries-typedarray': [FAIL],
-  'staging/sm/RegExp/lastIndex-match-or-replace': [FAIL],
-  'staging/sm/RegExp/match-trace': [FAIL],
   'staging/sm/RegExp/replace-trace': [FAIL],
   'staging/sm/regress/regress-1507322-deep-weakmap': [FAIL],
   'staging/sm/regress/regress-563221': [FAIL],
@@ -2712,4 +2683,57 @@
 }],
 # end import test262@44d71fbe7dccabcc071cbe66cc4b105d896d3c2a
 ###
+
+####
+# Roll-watcher patch
+[ALWAYS, {
+  'built-ins/String/prototype/match/cstm-matcher-on-bigint-primitive': [SKIP],
+  'built-ins/String/prototype/match/cstm-matcher-on-boolean-primitive': [SKIP],
+  'built-ins/String/prototype/match/cstm-matcher-on-number-primitive': [SKIP],
+  'built-ins/String/prototype/match/cstm-matcher-on-string-primitive': [SKIP],
+  'built-ins/String/prototype/matchAll/cstm-matchall-on-bigint-primitive': [SKIP],
+  'built-ins/String/prototype/matchAll/cstm-matchall-on-number-primitive': [SKIP],
+  'built-ins/String/prototype/matchAll/cstm-matchall-on-string-primitive': [SKIP],
+  'built-ins/String/prototype/replace/cstm-replace-on-bigint-primitive': [SKIP],
+  'built-ins/String/prototype/replace/cstm-replace-on-boolean-primitive': [SKIP],
+  'built-ins/String/prototype/replace/cstm-replace-on-number-primitive': [SKIP],
+  'built-ins/String/prototype/replace/cstm-replace-on-string-primitive': [SKIP],
+  'built-ins/String/prototype/replaceAll/cstm-replaceall-on-bigint-primitive': [SKIP],
+  'built-ins/String/prototype/replaceAll/cstm-replaceall-on-boolean-primitive': [SKIP],
+  'built-ins/String/prototype/replaceAll/cstm-replaceall-on-number-primitive': [SKIP],
+  'built-ins/String/prototype/replaceAll/cstm-replaceall-on-string-primitive': [SKIP],
+  'built-ins/String/prototype/search/cstm-search-on-bigint-primitive': [SKIP],
+  'built-ins/String/prototype/search/cstm-search-on-boolean-primitive': [SKIP],
+  'built-ins/String/prototype/search/cstm-search-on-number-primitive': [SKIP],
+  'built-ins/String/prototype/search/cstm-search-on-string-primitive': [SKIP],
+  'built-ins/String/prototype/split/cstm-split-on-bigint-primitive': [SKIP],
+  'built-ins/String/prototype/split/cstm-split-on-boolean-primitive': [SKIP],
+  'built-ins/String/prototype/split/cstm-split-on-number-primitive': [SKIP],
+  'built-ins/String/prototype/split/cstm-split-on-string-primitive': [SKIP],
+  'intl402/DateTimeFormat/canonicalize-utc-timezone': [SKIP],
+  'intl402/Temporal/ZonedDateTime/prototype/equals/canonicalize-utc-timezone': [SKIP],
+  'staging/Intl402/Temporal/old/addition-across-lunisolar-leap-months-chinese': [SKIP],
+  'staging/Intl402/Temporal/old/addition-across-lunisolar-leap-months-hebrew': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-buddhist': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-chinese': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-coptic': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-dangi': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-ethioaa': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-ethiopic': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-gregory': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-hebrew': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-indian': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-islamic': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-islamic-civil': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-islamic-rgsa': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-islamic-tbla': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-islamic-umalqura': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-islamicc': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-iso8601': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-japanese': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-persian': [SKIP],
+  'staging/Intl402/Temporal/old/non-iso-calendars-roc': [SKIP],
+}],
+# End roll-watcher patch
+####
 ]

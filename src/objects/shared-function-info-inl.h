@@ -5,6 +5,9 @@
 #ifndef V8_OBJECTS_SHARED_FUNCTION_INFO_INL_H_
 #define V8_OBJECTS_SHARED_FUNCTION_INFO_INL_H_
 
+#include "src/objects/shared-function-info.h"
+// Include the non-inl header before the rest of the headers.
+
 #include <optional>
 
 #include "src/base/macros.h"
@@ -22,7 +25,6 @@
 #include "src/objects/objects-inl.h"
 #include "src/objects/scope-info-inl.h"
 #include "src/objects/script-inl.h"
-#include "src/objects/shared-function-info.h"
 #include "src/objects/string.h"
 #include "src/objects/templates-inl.h"
 
@@ -397,6 +399,8 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, properties_are_final,
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags,
                     private_name_lookup_skips_outer_class,
                     SharedFunctionInfo::PrivateNameLookupSkipsOuterClassBit)
+BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, live_edited,
+                    SharedFunctionInfo::LiveEditedBit)
 
 bool SharedFunctionInfo::optimization_disabled() const {
   return disabled_optimization_reason() != BailoutReason::kNoReason;
@@ -1011,7 +1015,9 @@ void SharedFunctionInfo::ClearPreparseData(IsolateForSandbox isolate) {
                 UncompiledData::kHeaderSize);
 
   // Fill the remaining space with filler and clear slots in the trimmed area.
-  heap->NotifyObjectSizeChange(data, UncompiledDataWithPreparseData::kSize,
+  int old_size = data->Size();
+  DCHECK_LE(UncompiledDataWithPreparseData::kSize, old_size);
+  heap->NotifyObjectSizeChange(data, old_size,
                                UncompiledDataWithoutPreparseData::kSize,
                                ClearRecordedSlots::kYes);
 

@@ -61,6 +61,7 @@
 #include "src/interpreter/interpreter.h"
 #include "src/logging/counters.h"
 #include "src/logging/log-file.h"
+#include "src/objects/js-array.h"
 #include "src/objects/managed-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/objects.h"
@@ -1548,6 +1549,46 @@ void RejectPromiseIfExecutionIsNotTerminating(Isolate* isolate,
     resolver->Reject(realm, try_catch.Exception()).ToChecked();
   }
 }
+
+Maybe<bool> ChainDynamicImportPromise(Isolate* isolate, Local<Context> realm,
+                                      v8::Local<v8::Promise::Resolver> resolver,
+                                      Local<Promise> result_promise,
+                                      Local<Value> namespace_or_source) {
+  Local<Array> module_resolution_data = v8::Array::New(isolate);
+  if (module_resolution_data->SetPrototypeV2(realm, v8::Null(isolate))
+          .IsNothing()) {
+    return Nothing<bool>();
+  }
+  if (module_resolution_data
+          ->Set(realm, ModuleResolutionDataIndex::kResolver, resolver)
+          .IsNothing()) {
+    return Nothing<bool>();
+  }
+  if (module_resolution_data
+          ->Set(realm, ModuleResolutionDataIndex::kNamespaceOrSource,
+                namespace_or_source)
+          .IsNothing()) {
+    return Nothing<bool>();
+  }
+  Local<Function> callback_success;
+  if (!Function::New(realm, Shell::ModuleResolutionSuccessCallback,
+                     module_resolution_data)
+           .ToLocal(&callback_success)) {
+    return Nothing<bool>();
+  }
+
+  Local<Function> callback_failure;
+  if (!Function::New(realm, Shell::ModuleResolutionFailureCallback,
+                     module_resolution_data)
+           .ToLocal(&callback_failure)) {
+    return Nothing<bool>();
+  }
+  if (result_promise->Then(realm, callback_success, callback_failure)
+          .IsEmpty()) {
+    return Nothing<bool>();
+  }
+  return Just(true);
+}
 }  // namespace
 
 void Shell::DoHostImportModuleDynamically(void* import_data) {
@@ -1613,9 +1654,7 @@ void Shell::DoHostImportModuleDynamically(void* import_data) {
         } else if (!FetchModuleSource(Local<Module>(), realm, absolute_path,
                                       module_type)
                         .ToLocal(&module_source)) {
-          RejectPromiseIfExecutionIsNotTerminating(isolate, realm, resolver,
-                                                   try_catch);
-          return;
+          break;
         }
         Local<Promise::Resolver> module_resolver =
             Promise::Resolver::New(realm).ToLocalChecked();
@@ -1634,16 +1673,14 @@ void Shell::DoHostImportModuleDynamically(void* import_data) {
         } else if (!FetchModuleTree(Local<Module>(), realm, absolute_path,
                                     module_type)
                         .ToLocal(&root_module)) {
-          RejectPromiseIfExecutionIsNotTerminating(isolate, realm, resolver,
-                                                   try_catch);
-          return;
+          break;
         }
         if (root_module
                 ->InstantiateModule(realm, ResolveModuleCallback,
                                     ResolveModuleSourceCallback)
                 .FromMaybe(false)) {
           MaybeLocal<Value> maybe_result = root_module->Evaluate(realm);
-          CHECK(!maybe_result.IsEmpty());
+          if (maybe_result.IsEmpty()) break;
           global_result_promise.Reset(
               isolate, maybe_result.ToLocalChecked().As<Promise>());
           global_namespace_or_source.Reset(isolate,
@@ -1687,25 +1724,15 @@ void Shell::DoHostImportModuleDynamically(void* import_data) {
 
   Context::Scope context_scope(realm);
 
-  Local<Array> module_resolution_data = v8::Array::New(isolate);
-  module_resolution_data->SetPrototypeV2(realm, v8::Null(isolate)).ToChecked();
-  module_resolution_data
-      ->Set(realm, ModuleResolutionDataIndex::kResolver, resolver)
-      .ToChecked();
-  module_resolution_data
-      ->Set(realm, ModuleResolutionDataIndex::kNamespaceOrSource,
-            namespace_or_source)
-      .ToChecked();
-  Local<Function> callback_success;
-  CHECK(Function::New(realm, ModuleResolutionSuccessCallback,
-                      module_resolution_data)
-            .ToLocal(&callback_success));
-  Local<Function> callback_failure;
-  CHECK(Function::New(realm, ModuleResolutionFailureCallback,
-                      module_resolution_data)
-            .ToLocal(&callback_failure));
-  result_promise->Then(realm, callback_success, callback_failure)
-      .ToLocalChecked();
+  // Chaining the promise generally does not throw, but execution may be
+  // terminating (e.g. when within a worker being terminated). Check the return
+  // value to display a helpful message.
+  if (ChainDynamicImportPromise(isolate, realm, resolver, result_promise,
+                                namespace_or_source)
+          .IsNothing()) {
+    RejectPromiseIfExecutionIsNotTerminating(isolate, realm, resolver,
+                                             try_catch);
+  }
 }
 
 bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
@@ -4115,6 +4142,22 @@ Local<ObjectTemplate> Shell::CreateD8Template(Isolate* isolate) {
         FunctionTemplate::New(isolate, ProfilerTriggerSample));
     d8_template->Set(isolate, "profiler", profiler_template);
   }
+  {
+    Local<ObjectTemplate> constants_template = ObjectTemplate::New(isolate);
+    if (!i::v8_flags.correctness_fuzzer_suppressions) {
+      // Don't expose these constants in differential-fuzzing builds as they
+      // differ with lower-limits mode.
+      constants_template->Set(
+          String::NewFromUtf8Literal(isolate, "maxFixedArrayCapacity",
+                                     NewStringType::kInternalized),
+          Number::New(isolate, i::kMaxFixedArrayCapacity));
+      constants_template->Set(
+          String::NewFromUtf8Literal(isolate, "maxFastArrayLength",
+                                     NewStringType::kInternalized),
+          Number::New(isolate, i::JSArray::kMaxFastArrayLength));
+    }
+    d8_template->Set(isolate, "constants", constants_template);
+  }
 #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
   d8_template->Set(
       isolate, "getContinuationPreservedEmbedderDataViaAPIForTesting",
@@ -6425,6 +6468,8 @@ int Shell::Main(int argc, char* argv[]) {
 #if defined(V8_ENABLE_PARTITION_ALLOC)
 #if PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC)
   allocator_shim::ConfigurePartitionsForTesting();
+  allocator_shim::internal::PartitionAllocMalloc::Allocator()
+      ->EnableThreadCacheIfSupported();
 #endif  // PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC)
 #endif
   v8::base::EnsureConsoleOutput();

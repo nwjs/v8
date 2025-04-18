@@ -639,6 +639,15 @@ class InstructionSelectorT final : public TurboshaftAdapter {
 
   turboshaft::OptionalOpIndex FindProjection(turboshaft::OpIndex node,
                                              size_t projection_index);
+  template <typename Op>
+  auto Inputs(turboshaft::OpIndex node) {
+    const Op& op = Cast<Op>(node);
+    return InputsImpl(op, std::make_index_sequence<Op::input_count>());
+  }
+  template <typename Op, std::size_t... Is>
+  auto InputsImpl(const Op& op, std::index_sequence<Is...>) {
+    return std::make_tuple(op.input(Is)...);
+  }
 
   // When we want to do branch-if-overflow fusion, we need to be mindful of the
   // 1st projection of the OverflowBinop:
@@ -664,6 +673,10 @@ class InstructionSelectorT final : public TurboshaftAdapter {
   }
 
   void UpdateSourcePosition(Instruction* instruction, turboshaft::OpIndex node);
+  bool IsCommutative(turboshaft::OpIndex node) const;
+  turboshaft::OpIndex block_terminator(const turboshaft::Block* block) const {
+    return schedule_->PreviousIndex(block->end());
+  }
 
  private:
   friend OperandGenerator;
@@ -752,7 +765,10 @@ class InstructionSelectorT final : public TurboshaftAdapter {
   // {call_code_immediate} to generate immediate operands to calls of code.
   // {call_address_immediate} to generate immediate operands to address calls.
   void InitializeCallBuffer(turboshaft::OpIndex call, CallBuffer* buffer,
-                            CallBufferFlags flags, int stack_slot_delta = 0);
+                            CallBufferFlags flags, turboshaft::OpIndex callee,
+                            turboshaft::OptionalOpIndex frame_state_opt,
+                            base::Vector<const turboshaft::OpIndex> arguments,
+                            int return_count, int stack_slot_delta = 0);
   bool IsTailCallAddressImmediate();
 
   void UpdateMaxPushedArgumentCount(size_t count);
@@ -1036,7 +1052,6 @@ class InstructionSelectorT final : public TurboshaftAdapter {
   void VisitConstant(turboshaft::OpIndex node);
   void VisitCall(turboshaft::OpIndex call, turboshaft::Block* handler = {});
   void VisitDeoptimizeIf(turboshaft::OpIndex node);
-  void VisitDeoptimizeUnless(turboshaft::OpIndex node);
   void VisitDynamicCheckMapsWithDeoptUnless(Node* node);
   void VisitTrapIf(turboshaft::OpIndex node, TrapId trap_id);
   void VisitTrapUnless(turboshaft::OpIndex node, TrapId trap_id);
@@ -1131,6 +1146,10 @@ class InstructionSelectorT final : public TurboshaftAdapter {
   // Swaps the two first input operands of the node, to help match shuffles
   // to specific architectural instructions.
   void SwapShuffleInputs(TurboshaftAdapter::SimdShuffleView& node);
+
+#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+  void VisitSimd128LoadPairDeinterleave(turboshaft::OpIndex node);
+#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 
 #if V8_ENABLE_WASM_SIMD256_REVEC
   void VisitSimd256LoadTransform(turboshaft::OpIndex node);

@@ -276,9 +276,9 @@ static void VisitBinop(InstructionSelectorT* selector, OpIndex node,
 }
 
 void InstructionSelectorT::VisitStackSlot(OpIndex node) {
-  StackSlotRepresentation rep = this->stack_slot_representation_of(node);
-  int slot =
-      frame_->AllocateSpillSlot(rep.size(), rep.alignment(), rep.is_tagged());
+  const StackSlotOp& stack_slot = Cast<StackSlotOp>(node);
+  int slot = frame_->AllocateSpillSlot(stack_slot.size, stack_slot.alignment,
+                                       stack_slot.is_tagged);
   OperandGenerator g(this);
 
   Emit(kArchStackSlot, g.DefineAsRegister(node),
@@ -1684,12 +1684,6 @@ void InstructionSelectorT::VisitSignExtendWord16ToInt32(OpIndex node) {
 
 void InstructionSelectorT::VisitWord32Clz(OpIndex node) {
   VisitRR(this, kRiscvClz32, node);
-}
-
-void InstructionSelectorT::VisitWord32Ctz(OpIndex node) {
-  RiscvOperandGeneratorT g(this);
-  Emit(kRiscvCtz32, g.DefineAsRegister(node),
-       g.UseRegister(this->input_at(node, 0)));
 }
 
 #define VISIT_EXT_MUL(OPCODE1, OPCODE2, TYPE)                                \

@@ -1069,9 +1069,9 @@ void InstructionSelectorT::VisitTraceInstruction(OpIndex node) {
 }
 
 void InstructionSelectorT::VisitStackSlot(OpIndex node) {
-  StackSlotRepresentation rep = this->stack_slot_representation_of(node);
-  int slot =
-      frame_->AllocateSpillSlot(rep.size(), rep.alignment(), rep.is_tagged());
+  const StackSlotOp& stack_slot = Cast<StackSlotOp>(node);
+  int slot = frame_->AllocateSpillSlot(stack_slot.size, stack_slot.alignment,
+                                       stack_slot.is_tagged);
   OperandGenerator g(this);
 
   Emit(kArchStackSlot, g.DefineAsRegister(node),
@@ -1395,7 +1395,7 @@ namespace {
 void VisitAtomicExchange(InstructionSelectorT* selector, OpIndex node,
                          ArchOpcode opcode, AtomicWidth width,
                          MemoryAccessKind access_kind) {
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   X64OperandGeneratorT g(selector);
   AddressingMode addressing_mode;
   InstructionOperand inputs[] = {
@@ -1524,8 +1524,9 @@ void VisitStoreCommon(InstructionSelectorT* selector,
     } else {
       if (ElementSizeLog2Of(store_rep.representation()) <
           kSystemPointerSizeLog2) {
-        if (selector->is_truncate_word64_to_word32(value)) {
-          value = selector->input_at(value, 0);
+        if (V<Word64> value64;
+            selector->MatchTruncateWord64ToWord32(value, &value64)) {
+          value = value64;
         }
       }
 
@@ -1689,34 +1690,30 @@ static void VisitBinop(InstructionSelectorT* selector, OpIndex node,
 
 void InstructionSelectorT::VisitWord32And(OpIndex node) {
   X64OperandGeneratorT g(this);
-  auto binop = this->word_binop_view(node);
-  if (auto c = GetWord32Constant(this, binop.right())) {
-    if (*c == 0xFF) {
-      if (this->is_load(binop.left())) {
-        LoadRepresentation load_rep =
-            this->load_view(binop.left()).loaded_rep();
-        if (load_rep.representation() == MachineRepresentation::kWord8 &&
-            load_rep.IsUnsigned()) {
-          EmitIdentity(node);
-          return;
-        }
+  V<Word32> left;
+  if (MatchWordBinop<Word32>(node, &left, 0xFF)) {
+    if (this->is_load(left)) {
+      LoadRepresentation load_rep = this->load_view(left).loaded_rep();
+      if (load_rep.representation() == MachineRepresentation::kWord8 &&
+          load_rep.IsUnsigned()) {
+        EmitIdentity(node);
+        return;
       }
-      Emit(kX64Movzxbl, g.DefineAsRegister(node), g.Use(binop.left()));
-      return;
-    } else if (*c == 0xFFFF) {
-      if (this->is_load(binop.left())) {
-        LoadRepresentation load_rep =
-            this->load_view(binop.left()).loaded_rep();
-        if ((load_rep.representation() == MachineRepresentation::kWord16 ||
-             load_rep.representation() == MachineRepresentation::kWord8) &&
-            load_rep.IsUnsigned()) {
-          EmitIdentity(node);
-          return;
-        }
-      }
-      Emit(kX64Movzxwl, g.DefineAsRegister(node), g.Use(binop.left()));
-      return;
     }
+    Emit(kX64Movzxbl, g.DefineAsRegister(node), g.Use(left));
+    return;
+  } else if (MatchWordBinop<Word32>(node, &left, 0xFFFF)) {
+    if (this->is_load(left)) {
+      LoadRepresentation load_rep = this->load_view(left).loaded_rep();
+      if ((load_rep.representation() == MachineRepresentation::kWord16 ||
+           load_rep.representation() == MachineRepresentation::kWord8) &&
+          load_rep.IsUnsigned()) {
+        EmitIdentity(node);
+        return;
+      }
+    }
+    Emit(kX64Movzxwl, g.DefineAsRegister(node), g.Use(left));
+    return;
   }
   VisitBinop(this, node, kX64And32);
 }
@@ -1828,8 +1825,8 @@ void VisitWord32Shift(InstructionSelectorT* selector, OpIndex node,
   auto left = selector->input_at(node, 0);
   auto right = selector->input_at(node, 1);
 
-  if (selector->is_truncate_word64_to_word32(left)) {
-    left = selector->input_at(left, 0);
+  if (V<Word64> left64; selector->MatchTruncateWord64ToWord32(left, &left64)) {
+    left = left64;
   }
 
   if (g.CanBeImmediate(right)) {
@@ -2146,8 +2143,12 @@ void InstructionSelectorT::VisitInt32Add(OpIndex node) {
   OpIndex left = add.left();
   OpIndex right = add.right();
   // No need to truncate the values before Int32Add.
-  left = this->remove_truncate_word64_to_word32(left);
-  right = this->remove_truncate_word64_to_word32(right);
+  if (V<Word64> left64; MatchTruncateWord64ToWord32(left, &left64)) {
+    left = left64;
+  }
+  if (V<Word64> right64; MatchTruncateWord64ToWord32(right, &right64)) {
+    right = right64;
+  }
 
   DCHECK(LhsIsNotOnlyConstant(this->turboshaft_graph(), left, right));
 
@@ -2194,9 +2195,7 @@ void InstructionSelectorT::VisitInt64AddWithOverflow(OpIndex node) {
 
 void InstructionSelectorT::VisitInt32Sub(OpIndex node) {
   X64OperandGeneratorT g(this);
-  auto binop = this->word_binop_view(node);
-  auto left = binop.left();
-  auto right = binop.right();
+  auto [left, right] = Inputs<WordBinopOp>(node);
   if (g.CanBeImmediate(right)) {
     int32_t imm = g.GetImmediateIntegerValue(right);
     if (imm == 0) {
@@ -2264,9 +2263,7 @@ namespace {
 
 void VisitMul(InstructionSelectorT* selector, OpIndex node, ArchOpcode opcode) {
   X64OperandGeneratorT g(selector);
-  auto binop = selector->word_binop_view(node);
-  auto left = binop.left();
-  auto right = binop.right();
+  auto [left, right] = selector->Inputs<WordBinopOp>(node);
   if (g.CanBeImmediate(right)) {
     selector->Emit(opcode, g.DefineAsRegister(node), g.Use(left),
                    g.UseImmediate(right));
@@ -2282,9 +2279,7 @@ void VisitMul(InstructionSelectorT* selector, OpIndex node, ArchOpcode opcode) {
 void VisitMulHigh(InstructionSelectorT* selector, OpIndex node,
                   ArchOpcode opcode) {
   X64OperandGeneratorT g(selector);
-  auto binop = selector->word_binop_view(node);
-  auto left = binop.left();
-  auto right = binop.right();
+  auto [left, right] = selector->Inputs<WordBinopOp>(node);
   if (selector->IsLive(left) && !selector->IsLive(right)) {
     std::swap(left, right);
   }
@@ -2297,20 +2292,18 @@ void VisitMulHigh(InstructionSelectorT* selector, OpIndex node,
 
 void VisitDiv(InstructionSelectorT* selector, OpIndex node, ArchOpcode opcode) {
   X64OperandGeneratorT g(selector);
-  auto binop = selector->word_binop_view(node);
+  auto [left, right] = selector->Inputs<WordBinopOp>(node);
   InstructionOperand temps[] = {g.TempRegister(rdx)};
-  selector->Emit(opcode, g.DefineAsFixed(node, rax),
-                 g.UseFixed(binop.left(), rax),
-                 g.UseUniqueRegister(binop.right()), arraysize(temps), temps);
+  selector->Emit(opcode, g.DefineAsFixed(node, rax), g.UseFixed(left, rax),
+                 g.UseUniqueRegister(right), arraysize(temps), temps);
 }
 
 void VisitMod(InstructionSelectorT* selector, OpIndex node, ArchOpcode opcode) {
   X64OperandGeneratorT g(selector);
-  auto binop = selector->word_binop_view(node);
+  auto [left, right] = selector->Inputs<WordBinopOp>(node);
   InstructionOperand temps[] = {g.TempRegister(rax)};
-  selector->Emit(opcode, g.DefineAsFixed(node, rdx),
-                 g.UseFixed(binop.left(), rax),
-                 g.UseUniqueRegister(binop.right()), arraysize(temps), temps);
+  selector->Emit(opcode, g.DefineAsFixed(node, rdx), g.UseFixed(left, rax),
+                 g.UseUniqueRegister(right), arraysize(temps), temps);
 }
 
 }  // namespace
@@ -2651,7 +2644,7 @@ bool InstructionSelectorT::ZeroExtendsWord32ToWord64NoPhis(OpIndex node) {
       return false;
     }
     case Opcode::kChange:
-      return this->is_truncate_word64_to_word32(node);
+      return Is<Opmask::kTruncateWord64ToWord32>(node);
     default:
       return false;
   }
@@ -3400,11 +3393,13 @@ void VisitWordCompare(InstructionSelectorT* selector, OpIndex node,
   // The 32-bit comparisons automatically truncate Word64
   // values to Word32 range, no need to do that explicitly.
   if (opcode == kX64Cmp32 || opcode == kX64Test32) {
-    if (selector->is_truncate_word64_to_word32(left)) {
-      left = selector->input_at(left, 0);
+    if (V<Word64> left64;
+        selector->MatchTruncateWord64ToWord32(left, &left64)) {
+      left = left64;
     }
-    if (selector->is_truncate_word64_to_word32(right)) {
-      right = selector->input_at(right, 0);
+    if (V<Word64> right64;
+        selector->MatchTruncateWord64ToWord32(right, &right64)) {
+      right = right64;
     }
   }
 
@@ -3616,7 +3611,7 @@ void VisitFloat64Compare(InstructionSelectorT* selector, OpIndex node,
 void VisitAtomicBinop(InstructionSelectorT* selector, OpIndex node,
                       ArchOpcode opcode, AtomicWidth width,
                       MemoryAccessKind access_kind) {
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   X64OperandGeneratorT g(selector);
   AddressingMode addressing_mode;
   InstructionOperand inputs[] = {
@@ -3638,11 +3633,11 @@ void VisitAtomicBinop(InstructionSelectorT* selector, OpIndex node,
 void VisitAtomicCompareExchange(InstructionSelectorT* selector, OpIndex node,
                                 ArchOpcode opcode, AtomicWidth width,
                                 MemoryAccessKind access_kind) {
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   X64OperandGeneratorT g(selector);
   AddressingMode addressing_mode;
   InstructionOperand inputs[] = {
-      g.UseFixed(atomic_op.expected(), rax),
+      g.UseFixed(atomic_op.expected().value(), rax),
       g.UseUniqueRegister(atomic_op.value()),
       g.UseUniqueRegister(atomic_op.base()),
       g.GetEffectiveIndexOperand(atomic_op.index(), &addressing_mode)};

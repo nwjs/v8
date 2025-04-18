@@ -904,9 +904,9 @@ std::tuple<InstructionCode, ImmediateMode> GetStoreOpcodeAndImmediate(
 void InstructionSelectorT::VisitTraceInstruction(OpIndex node) {}
 
 void InstructionSelectorT::VisitStackSlot(OpIndex node) {
-  StackSlotRepresentation rep = this->stack_slot_representation_of(node);
-  int slot =
-      frame_->AllocateSpillSlot(rep.size(), rep.alignment(), rep.is_tagged());
+  const StackSlotOp& stack_slot = Cast<StackSlotOp>(node);
+  int slot = frame_->AllocateSpillSlot(stack_slot.size, stack_slot.alignment,
+                                       stack_slot.is_tagged);
   OperandGenerator g(this);
 
   Emit(kArchStackSlot, g.DefineAsRegister(node),
@@ -1008,10 +1008,13 @@ InstructionOperand EmitAddBeforeLoadOrStore(InstructionSelectorT* selector,
                                             OpIndex node,
                                             InstructionCode* opcode) {
   Arm64OperandGeneratorT g(selector);
-  InstructionOperand addr = g.TempRegister();
-  selector->Emit(kArm64Add, addr, g.UseRegister(selector->input_at(node, 0)),
-                 g.UseRegister(selector->input_at(node, 1)));
   *opcode |= AddressingModeField::encode(kMode_MRI);
+  OpIndex input0 = selector->input_at(node, 0);
+  OpIndex input1 = selector->input_at(node, 1);
+  InstructionOperand addr = g.TempRegister();
+  auto rhs = g.CanBeImmediate(input1, kArithmeticImm) ? g.UseImmediate(input1)
+                                                      : g.UseRegister(input1);
+  selector->Emit(kArm64Add, addr, g.UseRegister(input0), rhs);
   return addr;
 }
 }  // namespace
@@ -1468,11 +1471,13 @@ class CompareSequence {
 
  private:
   InstructionCode GetOpcode(RegisterRepresentation rep) const {
-    if (rep == RegisterRepresentation::Word32()) {
-      return kArm64Cmp32;
-    } else {
-      DCHECK_EQ(rep, RegisterRepresentation::Word64());
-      return kArm64Cmp;
+    switch (rep.MapTaggedToWord().value()) {
+      case RegisterRepresentation::Word32():
+        return kArm64Cmp32;
+      case RegisterRepresentation::Word64():
+        return kArm64Cmp;
+      default:
+        UNREACHABLE();
     }
   }
 
@@ -1518,9 +1523,6 @@ class CompareChainNode final : public ZoneObject {
     user_condition_ = NegateFlagsCondition(user_condition_);
     requires_negation_ = false;
   }
-  void CommuteFlags() {
-    user_condition_ = CommuteFlagsCondition(user_condition_);
-  }
   bool IsLegalFirstCombine() const {
     DCHECK(IsLogicalCombine());
     // We need two cmps feeding the first logic op.
@@ -1555,7 +1557,8 @@ static std::optional<FlagsCondition> GetFlagsCondition(
   if (const ComparisonOp* comparison =
           selector->Get(node).TryCast<ComparisonOp>()) {
     if (comparison->rep == RegisterRepresentation::Word32() ||
-        comparison->rep == RegisterRepresentation::Word64()) {
+        comparison->rep == RegisterRepresentation::Word64() ||
+        comparison->rep == RegisterRepresentation::Tagged()) {
       switch (comparison->kind) {
         case ComparisonOp::Kind::kEqual:
           return FlagsCondition::kEqual;
@@ -1732,27 +1735,28 @@ void CombineFlagSettingOps(CompareChainNode* logic_node,
     // This is the beginning of the conditional compare chain.
     DCHECK(lhs->IsFlagSetting());
     DCHECK(rhs->IsFlagSetting());
-    OpIndex cmp = lhs->node();
-    OpIndex ccmp = rhs->node();
-    // ccmp has a much smaller immediate range than cmp, so swap the
-    // operations if possible.
-    if ((g.CanBeImmediate(selector->input_at(cmp, 0), kConditionalCompareImm) ||
-         g.CanBeImmediate(selector->input_at(cmp, 1),
-                          kConditionalCompareImm)) &&
-        (!g.CanBeImmediate(selector->input_at(ccmp, 0),
-                           kConditionalCompareImm) &&
-         !g.CanBeImmediate(selector->input_at(ccmp, 1),
-                           kConditionalCompareImm))) {
-      std::swap(lhs, rhs);
-      std::swap(cmp, ccmp);
-    }
 
-    OpIndex left = selector->input_at(cmp, 0);
-    OpIndex right = selector->input_at(cmp, 1);
-    if (g.CanBeImmediate(left, kArithmeticImm)) {
-      std::swap(left, right);
-      lhs->CommuteFlags();
+    {
+      // ccmp has a much smaller immediate range than cmp, so swap the
+      // operations if possible.
+      OpIndex cmp = lhs->node();
+      OpIndex ccmp = rhs->node();
+      OpIndex cmp_right = selector->input_at(cmp, 1);
+      OpIndex ccmp_right = selector->input_at(ccmp, 1);
+      if (g.CanBeImmediate(cmp_right, kConditionalCompareImm) &&
+          !g.CanBeImmediate(ccmp_right, kConditionalCompareImm)) {
+        // If the ccmp could use the cmp immediate, swap them.
+        std::swap(lhs, rhs);
+      } else if (g.CanBeImmediate(ccmp_right, kArithmeticImm) &&
+                 !g.CanBeImmediate(ccmp_right, kConditionalCompareImm)) {
+        // If the ccmp can't use its immediate, but a cmp could, swap them.
+        std::swap(lhs, rhs);
+      }
     }
+    OpIndex cmp = lhs->node();
+    OpIndex left = selector->input_at(lhs->node(), 0);
+    OpIndex right = selector->input_at(lhs->node(), 1);
+
     // Initialize chain with the compare which will hold the continuation.
     RegisterRepresentation rep = selector->Get(cmp).Cast<ComparisonOp>().rep;
     sequence->InitialCompare(cmp, left, right, rep);
@@ -3520,7 +3524,7 @@ void VisitAtomicExchange(InstructionSelectorT* selector, OpIndex node,
                          ArchOpcode opcode, AtomicWidth width,
                          MemoryAccessKind access_kind) {
   using OpIndex = OpIndex;
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   Arm64OperandGeneratorT g(selector);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
@@ -3549,10 +3553,10 @@ void VisitAtomicCompareExchange(InstructionSelectorT* selector, OpIndex node,
                                 MemoryAccessKind access_kind) {
   using OpIndex = OpIndex;
   Arm64OperandGeneratorT g(selector);
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
-  OpIndex old_value = atomic_op.expected();
+  OpIndex old_value = atomic_op.expected().value();
   OpIndex new_value = atomic_op.value();
   InstructionOperand inputs[] = {g.UseRegister(base), g.UseRegister(index),
                                  g.UseUniqueRegister(old_value),
@@ -3744,7 +3748,7 @@ void VisitAtomicBinop(InstructionSelectorT* selector, OpIndex node,
                       MemoryAccessKind access_kind) {
   using OpIndex = OpIndex;
   Arm64OperandGeneratorT g(selector);
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
   OpIndex value = atomic_op.value();
@@ -3779,9 +3783,10 @@ void InstructionSelectorT::VisitWordCompareZero(OpIndex user, OpIndex value,
   ConsumeEqualZero(&user, &value, cont);
 
   // Remove Word64->Word32 truncation.
-  if (this->is_truncate_word64_to_word32(value) && CanCover(user, value)) {
+  if (V<Word64> value64;
+      MatchTruncateWord64ToWord32(value, &value64) && CanCover(user, value)) {
     user = value;
-    value = this->remove_truncate_word64_to_word32(value);
+    value = value64;
   }
 
   // Try to match bit checks to create TBZ/TBNZ instructions.
@@ -5325,8 +5330,8 @@ std::optional<ArchOpcode> TryMapCanonicalShuffleToArch(
       {CanonicalShuffle::kS64x2Even, kArm64S64x2UnzipLeft},
       {CanonicalShuffle::kS64x2Odd, kArm64S64x2UnzipRight},
       {CanonicalShuffle::kS64x2ReverseBytes, kArm64S8x8Reverse},
-      {CanonicalShuffle::kS32x4InterleaveEven, kArm64S32x4UnzipLeft},
-      {CanonicalShuffle::kS32x4InterleaveOdd, kArm64S32x4UnzipRight},
+      {CanonicalShuffle::kS32x4Even, kArm64S32x4UnzipLeft},
+      {CanonicalShuffle::kS32x4Odd, kArm64S32x4UnzipRight},
       {CanonicalShuffle::kS32x4InterleaveLowHalves, kArm64S32x4ZipLeft},
       {CanonicalShuffle::kS32x4InterleaveHighHalves, kArm64S32x4ZipRight},
       {CanonicalShuffle::kS32x4ReverseBytes, kArm64S8x4Reverse},
@@ -5334,8 +5339,8 @@ std::optional<ArchOpcode> TryMapCanonicalShuffleToArch(
       {CanonicalShuffle::kS32x2Reverse, kArm64S32x2Reverse},
       {CanonicalShuffle::kS32x4TransposeEven, kArm64S32x4TransposeLeft},
       {CanonicalShuffle::kS32x4TransposeOdd, kArm64S32x4TransposeRight},
-      {CanonicalShuffle::kS16x8InterleaveEven, kArm64S16x8UnzipLeft},
-      {CanonicalShuffle::kS16x8InterleaveOdd, kArm64S16x8UnzipRight},
+      {CanonicalShuffle::kS16x8Even, kArm64S16x8UnzipLeft},
+      {CanonicalShuffle::kS16x8Odd, kArm64S16x8UnzipRight},
       {CanonicalShuffle::kS16x8InterleaveLowHalves, kArm64S16x8ZipLeft},
       {CanonicalShuffle::kS16x8InterleaveHighHalves, kArm64S16x8ZipRight},
       {CanonicalShuffle::kS16x2Reverse, kArm64S16x2Reverse},
@@ -5343,8 +5348,8 @@ std::optional<ArchOpcode> TryMapCanonicalShuffleToArch(
       {CanonicalShuffle::kS16x8ReverseBytes, kArm64S8x2Reverse},
       {CanonicalShuffle::kS16x8TransposeEven, kArm64S16x8TransposeLeft},
       {CanonicalShuffle::kS16x8TransposeOdd, kArm64S16x8TransposeRight},
-      {CanonicalShuffle::kS8x16InterleaveEven, kArm64S8x16UnzipLeft},
-      {CanonicalShuffle::kS8x16InterleaveOdd, kArm64S8x16UnzipRight},
+      {CanonicalShuffle::kS8x16Even, kArm64S8x16UnzipLeft},
+      {CanonicalShuffle::kS8x16Odd, kArm64S8x16UnzipRight},
       {CanonicalShuffle::kS8x16InterleaveLowHalves, kArm64S8x16ZipLeft},
       {CanonicalShuffle::kS8x16InterleaveHighHalves, kArm64S8x16ZipRight},
       {CanonicalShuffle::kS8x16TransposeEven, kArm64S8x16TransposeLeft},
@@ -5645,6 +5650,34 @@ void InstructionSelectorT::VisitI8x16Popcnt(OpIndex node) {
   code |= LaneSizeField::encode(8);
   VisitRR(this, code, node);
 }
+
+#ifdef V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+
+void InstructionSelectorT::VisitSimd128LoadPairDeinterleave(OpIndex node) {
+  const auto& load = this->Get(node).Cast<Simd128LoadPairDeinterleaveOp>();
+  Arm64OperandGeneratorT g(this);
+  InstructionCode opcode = kArm64S128LoadPairDeinterleave;
+  opcode |= LaneSizeField::encode(load.lane_size());
+  if (load.load_kind.with_trap_handler) {
+    opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+  }
+  OptionalOpIndex first = FindProjection(node, 0);
+  OptionalOpIndex second = FindProjection(node, 1);
+
+  InstructionOperand outputs[] = {
+      g.DefineAsFixed(first.value(), fp_fixed1),
+      g.DefineAsFixed(second.value(), fp_fixed2),
+  };
+
+  InstructionOperand inputs[] = {
+      EmitAddBeforeLoadOrStore(this, node, &opcode),
+      g.TempImmediate(0),
+  };
+  Emit(opcode, arraysize(outputs), outputs, arraysize(inputs), inputs);
+}
+
+#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void InstructionSelectorT::AddOutputToSelectContinuation(OperandGenerator* g,

@@ -686,6 +686,79 @@ BUILTIN(Uint8ArrayPrototypeToBase64) {
   return *output;
 }
 
+// https://tc39.es/proposal-arraybuffer-base64/spec/#sec-uint8array.fromhex
+BUILTIN(Uint8ArrayFromHex) {
+  HandleScope scope(isolate);
+  const char method_name[] = "Uint8Array.fromHex";
+
+  // 1. If string is not a String, throw a TypeError exception.
+  DirectHandle<Object> input = args.atOrUndefined(isolate, 1);
+  if (!IsString(*input)) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewTypeError(MessageTemplate::kArgumentIsNonString,
+                              isolate->factory()->input_string()));
+  }
+
+  DirectHandle<String> input_string =
+      String::Flatten(isolate, Cast<String>(input));
+
+  // 2. Let result be FromHex(string).
+  // 3. If result.[[Error]] is not none, then
+  //  a. Throw result.[[Error]].
+  // 4. Let resultLength be the length of result.[[Bytes]].
+  DirectHandle<JSArrayBuffer> buffer;
+
+  size_t input_length = input_string->length();
+  if (input_length % 2 != 0) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewSyntaxError(MessageTemplate::kInvalidHexString));
+  }
+
+  size_t output_length = (input_length / 2);
+
+  MaybeDirectHandle<JSArrayBuffer> result_buffer =
+      isolate->factory()->NewJSArrayBufferAndBackingStore(
+          output_length, InitializedFlag::kUninitialized);
+
+  if (!result_buffer.ToHandle(&buffer)) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewRangeError(MessageTemplate::kOutOfMemory,
+                               isolate->factory()->NewStringFromAsciiChecked(
+                                   method_name)));
+  }
+
+  bool result;
+  {
+    DisallowGarbageCollection no_gc;
+    String::FlatContent input_content = input_string->GetFlatContent(no_gc);
+
+      if (input_content.IsOneByte()) {
+        base::Vector<const uint8_t> input_vector =
+            input_content.ToOneByteVector();
+        result = ArrayBufferFromHex(input_vector, buffer, output_length);
+      } else {
+        base::Vector<const base::uc16> input_vector =
+            input_content.ToUC16Vector();
+        result = ArrayBufferFromHex(input_vector, buffer, output_length);
+      }
+  }
+
+  if (!result) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewSyntaxError(MessageTemplate::kInvalidHexString));
+  }
+  // 5. Let ta be ? AllocateTypedArray("Uint8Array", %Uint8Array%,
+  //  "%Uint8Array.prototype%", resultLength).
+  // 6. Set the value at each index of
+  //  ta.[[ViewedArrayBuffer]].[[ArrayBufferData]] to the value at the
+  //  corresponding index of result.[[Bytes]].
+  // 7. Return ta.
+  DirectHandle<JSTypedArray> result_typed_array =
+      isolate->factory()->NewJSTypedArray(kExternalUint8Array, buffer, 0,
+                                          output_length);
+  return *result_typed_array;
+}
+
 // https://tc39.es/proposal-arraybuffer-base64/spec/#sec-uint8array.prototype.tohex
 BUILTIN(Uint8ArrayPrototypeToHex) {
   HandleScope scope(isolate);

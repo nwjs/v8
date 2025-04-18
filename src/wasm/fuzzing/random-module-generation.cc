@@ -1399,7 +1399,8 @@ class BodyGen {
   }
 
   void ref_null(HeapType type, DataRange* data) {
-    builder_->EmitWithI32V(kExprRefNull, type.code());
+    builder_->Emit(kExprRefNull);
+    builder_->EmitHeapType(type);
   }
 
   bool get_local_ref(HeapType type, DataRange* data, Nullability nullable) {
@@ -1893,7 +1894,7 @@ class BodyGen {
     HeapType input_type = top_type(type);
     GenerateRef(input_type, data);
     builder_->EmitWithPrefix(nullable ? kExprRefCastNull : kExprRefCast);
-    builder_->EmitI32V(type.code());
+    builder_->EmitHeapType(type);
     return true;  // It always produces the desired result type.
   }
 
@@ -2062,8 +2063,8 @@ class BodyGen {
       builder_->EmitWithPrefix(kExprBrOnCast);
       builder_->EmitU32V(source_is_nullable + (target_is_nullable << 1));
       builder_->EmitU32V(block_index);
-      builder_->EmitI32V(source_type.code());             // source type
-      builder_->EmitI32V(break_type.heap_type().code());  // target type
+      builder_->EmitHeapType(source_type);             // source type
+      builder_->EmitHeapType(break_type.heap_type());  // target type
       // Fallthrough: The type has been up-cast to the source type of the
       // br_on_cast instruction! (If the type on the stack was more specific,
       // this loses type information.)
@@ -2087,8 +2088,8 @@ class BodyGen {
       builder_->EmitWithPrefix(kExprBrOnCastFail);
       builder_->EmitU32V(source_is_nullable + (target_is_nullable << 1));
       builder_->EmitU32V(block_index);
-      builder_->EmitI32V(source_type.code());
-      builder_->EmitI32V(target_type.code());
+      builder_->EmitHeapType(source_type);
+      builder_->EmitHeapType(target_type);
       // Fallthrough: The type has been cast to the target type.
       base::SmallVector<ValueType, 32> fallthrough_types(break_types);
       fallthrough_types.back() = ValueType::RefMaybeNull(
@@ -3780,7 +3781,7 @@ class ModuleGen {
                                     kNumDefaultArrayTypes};
         num_fields += builder_->GetStructType(supertype)->field_count();
       }
-      StructType::Builder struct_builder(zone_, num_fields);
+      StructType::Builder struct_builder(zone_, num_fields, false);
 
       // Add all fields from super type.
       uint32_t field_index = 0;
@@ -4537,7 +4538,8 @@ base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
           ModuleTypeIndex{module_range.get<uint8_t>() % existing_struct_types};
       num_fields += builder.GetStructType(supertype)->field_count();
     }
-    StructType::Builder struct_builder(zone, num_fields);
+    // TODO(403372470): Add support for custom descriptors.
+    StructType::Builder struct_builder(zone, num_fields, false);
 
     // Add all fields from super type.
     uint32_t field_index = 0;
@@ -4552,6 +4554,12 @@ base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
       ValueType type = GetValueTypeHelper(
           options, &module_range, current_type_index, current_type_index,
           kIncludeNumericTypes, kIncludePackedTypes, kExcludeSomeGenerics);
+      // To prevent huge initializer expressions, limit the existence of
+      // non-nullable references to the first 2 struct types (for non-inherited
+      // fields).
+      if (current_type_index >= 2 && type.is_non_nullable()) {
+        type = type.AsNullable();
+      }
 
       bool mutability = module_range.get<bool>();
       struct_builder.AddField(type, mutability);

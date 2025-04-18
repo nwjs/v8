@@ -105,32 +105,32 @@ BackingStore::BackingStore(PageAllocator* page_allocator, void* buffer_start,
       max_byte_length_(max_byte_length),
       byte_capacity_(byte_capacity),
       id_(next_backing_store_id_.fetch_add(1)),
-      page_allocator_(page_allocator),
-      is_shared_(shared == SharedFlag::kShared),
-      is_resizable_by_js_(resizable == ResizableFlag::kResizable),
-      is_wasm_memory_(is_wasm_memory),
-      is_wasm_memory64_(is_wasm_memory64),
-      is_nodejs_(false),
-      holds_shared_ptr_to_allocator_(false),
-      has_guard_regions_(has_guard_regions),
-      globally_registered_(false),
-      custom_deleter_(custom_deleter),
-      empty_deleter_(empty_deleter) {
+      page_allocator_(page_allocator), is_nodejs_(false) {
   // TODO(v8:11111): RAB / GSAB - Wasm integration.
-  DCHECK_IMPLIES(is_wasm_memory64_, is_wasm_memory_);
-  DCHECK_IMPLIES(has_guard_regions_, is_wasm_memory_);
-  DCHECK_IMPLIES(is_wasm_memory_, !is_resizable_by_js_);
-  DCHECK_IMPLIES(is_resizable_by_js_, !custom_deleter_);
-  DCHECK_IMPLIES(!is_wasm_memory && !is_resizable_by_js_,
+  DCHECK_IMPLIES(is_wasm_memory64, is_wasm_memory);
+  DCHECK_IMPLIES(has_guard_regions, is_wasm_memory);
+  DCHECK_IMPLIES(is_wasm_memory, resizable == ResizableFlag::kNotResizable);
+  DCHECK_IMPLIES(resizable == ResizableFlag::kResizable, !custom_deleter);
+  DCHECK_IMPLIES(!is_wasm_memory && resizable == ResizableFlag::kNotResizable,
                  byte_length_ == max_byte_length_);
-  DCHECK_GE(max_byte_length_, byte_length_);
-  DCHECK_GE(byte_capacity_, max_byte_length_);
+  DCHECK_GE(max_byte_length, byte_length);
+  DCHECK_GE(byte_capacity, max_byte_length);
   // TODO(1445003): Demote to a DCHECK once we found the issue.
   // Wasm memory should never be empty (== zero capacity). Otherwise
   // {JSArrayBuffer::Attach} would replace it by the {EmptyBackingStore} and we
   // loose information.
   // This is particularly important for shared Wasm memory.
-  CHECK_IMPLIES(is_wasm_memory_, byte_capacity_ != 0);
+  CHECK_IMPLIES(is_wasm_memory, byte_capacity != 0);
+
+  base::EnumSet<Flag, uint16_t> flags;
+  if (shared == SharedFlag::kShared) flags.Add(kIsShared);
+  if (resizable == ResizableFlag::kResizable) flags.Add(kIsResizableByJs);
+  if (is_wasm_memory) flags.Add(kIsWasmMemory);
+  if (is_wasm_memory64) flags.Add(kIsWasmMemory64);
+  if (has_guard_regions) flags.Add(kHasGuardRegions);
+  if (custom_deleter) flags.Add(kCustomDeleter);
+  if (empty_deleter) flags.Add(kEmptyDeleter);
+  flags_.store(flags, std::memory_order_relaxed);
 }
 
 BackingStore::~BackingStore() {
@@ -140,7 +140,7 @@ BackingStore::~BackingStore() {
     BackingStore* const bs;
 
     ~ClearSharedAllocator() {
-      if (!bs->holds_shared_ptr_to_allocator_) return;
+      if (!bs->holds_shared_ptr_to_allocator()) return;
       bs->type_specific_data_.v8_api_array_buffer_allocator_shared
           .std::shared_ptr<v8::ArrayBuffer::Allocator>::~shared_ptr();
     }
@@ -149,9 +149,9 @@ BackingStore::~BackingStore() {
   if (buffer_start_ == nullptr) return;
 
   auto FreeResizableMemory = [this] {
-    DCHECK(!custom_deleter_);
-    DCHECK(is_resizable_by_js_ || is_wasm_memory_);
-    auto region = GetReservedRegion(has_guard_regions_, is_wasm_memory64_,
+    DCHECK(!custom_deleter());
+    DCHECK(is_resizable_by_js() || is_wasm_memory());
+    auto region = GetReservedRegion(has_guard_regions(), is_wasm_memory64(),
                                     buffer_start_, byte_capacity_);
     if (!region.is_empty()) {
       FreePages(page_allocator_, reinterpret_cast<void*>(region.begin()),
@@ -160,15 +160,13 @@ BackingStore::~BackingStore() {
   };
 
 #if V8_ENABLE_WEBASSEMBLY
-  if (is_wasm_memory_) {
-    // TODO(v8:11111): RAB / GSAB - Wasm integration.
-    DCHECK(!is_resizable_by_js_);
+  if (is_wasm_memory()) {
     size_t reservation_size = GetReservationSize(
-        has_guard_regions_, byte_capacity_, is_wasm_memory64_);
+        has_guard_regions(), byte_capacity_, is_wasm_memory64());
     TRACE_BS(
         "BSw:free  bs=%p mem=%p (length=%zu, capacity=%zu, reservation=%zu)\n",
         this, buffer_start_, byte_length(), byte_capacity_, reservation_size);
-    if (is_shared_) {
+    if (is_shared()) {
       // Deallocate the list of attached memory objects.
       SharedWasmMemoryData* shared_data = get_shared_wasm_memory_data();
       delete shared_data;
@@ -179,12 +177,12 @@ BackingStore::~BackingStore() {
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-  if (is_resizable_by_js_) {
+  if (is_resizable_by_js()) {
     FreeResizableMemory();
     return;
   }
 
-  if (custom_deleter_) {
+  if (custom_deleter()) {
     TRACE_BS("BS:custom deleter bs=%p mem=%p (length=%zu, capacity=%zu)\n",
              this, buffer_start_, byte_length(), byte_capacity_);
     type_specific_data_.deleter.callback(buffer_start_, byte_length_,
@@ -274,7 +272,7 @@ std::unique_ptr<BackingStore> BackingStore::Allocate(
 
 void BackingStore::SetAllocatorFromIsolate(Isolate* isolate) {
   if (auto allocator_shared = isolate->array_buffer_allocator_shared()) {
-    holds_shared_ptr_to_allocator_ = true;
+    set_flag(kHoldsSharedPtrToAllocater);
     new (&type_specific_data_.v8_api_array_buffer_allocator_shared)
         std::shared_ptr<v8::ArrayBuffer::Allocator>(
             std::move(allocator_shared));
@@ -335,7 +333,11 @@ std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
   //--------------------------------------------------------------------------
   void* allocation_base = nullptr;
 #ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
+#ifdef V8_ENABLE_SANDBOX
   CHECK_WITH_MSG(isolate || Sandbox::current(),
+#else
+  CHECK_WITH_MSG(isolate,
+#endif
                  "One must enter an v8::Isolate before allocating resizable "
                  "array backing stores");
 #endif
@@ -468,7 +470,7 @@ std::unique_ptr<BackingStore> BackingStore::CopyWasmMemory(
       is_shared() ? SharedFlag::kShared : SharedFlag::kNotShared);
 
   if (!new_backing_store ||
-      new_backing_store->has_guard_regions() != has_guard_regions_) {
+      new_backing_store->has_guard_regions() != has_guard_regions()) {
     return {};
   }
 
@@ -513,7 +515,7 @@ std::optional<size_t> BackingStore::GrowWasmMemoryInPlace(Isolate* isolate,
   //     * This is guaranteed by incrementing {byte_length_} with a
   //       compare_exchange after changing the permissions.
   //     * This invariant is the reason why we cannot use a fetch_add.
-  DCHECK(is_wasm_memory_);
+  DCHECK(is_wasm_memory());
   max_pages = std::min(max_pages, byte_capacity_ / wasm::kWasmPageSize);
 
   // Do a compare-exchange loop, because we also need to adjust page
@@ -556,8 +558,8 @@ std::optional<size_t> BackingStore::GrowWasmMemoryInPlace(Isolate* isolate,
 
 void BackingStore::AttachSharedWasmMemoryObject(
     Isolate* isolate, DirectHandle<WasmMemoryObject> memory_object) {
-  DCHECK(is_wasm_memory_);
-  DCHECK(is_shared_);
+  DCHECK(is_wasm_memory());
+  DCHECK(is_shared());
   // We need to take the global registry lock for this operation.
   GlobalBackingStoreRegistry::AddSharedWasmMemoryObject(isolate, this,
                                                         memory_object);
@@ -573,6 +575,16 @@ void BackingStore::RemoveSharedWasmMemoryObjects(Isolate* isolate) {
 
 void BackingStore::UpdateSharedWasmMemoryObjects(Isolate* isolate) {
   GlobalBackingStoreRegistry::UpdateSharedWasmMemoryObjects(isolate);
+}
+
+void BackingStore::MakeWasmMemoryResizableByJS(bool resizable) {
+  DCHECK(is_wasm_memory());
+  DCHECK(!is_shared());
+  if (resizable) {
+    set_flag(kIsResizableByJs);
+  } else {
+    clear_flag(kIsResizableByJs);
+  }
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -734,9 +746,9 @@ std::unique_ptr<BackingStore> BackingStore::EmptyBackingStore(
 }
 
 v8::ArrayBuffer::Allocator* BackingStore::get_v8_api_array_buffer_allocator() {
-  CHECK(!is_wasm_memory_);
+  CHECK(!is_wasm_memory());
   auto array_buffer_allocator =
-      holds_shared_ptr_to_allocator_
+      holds_shared_ptr_to_allocator()
           ? type_specific_data_.v8_api_array_buffer_allocator_shared.get()
           : type_specific_data_.v8_api_array_buffer_allocator;
   CHECK_NOT_NULL(array_buffer_allocator);
@@ -744,7 +756,7 @@ v8::ArrayBuffer::Allocator* BackingStore::get_v8_api_array_buffer_allocator() {
 }
 
 SharedWasmMemoryData* BackingStore::get_shared_wasm_memory_data() const {
-  CHECK(is_wasm_memory_ && is_shared_);
+  CHECK(is_wasm_memory() && is_shared());
   auto shared_wasm_memory_data = type_specific_data_.shared_wasm_memory_data;
   CHECK(shared_wasm_memory_data);
   return shared_wasm_memory_data;
@@ -770,18 +782,18 @@ void GlobalBackingStoreRegistry::Register(
 
   GlobalBackingStoreRegistryImpl* impl = GetGlobalBackingStoreRegistryImpl();
   base::MutexGuard scope_lock(&impl->mutex_);
-  if (backing_store->globally_registered_) return;
+  if (backing_store->globally_registered()) return;
   TRACE_BS("BS:reg    bs=%p mem=%p (length=%zu, capacity=%zu)\n",
            backing_store.get(), backing_store->buffer_start(),
            backing_store->byte_length(), backing_store->byte_capacity());
   std::weak_ptr<BackingStore> weak = backing_store;
   auto result = impl->map_.insert({backing_store->buffer_start(), weak});
   CHECK(result.second);
-  backing_store->globally_registered_ = true;
+  backing_store->set_flag(BackingStore::kGloballyRegistered);
 }
 
 void GlobalBackingStoreRegistry::Unregister(BackingStore* backing_store) {
-  if (!backing_store->globally_registered_) return;
+  if (!backing_store->globally_registered()) return;
 
   CHECK(backing_store->is_wasm_memory());
 
@@ -794,7 +806,7 @@ void GlobalBackingStoreRegistry::Unregister(BackingStore* backing_store) {
     DCHECK(!result->second.lock());
     impl->map_.erase(result);
   }
-  backing_store->globally_registered_ = false;
+  backing_store->clear_flag(BackingStore::kGloballyRegistered);
 }
 
 void GlobalBackingStoreRegistry::Purge(Isolate* isolate) {
@@ -881,22 +893,15 @@ void GlobalBackingStoreRegistry::UpdateSharedWasmMemoryObjects(
 
     DirectHandle<WasmMemoryObject> memory_object(Cast<WasmMemoryObject>(obj),
                                                  isolate);
-    DirectHandle<JSArrayBuffer> old_buffer(memory_object->array_buffer(),
-                                           isolate);
-    std::shared_ptr<BackingStore> backing_store = old_buffer->GetBackingStore();
-    // Wasm memory always has a BackingStore.
-    CHECK_NOT_NULL(backing_store);
-    CHECK(backing_store->is_wasm_memory());
-    CHECK(backing_store->is_shared());
-
-    // Keep a raw pointer to the backing store for a CHECK later one. Make it
-    // {void*} so we do not accidentally try to use it for anything else.
-    void* expected_backing_store = backing_store.get();
-
-    DirectHandle<JSArrayBuffer> new_buffer =
-        isolate->factory()->NewJSSharedArrayBuffer(std::move(backing_store));
-    CHECK_EQ(expected_backing_store, new_buffer->GetBackingStore().get());
-    memory_object->SetNewBuffer(*new_buffer);
+    if (memory_object->array_buffer()->is_resizable_by_js()) {
+      // If the SharedArrayBuffer is exposed as growable already, there's no
+      // need to refresh it, but instances still need to be updated with the new
+      // length.
+      memory_object->UpdateInstances(isolate);
+    } else {
+      WasmMemoryObject::RefreshSharedBuffer(isolate, memory_object,
+                                            ResizableFlag::kNotResizable);
+    }
   }
 }
 #endif  // V8_ENABLE_WEBASSEMBLY

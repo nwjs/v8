@@ -11,6 +11,11 @@
 
 load('test/mjsunit/elements-kinds-helpers.js');
 
+function identity(x) {
+  return x;
+}
+%PrepareFunctionForOptimization(identity);
+
 function plusOne(x) {
   return x + 1;
 }
@@ -30,6 +35,69 @@ function wrapInObject(x) {
   return {a: x};
 }
 %PrepareFunctionForOptimization(wrapInObject);
+
+function unwrapObject(x) {
+  return x.a;
+}
+%PrepareFunctionForOptimization(unwrapObject);
+
+let ix = 0;
+function transitionFromSmiToDouble(x) {
+  if (ix++ == 0) {
+    return 0;
+  }
+  return 1.1;
+}
+%PrepareFunctionForOptimization(transitionFromSmiToDouble);
+
+function transitionFromSmiToObject(x) {
+  if (ix++ == 0) {
+    return 0;
+  }
+  return {a: 1};
+}
+%PrepareFunctionForOptimization(transitionFromSmiToObject);
+
+function transitionFromDoubleToObject(x) {
+  if (ix++ == 0) {
+    return 1.1;
+  }
+  return {a: 1};
+}
+%PrepareFunctionForOptimization(transitionFromDoubleToObject);
+
+function transitionFromObjectToDouble(x) {
+  if (ix++ == 0) {
+    return {a: 1};
+  }
+  return 1.1;
+}
+%PrepareFunctionForOptimization(transitionFromObjectToDouble);
+
+function resetTransitionFunctions() {
+  ix = 0;
+}
+
+(function testPackedSmiElementsWithIdentity() {
+  function foo(a) {
+    return a.map(identity);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const array = [1, 2, 3];
+  const result = foo(array);
+  assertTrue(HasPackedSmiElements(result));
+
+  %OptimizeFunctionOnNextCall(foo);
+
+  const array2 = [1, 2, 3];
+  const result2 = foo(array2);
+    // TODO(399393885): Make the optimized version use the same elements kind as
+  // the unoptimized version.
+  // assertTrue(HasPackedSmiElements(result2));
+  assertTrue(HasHoleySmiElements(result2));
+  assertOptimized(foo);
+})();
 
 (function testPackedSmiElements() {
   function foo(a) {
@@ -53,9 +121,6 @@ function wrapInObject(x) {
 
   assertOptimized(foo);
 })();
-
-// The only way to end up with a holey result is to start with a holey elements
-// kind; the mapper function cannot insert holes into the array.
 
 (function testHoleySmiElements() {
   function foo(a) {
@@ -244,24 +309,38 @@ function wrapInObject(x) {
   assertOptimized(foo);
 })();
 
-(function testDictionaryElements1() {
+
+(function testFromObjectToPackedSmi() {
   function foo(a) {
-    return a.map(plusOne);
+    return a.map(unwrapObject);
   }
   %PrepareFunctionForOptimization(foo);
 
-  const array = [1, 2, 3];
-  const array2 = [1, 2, 3];
-  for (let i = 0; i < 100000; i += 100) {
-    array[i] = 0;
-    array2[i] = 0;
-    if (%HasDictionaryElements(array)) {
-      break;
-    }
-  }
-  assertTrue(%HasDictionaryElements(array));
-  assertTrue(%HasDictionaryElements(array2));
+  const array = [{a: 1}, {a: 2}, {a: 3}];
+  const array2 = [{a: 1}, {a: 2}, {a: 3}];
+  const result = foo(array);
+  assertTrue(HasPackedSmiElements(result));
 
+  %OptimizeFunctionOnNextCall(foo);
+
+  const result2 = foo(array2);
+
+  // TODO(399393885): Make the optimized version use the same elements kind as
+  // the unoptimized version.
+  // assertTrue(HasPackedSmiElements(result2));
+  assertTrue(HasHoleySmiElements(result2));
+
+  assertOptimized(foo);
+})();
+
+(function testFromObjectToHoleySmi() {
+  function foo(a) {
+    return a.map(unwrapObject);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const array = [{a: 1}, {a: 2}, , {a: 3}];
+  const array2 = [{a: 1}, {a: 2}, , {a: 3}];
   const result = foo(array);
   assertTrue(HasHoleySmiElements(result));
 
@@ -272,58 +351,218 @@ function wrapInObject(x) {
   assertOptimized(foo);
 })();
 
-(function testDictionaryElements2() {
+(function testTransitionFromPackedSmiToDoubleWhileMapping() {
+  resetTransitionFunctions();
+
   function foo(a) {
-    return a.map(plusOne);
+    return a.map(transitionFromSmiToDouble);
   }
   %PrepareFunctionForOptimization(foo);
 
-  const array = [1, 2, 3];
-  const array2 = [1, 2, 3];
-  for (let i = 0; i < 100000; i += 100) {
-    array[i] = 0.1;
-    array2[i] = 0.1;
-    if (%HasDictionaryElements(array)) {
-      break;
-    }
-  }
-  assertTrue(%HasDictionaryElements(array));
-  assertTrue(%HasDictionaryElements(array2));
+  const array = [0, 0, 0];
+  const array2 = [0, 0, 0];
+  const result = foo(array);
+  assertTrue(HasPackedDoubleElements(result));
 
+  %OptimizeFunctionOnNextCall(foo);
+  resetTransitionFunctions();
+
+  const result2 = foo(array2);
+
+  // TODO(399393885): Make the optimized version use the same elements kind as
+  // the unoptimized version.
+  // assertTrue(HasPackedDoubleElements(result2));
+  assertTrue(HasHoleyDoubleElements(result2));
+
+  assertOptimized(foo);
+})();
+
+(function testTransitionFromHoleySmiToDoubleWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromSmiToDouble);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const array = [0, 0, , 0];
+  const array2 = [0, 0, , 0];
   const result = foo(array);
   assertTrue(HasHoleyDoubleElements(result));
 
   %OptimizeFunctionOnNextCall(foo);
+  resetTransitionFunctions();
 
   const result2 = foo(array2);
   assertTrue(HasHoleyDoubleElements(result2));
   assertOptimized(foo);
 })();
 
-(function testDictionaryElements3() {
+(function testTransitionFromPackedSmiToObjectWhileMapping() {
+  resetTransitionFunctions();
+
   function foo(a) {
-    return a.map(plusOneInObject);
+    return a.map(transitionFromSmiToObject);
   }
   %PrepareFunctionForOptimization(foo);
 
-  const array = [{a: 1}, {a: 2}, {a: 3}];
-  const array2 = [{a: 1}, {a: 2}, {a: 3}];
-  for (let i = 0; i < 100000; i += 100) {
-    array[i] = {a: 0};
-    array2[i] = {a: 0};
-    if (%HasDictionaryElements(array)) {
-      break;
-    }
-  }
-  assertTrue(%HasDictionaryElements(array));
-  assertTrue(%HasDictionaryElements(array2));
+  const array = [0, 0, 0];
+  const array2 = [0, 0, 0];
+  const result = foo(array);
+  assertTrue(HasPackedObjectElements(result));
 
+  %OptimizeFunctionOnNextCall(foo);
+  resetTransitionFunctions();
+
+  const result2 = foo(array2);
+
+  // TODO(399393885): Make the optimized version use the same elements kind as
+  // the unoptimized version.
+  // assertTrue(HasPackedObjectElements(result2));
+  assertTrue(HasHoleyObjectElements(result2));
+
+  assertOptimized(foo);
+})();
+
+(function testTransitionFromHoleySmiToObjectWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromSmiToObject);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const array = [0, 0, , 0];
+  const array2 = [0, 0, , 0];
   const result = foo(array);
   assertTrue(HasHoleyObjectElements(result));
 
   %OptimizeFunctionOnNextCall(foo);
+  resetTransitionFunctions();
 
   const result2 = foo(array2);
   assertTrue(HasHoleyObjectElements(result2));
   assertOptimized(foo);
+})();
+
+(function testTransitionFromPackedSmiToDoubleToObjectWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromDoubleToObject);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const array = [0, 0, 0];
+  const array2 = [0, 0, 0];
+  const result = foo(array);
+  assertTrue(HasPackedObjectElements(result));
+
+  %OptimizeFunctionOnNextCall(foo);
+  resetTransitionFunctions();
+
+  const result2 = foo(array2);
+
+  // TODO(399393885): Make the optimized version use the same elements kind as
+  // the unoptimized version.
+  // assertTrue(HasPackedObjectElements(result2));
+  assertTrue(HasHoleyObjectElements(result2));
+
+  assertOptimized(foo);
+})();
+
+(function testTransitionFromHoleySmiToDoubleToObjectWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromDoubleToObject);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const array = [0, 0, , 0];
+  const array2 = [0, 0, , 0];
+  const result = foo(array);
+  assertTrue(HasHoleyObjectElements(result));
+
+  %OptimizeFunctionOnNextCall(foo);
+  resetTransitionFunctions();
+
+  const result2 = foo(array2);
+  assertTrue(HasHoleyObjectElements(result2));
+  assertOptimized(foo);
+})();
+
+(function testTransitionFromPackedSmiToObjectToDoubleWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromObjectToDouble);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const array = [0, 0, 0];
+  const array2 = [0, 0, 0];
+  const result = foo(array);
+  assertTrue(HasPackedObjectElements(result));
+
+  %OptimizeFunctionOnNextCall(foo);
+  resetTransitionFunctions();
+
+  const result2 = foo(array2);
+
+  // TODO(399393885): Make the optimized version use the same elements kind as
+  // the unoptimized version.
+  // assertTrue(HasPackedObjectElements(result2));
+  assertTrue(HasHoleyObjectElements(result2));
+
+  assertOptimized(foo);
+})();
+
+(function testTransitionFromHoleySmiToObjectToDoubleWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromObjectToDouble);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const array = [0, 0, , 0];
+  const array2 = [0, 0, , 0];
+  const result = foo(array);
+  assertTrue(HasHoleyObjectElements(result));
+
+  %OptimizeFunctionOnNextCall(foo);
+  resetTransitionFunctions();
+
+  const result2 = foo(array2);
+  assertTrue(HasHoleyObjectElements(result2));
+  assertOptimized(foo);
+})();
+
+(function testMapperReducesLength() {
+  let array = [0, 1, 2];
+  function evil(x) {
+    if (x == 1) {
+      array.length = 1;
+    }
+    return x;
+  }
+  %PrepareFunctionForOptimization(evil);
+  function foo(a) {
+    return a.map(evil);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const result = foo(array);
+  assertTrue(HasHoleySmiElements(result));
+  assertEquals(undefined, result[2]);
+
+  array = [0, 1, 2];
+  %OptimizeFunctionOnNextCall(foo);
+
+  const result2 = foo(array);
+  assertTrue(HasHoleySmiElements(result2));
+  assertEquals(undefined, result2[2]);
+  // Deopted since we iterated the array out of bounds.
+  assertUnoptimized(foo);
 })();

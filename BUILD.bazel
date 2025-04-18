@@ -601,6 +601,7 @@ v8_config(
 filegroup(
     name = "public_header_files",
     srcs = glob(["include/**/*.h"]),
+    visibility = ["//visibility:public"],
 )
 
 filegroup(
@@ -637,7 +638,6 @@ filegroup(
         "include/cppgc/cross-thread-persistent.h",
         "include/cppgc/custom-space.h",
         "include/cppgc/default-platform.h",
-        "include/cppgc/ephemeron-pair.h",
         "include/cppgc/explicit-management.h",
         "include/cppgc/garbage-collected.h",
         "include/cppgc/heap.h",
@@ -651,6 +651,7 @@ filegroup(
         "include/cppgc/internal/caged-heap.h",
         "include/cppgc/internal/caged-heap-local-data.h",
         "include/cppgc/internal/compiler-specific.h",
+        "include/cppgc/internal/conditional-stack-allocated.h",
         "include/cppgc/internal/finalizer-trait.h",
         "include/cppgc/internal/gc-info.h",
         "include/cppgc/internal/logging.h",
@@ -1799,6 +1800,8 @@ filegroup(
         "src/heap/page-metadata.cc",
         "src/heap/page-metadata.h",
         "src/heap/page-metadata-inl.h",
+        "src/heap/page-pool.cc",
+        "src/heap/page-pool.h",
         "src/heap/paged-spaces.cc",
         "src/heap/paged-spaces.h",
         "src/heap/paged-spaces-inl.h",
@@ -2812,6 +2815,7 @@ filegroup(
             "src/maglev/maglev-assembler.h",
             "src/maglev/maglev-basic-block.h",
             "src/maglev/maglev-code-gen-state.h",
+            "src/maglev/maglev-code-gen-state-inl.h",
             "src/maglev/maglev-code-generator.h",
             "src/maglev/maglev-compilation-info.h",
             "src/maglev/maglev-compilation-unit.h",
@@ -3391,8 +3395,8 @@ filegroup(
         "src/compiler/turboshaft/machine-lowering-phase.h",
         "src/compiler/turboshaft/machine-lowering-reducer-inl.h",
         "src/compiler/turboshaft/maglev-early-lowering-reducer-inl.h",
-        "src/compiler/turboshaft/maglev-graph-building-phase.cc",
-        "src/compiler/turboshaft/maglev-graph-building-phase.h",
+        "src/compiler/turboshaft/turbolev-graph-builder.cc",
+        "src/compiler/turboshaft/turbolev-graph-builder.h",
         "src/compiler/turboshaft/machine-optimization-reducer.h",
         "src/compiler/turboshaft/memory-optimization-reducer.cc",
         "src/compiler/turboshaft/memory-optimization-reducer.h",
@@ -3529,6 +3533,8 @@ filegroup(
             "src/compiler/turboshaft/int64-lowering-phase.h",
             "src/compiler/turboshaft/int64-lowering-reducer.h",
             "src/compiler/turboshaft/wasm-assembler-helpers.h",
+            "src/compiler/turboshaft/wasm-debug-memory-lowering-phase.cc",
+            "src/compiler/turboshaft/wasm-debug-memory-lowering-phase.h",
             "src/compiler/turboshaft/wasm-gc-optimize-phase.cc",
             "src/compiler/turboshaft/wasm-gc-optimize-phase.h",
             "src/compiler/turboshaft/wasm-gc-typed-optimization-reducer.cc",
@@ -3579,6 +3585,7 @@ filegroup(
         "//conditions:default": [
             "src/maglev/maglev-basic-block.h",
             "src/maglev/maglev-code-gen-state.h",
+            "src/maglev/maglev-code-gen-state-inl.h",
             "src/maglev/maglev-deopt-frame-visitor.h",
             "src/maglev/maglev-compilation-info.cc",
             "src/maglev/maglev-compilation-info.h",

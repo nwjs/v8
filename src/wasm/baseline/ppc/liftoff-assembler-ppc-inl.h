@@ -252,6 +252,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
            Operand(stack_param_slots * kStackSlotSize +
                    CommonFrameConstants::kFixedFrameSizeAboveFp));
     CallBuiltin(Builtin::kWasmHandleStackOverflow);
+    safepoint_table_builder->DefineSafepoint(this);
     PopRegisters(regs_to_save);
   } else {
     Call(static_cast<Address>(Builtin::kWasmStackOverflow),
@@ -1664,8 +1665,8 @@ bool LiftoffAssembler::emit_type_conversion(WasmOpcode opcode,
       mtfsb0(VXCVI);  // clear FPSCR:VXCVI bit
       fctiwz(kScratchDoubleReg, src.fp());
       MovDoubleLowToInt(dst.gp(), kScratchDoubleReg);
-      mcrfs(cr7, VXCVI);
-      boverflow(trap, cr7);
+      mcrfs(cr0, VXCVI);
+      boverflow(trap, cr0);
       return true;
     }
     case kExprI32UConvertF64:
@@ -1673,8 +1674,8 @@ bool LiftoffAssembler::emit_type_conversion(WasmOpcode opcode,
       mtfsb0(VXCVI);  // clear FPSCR:VXCVI bit
       ConvertDoubleToUnsignedInt64(src.fp(), r0, kScratchDoubleReg,
                                    kRoundToZero);
-      mcrfs(cr7, VXCVI);  // extract FPSCR field containing VXCVI into cr7
-      boverflow(trap, cr7);
+      mcrfs(cr0, VXCVI);  // extract FPSCR field containing VXCVI into cr0
+      boverflow(trap, cr0);
       ZeroExtWord32(dst.gp(), r0);
       CmpU64(dst.gp(), r0);
       bne(trap);
@@ -1689,8 +1690,8 @@ bool LiftoffAssembler::emit_type_conversion(WasmOpcode opcode,
       mtfsb0(VXCVI);  // clear FPSCR:VXCVI bit
       fctidz(kScratchDoubleReg, src.fp());
       MovDoubleToInt64(dst.gp(), kScratchDoubleReg);
-      mcrfs(cr7, VXCVI);
-      boverflow(trap, cr7);
+      mcrfs(cr0, VXCVI);
+      boverflow(trap, cr0);
       return true;
     }
     case kExprI64UConvertF64:
@@ -1702,8 +1703,8 @@ bool LiftoffAssembler::emit_type_conversion(WasmOpcode opcode,
       mtfsb0(VXCVI);  // clear FPSCR:VXCVI bit
       fctiduz(kScratchDoubleReg, src.fp());
       MovDoubleToInt64(dst.gp(), kScratchDoubleReg);
-      mcrfs(cr7, VXCVI);
-      boverflow(trap, cr7);
+      mcrfs(cr0, VXCVI);
+      boverflow(trap, cr0);
       return true;
     }
     case kExprI32SConvertSatF64:
@@ -2120,24 +2121,24 @@ SIMD_SHIFT_RR_LIST(EMIT_SIMD_SHIFT_RR)
 #undef EMIT_SIMD_SHIFT_RR
 #undef SIMD_SHIFT_RR_LIST
 
-#define SIMD_SHIFT_RI_LIST(V) \
-  V(i64x2_shli, I64x2Shl)     \
-  V(i64x2_shri_s, I64x2ShrS)  \
-  V(i64x2_shri_u, I64x2ShrU)  \
-  V(i32x4_shli, I32x4Shl)     \
-  V(i32x4_shri_s, I32x4ShrS)  \
-  V(i32x4_shri_u, I32x4ShrU)  \
-  V(i16x8_shli, I16x8Shl)     \
-  V(i16x8_shri_s, I16x8ShrS)  \
-  V(i16x8_shri_u, I16x8ShrU)  \
-  V(i8x16_shli, I8x16Shl)     \
-  V(i8x16_shri_s, I8x16ShrS)  \
-  V(i8x16_shri_u, I8x16ShrU)
+#define SIMD_SHIFT_RI_LIST(V)    \
+  V(i64x2_shli, I64x2Shl, 63)    \
+  V(i64x2_shri_s, I64x2ShrS, 63) \
+  V(i64x2_shri_u, I64x2ShrU, 63) \
+  V(i32x4_shli, I32x4Shl, 31)    \
+  V(i32x4_shri_s, I32x4ShrS, 31) \
+  V(i32x4_shri_u, I32x4ShrU, 31) \
+  V(i16x8_shli, I16x8Shl, 15)    \
+  V(i16x8_shri_s, I16x8ShrS, 15) \
+  V(i16x8_shri_u, I16x8ShrU, 15) \
+  V(i8x16_shli, I8x16Shl, 7)     \
+  V(i8x16_shri_s, I8x16ShrS, 7)  \
+  V(i8x16_shri_u, I8x16ShrU, 7)
 
-#define EMIT_SIMD_SHIFT_RI(name, op)                                           \
+#define EMIT_SIMD_SHIFT_RI(name, op, mask)                                     \
   void LiftoffAssembler::emit_##name(LiftoffRegister dst, LiftoffRegister lhs, \
                                      int32_t rhs) {                            \
-    op(dst.fp().toSimd(), lhs.fp().toSimd(), Operand(rhs), r0,                 \
+    op(dst.fp().toSimd(), lhs.fp().toSimd(), Operand(rhs & mask), r0,          \
        kScratchSimd128Reg);                                                    \
   }
 SIMD_SHIFT_RI_LIST(EMIT_SIMD_SHIFT_RI)

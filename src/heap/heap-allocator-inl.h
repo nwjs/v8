@@ -5,10 +5,12 @@
 #ifndef V8_HEAP_HEAP_ALLOCATOR_INL_H_
 #define V8_HEAP_HEAP_ALLOCATOR_INL_H_
 
+#include "src/heap/heap-allocator.h"
+// Include the non-inl header before the rest of the headers.
+
 #include "src/base/logging.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
-#include "src/heap/heap-allocator.h"
 #include "src/heap/large-spaces.h"
 #include "src/heap/local-heap.h"
 #include "src/heap/main-allocator-inl.h"
@@ -76,6 +78,8 @@ V8_WARN_UNUSED_RESULT V8_INLINE AllocationResult HeapAllocator::AllocateRaw(
   DCHECK(AllowHeapAllocation::IsAllowed());
   CHECK(AllowHeapAllocationInRelease::IsAllowed());
   DCHECK(local_heap_->IsRunning());
+  // We need to have entered the isolate before allocating.
+  DCHECK_EQ(heap_->isolate(), Isolate::TryGetCurrent());
 #if V8_ENABLE_WEBASSEMBLY
   if (!v8_flags.wasm_jitless) {
     trap_handler::AssertThreadNotInWasm();

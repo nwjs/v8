@@ -20,7 +20,7 @@ using BlockConstIterator = ZoneVector<BasicBlock*>::const_iterator;
 using BlockConstReverseIterator =
     ZoneVector<BasicBlock*>::const_reverse_iterator;
 
-struct MaglevCallerDetails;
+struct MaglevCallSiteInfo;
 
 class Graph final : public ZoneObject {
  public:
@@ -66,9 +66,39 @@ class Graph final : public ZoneObject {
 
   BasicBlock* last_block() const { return blocks_.back(); }
 
-  void Add(BasicBlock* block) { blocks_.push_back(block); }
+  void Add(BasicBlock* block) {
+    if (block->has_id()) {
+      // The inliner adds blocks multiple times.
+      DCHECK(v8_flags.maglev_non_eager_inlining ||
+             v8_flags.turbolev_non_eager_inlining);
+    } else {
+      block->set_id(max_block_id_++);
+    }
+    blocks_.push_back(block);
+  }
 
   void set_blocks(ZoneVector<BasicBlock*> blocks) { blocks_ = blocks; }
+
+  template <typename Function>
+  void IterateGraphAndSweepDeadBlocks(Function&& is_dead) {
+    auto current = blocks_.begin();
+    auto last_non_dead = current;
+    while (current != blocks_.end()) {
+      if (is_dead(*current)) {
+        (*current)->mark_dead();
+      } else {
+        if (current != last_non_dead) {
+          // Move current to last non dead position.
+          *last_non_dead = *current;
+        }
+        ++last_non_dead;
+      }
+      ++current;
+    }
+    if (current != last_non_dead) {
+      blocks_.resize(blocks_.size() - (current - last_non_dead));
+    }
+  }
 
   uint32_t tagged_stack_slots() const { return tagged_stack_slots_; }
   uint32_t untagged_stack_slots() const { return untagged_stack_slots_; }
@@ -119,7 +149,7 @@ class Graph final : public ZoneObject {
   }
   ZoneVector<InitialValue*>& parameters() { return parameters_; }
 
-  ZoneVector<MaglevCallerDetails*>& inlineable_calls() {
+  ZoneVector<MaglevCallSiteInfo*>& inlineable_calls() {
     return inlineable_calls_;
   }
 
@@ -234,6 +264,8 @@ class Graph final : public ZoneObject {
 
   Zone* zone() const { return blocks_.zone(); }
 
+  BasicBlock::Id max_block_id() const { return max_block_id_; }
+
  private:
   uint32_t tagged_stack_slots_ = kMaxUInt32;
   uint32_t untagged_stack_slots_ = kMaxUInt32;
@@ -250,7 +282,7 @@ class Graph final : public ZoneObject {
   ZoneMap<uint64_t, Float64Constant*> float_;
   ZoneMap<Address, ExternalConstant*> external_references_;
   ZoneVector<InitialValue*> parameters_;
-  ZoneVector<MaglevCallerDetails*> inlineable_calls_;
+  ZoneVector<MaglevCallSiteInfo*> inlineable_calls_;
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_escape_map_;
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_elide_map_;
   RegList register_inputs_;
@@ -267,6 +299,7 @@ class Graph final : public ZoneObject {
   uint32_t object_ids_ = 0;
   bool has_resumable_generator_ = false;
   ZoneUnorderedMap<ValueNode*, compiler::OptionalScopeInfoRef> scope_infos_;
+  BasicBlock::Id max_block_id_ = 0;
 };
 
 }  // namespace maglev

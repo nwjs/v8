@@ -19,6 +19,7 @@
 #include "src/compiler/globals.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/state-values-utils.h"
+#include "src/compiler/turboshaft/index.h"
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/opmasks.h"
 #include "src/compiler/turboshaft/representations.h"
@@ -491,7 +492,7 @@ bool InstructionSelectorT::IsUsed(OpIndex node) const {
   if (!ShouldSkipOptimizationStep() && ShouldSkipOperation(this->Get(node))) {
     return false;
   }
-  if (this->IsRequiredWhenUnused(node)) return true;
+  if (Get(node).IsRequiredWhenUnused()) return true;
   return used_.Contains(this->id(node));
 }
 
@@ -1097,20 +1098,19 @@ struct CallBufferT {
 
 // TODO(bmeurer): Get rid of the CallBuffer business and make
 // InstructionSelector::VisitCall platform independent instead.
-void InstructionSelectorT::InitializeCallBuffer(OpIndex node,
-                                                CallBuffer* buffer,
-                                                CallBufferFlags flags,
-                                                int stack_param_delta) {
+void InstructionSelectorT::InitializeCallBuffer(
+    OpIndex node, CallBuffer* buffer, CallBufferFlags flags, OpIndex callee,
+    OptionalOpIndex frame_state_opt, base::Vector<const OpIndex> arguments,
+    int return_count, int stack_param_delta) {
   OperandGenerator g(this);
   size_t ret_count = buffer->descriptor->ReturnCount();
   bool is_tail_call = (flags & kCallTail) != 0;
-  auto call = this->call_view(node);
-  DCHECK_LE(call.return_count(), ret_count);
+  DCHECK_LE(return_count, ret_count);
 
   if (ret_count > 0) {
     // Collect the projections that represent multiple outputs from this call.
     if (ret_count == 1) {
-      PushParameter result = {call, buffer->descriptor->GetReturnLocation(0)};
+      PushParameter result = {node, buffer->descriptor->GetReturnLocation(0)};
       buffer->output_nodes.push_back(result);
     } else {
       buffer->output_nodes.resize(ret_count);
@@ -1118,12 +1118,12 @@ void InstructionSelectorT::InitializeCallBuffer(OpIndex node,
         LinkageLocation location = buffer->descriptor->GetReturnLocation(i);
         buffer->output_nodes[i] = PushParameter({}, location);
       }
-      for (OpIndex call_use : turboshaft_uses(call)) {
+      for (OpIndex call_use : turboshaft_uses(node)) {
         const Operation& use_op = this->Get(call_use);
         if (use_op.Is<DidntThrowOp>()) {
           for (OpIndex use : turboshaft_uses(call_use)) {
-            DCHECK(this->is_projection(use));
-            size_t index = this->projection_index_of(use);
+            const ProjectionOp& projection = Cast<ProjectionOp>(use);
+            size_t index = projection.index;
             DCHECK_LT(index, buffer->output_nodes.size());
             DCHECK(!buffer->output_nodes[index].node.valid());
             buffer->output_nodes[index].node = use;
@@ -1164,7 +1164,6 @@ void InstructionSelectorT::InitializeCallBuffer(OpIndex node,
   }
 
   // The first argument is always the callee code.
-  OpIndex callee = call.callee();
   bool call_code_immediate = (flags & kCallCodeImmediate) != 0;
   bool call_address_immediate = (flags & kCallAddressImmediate) != 0;
   bool call_use_fixed_target_reg = (flags & kCallFixedTargetRegister) != 0;
@@ -1232,19 +1231,19 @@ void InstructionSelectorT::InitializeCallBuffer(OpIndex node,
   size_t frame_state_entries = 0;
   USE(frame_state_entries);  // frame_state_entries is only used for debug.
   if (buffer->frame_state_descriptor != nullptr) {
-    OpIndex frame_state = call.frame_state();
+    OpIndex frame_state = frame_state_opt.value();
 
     // If it was a syntactic tail call we need to drop the current frame and
     // all the frames on top of it that are either inlined extra arguments
     // or a tail caller frame.
     if (is_tail_call) {
-      frame_state = this->parent_frame_state(frame_state);
+      frame_state = Cast<FrameStateOp>(frame_state).parent_frame_state();
       buffer->frame_state_descriptor =
           buffer->frame_state_descriptor->outer_state();
       while (buffer->frame_state_descriptor != nullptr &&
              buffer->frame_state_descriptor->type() ==
                  FrameStateType::kInlinedExtraArguments) {
-        frame_state = this->parent_frame_state(frame_state);
+        frame_state = Cast<FrameStateOp>(frame_state).parent_frame_state();
         buffer->frame_state_descriptor =
             buffer->frame_state_descriptor->outer_state();
       }
@@ -1252,7 +1251,7 @@ void InstructionSelectorT::InitializeCallBuffer(OpIndex node,
 
     int const state_id = sequence()->AddDeoptimizationEntry(
         buffer->frame_state_descriptor, DeoptimizeKind::kLazy,
-        DeoptimizeReason::kUnknown, this->id(call), FeedbackSource());
+        DeoptimizeReason::kUnknown, node.id(), FeedbackSource());
     buffer->instruction_args.push_back(g.TempImmediate(state_id));
 
     StateObjectDeduplicator deduplicator(instruction_zone());
@@ -1272,7 +1271,6 @@ void InstructionSelectorT::InitializeCallBuffer(OpIndex node,
   // arguments require an explicit push instruction before the call and do
   // not appear as arguments to the call. Everything else ends up
   // as an InstructionOperand argument to the call.
-  auto arguments = call.arguments();
   auto iter(arguments.begin());
   size_t pushed_count = 0;
   for (size_t index = 1; index < input_count; ++iter, ++index) {
@@ -1360,6 +1358,12 @@ bool InstructionSelectorT::IsSourcePositionUsed(OpIndex node) {
             operation.TryCast<Simd128LaneMemoryOp>()) {
       return lm->kind.with_trap_handler;
     }
+#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+    if (const Simd128LoadPairDeinterleaveOp* dl =
+            operation.TryCast<Simd128LoadPairDeinterleaveOp>()) {
+      return dl->load_kind.with_trap_handler;
+    }
+#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 #endif
     if (additional_protected_instructions_->Contains(this->id(node))) {
       return true;
@@ -1367,6 +1371,21 @@ bool InstructionSelectorT::IsSourcePositionUsed(OpIndex node) {
     return false;
 }
 
+bool InstructionSelectorT::IsCommutative(turboshaft::OpIndex node) const {
+  const turboshaft::Operation& op = Get(node);
+  if (const auto word_binop = op.TryCast<turboshaft::WordBinopOp>()) {
+    return turboshaft::WordBinopOp::IsCommutative(word_binop->kind);
+  } else if (const auto overflow_binop =
+                 op.TryCast<turboshaft::OverflowCheckedBinopOp>()) {
+    return turboshaft::OverflowCheckedBinopOp::IsCommutative(
+        overflow_binop->kind);
+  } else if (const auto float_binop = op.TryCast<turboshaft::FloatBinopOp>()) {
+    return turboshaft::FloatBinopOp::IsCommutative(float_binop->kind);
+  } else if (const auto comparison = op.TryCast<turboshaft::ComparisonOp>()) {
+    return turboshaft::ComparisonOp::IsCommutative(comparison->kind);
+  }
+  return false;
+}
 namespace {
 bool increment_effect_level_for_node(TurboshaftAdapter* adapter, OpIndex node) {
   // We need to increment the effect level if the operation consumes any of the
@@ -1889,8 +1908,9 @@ IF_WASM(VISIT_UNSUPPORTED_OP, I8x8Shuffle)
 #endif  // !V8_TARGET_ARCH_ARM64
 
 void InstructionSelectorT::VisitParameter(OpIndex node) {
+  const ParameterOp& parameter = Cast<ParameterOp>(node);
+  const int index = parameter.parameter_index;
   OperandGenerator g(this);
-  int index = this->parameter_index_of(node);
 
   if (linkage()->GetParameterLocation(index).IsNullRegister()) {
     EmitMoveParamToFPR(node, index);
@@ -1929,10 +1949,10 @@ void InstructionSelectorT::VisitIfException(OpIndex node) {
 }
 
 void InstructionSelectorT::VisitOsrValue(OpIndex node) {
+  const OsrValueOp& osr_value = Cast<OsrValueOp>(node);
   OperandGenerator g(this);
-  int index = this->osr_value_index_of(node);
-  Emit(kArchNop,
-       g.DefineAsLocation(node, linkage()->GetOsrValueLocation(index)));
+  Emit(kArchNop, g.DefineAsLocation(
+                     node, linkage()->GetOsrValueLocation(osr_value.index)));
 }
 
 void InstructionSelectorT::VisitPhi(OpIndex node) {
@@ -1968,6 +1988,10 @@ void InstructionSelectorT::VisitProjection(OpIndex node) {
     UNREACHABLE();
   } else if (value_op.Is<AtomicWord32PairOp>()) {
     // Nothing to do here.
+#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+  } else if (value_op.Is<Simd128LoadPairDeinterleaveOp>()) {
+    MarkAsUsed(projection.input());
+#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
   } else {
     UNIMPLEMENTED();
   }
@@ -2075,8 +2099,8 @@ void InstructionSelectorT::UpdateMaxPushedArgumentCount(size_t count) {
 
 void InstructionSelectorT::VisitCall(OpIndex node, Block* handler) {
   OperandGenerator g(this);
-  auto call = this->call_view(node);
-  const CallDescriptor* call_descriptor = call.call_descriptor();
+  const CallOp& call_op = Cast<CallOp>(node);
+  const CallDescriptor* call_descriptor = call_op.descriptor->descriptor;
   SaveFPRegsMode mode = call_descriptor->NeedsCallerSavedFPRegisters()
                             ? SaveFPRegsMode::kSave
                             : SaveFPRegsMode::kIgnore;
@@ -2090,7 +2114,8 @@ void InstructionSelectorT::VisitCall(OpIndex node, Block* handler) {
   bool needs_frame_state = false;
   if (call_descriptor->NeedsFrameState()) {
     needs_frame_state = true;
-    frame_state_descriptor = GetFrameStateDescriptor(call.frame_state());
+    frame_state_descriptor =
+        GetFrameStateDescriptor(call_op.frame_state().value());
   }
 
   CallBuffer buffer(zone(), call_descriptor, frame_state_descriptor);
@@ -2105,7 +2130,9 @@ void InstructionSelectorT::VisitCall(OpIndex node, Block* handler) {
   if (flags & CallDescriptor::kFixedTargetRegister) {
     call_buffer_flags |= kCallFixedTargetRegister;
   }
-  InitializeCallBuffer(node, &buffer, call_buffer_flags);
+  InitializeCallBuffer(node, &buffer, call_buffer_flags, call_op.callee(),
+                       call_op.frame_state(), call_op.arguments(),
+                       static_cast<int>(call_op.results_rep().size()));
 
   EmitPrepareArguments(&buffer.pushed_nodes, call_descriptor, node);
   UpdateMaxPushedArgumentCount(buffer.pushed_nodes.size());
@@ -2136,12 +2163,11 @@ void InstructionSelectorT::VisitCall(OpIndex node, Block* handler) {
     flags |= CallDescriptor::kHasExceptionHandler;
     buffer.instruction_args.push_back(g.Label(handler));
   } else {
-      if (call.ts_call_descriptor()->lazy_deopt_on_throw ==
-          LazyDeoptOnThrow::kYes) {
-        flags |= CallDescriptor::kHasExceptionHandler;
-        buffer.instruction_args.push_back(
-            g.UseImmediate(kLazyDeoptOnThrowSentinel));
-      }
+    if (call_op.descriptor->lazy_deopt_on_throw == LazyDeoptOnThrow::kYes) {
+      flags |= CallDescriptor::kHasExceptionHandler;
+      buffer.instruction_args.push_back(
+          g.UseImmediate(kLazyDeoptOnThrowSentinel));
+    }
   }
 
   // Select the appropriate opcode based on the call type.
@@ -2176,11 +2202,11 @@ void InstructionSelectorT::VisitCall(OpIndex node, Block* handler) {
     case CallDescriptor::kCallWasmCapiFunction:
     case CallDescriptor::kCallWasmFunction:
     case CallDescriptor::kCallWasmImportWrapper:
-      DCHECK(this->IsRelocatableWasmConstant(call.callee()));
+      DCHECK(this->IsRelocatableWasmConstant(call_op.callee()));
       opcode = EncodeCallDescriptorFlags(kArchCallWasmFunction, flags);
       break;
     case CallDescriptor::kCallWasmFunctionIndirect:
-      DCHECK(!this->IsRelocatableWasmConstant(call.callee()));
+      DCHECK(!this->IsRelocatableWasmConstant(call_op.callee()));
       opcode = EncodeCallDescriptorFlags(kArchCallWasmFunctionIndirect, flags);
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -2210,9 +2236,9 @@ void InstructionSelectorT::VisitCall(OpIndex node, Block* handler) {
 void InstructionSelectorT::VisitTailCall(OpIndex node) {
   OperandGenerator g(this);
 
-  auto call = this->call_view(node);
+  const TailCallOp& call_op = Cast<TailCallOp>(node);
   auto caller = linkage()->GetIncomingDescriptor();
-  auto callee = call.call_descriptor();
+  auto callee = call_op.descriptor->descriptor;
   DCHECK(caller->CanTailCall(callee));
   const int stack_param_delta = callee->GetStackParameterDelta(caller);
   CallBuffer buffer(zone(), callee, nullptr);
@@ -2225,7 +2251,10 @@ void InstructionSelectorT::VisitTailCall(OpIndex node) {
   if (callee->flags() & CallDescriptor::kFixedTargetRegister) {
     flags |= kCallFixedTargetRegister;
   }
-  InitializeCallBuffer(node, &buffer, flags, stack_param_delta);
+  InitializeCallBuffer(node, &buffer, flags, call_op.callee(),
+                       OptionalOpIndex::Nullopt(), call_op.arguments(),
+                       static_cast<int>(call_op.outputs_rep().size()),
+                       stack_param_delta);
   UpdateMaxPushedArgumentCount(stack_param_delta);
 
   // Select the appropriate opcode based on the call type.
@@ -2242,12 +2271,12 @@ void InstructionSelectorT::VisitTailCall(OpIndex node) {
 #if V8_ENABLE_WEBASSEMBLY
     case CallDescriptor::kCallWasmFunction:
       DCHECK(!caller->IsJSFunctionCall());
-      DCHECK(this->IsRelocatableWasmConstant(call.callee()));
+      DCHECK(this->IsRelocatableWasmConstant(call_op.callee()));
       opcode = kArchTailCallWasm;
       break;
     case CallDescriptor::kCallWasmFunctionIndirect:
       DCHECK(!caller->IsJSFunctionCall());
-      DCHECK(!this->IsRelocatableWasmConstant(call.callee()));
+      DCHECK(!this->IsRelocatableWasmConstant(call_op.callee()));
       opcode = kArchTailCallWasmIndirect;
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -2328,12 +2357,12 @@ void InstructionSelectorT::VisitReturn(OpIndex node) {
 
 void InstructionSelectorT::VisitBranch(OpIndex branch_node, Block* tbranch,
                                        Block* fbranch) {
-  auto branch = this->branch_view(branch_node);
+  const BranchOp& branch = Cast<BranchOp>(branch_node);
   TryPrepareScheduleFirstProjection(branch.condition());
 
   FlagsContinuation cont =
       FlagsContinuation::ForBranch(kNotEqual, tbranch, fbranch);
-  VisitWordCompareZero(branch, branch.condition(), &cont);
+  VisitWordCompareZero(branch_node, branch.condition(), &cont);
 }
 
 // When a DeoptimizeIf/DeoptimizeUnless/Branch depends on a BinopOverflow, the
@@ -2356,15 +2385,16 @@ void InstructionSelectorT::VisitBranch(OpIndex branch_node, Block* tbranch,
 // scheduled (and a few other conditions must be satisfied, see
 // InstructionSelectorXXX::VisitWordCompareZero).
 // TryPrepareScheduleFirstProjection is thus called from
-// VisitDeoptimizeIf/VisitDeoptimizeUnless/VisitBranch and detects if the 1st
+// VisitDeoptimizeIf/VisitBranch and detects if the 1st
 // projection could be scheduled now, and, if so, defines it.
 void InstructionSelectorT::TryPrepareScheduleFirstProjection(
     OpIndex maybe_projection) {
-  // The DeoptimizeIf/DeoptimizeUnless/Branch condition is not a projection.
-  if (!this->is_projection(maybe_projection)) return;
+  // The DeoptimizeIf/Branch condition is not a projection.
+  const ProjectionOp* projection = TryCast<ProjectionOp>(maybe_projection);
+  if (!projection) return;
 
-  if (this->projection_index_of(maybe_projection) != 1u) {
-    // The DeoptimizeIf/DeoptimizeUnless/Branch isn't on the Projection[1]
+  if (projection->index != 1u) {
+    // The DeoptimizeIf/Branch isn't on the Projection[1]
     // (ie, not on the overflow bit of a BinopOverflow).
     return;
   }
@@ -2429,25 +2459,13 @@ void InstructionSelectorT::TryPrepareScheduleFirstProjection(
 }
 
 void InstructionSelectorT::VisitDeoptimizeIf(OpIndex node) {
-  auto deopt = this->deoptimize_view(node);
-  DCHECK(deopt.is_deoptimize_if());
+  const DeoptimizeIfOp& deopt = Cast<DeoptimizeIfOp>(node);
 
   TryPrepareScheduleFirstProjection(deopt.condition());
 
   FlagsContinuation cont = FlagsContinuation::ForDeoptimize(
-      kNotEqual, deopt.reason(), this->id(node), deopt.feedback(),
-      deopt.frame_state());
-  VisitWordCompareZero(node, deopt.condition(), &cont);
-}
-
-void InstructionSelectorT::VisitDeoptimizeUnless(OpIndex node) {
-  auto deopt = this->deoptimize_view(node);
-  DCHECK(deopt.is_deoptimize_unless());
-  TryPrepareScheduleFirstProjection(deopt.condition());
-
-  FlagsContinuation cont =
-      FlagsContinuation::ForDeoptimize(kEqual, deopt.reason(), this->id(node),
-                                       deopt.feedback(), deopt.frame_state());
+      deopt.negated ? kEqual : kNotEqual, deopt.parameters->reason(), node.id(),
+      deopt.parameters->feedback(), deopt.frame_state());
   VisitWordCompareZero(node, deopt.condition(), &cont);
 }
 
@@ -3358,9 +3376,6 @@ void InstructionSelectorT::VisitNode(OpIndex node) {
     case Opcode::kProjection:
       return VisitProjection(node);
     case Opcode::kDeoptimizeIf:
-      if (Get(node).Cast<DeoptimizeIfOp>().negated) {
-        return VisitDeoptimizeUnless(node);
-      }
       return VisitDeoptimizeIf(node);
 #if V8_ENABLE_WEBASSEMBLY
     case Opcode::kTrapIf: {
@@ -3669,6 +3684,18 @@ void InstructionSelectorT::VisitNode(OpIndex node) {
 #undef VISIT_SIMD_TERNARY
       }
     }
+
+#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+    case Opcode::kSimd128LoadPairDeinterleave: {
+      OptionalOpIndex projection0 = FindProjection(node, 0);
+      DCHECK(projection0.valid());
+      MarkAsSimd128(projection0.value());
+      OptionalOpIndex projection1 = FindProjection(node, 1);
+      DCHECK(projection1.valid());
+      MarkAsSimd128(projection1.value());
+      return VisitSimd128LoadPairDeinterleave(node);
+    }
+#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 
     // SIMD256
 #if V8_ENABLE_WASM_SIMD256_REVEC

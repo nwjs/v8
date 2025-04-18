@@ -518,9 +518,9 @@ void VisitPairAtomicBinOp(InstructionSelectorT* selector, OpIndex node,
 }  // namespace
 
 void InstructionSelectorT::VisitStackSlot(OpIndex node) {
-  StackSlotRepresentation rep = this->stack_slot_representation_of(node);
-  int slot =
-      frame_->AllocateSpillSlot(rep.size(), rep.alignment(), rep.is_tagged());
+  const StackSlotOp& stack_slot = Cast<StackSlotOp>(node);
+  int slot = frame_->AllocateSpillSlot(stack_slot.size, stack_slot.alignment,
+                                       stack_slot.is_tagged);
   OperandGenerator g(this);
 
   Emit(kArchStackSlot, g.DefineAsRegister(node),
@@ -1628,11 +1628,10 @@ void InstructionSelectorT::VisitInt32Mul(OpIndex node) {
 }
 
 void InstructionSelectorT::VisitUint32MulHigh(OpIndex node) {
-  auto binop = this->word_binop_view(node);
+  auto [left, right] = Inputs<WordBinopOp>(node);
   ArmOperandGeneratorT g(this);
   InstructionOperand outputs[] = {g.TempRegister(), g.DefineAsRegister(node)};
-  InstructionOperand inputs[] = {g.UseRegister(binop.left()),
-                                 g.UseRegister(binop.right())};
+  InstructionOperand inputs[] = {g.UseRegister(left), g.UseRegister(right)};
   Emit(kArmUmull, arraysize(outputs), outputs, arraysize(inputs), inputs);
 }
 
@@ -2462,13 +2461,12 @@ void InstructionSelectorT::VisitWord32AtomicExchange(OpIndex node) {
 
 void InstructionSelectorT::VisitWord32AtomicCompareExchange(OpIndex node) {
   ArmOperandGeneratorT g(this);
-  auto rmw_view = this->atomic_rmw_view(node);
-  OpIndex base = rmw_view.base();
-  OpIndex index = rmw_view.index();
-  OpIndex old_value = rmw_view.expected();
-  OpIndex new_value = rmw_view.value();
+  const AtomicRMWOp& atomic_op = Cast<AtomicRMWOp>(node);
+  OpIndex base = atomic_op.base();
+  OpIndex index = atomic_op.index();
+  OpIndex old_value = atomic_op.expected().value();
+  OpIndex new_value = atomic_op.value();
   ArchOpcode opcode;
-  const AtomicRMWOp& atomic_op = this->Get(node).template Cast<AtomicRMWOp>();
   if (atomic_op.memory_rep == MemoryRepresentation::Int8()) {
     opcode = kAtomicCompareExchangeInt8;
   } else if (atomic_op.memory_rep == MemoryRepresentation::Uint8()) {
@@ -2503,9 +2501,8 @@ void InstructionSelectorT::VisitWord32AtomicBinaryOperation(
     OpIndex node, ArchOpcode int8_op, ArchOpcode uint8_op, ArchOpcode int16_op,
     ArchOpcode uint16_op, ArchOpcode word32_op) {
   ArmOperandGeneratorT g(this);
-  auto rmw_view = this->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = Cast<AtomicRMWOp>(node);
   ArchOpcode opcode;
-  const AtomicRMWOp& atomic_op = this->Get(node).template Cast<AtomicRMWOp>();
   if (atomic_op.memory_rep == MemoryRepresentation::Int8()) {
     opcode = int8_op;
   } else if (atomic_op.memory_rep == MemoryRepresentation::Uint8()) {
@@ -2524,9 +2521,9 @@ void InstructionSelectorT::VisitWord32AtomicBinaryOperation(
   AddressingMode addressing_mode = kMode_Offset_RR;
   InstructionOperand inputs[3];
   size_t input_count = 0;
-  inputs[input_count++] = g.UseRegister(rmw_view.base());
-  inputs[input_count++] = g.UseRegister(rmw_view.index());
-  inputs[input_count++] = g.UseUniqueRegister(rmw_view.value());
+  inputs[input_count++] = g.UseRegister(atomic_op.base());
+  inputs[input_count++] = g.UseRegister(atomic_op.index());
+  inputs[input_count++] = g.UseUniqueRegister(atomic_op.value());
   InstructionOperand outputs[1];
   outputs[0] = g.DefineAsRegister(node);
   InstructionOperand temps[] = {g.TempRegister(), g.TempRegister(),
@@ -2584,11 +2581,12 @@ void InstructionSelectorT::VisitWord32AtomicPairLoad(OpIndex node) {
 
 void InstructionSelectorT::VisitWord32AtomicPairStore(OpIndex node) {
   ArmOperandGeneratorT g(this);
-  auto store = this->word32_atomic_pair_store_view(node);
+  const AtomicWord32PairOp& store = Cast<AtomicWord32PairOp>(node);
   AddressingMode addressing_mode = kMode_Offset_RR;
-  InstructionOperand inputs[] = {
-      g.UseUniqueRegister(store.base()), g.UseUniqueRegister(store.index()),
-      g.UseFixed(store.value_low(), r2), g.UseFixed(store.value_high(), r3)};
+  InstructionOperand inputs[] = {g.UseUniqueRegister(store.base()),
+                                 g.UseUniqueRegister(store.index().value()),
+                                 g.UseFixed(store.value_low().value(), r2),
+                                 g.UseFixed(store.value_high().value(), r3)};
   InstructionOperand temps[] = {g.TempRegister(), g.TempRegister(r0),
                                 g.TempRegister(r1)};
   InstructionCode code =

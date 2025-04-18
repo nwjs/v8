@@ -35,18 +35,9 @@ const BABYLON_OPTIONS = {
     tokens: false,
     ranges: false,
     plugins: [
-        'asyncGenerators',
-        'bigInt',
-        'classPrivateMethods',
-        'classPrivateProperties',
-        'classProperties',
         'doExpressions',
+        'explicitResourceManagement',
         'exportDefaultFrom',
-        'nullishCoalescingOperator',
-        'numericSeparator',
-        'objectRestSpread',
-        'optionalCatchBinding',
-        'optionalChaining',
     ],
 }
 
@@ -270,6 +261,13 @@ class BaseCorpus {
    */
   loadFlags(relPath, data) {
     return [];
+  }
+
+  /**
+   * By default load dependencies from within this corpus.
+   */
+  loadDependency(relPath) {
+    return loadDependency(this, relPath);
   }
 }
 
@@ -528,7 +526,7 @@ function loadDependency(corpus, relPath) {
 }
 
 function loadDependencyAbs(corpus, absPath) {
-  return loadDependency(corpus, fsPath.relative(corpus.inputDir, absPath));
+  return corpus.loadDependency(fsPath.relative(corpus.inputDir, absPath));
 }
 
 // Convenience helper to load a file from the resources directory.

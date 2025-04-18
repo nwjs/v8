@@ -571,7 +571,10 @@ RUNTIME_FUNCTION(Runtime_CurrentFrameIsTurbofan) {
 #ifdef V8_ENABLE_MAGLEV
 RUNTIME_FUNCTION(Runtime_OptimizeMaglevOnNextCall) {
   HandleScope scope(isolate);
-  return OptimizeFunctionOnNextCall(args, isolate, CodeKind::MAGLEV);
+  return OptimizeFunctionOnNextCall(
+      args, isolate,
+      v8_flags.optimize_maglev_optimizes_to_turbofan ? CodeKind::TURBOFAN_JS
+                                                     : CodeKind::MAGLEV);
 }
 #else
 RUNTIME_FUNCTION(Runtime_OptimizeMaglevOnNextCall) {
@@ -916,6 +919,10 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
   if (v8_flags.optimize_on_next_call_optimizes_to_maglev) {
     status |= static_cast<int>(
         OptimizationStatus::kOptimizeOnNextCallOptimizesToMaglev);
+  }
+  if (v8_flags.optimize_maglev_optimizes_to_turbofan) {
+    status |= static_cast<int>(
+        OptimizationStatus::kOptimizeMaglevOptimizesToTurbofan);
   }
 
   Handle<Object> function_object = args.at(0);
@@ -2289,25 +2296,41 @@ RUNTIME_FUNCTION(Runtime_GetFeedback) {
 #endif  // not V8_JITLESS
 }
 
-RUNTIME_FUNCTION(Runtime_IsNoWriteBarrierNeeded) {
-  HandleScope scope(isolate);
+RUNTIME_FUNCTION(Runtime_CheckNoWriteBarrierNeeded) {
+#if defined(V8_ENABLE_DEBUG_CODE) && !V8_DISABLE_WRITE_BARRIERS_BOOL
   DisallowGarbageCollection no_gc;
-  if (args.length() != 1) {
+  if (args.length() != 2) {
     return CrashUnlessFuzzing(isolate);
   }
-  DirectHandle<Object> object = args.at(0);
-  if (!(*object).IsHeapObject()) {
+  Tagged<Object> object = args[0];
+  if (!object.IsHeapObject()) {
     return CrashUnlessFuzzing(isolate);
   }
   auto heap_object = Cast<HeapObject>(object);
-  if (HeapLayout::InReadOnlySpace(*heap_object)) {
-    return ReadOnlyRoots(isolate).true_value();
+  Tagged<Object> value = args[1];
+  CHECK(!WriteBarrier::IsRequired(heap_object, value));
+  return args[0];
+#else
+  UNREACHABLE();
+#endif
+}
+
+RUNTIME_FUNCTION(Runtime_ArrayBufferDetachForceWasm) {
+  HandleScope scope(isolate);
+  DisallowGarbageCollection no_gc;
+  if (args.length() > 2 || !IsJSArrayBuffer(*args.at(0))) {
+    return CrashUnlessFuzzing(isolate);
   }
-  if (WriteBarrier::GetWriteBarrierModeForObject(*heap_object, no_gc) !=
-      WriteBarrierMode::SKIP_WRITE_BARRIER) {
-    return ReadOnlyRoots(isolate).false_value();
+  auto array_buffer = Cast<JSArrayBuffer>(args.at(0));
+  if (!array_buffer->GetBackingStore()->is_wasm_memory() ||
+      array_buffer->is_shared()) {
+    return CrashUnlessFuzzing(isolate);
   }
-  return ReadOnlyRoots(isolate).true_value();
+  constexpr bool kForceForWasmMemory = true;
+  MAYBE_RETURN(JSArrayBuffer::Detach(array_buffer, kForceForWasmMemory,
+                                     args.atOrUndefined(isolate, 1)),
+               ReadOnlyRoots(isolate).exception());
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 }  // namespace internal

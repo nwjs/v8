@@ -177,32 +177,51 @@ NodeType StaticTypeForNode(compiler::JSHeapBroker* broker,
 
 struct CatchBlockDetails {
   BasicBlockRef* ref = nullptr;
-  MergePointInterpreterFrameState* state = nullptr;
-  const MaglevCompilationUnit* unit = nullptr;
+  bool exception_handler_was_used = false;
   int deopt_frame_distance = 0;
-  MaglevGraphBuilder* builder = nullptr;
 };
 
 struct MaglevCallerDetails {
-  MaglevCompilationUnit* callee;
-  SourcePosition call_site_positiion;
   base::Vector<ValueNode*> arguments;
   DeoptFrame* deopt_frame;
   KnownNodeAspects* known_node_aspects;
-  VirtualObject::List virtual_objects;
   LoopEffects* loop_effects;
   ZoneUnorderedMap<KnownNodeAspects::LoadedContextSlotsKey, Node*>
       unobserved_context_slot_stores;
   CatchBlockDetails catch_block;
   bool is_inside_loop;
+  bool is_eager_inline;
   float call_frequency;
-  // Only available if non-greedy inlining, otherwise nullptr.
+};
+
+struct MaglevCallSiteInfo {
+  MaglevCallerDetails caller_details;
   CallKnownJSFunction* generic_call_node;
+  compiler::FeedbackCellRef feedback_cell;
+  float score;
 };
 
 class MaglevGraphBuilder {
  public:
   class DeoptFrameScope;
+
+  class V8_NODISCARD LazyDeoptResultLocationScope {
+   public:
+    LazyDeoptResultLocationScope(MaglevGraphBuilder* builder,
+                                 interpreter::Register result_location,
+                                 int result_size);
+    ~LazyDeoptResultLocationScope();
+
+    interpreter::Register result_location() { return result_location_; }
+
+    int result_size() const { return result_size_; }
+
+   private:
+    MaglevGraphBuilder* builder_;
+    LazyDeoptResultLocationScope* previous_;
+    interpreter::Register result_location_;
+    int result_size_;
+  };
 
   explicit MaglevGraphBuilder(LocalIsolate* local_isolate,
                               MaglevCompilationUnit* compilation_unit,
@@ -256,7 +275,8 @@ class MaglevGraphBuilder {
     BuildBody();
   }
 
-  ReduceResult BuildInlineFunction(ValueNode* context, ValueNode* function,
+  ReduceResult BuildInlineFunction(SourcePosition call_site_position,
+                                   ValueNode* context, ValueNode* function,
                                    ValueNode* new_target);
 
   void StartPrologue();
@@ -388,6 +408,14 @@ class MaglevGraphBuilder {
   bool is_inline() const { return caller_details_ != nullptr; }
   int inlining_depth() const { return compilation_unit_->inlining_depth(); }
 
+  bool is_eager_inline() const {
+    DCHECK(is_inline());
+    DCHECK_IMPLIES(!caller_details_->is_eager_inline,
+                   v8_flags.maglev_non_eager_inlining ||
+                       v8_flags.turbolev_non_eager_inlining);
+    return caller_details_->is_eager_inline;
+  }
+
   DeoptFrame GetLatestCheckpointedFrame();
 
   bool need_checkpointed_loop_entry() {
@@ -419,6 +447,13 @@ class MaglevGraphBuilder {
 
   bool is_turbolev() const { return is_turbolev_; }
 
+  bool is_non_eager_inlining_enabled() const {
+    if (is_turbolev()) {
+      return v8_flags.turbolev_non_eager_inlining;
+    }
+    return v8_flags.maglev_non_eager_inlining;
+  }
+
   // Inlining configuration. For Maglev, we use the Maglev flags, and for
   // Turbolev, we use the Turbofan flags.
   int max_inlined_bytecode_size() {
@@ -449,6 +484,11 @@ class MaglevGraphBuilder {
       return v8_flags.max_maglev_inlined_bytecode_size_cumulative;
     }
   }
+
+  DeoptFrame* AddInlinedArgumentsToDeoptFrame(DeoptFrame* deopt_frame,
+                                              const MaglevCompilationUnit* unit,
+                                              ValueNode* closure,
+                                              base::Vector<ValueNode*> args);
 
  private:
   // Helper class for building a subgraph with its own control flow, that is not
@@ -1142,10 +1182,17 @@ class MaglevGraphBuilder {
   template <typename NodeT>
   void AttachLazyDeoptInfo(NodeT* node) {
     if constexpr (NodeT::kProperties.can_lazy_deopt()) {
-      auto [register_result, register_count] = GetResultLocationAndSize();
+      interpreter::Register result_location;
+      int result_size;
+      if (lazy_deopt_result_location_scope_) {
+        result_location = lazy_deopt_result_location_scope_->result_location();
+        result_size = lazy_deopt_result_location_scope_->result_size();
+      } else {
+        std::tie(result_location, result_size) = GetResultLocationAndSize();
+      }
       new (node->lazy_deopt_info()) LazyDeoptInfo(
-          zone(), GetDeoptFrameForLazyDeopt(register_result, register_count),
-          register_result, register_count, current_speculation_feedback_);
+          zone(), GetDeoptFrameForLazyDeopt(result_location, result_size),
+          result_location, result_size, current_speculation_feedback_);
     }
   }
 
@@ -1154,33 +1201,63 @@ class MaglevGraphBuilder {
     if constexpr (NodeT::kProperties.can_throw()) {
       CatchBlockDetails catch_block = GetCurrentTryCatchBlock();
       if (catch_block.ref) {
-        if (!catch_block.state->exception_handler_was_used()) {
+        if (!catch_block.exception_handler_was_used) {
           // Attach an empty live exception handler to mark that there's a
           // matching catch but we'll lazy deopt if we ever throw.
-          new (node->exception_handler_info()) ExceptionHandlerInfo(
-              catch_block.ref, ExceptionHandlerInfo::kLazyDeopt);
+          new (node->exception_handler_info())
+              ExceptionHandlerInfo(ExceptionHandlerInfo::kLazyDeopt);
           DCHECK(node->exception_handler_info()->HasExceptionHandler());
           DCHECK(node->exception_handler_info()->ShouldLazyDeopt());
+          if constexpr (std ::is_same_v<NodeT, CallKnownJSFunction>) {
+            if (is_non_eager_inlining_enabled()) {
+              // Ensure that we always have the handler of inline call
+              // candidates.
+              current_block_->AddExceptionHandler(
+                  node->exception_handler_info());
+            }
+          }
           return;
         }
 
-        new (node->exception_handler_info()) ExceptionHandlerInfo(
-            catch_block.ref, catch_block.deopt_frame_distance);
+        DCHECK_IMPLIES(!IsInsideTryBlock(), is_inline());
+        if (!IsInsideTryBlock() && !is_eager_inline()) {
+          // If we are inlining a function non-eagerly and we are not inside a
+          // try block, then the catch block already exists.
+          new (node->exception_handler_info()) ExceptionHandlerInfo(
+              catch_block.ref->block_ptr(), catch_block.deopt_frame_distance);
+        } else {
+          // If we are inside a try block for the current builder or if we are
+          // inside an eager inlined call inside a try block, the catch basic
+          // block doesn't exist yet, use the ref-list mechanism.
+          new (node->exception_handler_info()) ExceptionHandlerInfo(
+              catch_block.ref, catch_block.deopt_frame_distance);
+        }
+
         DCHECK(node->exception_handler_info()->HasExceptionHandler());
         DCHECK(!node->exception_handler_info()->ShouldLazyDeopt());
 
-        // Merge the current state into the handler state.
-        DCHECK_NOT_NULL(catch_block.state);
-        catch_block.state->MergeThrow(
-            catch_block.builder, catch_block.unit,
-            *current_interpreter_frame_.known_node_aspects(),
-            current_interpreter_frame_.virtual_objects());
+        current_block_->AddExceptionHandler(node->exception_handler_info());
+
+        if (IsInsideTryBlock()) {
+          // Merge the current state into the handler state.
+          auto state = GetCatchBlockFrameState();
+          DCHECK_NOT_NULL(state);
+          state->MergeThrow(this, compilation_unit_,
+                            *current_interpreter_frame_.known_node_aspects(),
+                            current_interpreter_frame_.virtual_objects());
+        }
       } else {
         // Patch no exception handler marker.
         // TODO(victorgomes): Avoid allocating exception handler data in this
         // case.
         new (node->exception_handler_info()) ExceptionHandlerInfo();
         DCHECK(!node->exception_handler_info()->HasExceptionHandler());
+        if constexpr (std ::is_same_v<NodeT, CallKnownJSFunction>) {
+          if (is_non_eager_inlining_enabled()) {
+            // Ensure that we always have the handler of inline call candidates.
+            current_block_->AddExceptionHandler(node->exception_handler_info());
+          }
+        }
       }
     }
   }
@@ -1189,12 +1266,27 @@ class MaglevGraphBuilder {
   // region.
   bool IsInsideTryBlock() const { return catch_block_stack_.size() > 0; }
 
+  MergePointInterpreterFrameState* GetCatchBlockFrameState() {
+    DCHECK(IsInsideTryBlock());
+    return merge_states_[catch_block_stack_.top().handler];
+  }
+
   CatchBlockDetails GetCurrentTryCatchBlock() {
     if (IsInsideTryBlock()) {
       // Inside a try-block.
       int offset = catch_block_stack_.top().handler;
-      return {&jump_targets_[offset], merge_states_[offset], compilation_unit_,
-              0, this};
+      return {&jump_targets_[offset],
+              merge_states_[offset]->exception_handler_was_used(), 0};
+    }
+    if (!is_inline()) {
+      return CatchBlockDetails{};
+    }
+    return caller_details_->catch_block;
+  }
+
+  CatchBlockDetails GetTryCatchBlockFromInfo(ExceptionHandlerInfo* info) {
+    if (IsInsideTryBlock()) {
+      return {info->catch_block_ref_address(), !info->ShouldLazyDeopt(), 0};
     }
     if (!is_inline()) {
       return CatchBlockDetails{};
@@ -1744,9 +1836,9 @@ class MaglevGraphBuilder {
 #endif
 
   DeoptFrame* GetCallerDeoptFrame();
-  DeoptFrame* GetDeoptFrameForCall(const MaglevCompilationUnit* unit,
-                                   ValueNode* closure,
-                                   base::Vector<ValueNode*> args);
+  DeoptFrame* GetDeoptFrameForEagerCall(const MaglevCompilationUnit* unit,
+                                        ValueNode* closure,
+                                        base::Vector<ValueNode*> args);
   DeoptFrame GetDeoptFrameForLazyDeopt(interpreter::Register result_location,
                                        int result_size);
   DeoptFrame GetDeoptFrameForLazyDeoptHelper(
@@ -1763,8 +1855,8 @@ class MaglevGraphBuilder {
     }
 
     if constexpr (Node::opcode_of<NodeT> != Opcode::kAllocationBlock &&
-                  (NodeT::kProperties.can_eager_deopt() ||
-                   NodeT::kProperties.can_lazy_deopt() ||
+                  (NodeT::kProperties.can_deopt() ||
+                   NodeT::kProperties.can_throw() ||
                    NodeT::kProperties.can_allocate())) {
       ClearCurrentAllocationBlock();
     }
@@ -1940,7 +2032,6 @@ class MaglevGraphBuilder {
       graph_labeller()->RegisterNode(control_node, compilation_unit_,
                                      BytecodeOffset(iterator_.current_offset()),
                                      current_source_position_);
-      graph_labeller()->RegisterBasicBlock(block);
       if (v8_flags.trace_maglev_graph_building) {
         bool kSkipTargets = true;
         std::cout << "  " << control_node << "  "
@@ -2009,6 +2100,7 @@ class MaglevGraphBuilder {
   V(ArrayForEach)                              \
   V(ArrayIsArray)                              \
   V(ArrayIteratorPrototypeNext)                \
+  V(ArrayMap)                                  \
   V(ArrayPrototypeEntries)                     \
   V(ArrayPrototypeKeys)                        \
   V(ArrayPrototypeValues)                      \
@@ -2036,6 +2128,7 @@ class MaglevGraphBuilder {
   V(MathPow)                                   \
   V(MathAbs)                                   \
   V(MathRound)                                 \
+  V(SetPrototypeHas)                           \
   V(StringConstructor)                         \
   V(StringFromCharCode)                        \
   V(StringPrototypeCharCodeAt)                 \
@@ -2050,6 +2143,24 @@ class MaglevGraphBuilder {
                                     CallArguments& args);
   MAGLEV_REDUCED_BUILTIN(DEFINE_BUILTIN_REDUCER)
 #undef DEFINE_BUILTIN_REDUCER
+
+  using InitialCallback = std::function<ReduceResult(ValueNode*)>;
+  using ProcessElementCallback = std::function<void(ValueNode*, ValueNode*)>;
+  using GetDeoptScopeCallback = std::function<DeoptFrameScope(
+      compiler::JSFunctionRef, ValueNode*, ValueNode*, ValueNode*, ValueNode*,
+      ValueNode*, ValueNode*)>;
+
+  // Used for reduding Array.prototype.forEach and Array.prototype.map.
+  // initial_callback will be called to generate code before starting the
+  // iteration, and process_element_callback will be called to generate code for
+  // each result element.
+  MaybeReduceResult TryReduceArrayIteratingBuiltin(
+      const char* name, compiler::JSFunctionRef target, CallArguments& args,
+      GetDeoptScopeCallback get_eager_deopt_scope,
+      GetDeoptScopeCallback get_lazy_deopt_scope,
+      const std::optional<InitialCallback>& initial_callback = {},
+      const std::optional<ProcessElementCallback>& process_element_callback =
+          {});
 
   MaybeReduceResult TryReduceGetProto(ValueNode* node);
 
@@ -2087,6 +2198,13 @@ class MaglevGraphBuilder {
       compiler::SharedFunctionInfoRef shared,
       compiler::FeedbackCellRef feedback_cell, CallArguments& args,
       const compiler::FeedbackSource& feedback_source);
+  CallKnownJSFunction* BuildCallKnownJSFunction(
+      ValueNode* context, ValueNode* function, ValueNode* new_target,
+#ifdef V8_ENABLE_LEAPTIERING
+      JSDispatchHandle dispatch_handle,
+#endif
+      compiler::SharedFunctionInfoRef shared,
+      base::Vector<ValueNode*> arguments);
   MaybeReduceResult TryBuildCallKnownJSFunction(
       compiler::JSFunctionRef function, ValueNode* new_target,
       CallArguments& args, const compiler::FeedbackSource& feedback_source);
@@ -2140,7 +2258,7 @@ class MaglevGraphBuilder {
   MaybeReduceResult TryReduceCallForApiFunction(
       compiler::FunctionTemplateInfoRef api_callback,
       compiler::OptionalSharedFunctionInfoRef maybe_shared,
-      compiler::OptionalJSObjectRef api_holder, CallArguments& args);
+      CallArguments& args);
   MaybeReduceResult TryReduceFunctionPrototypeApplyCallWithReceiver(
       compiler::OptionalHeapObjectRef maybe_receiver, CallArguments& args,
       const compiler::FeedbackSource& feedback_source);
@@ -2557,10 +2675,14 @@ class MaglevGraphBuilder {
     if (InlinedAllocation* alloc = node->TryCast<InlinedAllocation>()) {
       VirtualObject* vobject =
           current_interpreter_frame_.virtual_objects().FindAllocatedWith(alloc);
-      CHECK_NOT_NULL(vobject);
-      AddDeoptUse(vobject);
-      // Add an escaping use for the allocation.
-      AddNonEscapingUses(alloc, 1);
+      if (vobject) {
+        CHECK_NOT_NULL(vobject);
+        AddDeoptUse(vobject);
+        // Add an escaping use for the allocation.
+        AddNonEscapingUses(alloc, 1);
+      } else {
+        DCHECK(alloc->is_returned_value_from_inline_call());
+      }
       alloc->add_use();
     } else {
       node->add_use();
@@ -3155,6 +3277,7 @@ class MaglevGraphBuilder {
   int next_handler_table_index_ = 0;
 
   DeoptFrameScope* current_deopt_scope_ = nullptr;
+  LazyDeoptResultLocationScope* lazy_deopt_result_location_scope_ = nullptr;
 
   struct HandlerTableEntry {
     int end;

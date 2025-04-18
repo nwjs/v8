@@ -4236,14 +4236,14 @@ void MacroAssembler::StoreU16LE(Register src, const MemOperand& mem,
 
 void MacroAssembler::StoreF64LE(DoubleRegister src, const MemOperand& opnd,
                                 Register scratch) {
-  DCHECK(is_uint12(opnd.offset()));
+  DCHECK(is_int20(opnd.offset()));
   lgdr(scratch, src);
   strvg(scratch, opnd);
 }
 
 void MacroAssembler::StoreF32LE(DoubleRegister src, const MemOperand& opnd,
                                 Register scratch) {
-  DCHECK(is_uint12(opnd.offset()));
+  DCHECK(is_int20(opnd.offset()));
   lgdr(scratch, src);
   ShiftRightU64(scratch, scratch, Operand(32));
   strv(scratch, opnd);
@@ -6372,7 +6372,8 @@ void MacroAssembler::S128Const(Simd128Register dst, uint64_t high, uint64_t low,
 void MacroAssembler::I8x16Swizzle(Simd128Register dst, Simd128Register src1,
                                   Simd128Register src2, Register scratch1,
                                   Register scratch2, Simd128Register scratch3) {
-  DCHECK(!AreAliased(src1, src2, scratch3));
+  DCHECK(!AreAliased(src1, scratch3));
+  DCHECK(!AreAliased(src2, scratch3));
   // Saturate the indices to 5 bits. Input indices more than 31 should
   // return 0.
   vrepi(scratch3, Operand(31), Condition(0));
@@ -6446,7 +6447,8 @@ void MacroAssembler::I16x8Q15MulRSatS(Simd128Register dst, Simd128Register src1,
                                       Simd128Register scratch1,
                                       Simd128Register scratch2,
                                       Simd128Register scratch3) {
-  DCHECK(!AreAliased(src1, src2, scratch1, scratch2, scratch3));
+  DCHECK(!AreAliased(src1, scratch1, scratch2, scratch3));
+  DCHECK(!AreAliased(src2, scratch1, scratch2, scratch3));
   vrepi(scratch1, Operand(0x4000), Condition(2));
   Q15_MUL_ROAUND(scratch2, src1, src2, scratch1, scratch3, vupl)
   Q15_MUL_ROAUND(dst, src1, src2, scratch1, scratch3, vuph)

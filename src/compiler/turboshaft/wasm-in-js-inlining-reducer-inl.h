@@ -738,11 +738,11 @@ class WasmInJsInliningInterface {
   }
 
   void StructNew(FullDecoder* decoder, const StructIndexImmediate& imm,
-                 const Value args[], Value* result) {
+                 const Value& descriptor, const Value args[], Value* result) {
     Bailout(decoder);
   }
   void StructNewDefault(FullDecoder* decoder, const StructIndexImmediate& imm,
-                        Value* result) {
+                        const Value& descriptor, Value* result) {
     Bailout(decoder);
   }
   void StructGet(FullDecoder* decoder, const Value& struct_object,
@@ -819,7 +819,11 @@ class WasmInJsInliningInterface {
     Bailout(decoder);
   }
 
-  void RefTest(FullDecoder* decoder, wasm::ModuleTypeIndex ref_index,
+  void RefGetDesc(FullDecoder* decoder, const Value& ref, Value* desc) {
+    Bailout(decoder);
+  }
+
+  void RefTest(FullDecoder* decoder, wasm::HeapType target_type,
                const Value& object, Value* result, bool null_succeeds) {
     Bailout(decoder);
   }
@@ -827,8 +831,11 @@ class WasmInJsInliningInterface {
                        wasm::HeapType type, Value* result, bool null_succeeds) {
     Bailout(decoder);
   }
-  void RefCast(FullDecoder* decoder, wasm::ModuleTypeIndex ref_index,
-               const Value& object, Value* result, bool null_succeeds) {
+  void RefCast(FullDecoder* decoder, const Value& object, Value* result) {
+    Bailout(decoder);
+  }
+  void RefCastDesc(FullDecoder* decoder, const Value& object,
+                   const Value& descriptor, Value* result) {
     Bailout(decoder);
   }
   void RefCastAbstract(FullDecoder* decoder, const Value& object,
@@ -916,7 +923,7 @@ class WasmInJsInliningInterface {
     Bailout(decoder);
   }
 
-  void BrOnCast(FullDecoder* decoder, wasm::ModuleTypeIndex ref_index,
+  void BrOnCast(FullDecoder* decoder, wasm::HeapType target_type,
                 const Value& object, Value* value_on_branch, uint32_t br_depth,
                 bool null_succeeds) {
     Bailout(decoder);
@@ -926,7 +933,7 @@ class WasmInJsInliningInterface {
                         uint32_t br_depth, bool null_succeeds) {
     Bailout(decoder);
   }
-  void BrOnCastFail(FullDecoder* decoder, wasm::ModuleTypeIndex ref_index,
+  void BrOnCastFail(FullDecoder* decoder, wasm::HeapType target_type,
                     const Value& object, Value* value_on_fallthrough,
                     uint32_t br_depth, bool null_succeeds) {
     Bailout(decoder);

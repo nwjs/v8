@@ -4167,13 +4167,12 @@ THREADED_TEST(External) {
   CHECK_EQ(x, 10);
 
   {
+    i::ReadOnlyRoots roots(CcTest::i_isolate());
     i::DirectHandle<i::Object> obj = v8::Utils::OpenDirectHandle(*ext);
-    CHECK_EQ(i::Cast<i::HeapObject>(*obj)->map(),
-             CcTest::heap()->external_map());
+    CHECK_EQ(i::Cast<i::HeapObject>(*obj)->map(), roots.external_map());
     CHECK(ext->IsExternal());
     CHECK(!CompileRun("new Set().add(this.ext)").IsEmpty());
-    CHECK_EQ(i::Cast<i::HeapObject>(*obj)->map(),
-             CcTest::heap()->external_map());
+    CHECK_EQ(i::Cast<i::HeapObject>(*obj)->map(), roots.external_map());
     CHECK(ext->IsExternal());
   }
 
@@ -4417,17 +4416,10 @@ class TwoPassCallbackData {
     bool trigger_gc = trigger_gc_;
     delete this;
 
-    {
-      // Make sure that running JS works inside the second pass callback.
-      v8::HandleScope handle_scope(isolate);
-      v8::Context::Scope context_scope(metadata->context.Get(isolate));
-      v8::Local<v8::Value> value = CompileRun("(function() { return 42 })()");
-      CHECK(value->IsInt32());
-      CHECK_EQ(value.As<v8::Int32>()->Value(), 42);
+    if (!trigger_gc) {
+      return;
     }
-
-    if (!trigger_gc) return;
-    auto data_2 = new TwoPassCallbackData(isolate, metadata);
+    auto* data_2 = new TwoPassCallbackData(isolate, metadata);
     data_2->SetWeak();
     i::heap::InvokeMajorGC(CcTest::heap());
   }
@@ -5195,11 +5187,36 @@ THREADED_TEST(CurrentStackTraceHasUniqueIDs) {
   CHECK_NE(id1->Value(), id2->Value());
 }
 
-void GetCurrentStackTrace(const v8::FunctionCallbackInfo<v8::Value>& args) {
+// Callback that filters frames
+bool IsScriptFrameAllowed(v8::Isolate* isolate,
+                          v8::Local<v8::String> script_name) {
+  CHECK(!script_name.IsEmpty());
+
+  v8::String::Utf8Value script_name_value(isolate, script_name);
+  return script_name_value.length() == 0 ||
+         strstr(*script_name_value, "extension.js") == nullptr;
+}
+
+void GetCurrentStackTraceImpl(const v8::FunctionCallbackInfo<v8::Value>& args,
+                              bool filter_extension_scripts) {
   std::stringstream ss;
-  v8::Message::PrintCurrentStackTrace(args.GetIsolate(), ss);
+  if (filter_extension_scripts) {
+    v8::Message::PrintCurrentStackTrace(args.GetIsolate(), ss,
+                                        &IsScriptFrameAllowed);
+  } else {
+    v8::Message::PrintCurrentStackTrace(args.GetIsolate(), ss);
+  }
   std::string str = ss.str();
   args.GetReturnValue().Set(v8_str(str.c_str()));
+}
+
+void GetCurrentStackTrace(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  GetCurrentStackTraceImpl(args, false);
+}
+
+void GetCurrentFilteredStackTrace(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  GetCurrentStackTraceImpl(args, true);
 }
 
 THREADED_TEST(MessagePrintCurrentStackTrace) {
@@ -5237,6 +5254,63 @@ THREADED_TEST(MessagePrintCurrentStackTrace) {
       "b (test:5:10)\n"
       "a (test:8:10)\n"
       "test:10:1");
+  CHECK_EQ(stack_trace_string, expected);
+}
+
+THREADED_TEST(MessagePrintCurrentStackTraceWithFiltering) {
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+  Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
+  templ->Set(isolate, "GetCurrentFilteredStackTrace",
+             v8::FunctionTemplate::New(isolate, GetCurrentFilteredStackTrace));
+  LocalContext context(nullptr, templ);
+
+  // Set up test with multiple frames including extension frames
+  CompileRunWithOrigin(
+      R"(
+      function normalFunction() {
+        return GetCurrentFilteredStackTrace();
+      }
+      function outerFunction() {
+        return normalFunction();
+      }
+      )",
+      "normal.js");
+
+  // Compile the extension function with extension.js origin
+  // The last expression (simulatedExtensionFunction) becomes the return value
+  Local<Value> extension_function = CompileRunWithOrigin(
+      R"(
+      function simulatedExtensionFunction() {
+        return outerFunction();
+      }
+      simulatedExtensionFunction;)",
+      "extension.js");
+
+  // Set the extension function as a global property
+  context->Global()
+      ->Set(context.local(), v8_str("extensionFunction"), extension_function)
+      .FromJust();
+
+  Local<Value> stack_trace = CompileRunWithOrigin(
+      R"(
+      function testFilteredStackTrace() {
+        return extensionFunction();
+      }
+      testFilteredStackTrace();)",
+      "normal.js");
+
+  CHECK(stack_trace->IsString());
+  v8::String::Utf8Value stack_trace_value(isolate,
+                                          stack_trace.As<v8::String>());
+  std::string stack_trace_string(*stack_trace_value);
+  std::string expected(
+      "normalFunction (normal.js:3:16)\n"
+      "outerFunction (normal.js:6:16)\n"
+      "<redacted>\n"
+      "testFilteredStackTrace (normal.js:3:16)\n"
+      "normal.js:5:7");
+
   CHECK_EQ(stack_trace_string, expected);
 }
 
@@ -8722,6 +8796,24 @@ THREADED_TEST(StringWrite) {
   CHECK_EQ(13, len);
   CHECK_EQ(0, strcmp(utf8buf, "ab\xEF\xBF\xBDwx\xEF\xBF\xBDyz"));
 
+  // replace orphan lead surrogates even if we hit buffer capacity
+  memset(utf8buf, 0x1, 1000);
+  len = orphans_str->WriteUtf8V2(isolate, utf8buf, 5,
+                                 String::WriteFlags::kReplaceInvalidUtf8,
+                                 &processed_characters);
+  CHECK_EQ(5, len);
+  CHECK_EQ(0, strncmp(utf8buf, "ab\xEF\xBF\xBD", 5));
+  CHECK_EQ(3, processed_characters);
+
+  // Encode orphan lead surrogates as their WTF-8 equivalent
+  // if ReplaceInvalidUtf8 flag is not passed
+  memset(utf8buf, 0x1, 1000);
+  len = orphans_str->WriteUtf8V2(isolate, utf8buf, 5, String::WriteFlags::kNone,
+                                 &processed_characters);
+  CHECK_EQ(5, len);
+  CHECK_EQ(0, strncmp(utf8buf, "ab\xED\xA0\x80", 5));
+  CHECK_EQ(3, processed_characters);
+
   // replace single lead surrogate with Unicode replacement character
   memset(utf8buf, 0x1, 1000);
   len = lead_str->WriteUtf8V2(isolate, utf8buf, sizeof(utf8buf),
@@ -8742,8 +8834,20 @@ THREADED_TEST(StringWrite) {
   // space
   memset(utf8buf, 0x1, 1000);
   len = pair_str->WriteUtf8V2(isolate, utf8buf, 3,
-                              String::WriteFlags::kReplaceInvalidUtf8);
+                              String::WriteFlags::kReplaceInvalidUtf8,
+                              &processed_characters);
   CHECK_EQ(0, len);
+  CHECK_EQ(0, processed_characters);
+  CHECK_EQ(0, strncmp(utf8buf, "\x01\x01\x01", 3));
+
+  // do not replace / write anything if surrogate pair does not fit the buffer
+  // space regardless of String::WriteFlags::kReplaceInvalidUtf8
+  memset(utf8buf, 0x1, 1000);
+  len = pair_str->WriteUtf8V2(isolate, utf8buf, 3, String::WriteFlags::kNone,
+                              &processed_characters);
+  CHECK_EQ(0, len);
+  CHECK_EQ(0, processed_characters);
+  CHECK_EQ(0, strncmp(utf8buf, "\x01\x01\x01", 3));
 
   memset(utf8buf, 0x1, sizeof(utf8buf));
   len = left_tree->Utf8LengthV2(isolate);
@@ -14254,8 +14358,11 @@ UNINITIALIZED_TEST(SetJitCodeEventHandler) {
 
     // Generate new code objects sparsely distributed across several
     // different fragmented code-space pages.
-    const int kIterations = 10;
+    static constexpr int kIterations = 10;
+    std::array<v8::Global<v8::Object>, kIterations> bars;
+    std::array<v8::Global<v8::Object>, kIterations> foos;
     for (int i = 0; i < kIterations; ++i) {
+      v8::HandleScope nested_scope(isolate);
       LocalContext env(isolate);
       i::AlwaysAllocateScopeForTesting always_allocate(heap);
       CompileRun(script);
@@ -14265,10 +14372,12 @@ UNINITIALIZED_TEST(SetJitCodeEventHandler) {
           v8::Utils::OpenHandle(*env->Global()
                                      ->Get(env.local(), v8_str("bar"))
                                      .ToLocalChecked()));
+      bars[i].Reset(isolate, v8::Utils::ToLocal(bar));
       i::DirectHandle<i::JSFunction> foo = i::Cast<i::JSFunction>(
           v8::Utils::OpenHandle(*env->Global()
                                      ->Get(env.local(), v8_str("foo"))
                                      .ToLocalChecked()));
+      foos[i].Reset(isolate, v8::Utils::ToLocal(foo));
 
       i::PagedSpace* foo_owning_space = reinterpret_cast<i::PagedSpace*>(
           i::PageMetadata::FromHeapObject(foo->abstract_code(i_isolate))
@@ -17247,6 +17356,86 @@ TEST(SetStackLimitInThread) {
     v8::Locker locker(CcTest::isolate());
     CHECK(stack_limit == set_limit);
   }
+}
+
+static bool TestStackOverflow(v8::Isolate* isolate) {
+  v8::Isolate::Scope isolate_scope(isolate);
+  v8::HandleScope scope(isolate);
+  LocalContext context(isolate);
+  v8::TryCatch try_catch(isolate);
+  const char* code =
+      "var errored = false;"
+      "function fn(...args) {"
+      "  try { fn(...args); }"
+      "  catch (e) {"
+      // Only trigger GC once the stack is full to speedup the test.
+      "    if (!errored) {"
+      "      gc();"
+      "      errored = true;"
+      "    }"
+      "    throw e;"
+      "  }"
+      "}"
+      "try {"
+      "  fn.apply(null, new Array(10).fill(1).map(() => {}));"
+      "  false;"
+      "} catch (e) {"
+      "  e.name === 'RangeError'"  // StackOverflow is a RangeError
+      "}";
+  Local<Value> value = CompileRun(code);
+
+  // A StackOverflow error is thrown, without crashing.
+  return value->IsTrue();
+}
+
+class StackOverflowThread : public v8::base::Thread {
+ public:
+  explicit StackOverflowThread(int stack_size, int js_stack_size)
+      : Thread(Options("StackOverflowThread", stack_size)),
+        js_stack_size_(js_stack_size),
+        result_(false) {}
+
+  void Run() override {
+    uintptr_t stack_top = v8::base::Stack::GetStackStart();
+    // Compute isolate stack limit by js stack size.
+    uintptr_t stack_base = stack_top - js_stack_size_;
+    v8::Isolate::CreateParams create_params = CreateTestParams();
+    v8::Isolate* isolate = v8::Isolate::New(create_params);
+    isolate->SetStackLimit(stack_base);
+    result_ = TestStackOverflow(isolate);
+    isolate->Dispose();
+  }
+
+  int result() { return result_; }
+
+ private:
+  int js_stack_size_;
+  bool result_;
+};
+
+TEST(SetStackLimitInThreadAndStackOverflow) {
+  // Set a small --stack-size flag.
+  i::FlagScope<int> f_stack_size(&i::v8_flags.stack_size, 100);
+  // Trigger GC aggressively to verify that GC does not crash with stack litmit.
+  i::FlagScope<size_t> f_heap_size(&i::v8_flags.max_heap_size, 8);
+  i::FlagScope<bool> f_expose_gc(&i::v8_flags.expose_gc, true);
+
+  // ASAN requires more stack space.
+#ifdef V8_USE_ADDRESS_SANITIZER
+  constexpr int stack_size = 32 * v8::internal::MB;
+  constexpr int js_stack_size = 2 * v8::internal::MB;
+#else
+  constexpr int stack_size = 2 * v8::internal::MB;
+  constexpr int js_stack_size = 1 * v8::internal::MB;
+#endif
+  // Spawn an Isolate on a thread with larger stack limits than --stack-size.
+  StackOverflowThread thread1(stack_size, js_stack_size);
+
+  CHECK(thread1.Start());
+
+  thread1.Join();
+
+  CHECK(thread1.result());
 }
 
 THREADED_TEST(GetHeapStatistics) {
@@ -21901,13 +22090,16 @@ THREADED_TEST(FunctionNew) {
   CHECK(env->Global()->Set(env.local(), v8_str("func"), func).FromJust());
   Local<Value> result = CompileRun("func();");
   CHECK(v8::Integer::New(isolate, 17)->Equals(env.local(), result).FromJust());
-  // Serial number should be invalid => should not be cached.
-  auto serial_number = i::Cast<i::JSFunction>(v8::Utils::OpenHandle(*func))
-                           ->shared()
-                           ->api_func_data()
-                           ->serial_number();
-  CHECK_EQ(i::TemplateInfo::kDoNotCache, serial_number);
-
+  {
+    // The template is not cacheable and there was no need to assign a serial
+    // number yet.
+    auto info = i::Cast<i::JSFunction>(v8::Utils::OpenHandle(*func))
+                    ->shared()
+                    ->api_func_data();
+    CHECK(!info->is_cacheable());
+    CHECK_EQ(info->serial_number(),
+             i::TemplateInfo::kUninitializedSerialNumber);
+  }
   // Verify that each Function::New creates a new function instance
   Local<Object> data2 = v8::Object::New(isolate);
   function_new_expected_env_global.Reset(isolate, data2);
@@ -27091,237 +27283,6 @@ TEST(PersistentValueMap) {
   map.Set("key", value);
 }
 
-enum class AtomicsWaitCallbackAction {
-  Interrupt,
-  StopAndThrowInFirstCall,
-  StopAndThrowInSecondCall,
-  StopFromThreadAndThrow,
-  KeepWaiting
-};
-
-class StopAtomicsWaitThread;
-
-START_ALLOW_USE_DEPRECATED()
-
-struct AtomicsWaitCallbackInfo {
-  v8::Isolate* isolate;
-  v8::Isolate::AtomicsWaitWakeHandle* wake_handle;
-  std::unique_ptr<StopAtomicsWaitThread> stop_thread;
-  AtomicsWaitCallbackAction action;
-
-  Local<v8::SharedArrayBuffer> expected_sab;
-  v8::Isolate::AtomicsWaitEvent expected_event;
-  double expected_timeout;
-  int64_t expected_value;
-  size_t expected_offset;
-
-  size_t ncalls = 0;
-};
-
-class StopAtomicsWaitThread : public v8::base::Thread {
- public:
-  explicit StopAtomicsWaitThread(AtomicsWaitCallbackInfo* info)
-      : Thread(Options("StopAtomicsWaitThread")), info_(info) {}
-
-  void Run() override {
-    CHECK_NOT_NULL(info_->wake_handle);
-    info_->wake_handle->Wake();
-  }
-
- private:
-  AtomicsWaitCallbackInfo* info_;
-};
-
-void AtomicsWaitCallbackForTesting(
-    v8::Isolate::AtomicsWaitEvent event, Local<v8::SharedArrayBuffer> sab,
-    size_t offset_in_bytes, int64_t value, double timeout_in_ms,
-    v8::Isolate::AtomicsWaitWakeHandle* wake_handle, void* data) {
-  AtomicsWaitCallbackInfo* info = static_cast<AtomicsWaitCallbackInfo*>(data);
-  info->ncalls++;
-  info->wake_handle = wake_handle;
-  CHECK(sab->StrictEquals(info->expected_sab));
-  CHECK_EQ(timeout_in_ms, info->expected_timeout);
-  CHECK_EQ(value, info->expected_value);
-  CHECK_EQ(offset_in_bytes, info->expected_offset);
-  CHECK_EQ(v8::StateTag::ATOMICS_WAIT,
-           reinterpret_cast<i::Isolate*>(info->isolate)->current_vm_state());
-
-  auto ThrowSomething = [&]() {
-    info->isolate->ThrowException(v8::Integer::New(info->isolate, 42));
-  };
-
-  if (event == v8::Isolate::AtomicsWaitEvent::kStartWait) {
-    CHECK_NOT_NULL(wake_handle);
-    switch (info->action) {
-      case AtomicsWaitCallbackAction::Interrupt:
-        info->isolate->TerminateExecution();
-        break;
-      case AtomicsWaitCallbackAction::StopAndThrowInFirstCall:
-        ThrowSomething();
-        [[fallthrough]];
-      case AtomicsWaitCallbackAction::StopAndThrowInSecondCall:
-        wake_handle->Wake();
-        break;
-      case AtomicsWaitCallbackAction::StopFromThreadAndThrow:
-        info->stop_thread = std::make_unique<StopAtomicsWaitThread>(info);
-        CHECK(info->stop_thread->Start());
-        break;
-      case AtomicsWaitCallbackAction::KeepWaiting:
-        break;
-    }
-  } else {
-    CHECK_EQ(event, info->expected_event);
-    CHECK_NULL(wake_handle);
-
-    if (info->stop_thread) {
-      info->stop_thread->Join();
-      info->stop_thread.reset();
-    }
-
-    if (info->action == AtomicsWaitCallbackAction::StopAndThrowInSecondCall ||
-        info->action == AtomicsWaitCallbackAction::StopFromThreadAndThrow) {
-      ThrowSomething();
-    }
-  }
-}
-
-// Must be called from within HandleScope
-void AtomicsWaitCallbackCommon(v8::Isolate* isolate, Local<Value> sab,
-                               size_t initial_offset,
-                               size_t offset_multiplier) {
-  CHECK(sab->IsSharedArrayBuffer());
-
-  AtomicsWaitCallbackInfo info;
-  info.isolate = isolate;
-  info.expected_sab = sab.As<v8::SharedArrayBuffer>();
-  isolate->SetAtomicsWaitCallback(AtomicsWaitCallbackForTesting, &info);
-
-  {
-    v8::TryCatch try_catch(isolate);
-    info.expected_offset = initial_offset;
-    info.expected_timeout = std::numeric_limits<double>::infinity();
-    info.expected_value = 0;
-    info.expected_event = v8::Isolate::AtomicsWaitEvent::kTerminatedExecution;
-    info.action = AtomicsWaitCallbackAction::Interrupt;
-    info.ncalls = 0;
-    CompileRun("wait(0, 0);");
-    CHECK_EQ(info.ncalls, 2);
-    CHECK(try_catch.HasTerminated());
-  }
-
-  {
-    v8::TryCatch try_catch(isolate);
-    info.expected_offset = initial_offset + offset_multiplier;
-    info.expected_timeout = std::numeric_limits<double>::infinity();
-    info.expected_value = 1;
-    info.expected_event = v8::Isolate::AtomicsWaitEvent::kNotEqual;
-    info.action = AtomicsWaitCallbackAction::KeepWaiting;
-    info.ncalls = 0;
-    CompileRun("wait(1, 1);");  // real value is 0 != 1
-    CHECK_EQ(info.ncalls, 2);
-    CHECK(!try_catch.HasCaught());
-  }
-
-  {
-    v8::TryCatch try_catch(isolate);
-    info.expected_offset = initial_offset + offset_multiplier;
-    info.expected_timeout = 0.125;
-    info.expected_value = 0;
-    info.expected_event = v8::Isolate::AtomicsWaitEvent::kTimedOut;
-    info.action = AtomicsWaitCallbackAction::KeepWaiting;
-    info.ncalls = 0;
-    CompileRun("wait(1, 0, 0.125);");  // timeout
-    CHECK_EQ(info.ncalls, 2);
-    CHECK(!try_catch.HasCaught());
-  }
-
-  {
-    v8::TryCatch try_catch(isolate);
-    info.expected_offset = initial_offset + offset_multiplier;
-    info.expected_timeout = std::numeric_limits<double>::infinity();
-    info.expected_value = 0;
-    info.expected_event = v8::Isolate::AtomicsWaitEvent::kAPIStopped;
-    info.action = AtomicsWaitCallbackAction::StopAndThrowInFirstCall;
-    info.ncalls = 0;
-    CompileRun("wait(1, 0);");
-    CHECK_EQ(info.ncalls, 1);  // Only one extra call
-    CHECK(try_catch.HasCaught());
-    CHECK(try_catch.Exception()->IsInt32());
-    CHECK_EQ(try_catch.Exception().As<v8::Int32>()->Value(), 42);
-  }
-
-  {
-    v8::TryCatch try_catch(isolate);
-    info.expected_offset = initial_offset + offset_multiplier;
-    info.expected_timeout = std::numeric_limits<double>::infinity();
-    info.expected_value = 0;
-    info.expected_event = v8::Isolate::AtomicsWaitEvent::kAPIStopped;
-    info.action = AtomicsWaitCallbackAction::StopAndThrowInSecondCall;
-    info.ncalls = 0;
-    CompileRun("wait(1, 0);");
-    CHECK_EQ(info.ncalls, 2);
-    CHECK(try_catch.HasCaught());
-    CHECK(try_catch.Exception()->IsInt32());
-    CHECK_EQ(try_catch.Exception().As<v8::Int32>()->Value(), 42);
-  }
-
-  {
-    // Same test as before, but with a different `expected_value`.
-    v8::TryCatch try_catch(isolate);
-    info.expected_offset = initial_offset + offset_multiplier;
-    info.expected_timeout = std::numeric_limits<double>::infinity();
-    info.expected_value = 200;
-    info.expected_event = v8::Isolate::AtomicsWaitEvent::kAPIStopped;
-    info.action = AtomicsWaitCallbackAction::StopAndThrowInSecondCall;
-    info.ncalls = 0;
-    CompileRun(
-        "setArrayElemAs(1, 200);"
-        "wait(1, 200);");
-    CHECK_EQ(info.ncalls, 2);
-    CHECK(try_catch.HasCaught());
-    CHECK(try_catch.Exception()->IsInt32());
-    CHECK_EQ(try_catch.Exception().As<v8::Int32>()->Value(), 42);
-  }
-
-  {
-    // Wake the `Atomics.wait()` call from a thread.
-    v8::TryCatch try_catch(isolate);
-    info.expected_offset = initial_offset;
-    info.expected_timeout = std::numeric_limits<double>::infinity();
-    info.expected_value = 0;
-    info.expected_event = v8::Isolate::AtomicsWaitEvent::kAPIStopped;
-    info.action = AtomicsWaitCallbackAction::StopFromThreadAndThrow;
-    info.ncalls = 0;
-    CompileRun(
-        "setArrayElemAs(1, 0);"
-        "wait(0, 0);");
-    CHECK_EQ(info.ncalls, 2);
-    CHECK(try_catch.HasCaught());
-    CHECK(try_catch.Exception()->IsInt32());
-    CHECK_EQ(try_catch.Exception().As<v8::Int32>()->Value(), 42);
-  }
-}
-
-TEST(AtomicsWaitCallback) {
-  LocalContext env;
-  v8::Isolate* isolate = env->GetIsolate();
-  v8::HandleScope scope(isolate);
-  const char* init = R"(
-      let sab = new SharedArrayBuffer(16);
-      let int32arr = new Int32Array(sab, 4);
-      let setArrayElemAs = function(id, val) {
-        int32arr[id] = val;
-      };
-      let wait = function(id, val, timeout) {
-        if(arguments.length == 2) return Atomics.wait(int32arr, id, val);
-        return Atomics.wait(int32arr, id, val, timeout);
-      };
-      sab;)";
-  AtomicsWaitCallbackCommon(isolate, CompileRun(init), 4, 4);
-}
-
-END_ALLOW_USE_DEPRECATED()
-
 #if V8_ENABLE_WEBASSEMBLY
 namespace v8::internal::wasm {
 
@@ -27338,78 +27299,6 @@ TEST(WasmCodeFlushingOnMemoryPressure) {
   isolate->MemoryPressureNotification(v8::MemoryPressureLevel::kCritical);
   // When there is memory pressure, flush all Liftoff code.
   CHECK_EQ(GetWasmEngine()->GetLiftoffCodeSizeForTesting(), 0);
-}
-
-TEST(WasmI32AtomicWaitCallback) {
-  WasmRunner<int32_t, int32_t, int32_t, double> r(TestExecutionTier::kTurbofan);
-  r.builder().AddMemory(kWasmPageSize, SharedFlag::kShared);
-  r.builder().SetMemoryShared();
-  r.Build({WASM_ATOMICS_WAIT(kExprI32AtomicWait, WASM_LOCAL_GET(0),
-                             WASM_LOCAL_GET(1),
-                             WASM_I64_SCONVERT_F64(WASM_LOCAL_GET(2)), 2, 4)});
-  LocalContext env;
-  v8::Isolate* isolate = env->GetIsolate();
-  v8::HandleScope scope(isolate);
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  DirectHandle<JSFunction> func = r.builder().WrapCode(0);
-  CHECK(env->Global()
-            ->Set(env.local(), v8_str("func"), v8::Utils::ToLocal(func))
-            .FromJust());
-  DirectHandle<JSArrayBuffer> memory(
-      r.builder().trusted_instance_data()->memory_object(0)->array_buffer(),
-      i_isolate);
-  CHECK(env->Global()
-            ->Set(env.local(), v8_str("sab"), v8::Utils::ToLocal(memory))
-            .FromJust());
-
-  const char* init = R"(
-      let int32arr = new Int32Array(sab, 4);
-      let setArrayElemAs = function(id, val) {
-        int32arr[id] = val;
-      };
-      let wait = function(id, val, timeout) {
-        if(arguments.length === 2)
-          return func(id << 2, val, -1);
-        return func(id << 2, val, timeout*1000000);
-      };
-      sab;)";
-  AtomicsWaitCallbackCommon(isolate, CompileRun(init), 4, 4);
-}
-
-TEST(WasmI64AtomicWaitCallback) {
-  WasmRunner<int32_t, int32_t, double, double> r(TestExecutionTier::kTurbofan);
-  r.builder().AddMemory(kWasmPageSize, SharedFlag::kShared);
-  r.builder().SetMemoryShared();
-  r.Build({WASM_ATOMICS_WAIT(kExprI64AtomicWait, WASM_LOCAL_GET(0),
-                             WASM_I64_SCONVERT_F64(WASM_LOCAL_GET(1)),
-                             WASM_I64_SCONVERT_F64(WASM_LOCAL_GET(2)), 3, 8)});
-  LocalContext env;
-  v8::Isolate* isolate = env->GetIsolate();
-  v8::HandleScope scope(isolate);
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  DirectHandle<JSFunction> func = r.builder().WrapCode(0);
-  CHECK(env->Global()
-            ->Set(env.local(), v8_str("func"), v8::Utils::ToLocal(func))
-            .FromJust());
-  DirectHandle<JSArrayBuffer> memory(
-      r.builder().trusted_instance_data()->memory_object(0)->array_buffer(),
-      i_isolate);
-  CHECK(env->Global()
-            ->Set(env.local(), v8_str("sab"), v8::Utils::ToLocal(memory))
-            .FromJust());
-
-  const char* init = R"(
-      let int64arr = new BigInt64Array(sab, 8);
-      let setArrayElemAs = function(id, val) {
-        int64arr[id] = BigInt(val);
-      };
-      let wait = function(id, val, timeout) {
-        if(arguments.length === 2)
-          return func(id << 3, val, -1);
-        return func(id << 3, val, timeout*1000000);
-      };
-      sab;)";
-  AtomicsWaitCallbackCommon(isolate, CompileRun(init), 8, 8);
 }
 
 }  // namespace v8::internal::wasm
@@ -30513,7 +30402,7 @@ TEST(WasmAbortStreamingAfterContextDisposal) {
         i::DirectHandle<i::WasmModuleObject> result) override {
       UNREACHABLE();
     }
-    void OnCompilationFailed(i::DirectHandle<i::Object> error_reason) override {
+    void OnCompilationFailed(i::DirectHandle<i::JSAny> error_reason) override {
       UNREACHABLE();
     }
   };
@@ -31373,4 +31262,85 @@ TEST(GettingHashSeed) {
   v8::Isolate* isolate = env->GetIsolate();
   // Validate existence of the function.
   CHECK_GT(isolate->GetHashSeed(), 0);
+}
+
+TEST(LocalCasts) {
+  LocalContext context;
+  v8::Isolate* isolate = context->GetIsolate();
+  v8::HandleScope scope(isolate);
+
+  {
+    // Cast v8::Local<v8::String>.
+    v8::Local<v8::String> str = v8_str("foo");
+    // Implicit up-casts.
+    v8::Local<v8::Value> val = str;
+    USE(val);
+    v8::Local<v8::Data> data = str;
+    // Implicit cast and up-casts to MaybeLocal.
+    v8::MaybeLocal<v8::String> maybe_str = str;
+    USE(maybe_str);
+    v8::MaybeLocal<v8::Value> maybe_val = str;
+    USE(maybe_val);
+    v8::MaybeLocal<v8::Data> maybe_data = str;
+    USE(maybe_data);
+
+    // Equivalent casts and explicit down-casts.
+    v8::Local<v8::Value>::Cast(str);
+    v8::Local<v8::Value>::Cast(data);
+    v8::Local<v8::String>::Cast(str);
+    v8::Local<v8::String>::Cast(data);
+  }
+
+  {
+    // Cast v8::MaybeLocal<v8::String>.
+    v8::MaybeLocal<v8::String> maybe_str = v8_str("foo");
+    // Implicit up-casts.
+    v8::MaybeLocal<v8::Value> maybe_val = maybe_str;
+    USE(maybe_val);
+    v8::MaybeLocal<v8::Data> maybe_data = maybe_str;
+
+    // Equivalent casts and explicit down-casts.
+    v8::MaybeLocal<v8::Value>::Cast(maybe_str);
+    v8::MaybeLocal<v8::Value>::Cast(maybe_data);
+    v8::MaybeLocal<v8::String>::Cast(maybe_str);
+    v8::MaybeLocal<v8::String>::Cast(maybe_data);
+  }
+
+  {
+    // Cast an empty v8::Local<v8::String>.
+    v8::Local<v8::String> no_str;
+    USE(no_str);
+    // Implicit up-casts.
+    v8::Local<v8::Value> no_val = no_str;
+    USE(no_val);
+    v8::Local<v8::Data> no_data = no_str;
+    // Implicit cast and up-casts to MaybeLocal.
+    v8::MaybeLocal<v8::String> no_maybe_str = no_str;
+    USE(no_maybe_str);
+    v8::MaybeLocal<v8::Value> no_maybe_val = no_str;
+    USE(no_maybe_val);
+    v8::MaybeLocal<v8::Data> no_maybe_data = no_str;
+    USE(no_maybe_data);
+
+    // Equivalent casts and explicit down-casts.
+    v8::Local<v8::Value>::Cast(no_str);
+    v8::Local<v8::Value>::Cast(no_data);
+    v8::Local<v8::String>::Cast(no_str);
+    v8::Local<v8::String>::Cast(no_data);
+  }
+
+  {
+    // Cast an empty v8::MaybeLocal<v8::String>.
+    v8::MaybeLocal<v8::String> no_str;
+    // Implicit up-casts.
+    v8::MaybeLocal<v8::Value> no_val = no_str;
+    USE(no_val);
+    v8::MaybeLocal<v8::Data> no_data = no_str;
+
+    // Equivalent casts and explicit down-casts.
+    v8::MaybeLocal<v8::Value>::Cast(no_str);
+    v8::MaybeLocal<v8::Value>::Cast(no_data);
+    v8::MaybeLocal<v8::String>::Cast(no_str);
+    v8::MaybeLocal<v8::String>::Cast(no_data);
+  }
 }

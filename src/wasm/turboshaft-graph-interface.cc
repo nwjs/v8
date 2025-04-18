@@ -4452,24 +4452,24 @@ class TurboshaftGraphBuildingInterface : public WasmGraphBuilderBase {
   }
 
   void StructNew(FullDecoder* decoder, const StructIndexImmediate& imm,
-                 const Value args[], Value* result) {
+                 const Value& descriptor, const Value args[], Value* result) {
     uint32_t field_count = imm.struct_type->field_count();
     SmallZoneVector<OpIndex, 16> args_vector(field_count, decoder->zone_);
     for (uint32_t i = 0; i < field_count; ++i) {
       args_vector[i] = args[i].op;
     }
-    result->op = StructNewImpl(decoder, imm, args_vector.data());
+    result->op = StructNewImpl(decoder, imm, descriptor, args_vector.data());
   }
 
   void StructNewDefault(FullDecoder* decoder, const StructIndexImmediate& imm,
-                        Value* result) {
+                        const Value& descriptor, Value* result) {
     uint32_t field_count = imm.struct_type->field_count();
     SmallZoneVector<OpIndex, 16> args(field_count, decoder->zone_);
     for (uint32_t i = 0; i < field_count; i++) {
       ValueType field_type = imm.struct_type->field(i);
       args[i] = DefaultValue(field_type);
     }
-    result->op = StructNewImpl(decoder, imm, args.data());
+    result->op = StructNewImpl(decoder, imm, descriptor, args.data());
   }
 
   void StructGet(FullDecoder* decoder, const Value& struct_object,
@@ -4758,14 +4758,34 @@ class TurboshaftGraphBuildingInterface : public WasmGraphBuilderBase {
     }
   }
 
-  void RefTest(FullDecoder* decoder, ModuleTypeIndex ref_index,
-               const Value& object, Value* result, bool null_succeeds) {
-    HeapType target = decoder->module_->heap_type(ref_index);
-    V<Map> rtt =
-        __ RttCanon(managed_object_maps(target.is_shared()), ref_index);
+  void RefGetDesc(FullDecoder* decoder, const Value& ref_val, Value* result) {
+    // Implicit null checks don't cover the map load.
+    V<Object> ref = NullCheck(ref_val);
+    V<Map> map = __ LoadMapField(ref);
+    result->op = __ Load(map, LoadOp::Kind::TaggedBase().Immutable(),
+                         MemoryRepresentation::TaggedPointer(),
+                         Map::kInstanceDescriptorsOffset);
+  }
+
+  compiler::ExactOrSubtype GetExactness(FullDecoder* decoder, HeapType target) {
+    // For exact target types, an exact match is needed for correctness;
+    // for final target types, it's a performance optimization.
+    if (target.is_exact() ||
+        decoder->module_->type(target.ref_index()).is_final) {
+      return compiler::kExactMatchOnly;
+    }
+    return compiler::kMayBeSubtype;
+  }
+
+  void RefTest(FullDecoder* decoder, HeapType target, const Value& object,
+               Value* result, bool null_succeeds) {
+    V<Map> rtt = __ RttCanon(managed_object_maps(target.is_shared()),
+                             target.ref_index());
     compiler::WasmTypeCheckConfig config{
-        object.type, ValueType::RefMaybeNull(
-                         target, null_succeeds ? kNullable : kNonNullable)};
+        object.type,
+        ValueType::RefMaybeNull(target,
+                                null_succeeds ? kNullable : kNonNullable),
+        GetExactness(decoder, target)};
     result->op = __ WasmTypeCheck(object.op, rtt, config);
   }
 
@@ -4778,19 +4798,30 @@ class TurboshaftGraphBuildingInterface : public WasmGraphBuilderBase {
     result->op = __ WasmTypeCheck(object.op, rtt, config);
   }
 
-  void RefCast(FullDecoder* decoder, ModuleTypeIndex ref_index,
-               const Value& object, Value* result, bool null_succeeds) {
+  void RefCast(FullDecoder* decoder, const Value& object, Value* result) {
     if (v8_flags.experimental_wasm_assume_ref_cast_succeeds) {
       // TODO(14108): Implement type guards.
       Forward(decoder, object, result);
       return;
     }
     ValueType target = result->type;
-    DCHECK_EQ(target.ref_index(), ref_index);
-    V<Map> rtt =
-        __ RttCanon(managed_object_maps(target.is_shared()), ref_index);
-    DCHECK_EQ(result->type.is_nullable(), null_succeeds);
-    compiler::WasmTypeCheckConfig config{object.type, result->type};
+    V<Map> rtt = __ RttCanon(managed_object_maps(target.is_shared()),
+                             target.ref_index());
+    compiler::WasmTypeCheckConfig config{
+        object.type, target, GetExactness(decoder, target.heap_type())};
+    result->op = __ WasmTypeCast(object.op, rtt, config);
+  }
+
+  void RefCastDesc(FullDecoder* decoder, const Value& object, const Value& desc,
+                   Value* result) {
+    if (v8_flags.experimental_wasm_assume_ref_cast_succeeds) {
+      // TODO(14108): Implement type guards.
+      Forward(decoder, object, result);
+      return;
+    }
+    V<Map> rtt = GetRttFromDescriptor(desc);
+    compiler::WasmTypeCheckConfig config{object.type, result->type,
+                                         compiler::kExactMatchOnly};
     result->op = __ WasmTypeCast(object.op, rtt, config);
   }
 
@@ -4812,18 +4843,17 @@ class TurboshaftGraphBuildingInterface : public WasmGraphBuilderBase {
   }
 
   // TODO(jkummerow): Pass {target} to the interface.
-  void BrOnCast(FullDecoder* decoder, ModuleTypeIndex ref_index,
-                const Value& object, Value* value_on_branch, uint32_t br_depth,
-                bool null_succeeds) {
+  void BrOnCast(FullDecoder* decoder, HeapType target_type, const Value& object,
+                Value* value_on_branch, uint32_t br_depth, bool null_succeeds) {
     // Note: we cannot just take {ref_index} and {null_succeeds} from
     // {value_on_branch->type} because of
     // https://github.com/WebAssembly/gc/issues/516.
-    ValueType target =
-        ValueType::RefMaybeNull(decoder->module_->heap_type(ref_index),
-                                null_succeeds ? kNullable : kNonNullable);
-    V<Map> rtt =
-        __ RttCanon(managed_object_maps(target.is_shared()), ref_index);
-    compiler::WasmTypeCheckConfig config{object.type, target};
+    ValueType target = ValueType::RefMaybeNull(
+        target_type, null_succeeds ? kNullable : kNonNullable);
+    V<Map> rtt = __ RttCanon(managed_object_maps(target.is_shared()),
+                             target_type.ref_index());
+    compiler::WasmTypeCheckConfig config{object.type, target,
+                                         GetExactness(decoder, target_type)};
     return BrOnCastImpl(decoder, rtt, config, object, value_on_branch, br_depth,
                         null_succeeds);
   }
@@ -4839,15 +4869,15 @@ class TurboshaftGraphBuildingInterface : public WasmGraphBuilderBase {
                         null_succeeds);
   }
 
-  void BrOnCastFail(FullDecoder* decoder, ModuleTypeIndex ref_index,
+  void BrOnCastFail(FullDecoder* decoder, HeapType target_type,
                     const Value& object, Value* value_on_fallthrough,
                     uint32_t br_depth, bool null_succeeds) {
-    ValueType target =
-        ValueType::RefMaybeNull(decoder->module_->heap_type(ref_index),
-                                null_succeeds ? kNullable : kNonNullable);
-    V<Map> rtt =
-        __ RttCanon(managed_object_maps(target.is_shared()), ref_index);
-    compiler::WasmTypeCheckConfig config{object.type, target};
+    ValueType target = ValueType::RefMaybeNull(
+        target_type, null_succeeds ? kNullable : kNonNullable);
+    V<Map> rtt = __ RttCanon(managed_object_maps(target.is_shared()),
+                             target_type.ref_index());
+    compiler::WasmTypeCheckConfig config{object.type, target,
+                                         GetExactness(decoder, target_type)};
     return BrOnCastFailImpl(decoder, rtt, config, object, value_on_fallthrough,
                             br_depth, null_succeeds);
   }
@@ -8027,12 +8057,51 @@ class TurboshaftGraphBuildingInterface : public WasmGraphBuilderBase {
     return array;
   }
 
-  V<WasmStruct> StructNewImpl(FullDecoder* decoder,
-                              const StructIndexImmediate& imm, OpIndex args[]) {
-    bool shared = decoder->module_->type(imm.index).is_shared;
-    V<Map> rtt = __ RttCanon(managed_object_maps(shared), imm.index);
+  V<Map> GetRttFromDescriptor(const Value& descriptor) {
+    V<WasmStructNullable> descriptor_struct =
+        V<WasmStructNullable>::Cast(descriptor.op);
+    // TODO(jkummerow): Refactor this to share the logic with
+    // wasm-lowering-reducer.h.
+    bool force_explicit_null_check =
+        !trap_handler::IsTrapHandlerEnabled() || !V8_STATIC_ROOTS_BOOL;
+    bool explicit_null_check =
+        descriptor.type.is_nullable() && force_explicit_null_check;
+    bool implicit_null_check =
+        descriptor.type.is_nullable() && !force_explicit_null_check;
 
-    V<WasmStruct> struct_value = __ WasmAllocateStruct(rtt, imm.struct_type);
+    if (explicit_null_check) {
+      __ TrapIf(__ IsNull(descriptor_struct, wasm::kWasmAnyRef),
+                TrapId::kTrapNullDereference);
+    }
+    LoadOp::Kind load_kind = implicit_null_check ? LoadOp::Kind::TrapOnNull()
+                                                 : LoadOp::Kind::TaggedBase();
+    load_kind = load_kind.Immutable();
+    return __ Load(descriptor_struct, load_kind,
+                   MemoryRepresentation::TaggedPointer(),
+                   WasmStruct::kHeaderSize);
+  }
+
+  V<WasmStruct> StructNewImpl(FullDecoder* decoder,
+                              const StructIndexImmediate& imm,
+                              const Value& descriptor, OpIndex args[]) {
+    const TypeDefinition& type = decoder->module_->type(imm.index);
+    DCHECK_EQ(type.has_descriptor(), descriptor.op.valid());
+    V<Map> rtt;
+    if (type.has_descriptor()) {
+      rtt = GetRttFromDescriptor(descriptor);
+    } else {
+      rtt = __ RttCanon(managed_object_maps(type.is_shared), imm.index);
+    }
+
+    V<WasmStruct> struct_value;
+    if (type.is_descriptor()) {
+      struct_value = CallBuiltinThroughJumptable<
+          BuiltinCallDescriptor::WasmAllocateDescriptorStruct>(
+          decoder, {rtt, __ Word32Constant(imm.index.index)});
+    } else {
+      struct_value = __ WasmAllocateStruct(rtt, imm.struct_type);
+    }
+
     for (uint32_t i = 0; i < imm.struct_type->field_count(); ++i) {
       __ StructSet(struct_value, args[i], imm.struct_type, imm.index, i,
                    compiler::kWithoutNullCheck);

@@ -12,6 +12,7 @@
 #include "src/base/template-utils.h"
 #include "src/debug/debug.h"
 #include "src/execution/frames-inl.h"
+#include "src/execution/isolate-inl.h"
 #include "src/execution/v8threads.h"
 #include "src/execution/vm-state-inl.h"
 #include "src/libsampler/sampler.h"
@@ -276,6 +277,8 @@ SamplingEventsProcessor::ProcessOneSample() {
 }
 
 void SamplingEventsProcessor::Run() {
+  // Set the current isolate such that trusted pointer tables etc are available.
+  SetCurrentIsolateScope isolate_scope(isolate_);
   base::MutexGuard guard(&running_mutex_);
   while (running_.load(std::memory_order_relaxed)) {
     base::TimeTicks nextSampleTime = base::TimeTicks::Now() + period_;

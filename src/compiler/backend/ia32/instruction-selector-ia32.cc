@@ -787,9 +787,9 @@ void VisitI8x16Shift(InstructionSelectorT* selector, OpIndex node,
 }  // namespace
 
 void InstructionSelectorT::VisitStackSlot(OpIndex node) {
-  StackSlotRepresentation rep = this->stack_slot_representation_of(node);
-  int slot =
-      frame_->AllocateSpillSlot(rep.size(), rep.alignment(), rep.is_tagged());
+  const StackSlotOp& stack_slot = Cast<StackSlotOp>(node);
+  int slot = frame_->AllocateSpillSlot(stack_slot.size, stack_slot.alignment,
+                                       stack_slot.is_tagged);
   OperandGenerator g(this);
 
   Emit(kArchStackSlot, g.DefineAsRegister(node),
@@ -1686,9 +1686,7 @@ void InstructionSelectorT::VisitInt32Add(OpIndex node) {
 
 void InstructionSelectorT::VisitInt32Sub(OpIndex node) {
   IA32OperandGeneratorT g(this);
-  auto binop = this->word_binop_view(node);
-  auto left = binop.left();
-  auto right = binop.right();
+  auto [left, right] = Inputs<WordBinopOp>(node);
   if (this->MatchIntegralZero(left)) {
     Emit(kIA32Neg, g.DefineSameAsFirst(node), g.Use(right));
   } else {
@@ -2462,10 +2460,10 @@ void InstructionSelectorT::VisitWord32AtomicExchange(OpIndex node) {
 
 void InstructionSelectorT::VisitWord32AtomicCompareExchange(OpIndex node) {
   IA32OperandGeneratorT g(this);
-  auto atomic_op = this->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
-  OpIndex old_value = atomic_op.expected();
+  OpIndex old_value = atomic_op.expected().value();
   OpIndex new_value = atomic_op.value();
 
   MachineType type = AtomicOpType(this, node);

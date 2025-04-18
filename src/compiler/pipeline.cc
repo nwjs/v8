@@ -111,6 +111,7 @@
 #include "src/compiler/int64-lowering.h"
 #include "src/compiler/turboshaft/int64-lowering-phase.h"
 #include "src/compiler/turboshaft/wasm-dead-code-elimination-phase.h"
+#include "src/compiler/turboshaft/wasm-debug-memory-lowering-phase.h"
 #include "src/compiler/turboshaft/wasm-gc-optimize-phase.h"
 #include "src/compiler/turboshaft/wasm-lowering-phase.h"
 #include "src/compiler/turboshaft/wasm-optimize-phase.h"
@@ -1859,6 +1860,13 @@ CompilationJob::Status WasmTurboshaftWrapperCompilationJob::ExecuteJobImpl(
   if (v8_flags.wasm_opt) {
     turboshaft_pipeline.Run<turboshaft::WasmOptimizePhase>();
   }
+#if DEBUG
+  if (!v8_flags.wasm_opt) {
+    // We still need to lower allocation operations even with optimizations
+    // being turned off.
+    turboshaft_pipeline.Run<turboshaft::WasmDebugMemoryLoweringPhase>();
+  }
+#endif
 
   if (!Is64()) {
     turboshaft_pipeline.Run<turboshaft::Int64LoweringPhase>();
@@ -2712,6 +2720,13 @@ Pipeline::GenerateCodeForWasmNativeStubFromTurboshaft(
     if (v8_flags.wasm_opt) {
       turboshaft_pipeline.Run<turboshaft::WasmOptimizePhase>();
     }
+#if DEBUG
+    if (!v8_flags.wasm_opt) {
+      // We still need to lower allocation operations even with optimizations
+      // being turned off.
+      turboshaft_pipeline.Run<turboshaft::WasmDebugMemoryLoweringPhase>();
+    }
+#endif
 
     if (!Is64()) {
       turboshaft_pipeline.Run<turboshaft::Int64LoweringPhase>();
@@ -2877,14 +2892,7 @@ wasm::WasmCompilationResult Pipeline::GenerateWasmCode(
   if (v8_flags.experimental_wasm_revectorize) {
     bool cpu_feature_support =
         CpuFeatures::IsSupported(AVX) && CpuFeatures::IsSupported(AVX2);
-    // TODO(381696879): This is already tracked in the detected features from
-    // module-decoding, but not in `detected->has_memory64()`. Instead of fixing
-    // this, we just re-compute it here by looking at the declared memories of
-    // the module. In the long term we should completely remove this check.
-    const bool has_memory64 = std::any_of(
-        env->module->memories.begin(), env->module->memories.end(),
-        [](const wasm::WasmMemory& mem) { return mem.is_memory64(); });
-    if (cpu_feature_support && detected->has_simd() && !has_memory64) {
+    if (cpu_feature_support && detected->has_simd()) {
       if (v8_flags.trace_wasm_revectorize) {
         std::cout << "Begin revec function "
                   << data.info()->GetDebugName().get() << std::endl;
@@ -2923,6 +2931,12 @@ wasm::WasmCompilationResult Pipeline::GenerateWasmCode(
   // improve block ordering, independent of loop unrolling.
   turboshaft_pipeline.Run<turboshaft::WasmLoweringPhase>();
 
+  // TODO(14108): Do we need value numbering if wasm_opt is turned off?
+  const bool is_asm_js = is_asmjs_module(module);
+  if (v8_flags.wasm_opt || is_asm_js) {
+    turboshaft_pipeline.Run<turboshaft::WasmOptimizePhase>();
+  }
+
 #if V8_TARGET_ARCH_ARM64
   if (v8_flags.experimental_wasm_simd_opt && v8_flags.wasm_opt &&
       detected->has_simd()) {
@@ -2930,11 +2944,13 @@ wasm::WasmCompilationResult Pipeline::GenerateWasmCode(
   }
 #endif  // V8_TARGET_ARCH_ARM64
 
-  // TODO(14108): Do we need value numbering if wasm_opt is turned off?
-  const bool is_asm_js = is_asmjs_module(module);
-  if (v8_flags.wasm_opt || is_asm_js) {
-    turboshaft_pipeline.Run<turboshaft::WasmOptimizePhase>();
+#if DEBUG
+  if (!v8_flags.wasm_opt) {
+    // We still need to lower allocation operations even with optimizations
+    // being turned off.
+    turboshaft_pipeline.Run<turboshaft::WasmDebugMemoryLoweringPhase>();
   }
+#endif
 
   if (mcgraph->machine()->Is32()) {
     turboshaft_pipeline.Run<turboshaft::Int64LoweringPhase>();

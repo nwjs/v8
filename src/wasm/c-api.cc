@@ -63,15 +63,12 @@
 #else  // V8_OS_WIN
 
 // Setup for Linux shared library export.
-#if V8_HAS_ATTRIBUTE_VISIBILITY
-#ifdef BUILDING_V8_SHARED
+#if V8_HAS_ATTRIBUTE_VISIBILITY && \
+    (defined(BUILDING_V8_SHARED) || defined(USING_V8_SHARED))
 #define WASM_EXPORT __attribute__((visibility("default")))
 #else
 #define WASM_EXPORT
-#endif
-#else
-#define WASM_EXPORT
-#endif
+#endif  // V8_HAS_ATTRIBUTE_VISIBILITY && ...
 
 #endif  // V8_OS_WIN
 
@@ -2127,12 +2124,12 @@ WASM_EXPORT auto Table::make(Store* store_abs, const TableType* type,
   switch (type->element()->kind()) {
     case ValKind::FUNCREF:
       i_type = i::wasm::kWasmFuncRef;
-      canonical_type = i::wasm::kCanonicalFuncRef;
+      canonical_type = i::wasm::kWasmFuncRef;
       break;
     case ValKind::EXTERNREF:
       // See Engine::make().
       i_type = i::wasm::kWasmExternRef;
-      canonical_type = i::wasm::kCanonicalExternRef;
+      canonical_type = i::wasm::kWasmExternRef;
       break;
     default:
       UNREACHABLE();

@@ -446,6 +446,7 @@ class V8_EXPORT_PRIVATE AsmJsOffsetInformation {
 
 // Used as the supertype for a type at the top of the type hierarchy.
 constexpr ModuleTypeIndex kNoSuperType = ModuleTypeIndex::Invalid();
+constexpr ModuleTypeIndex kNoType = ModuleTypeIndex::Invalid();
 
 struct TypeDefinition {
   enum Kind : int8_t {
@@ -494,15 +495,16 @@ struct TypeDefinition {
     if (kind != other.kind) return false;
     if (is_final != other.is_final) return false;
     if (is_shared != other.is_shared) return false;
+    if (descriptor != other.descriptor) return false;
+    if (describes != other.describes) return false;
     if (kind == kFunction) return *function_sig == *other.function_sig;
     if (kind == kStruct) return *struct_type == *other.struct_type;
     DCHECK_EQ(kArray, kind);
     return *array_type == *other.array_type;
   }
 
-  bool operator!=(const TypeDefinition& other) const {
-    return !(*this == other);
-  }
+  bool has_descriptor() const { return descriptor.valid(); }
+  bool is_descriptor() const { return describes.valid(); }
 
   union {
     const FunctionSig* function_sig = nullptr;
@@ -511,6 +513,8 @@ struct TypeDefinition {
     const ContType* cont_type;
   };
   ModuleTypeIndex supertype{kNoSuperType};
+  ModuleTypeIndex descriptor{kNoType};
+  ModuleTypeIndex describes{kNoType};
   Kind kind = kFunction;
   bool is_final = false;
   bool is_shared = false;
@@ -1024,9 +1028,7 @@ struct V8_EXPORT_PRIVATE ModuleWireBytes {
     DCHECK_GE(kMaxInt, end - start);
   }
 
-  bool operator==(ModuleWireBytes other) const {
-    return module_bytes_ == other.module_bytes_;
-  }
+  bool operator==(const ModuleWireBytes& other) const = default;
 
   // Get a string stored in the module bytes representing a name.
   WasmName GetNameOrNull(WireBytesRef ref) const;

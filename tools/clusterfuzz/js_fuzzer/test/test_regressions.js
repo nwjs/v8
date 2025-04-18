@@ -315,6 +315,9 @@ describe('Regression tests', () => {
     this.settings['MUTATE_VARIABLES'] = 1.0;
     this.settings['ADD_VAR_OR_OBJ_MUTATIONS'] = 1.0;
 
+    // Also stress closure removal (though it has no effect in this test).
+    this.settings['TRANSFORM_CLOSURES'] = 1.0;
+
     const source = helpers.loadTestData('loop_mutations.js');
     const mutator = new scriptMutator.ScriptMutator(
         this.settings, 'test_data/regress/empty_db');
@@ -443,6 +446,18 @@ describe('Regression tests', () => {
         this.settings, 'test_data/regress/empty_db');
     const mutated = mutator.mutateMultiple([source]).code;
     helpers.assertExpectedResult('regress/yield/expected.js', mutated);
+  });
+
+  it('iterates snippets', () => {
+    const mutator = new scriptMutator.CrossScriptMutator(
+        this.settings, 'test_data/regress/empty_db');
+    const testRunner = new mutator.runnerClass();
+    testRunner.dbPath = 'test_data/regress/super/super_call_db';
+    for (const [i, inputs] of testRunner.enumerateInputs()) {
+      const mutated = mutator.mutateMultiple(inputs);
+      helpers.assertExpectedResult(
+          `verify_db/expected_code_${i}.js`, mutated.code);
+    }
   });
 });
 

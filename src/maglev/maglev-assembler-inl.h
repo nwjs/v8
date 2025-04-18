@@ -5,13 +5,15 @@
 #ifndef V8_MAGLEV_MAGLEV_ASSEMBLER_INL_H_
 #define V8_MAGLEV_MAGLEV_ASSEMBLER_INL_H_
 
+#include "src/maglev/maglev-assembler.h"
+// Include the non-inl header before the rest of the headers.
+
 #include <algorithm>
 #include <type_traits>
 
 #include "src/base/iterator.h"
 #include "src/base/template-utils.h"
 #include "src/codegen/machine-type.h"
-#include "src/maglev/maglev-assembler.h"
 
 #ifdef V8_TARGET_ARCH_ARM
 #include "src/maglev/arm/maglev-assembler-arm-inl.h"
@@ -998,7 +1000,7 @@ inline void MaglevAssembler::DefineLazyDeoptPoint(LazyDeoptInfo* info) {
 inline void MaglevAssembler::DefineExceptionHandlerPoint(NodeBase* node) {
   ExceptionHandlerInfo* info = node->exception_handler_info();
   if (!info->HasExceptionHandler()) return;
-  info->pc_offset = pc_offset_for_safepoint();
+  info->set_pc_offset(pc_offset_for_safepoint());
   code_gen_state()->PushHandlerInfo(node);
 }
 
@@ -1014,6 +1016,36 @@ inline void SaveRegisterStateForCall::DefineSafepointWithLazyDeopt(
   masm->code_gen_state()->PushLazyDeopt(lazy_deopt_info);
   DefineSafepoint();
   masm->MaybeEmitPlaceHolderForDeopt();
+}
+
+inline void MaglevAssembler::AssertElidedWriteBarrier(
+    Register object, Register value, RegisterSnapshot snapshot) {
+#if defined(V8_ENABLE_DEBUG_CODE) && !V8_DISABLE_WRITE_BARRIERS_BOOL
+  if (!v8_flags.slow_debug_code) return;
+
+  ZoneLabelRef ok(this);
+  Label* deferred_write_barrier_check = MakeDeferredCode(
+      [](MaglevAssembler* masm, ZoneLabelRef ok, Register object,
+         Register value, RegisterSnapshot snapshot) {
+        masm->set_allow_call(true);
+        {
+          SaveRegisterStateForCall save_register_state(masm, snapshot);
+#ifdef V8_COMPRESS_POINTERS
+          masm->DecompressTagged(object, object);
+          masm->DecompressTagged(value, value);
+#endif
+          masm->Push(object, value);
+          masm->Move(kContextRegister, masm->native_context().object());
+          masm->CallRuntime(Runtime::kCheckNoWriteBarrierNeeded, 2);
+        }
+        masm->set_allow_call(false);
+        masm->Jump(*ok);
+      },
+      ok, object, value, snapshot);
+
+  JumpIfNotSmi(value, deferred_write_barrier_check);
+  bind(*ok);
+#endif  // V8_ENABLE_DEBUG_CODE && !V8_DISABLE_WRITE_BARRIERS
 }
 
 }  // namespace maglev

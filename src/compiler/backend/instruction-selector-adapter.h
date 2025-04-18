@@ -26,109 +26,6 @@ struct TurboshaftAdapter : public turboshaft::OperationMatcher {
   explicit TurboshaftAdapter(turboshaft::Graph* graph)
       : turboshaft::OperationMatcher(*graph), graph_(graph) {}
 
-  class CallView {
-   public:
-    explicit CallView(turboshaft::Graph* graph, turboshaft::OpIndex node)
-        : node_(node) {
-      call_op_ = graph->Get(node_).TryCast<turboshaft::CallOp>();
-      if (call_op_ != nullptr) return;
-      tail_call_op_ = graph->Get(node_).TryCast<turboshaft::TailCallOp>();
-      if (tail_call_op_ != nullptr) return;
-      UNREACHABLE();
-    }
-
-    int return_count() const {
-      if (call_op_) {
-        return static_cast<int>(call_op_->results_rep().size());
-      }
-      if (tail_call_op_) {
-        return static_cast<int>(tail_call_op_->outputs_rep().size());
-      }
-      UNREACHABLE();
-    }
-    turboshaft::OpIndex callee() const {
-      if (call_op_) return call_op_->callee();
-      if (tail_call_op_) return tail_call_op_->callee();
-      UNREACHABLE();
-    }
-    turboshaft::OpIndex frame_state() const {
-      if (call_op_) return call_op_->frame_state().value();
-      UNREACHABLE();
-    }
-    base::Vector<const turboshaft::OpIndex> arguments() const {
-      if (call_op_) return call_op_->arguments();
-      if (tail_call_op_) return tail_call_op_->arguments();
-      UNREACHABLE();
-    }
-    const CallDescriptor* call_descriptor() const {
-      if (call_op_) return call_op_->descriptor->descriptor;
-      if (tail_call_op_) return tail_call_op_->descriptor->descriptor;
-      UNREACHABLE();
-    }
-
-    const turboshaft::TSCallDescriptor* ts_call_descriptor() const {
-      if (call_op_) return call_op_->descriptor;
-      if (tail_call_op_) return tail_call_op_->descriptor;
-      UNREACHABLE();
-    }
-
-    operator turboshaft::OpIndex() const { return node_; }
-
-   private:
-    turboshaft::OpIndex node_;
-    const turboshaft::CallOp* call_op_;
-    const turboshaft::TailCallOp* tail_call_op_;
-  };
-
-  class BranchView {
-   public:
-    explicit BranchView(turboshaft::Graph* graph, turboshaft::OpIndex node)
-        : node_(node) {
-      op_ = &graph->Get(node_).Cast<turboshaft::BranchOp>();
-    }
-
-    turboshaft::OpIndex condition() const { return op_->condition(); }
-
-    operator turboshaft::OpIndex() const { return node_; }
-
-   private:
-    turboshaft::OpIndex node_;
-    const turboshaft::BranchOp* op_;
-  };
-
-  class WordBinopView {
-   public:
-    explicit WordBinopView(turboshaft::Graph* graph, turboshaft::OpIndex node)
-        : node_(node) {
-      op_ = &graph->Get(node_).Cast<turboshaft::WordBinopOp>();
-      left_ = op_->left();
-      right_ = op_->right();
-      can_put_constant_right_ =
-          op_->IsCommutative(op_->kind) &&
-          graph->Get(left_).Is<turboshaft::ConstantOp>() &&
-          !graph->Get(right_).Is<turboshaft::ConstantOp>();
-    }
-
-    void EnsureConstantIsRightIfCommutative() {
-      if (can_put_constant_right_) {
-        std::swap(left_, right_);
-        can_put_constant_right_ = false;
-      }
-    }
-
-    turboshaft::OpIndex left() const { return left_; }
-    turboshaft::OpIndex right() const { return right_; }
-
-    operator turboshaft::OpIndex() const { return node_; }
-
-   private:
-    turboshaft::OpIndex node_;
-    const turboshaft::WordBinopOp* op_;
-    turboshaft::OpIndex left_;
-    turboshaft::OpIndex right_;
-    bool can_put_constant_right_;
-  };
-
   class LoadView {
    public:
     LoadView(turboshaft::Graph* graph, turboshaft::OpIndex node) : node_(node) {
@@ -332,89 +229,6 @@ struct TurboshaftAdapter : public turboshaft::OperationMatcher {
     const turboshaft::StoreOp* op_;
   };
 
-  class DeoptimizeView {
-   public:
-    DeoptimizeView(const turboshaft::Graph* graph, turboshaft::OpIndex node)
-        : node_(node) {
-      const auto& op = graph->Get(node);
-      if (op.Is<turboshaft::DeoptimizeOp>()) {
-        deoptimize_op_ = &op.Cast<turboshaft::DeoptimizeOp>();
-        parameters_ = deoptimize_op_->parameters;
-      } else {
-        DCHECK(op.Is<turboshaft::DeoptimizeIfOp>());
-        deoptimize_if_op_ = &op.Cast<turboshaft::DeoptimizeIfOp>();
-        parameters_ = deoptimize_if_op_->parameters;
-      }
-    }
-
-    DeoptimizeReason reason() const { return parameters_->reason(); }
-    FeedbackSource feedback() const { return parameters_->feedback(); }
-    turboshaft::OpIndex frame_state() const {
-      return deoptimize_op_ ? deoptimize_op_->frame_state()
-                            : deoptimize_if_op_->frame_state();
-    }
-
-    bool is_deoptimize() const { return deoptimize_op_ != nullptr; }
-    bool is_deoptimize_if() const {
-      return deoptimize_if_op_ != nullptr && !deoptimize_if_op_->negated;
-    }
-    bool is_deoptimize_unless() const {
-      return deoptimize_if_op_ != nullptr && deoptimize_if_op_->negated;
-    }
-
-    turboshaft::OpIndex condition() const {
-      DCHECK(is_deoptimize_if() || is_deoptimize_unless());
-      return deoptimize_if_op_->condition();
-    }
-
-    operator turboshaft::OpIndex() const { return node_; }
-
-   private:
-    turboshaft::OpIndex node_;
-    const turboshaft::DeoptimizeOp* deoptimize_op_ = nullptr;
-    const turboshaft::DeoptimizeIfOp* deoptimize_if_op_ = nullptr;
-    const DeoptimizeParameters* parameters_;
-  };
-
-  class AtomicRMWView {
-   public:
-    AtomicRMWView(const turboshaft::Graph* graph, turboshaft::OpIndex node)
-        : node_(node) {
-      op_ = &graph->Get(node).Cast<turboshaft::AtomicRMWOp>();
-    }
-
-    turboshaft::OpIndex base() const { return op_->base(); }
-    turboshaft::OpIndex index() const { return op_->index(); }
-    turboshaft::OpIndex value() const { return op_->value(); }
-    turboshaft::OpIndex expected() const {
-      DCHECK_EQ(op_->bin_op, turboshaft::AtomicRMWOp::BinOp::kCompareExchange);
-      return op_->expected().value_or_invalid();
-    }
-
-    operator turboshaft::OpIndex() const { return node_; }
-
-   private:
-    turboshaft::OpIndex node_;
-    const turboshaft::AtomicRMWOp* op_;
-  };
-
-  class Word32AtomicPairStoreView {
-   public:
-    explicit Word32AtomicPairStoreView(const turboshaft::Graph* graph,
-                                       turboshaft::OpIndex node)
-        : store_(graph->Get(node).Cast<turboshaft::AtomicWord32PairOp>()) {}
-
-    turboshaft::OpIndex base() const { return store_.base(); }
-    turboshaft::OpIndex index() const { return store_.index().value(); }
-    turboshaft::OpIndex value_low() const { return store_.value_low().value(); }
-    turboshaft::OpIndex value_high() const {
-      return store_.value_high().value();
-    }
-
-   private:
-    const turboshaft::AtomicWord32PairOp& store_;
-  };
-
 #if V8_ENABLE_WEBASSEMBLY
   // TODO(391750831): Inline this.
   class SimdShuffleView {
@@ -470,15 +284,6 @@ struct TurboshaftAdapter : public turboshaft::OperationMatcher {
   bool is_load_root_register(turboshaft::OpIndex node) const {
     return graph_->Get(node).Is<turboshaft::LoadRootRegisterOp>();
   }
-  CallView call_view(turboshaft::OpIndex node) {
-    return CallView{graph_, node};
-  }
-  BranchView branch_view(turboshaft::OpIndex node) {
-    return BranchView(graph_, node);
-  }
-  WordBinopView word_binop_view(turboshaft::OpIndex node) {
-    return WordBinopView(graph_, node);
-  }
   LoadView load_view(turboshaft::OpIndex node) {
     DCHECK(is_load(node));
     return LoadView(graph_, node);
@@ -486,16 +291,7 @@ struct TurboshaftAdapter : public turboshaft::OperationMatcher {
   StoreView store_view(turboshaft::OpIndex node) {
     return StoreView(graph_, node);
   }
-  DeoptimizeView deoptimize_view(turboshaft::OpIndex node) {
-    return DeoptimizeView(graph_, node);
-  }
-  AtomicRMWView atomic_rmw_view(turboshaft::OpIndex node) {
-    return AtomicRMWView(graph_, node);
-  }
-  Word32AtomicPairStoreView word32_atomic_pair_store_view(
-      turboshaft::OpIndex node) {
-    return Word32AtomicPairStoreView(graph_, node);
-  }
+
 #if V8_ENABLE_WEBASSEMBLY
   SimdShuffleView simd_shuffle_view(turboshaft::OpIndex node) {
     return SimdShuffleView(graph_, node);
@@ -657,78 +453,6 @@ struct TurboshaftAdapter : public turboshaft::OperationMatcher {
   static turboshaft::OpIndex value(turboshaft::OptionalOpIndex node) {
     DCHECK(node.valid());
     return node.value();
-  }
-
-  turboshaft::OpIndex block_terminator(const turboshaft::Block* block) const {
-    return graph_->PreviousIndex(block->end());
-  }
-  turboshaft::OpIndex parent_frame_state(turboshaft::OpIndex node) const {
-    const turboshaft::FrameStateOp& frame_state =
-        graph_->Get(node).Cast<turboshaft::FrameStateOp>();
-    return frame_state.parent_frame_state();
-  }
-  int parameter_index_of(turboshaft::OpIndex node) const {
-    const turboshaft::ParameterOp& parameter =
-        graph_->Get(node).Cast<turboshaft::ParameterOp>();
-    return parameter.parameter_index;
-  }
-  bool is_projection(turboshaft::OpIndex node) const {
-    return graph_->Get(node).Is<turboshaft::ProjectionOp>();
-  }
-  size_t projection_index_of(turboshaft::OpIndex node) const {
-    DCHECK(is_projection(node));
-    const turboshaft::ProjectionOp& projection =
-        graph_->Get(node).Cast<turboshaft::ProjectionOp>();
-    return projection.index;
-  }
-  int osr_value_index_of(turboshaft::OpIndex node) const {
-    const turboshaft::OsrValueOp& osr_value =
-        graph_->Get(node).Cast<turboshaft::OsrValueOp>();
-    return osr_value.index;
-  }
-
-  bool is_truncate_word64_to_word32(turboshaft::OpIndex node) const {
-    return graph_->Get(node).Is<turboshaft::Opmask::kTruncateWord64ToWord32>();
-  }
-  turboshaft::OpIndex remove_truncate_word64_to_word32(
-      turboshaft::OpIndex node) const {
-    if (const turboshaft::ChangeOp* change =
-            graph_->Get(node)
-                .TryCast<turboshaft::Opmask::kTruncateWord64ToWord32>()) {
-      return change->input();
-    }
-    return node;
-  }
-
-  bool is_stack_slot(turboshaft::OpIndex node) const {
-    return graph_->Get(node).Is<turboshaft::StackSlotOp>();
-  }
-  StackSlotRepresentation stack_slot_representation_of(
-      turboshaft::OpIndex node) const {
-    DCHECK(is_stack_slot(node));
-    const turboshaft::StackSlotOp& stack_slot =
-        graph_->Get(node).Cast<turboshaft::StackSlotOp>();
-    return StackSlotRepresentation(stack_slot.size, stack_slot.alignment,
-                                   stack_slot.is_tagged);
-  }
-  bool IsRequiredWhenUnused(turboshaft::OpIndex node) const {
-    return graph_->Get(node).IsRequiredWhenUnused();
-  }
-  bool IsCommutative(turboshaft::OpIndex node) const {
-    const turboshaft::Operation& op = graph_->Get(node);
-    if (const auto word_binop = op.TryCast<turboshaft::WordBinopOp>()) {
-      return turboshaft::WordBinopOp::IsCommutative(word_binop->kind);
-    } else if (const auto overflow_binop =
-                   op.TryCast<turboshaft::OverflowCheckedBinopOp>()) {
-      return turboshaft::OverflowCheckedBinopOp::IsCommutative(
-          overflow_binop->kind);
-    } else if (const auto float_binop =
-                   op.TryCast<turboshaft::FloatBinopOp>()) {
-      return turboshaft::FloatBinopOp::IsCommutative(float_binop->kind);
-    } else if (const auto comparison = op.TryCast<turboshaft::ComparisonOp>()) {
-      return turboshaft::ComparisonOp::IsCommutative(comparison->kind);
-    }
-    return false;
   }
 
  private:

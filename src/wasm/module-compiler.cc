@@ -569,7 +569,6 @@ class CompilationStateImpl {
  public:
   CompilationStateImpl(const std::shared_ptr<NativeModule>& native_module,
                        std::shared_ptr<Counters> async_counters,
-                       DynamicTiering dynamic_tiering,
                        WasmDetectedFeatures detected_features);
   ~CompilationStateImpl() {
     if (baseline_compile_job_->IsValid()) {
@@ -698,8 +697,6 @@ class CompilationStateImpl {
     return outstanding_baseline_units_ == 0;
   }
 
-  DynamicTiering dynamic_tiering() const { return dynamic_tiering_; }
-
   Counters* counters() const { return async_counters_.get(); }
 
   void SetWireBytesStorage(
@@ -758,10 +755,6 @@ class CompilationStateImpl {
   std::atomic<bool> compile_cancelled_{false};
 
   CompilationUnitQueues compilation_unit_queues_;
-
-  // Cache the dynamic tiering configuration to be consistent for the whole
-  // compilation.
-  const DynamicTiering dynamic_tiering_;
 
   // This mutex protects all information of this {CompilationStateImpl} which is
   // being accessed concurrently.
@@ -847,7 +840,7 @@ CompilationStateImpl* BackgroundCompileScope::compilation_state() const {
 }
 
 size_t CompilationStateImpl::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(CompilationStateImpl, 472);
+  UPDATE_WHEN_CLASS_CHANGES(CompilationStateImpl, 464);
   size_t result = sizeof(CompilationStateImpl);
 
   {
@@ -948,10 +941,6 @@ void CompilationState::set_compilation_id(int compilation_id) {
   Impl(this)->set_compilation_id(compilation_id);
 }
 
-DynamicTiering CompilationState::dynamic_tiering() const {
-  return Impl(this)->dynamic_tiering();
-}
-
 size_t CompilationState::EstimateCurrentMemoryConsumption() const {
   return Impl(this)->EstimateCurrentMemoryConsumption();
 }
@@ -964,12 +953,11 @@ std::vector<WasmCode*> CompilationState::PublishCode(
 // static
 std::unique_ptr<CompilationState> CompilationState::New(
     const std::shared_ptr<NativeModule>& native_module,
-    std::shared_ptr<Counters> async_counters, DynamicTiering dynamic_tiering,
+    std::shared_ptr<Counters> async_counters,
     WasmDetectedFeatures detected_features) {
-  return std::unique_ptr<CompilationState>(
-      reinterpret_cast<CompilationState*>(new CompilationStateImpl(
-          std::move(native_module), std::move(async_counters), dynamic_tiering,
-          detected_features)));
+  return std::unique_ptr<CompilationState>(reinterpret_cast<CompilationState*>(
+      new CompilationStateImpl(std::move(native_module),
+                               std::move(async_counters), detected_features)));
 }
 
 WasmDetectedFeatures CompilationState::detected_features() const {
@@ -1042,7 +1030,6 @@ struct ExecutionTierPair {
 // a consistent view on the debug state, the caller reads the debug state once
 // and then passes it to this function.
 ExecutionTierPair GetDefaultTiersPerModule(NativeModule* native_module,
-                                           DynamicTiering dynamic_tiering,
                                            DebugState is_in_debug_state,
                                            bool lazy_module) {
   const WasmModule* module = native_module->module();
@@ -1058,7 +1045,7 @@ ExecutionTierPair GetDefaultTiersPerModule(NativeModule* native_module,
   }
   ExecutionTier baseline_tier =
       v8_flags.liftoff ? ExecutionTier::kLiftoff : ExecutionTier::kTurbofan;
-  bool eager_tier_up = !dynamic_tiering && v8_flags.wasm_tier_up;
+  bool eager_tier_up = !v8_flags.wasm_dynamic_tiering && v8_flags.wasm_tier_up;
   ExecutionTier top_tier =
       eager_tier_up ? ExecutionTier::kTurbofan : baseline_tier;
   return {baseline_tier, top_tier};
@@ -1067,13 +1054,11 @@ ExecutionTierPair GetDefaultTiersPerModule(NativeModule* native_module,
 ExecutionTierPair GetLazyCompilationTiers(NativeModule* native_module,
                                           uint32_t func_index,
                                           DebugState is_in_debug_state) {
-  DynamicTiering dynamic_tiering =
-      Impl(native_module->compilation_state())->dynamic_tiering();
   // For lazy compilation, get the tiers we would use if lazy compilation is
   // disabled.
   constexpr bool kNotLazy = false;
-  ExecutionTierPair tiers = GetDefaultTiersPerModule(
-      native_module, dynamic_tiering, is_in_debug_state, kNotLazy);
+  ExecutionTierPair tiers =
+      GetDefaultTiersPerModule(native_module, is_in_debug_state, kNotLazy);
   // If we are in debug mode, we ignore compilation hints.
   if (is_in_debug_state) return tiers;
 
@@ -1758,6 +1743,7 @@ void PublishDetectedFeatures(WasmDetectedFeatures detected_features,
       {WasmDetectedFeature::exnref, Feature::kWasmExnRef},
       {WasmDetectedFeature::typed_funcref, Feature::kWasmTypedFuncRef},
       {WasmDetectedFeature::jspi, Feature::kWasmJavaScriptPromiseIntegration},
+      {WasmDetectedFeature::branch_hinting, Feature::kWasmBranchHinting},
   };
 
   // Check that every staging or shipping feature has a use counter as that is
@@ -1765,8 +1751,7 @@ void PublishDetectedFeatures(WasmDetectedFeatures detected_features,
   auto check_use_counter = [](WasmDetectedFeature feat) constexpr -> bool {
     // Some features intentionally do not have a use counter.
     constexpr WasmDetectedFeature kIntentionallyNoUseCounter[] = {
-        WasmDetectedFeature::stringref,    // Deprecated / unlikely to ship.
-        WasmDetectedFeature::js_inlining,  // Not a user-visible feature.
+        WasmDetectedFeature::stringref,  // Deprecated / unlikely to ship.
     };
     for (auto no_use_counter_feature : kIntentionallyNoUseCounter) {
       if (feat == no_use_counter_feature) return true;
@@ -2403,12 +2388,8 @@ std::shared_ptr<NativeModule> GetOrCompileNewNativeModule(
         isolate->counters(), module->origin, wasm_compile, module_time));
   }
 
-  const bool include_liftoff =
-      module->origin == kWasmOrigin && v8_flags.liftoff;
   size_t code_size_estimate =
-      wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
-          module.get(), include_liftoff,
-          DynamicTiering{v8_flags.wasm_dynamic_tiering.value()});
+      wasm::WasmCodeManager::EstimateNativeModuleCodeSize(module.get());
   native_module = GetWasmEngine()->NewNativeModule(
       isolate, enabled_features, detected_features, std::move(compile_imports),
       module, code_size_estimate);
@@ -2466,7 +2447,6 @@ AsyncCompileJob::AsyncCompileJob(
       api_method_name_(api_method_name),
       enabled_features_(enabled_features),
       compile_imports_(std::move(compile_imports)),
-      dynamic_tiering_(DynamicTiering{v8_flags.wasm_dynamic_tiering.value()}),
       start_time_(base::TimeTicks::Now()),
       bytes_copy_(std::move(bytes)),
       wire_bytes_(bytes_copy_.as_vector()),
@@ -2508,7 +2488,7 @@ struct ValidateFunctionsStreamingJobData {
     base::Vector<const uint8_t> code;
 
     // Check whether the unit is valid.
-    operator bool() const {  // NOLINT(google-explicit-constructor)
+    operator bool() const {
       DCHECK_LE(-1, func_index);
       return func_index >= 0;
     }
@@ -3095,10 +3075,8 @@ class AsyncCompileJob::DecodeModule : public AsyncCompileJob::CompileStep {
     } else {
       // Decode passed.
       std::shared_ptr<WasmModule> module = std::move(result).value();
-      const bool include_liftoff = v8_flags.liftoff;
       size_t code_size_estimate =
-          wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
-              module.get(), include_liftoff, job->dynamic_tiering_);
+          wasm::WasmCodeManager::EstimateNativeModuleCodeSize(module.get());
       job->DoSync<PrepareAndStartCompile>(
           std::move(module), true /* start_compilation */,
           true /* lazy_functions_are_validated */, code_size_estimate);
@@ -3315,14 +3293,10 @@ bool AsyncStreamingProcessor::ProcessCodeSectionHeader(
 
   // Execute the PrepareAndStartCompile step immediately and not in a separate
   // task.
-  int num_imported_functions =
-      static_cast<int>(decoder_.module()->num_imported_functions);
   DCHECK_EQ(kWasmOrigin, decoder_.module()->origin);
-  const bool include_liftoff = v8_flags.liftoff;
   size_t code_size_estimate =
-      wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
-          num_functions, num_imported_functions, code_section_length,
-          include_liftoff, job_->dynamic_tiering_);
+      wasm::WasmCodeManager::EstimateNativeModuleCodeSize(num_functions,
+                                                          code_section_length);
   job_->DoImmediately<AsyncCompileJob::PrepareAndStartCompile>(
       decoder_.shared_module(),
       // start_compilation: false; triggered when we receive the bodies.
@@ -3482,10 +3456,8 @@ void AsyncStreamingProcessor::OnFinishedStream(
   if (prefix_cache_hit_) {
     // Restart as an asynchronous, non-streaming compilation. Most likely
     // {PrepareAndStartCompile} will get the native module from the cache.
-    const bool include_liftoff = v8_flags.liftoff;
     size_t code_size_estimate =
-        wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
-            module.get(), include_liftoff, job_->dynamic_tiering_);
+        wasm::WasmCodeManager::EstimateNativeModuleCodeSize(module.get());
     job_->DoSync<AsyncCompileJob::PrepareAndStartCompile>(
         std::move(module), true /* start_compilation */,
         false /* lazy_functions_are_validated_ */, code_size_estimate);
@@ -3586,14 +3558,13 @@ bool AsyncStreamingProcessor::Deserialize(
 
 CompilationStateImpl::CompilationStateImpl(
     const std::shared_ptr<NativeModule>& native_module,
-    std::shared_ptr<Counters> async_counters, DynamicTiering dynamic_tiering,
+    std::shared_ptr<Counters> async_counters,
     WasmDetectedFeatures detected_features)
     : native_module_(native_module.get()),
       native_module_weak_(std::move(native_module)),
       async_counters_(std::move(async_counters)),
       compilation_unit_queues_(native_module->num_imported_functions(),
                                native_module->num_declared_functions()),
-      dynamic_tiering_(dynamic_tiering),
       detected_features_(detected_features) {}
 
 void CompilationStateImpl::InitCompileJob() {
@@ -3784,8 +3755,7 @@ void CompilationStateImpl::InitializeCompilationProgress(
 
     // Compute the default compilation progress for all functions, and set it.
     const ExecutionTierPair default_tiers = GetDefaultTiersPerModule(
-        native_module_, dynamic_tiering_, native_module_->IsInDebugState(),
-        IsLazyModule(module));
+        native_module_, native_module_->IsInDebugState(), IsLazyModule(module));
     const uint8_t default_progress =
         RequiredBaselineTierField::encode(default_tiers.baseline_tier) |
         RequiredTopTierField::encode(default_tiers.top_tier) |
@@ -3925,9 +3895,8 @@ void CompilationStateImpl::InitializeCompilationProgressAfterDeserialization(
 
     // Update compilation state for eagerly compiled functions.
     constexpr bool kNotLazy = false;
-    ExecutionTierPair default_tiers =
-        GetDefaultTiersPerModule(native_module_, dynamic_tiering_,
-                                 native_module_->IsInDebugState(), kNotLazy);
+    ExecutionTierPair default_tiers = GetDefaultTiersPerModule(
+        native_module_, native_module_->IsInDebugState(), kNotLazy);
     uint8_t progress_for_eager_functions =
         RequiredBaselineTierField::encode(default_tiers.baseline_tier) |
         RequiredTopTierField::encode(default_tiers.top_tier) |
@@ -4146,12 +4115,14 @@ void CompilationStateImpl::TriggerOutstandingCallbacks() {
 
   // For dynamic tiering, trigger "compilation chunk finished" after a new chunk
   // of size {v8_flags.wasm_caching_threshold}.
-  if (dynamic_tiering_ &&
+  if (v8_flags.wasm_dynamic_tiering &&
       static_cast<size_t>(v8_flags.wasm_caching_threshold) <=
           bytes_since_last_chunk_) {
-    // Trigger caching immediately if there is no timeout or the hard threshold
-    // was reached.
-    if (v8_flags.wasm_caching_timeout_ms <= 0 ||
+    // Trigger caching immediately if
+    // - there is no timeout,
+    // - the hard threshold was reached, or
+    // - we are running single-threaded.
+    if (v8_flags.single_threaded || v8_flags.wasm_caching_timeout_ms <= 0 ||
         static_cast<size_t>(v8_flags.wasm_caching_hard_threshold) <=
             bytes_since_last_chunk_) {
       triggered_events.Add(CompilationEvent::kFinishedCompilationChunk);

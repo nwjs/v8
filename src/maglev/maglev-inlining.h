@@ -5,139 +5,157 @@
 #ifndef V8_MAGLEV_MAGLEV_INLINING_H_
 #define V8_MAGLEV_MAGLEV_INLINING_H_
 
+#include <algorithm>
+
 #include "src/base/logging.h"
+#include "src/compiler/heap-refs.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/execution/local-isolate.h"
+#include "src/maglev/maglev-basic-block.h"
 #include "src/maglev/maglev-compilation-info.h"
 #include "src/maglev/maglev-compilation-unit.h"
-#include "src/maglev/maglev-deopt-frame-visitor.h"
 #include "src/maglev/maglev-graph-builder.h"
-#include "src/maglev/maglev-graph-processor.h"
 #include "src/maglev/maglev-ir.h"
 
 namespace v8::internal::maglev {
 
-class UpdateInputsProcessor {
- public:
-  explicit UpdateInputsProcessor(ValueNode* from, ValueNode* to)
-      : from_(from), to_(to) {}
-
-  void PreProcessGraph(Graph* graph) {}
-  void PostProcessGraph(Graph* graph) {}
-  void PostProcessBasicBlock(BasicBlock* block) {}
-  BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
-    return BlockProcessResult::kContinue;
-  }
-  void PostPhiProcessing() {}
-
-  template <typename NodeT>
-  ProcessResult Process(NodeT* node, const ProcessingState& state) {
-    for (Input& input : *node) {
-      if (input.node() == from_) {
-        input.set_node(to_);
-        to_->add_use();
-      }
-    }
-    if constexpr (NodeT::kProperties.can_eager_deopt()) {
-      detail::DeepForEachInputForEager<detail::DeoptFrameVisitMode::kOther>(
-          node->eager_deopt_info(),
-          [&](ValueNode*& node, InputLocation* input) {
-            if (node == from_) {
-              node = to_;
-              to_->add_use();
-            }
-          });
-    }
-    if constexpr (NodeT::kProperties.can_lazy_deopt()) {
-      detail::DeepForEachInputForLazy<detail::DeoptFrameVisitMode::kOther>(
-          node->lazy_deopt_info(), [&](ValueNode*& node, InputLocation* input) {
-            if (node == from_) {
-              node = to_;
-              to_->add_use();
-            }
-          });
-    }
-    return ProcessResult::kContinue;
-  }
-
- private:
-  ValueNode* from_;
-  ValueNode* to_;
-};
-
 class MaglevInliner {
  public:
-  MaglevInliner(LocalIsolate* local_isolate, Graph* graph)
-      : local_isolate_(local_isolate), graph_(graph) {}
+  MaglevInliner(MaglevCompilationInfo* compilation_info, Graph* graph)
+      : compilation_info_(compilation_info), graph_(graph) {}
 
-  void Run() {
-    // TODO(victorgomes): Add some heuristics to choose which function to
-    // inline.
-    while (!graph_->inlineable_calls().empty()) {
+  void Run(bool is_tracing_maglev_graphs_enabled) {
+    if (graph_->inlined_functions().empty()) return;
+
+    while (true) {
       if (graph_->total_inlined_bytecode_size() >
           v8_flags.max_maglev_inlined_bytecode_size_cumulative) {
         // No more inlining.
         break;
       }
-      MaglevCallerDetails* details = graph_->inlineable_calls().back();
-      graph_->inlineable_calls().pop_back();
-      ValueNode* result = BuildInlineFunction(details);
-      if (result) {
-        if (auto alloc = result->TryCast<InlinedAllocation>()) {
-          // TODO(victorgomes): Support eliding VOs.
-          alloc->ForceEscaping();
-#ifdef DEBUG
-          alloc->set_is_returned_value_from_inline_call();
-#endif  // DEBUG
-        }
-        GraphProcessor<UpdateInputsProcessor> substitute_use(
-            details->generic_call_node, result);
-        substitute_use.ProcessGraph(graph_);
+      MaglevCallSiteInfo* call_site = ChooseNextCallSite();
+      if (!call_site) break;
+
+      MaybeReduceResult result = BuildInlineFunction(call_site);
+      if (result.IsFail()) continue;
+      // If --trace-maglev-inlining-verbose, we print the graph after each
+      // inlining step/call.
+      if (is_tracing_maglev_graphs_enabled && v8_flags.print_maglev_graphs &&
+          v8_flags.trace_maglev_inlining_verbose) {
+        std::cout << "\nAfter inlining "
+                  << call_site->generic_call_node->shared_function_info()
+                  << std::endl;
+        PrintGraph(std::cout, compilation_info_, graph_);
       }
+    }
+
+    // Otherwise we print just once at the end.
+    if (is_tracing_maglev_graphs_enabled && v8_flags.print_maglev_graphs &&
+        !v8_flags.trace_maglev_inlining_verbose) {
+      std::cout << "\nAfter inlining" << std::endl;
+      PrintGraph(std::cout, compilation_info_, graph_);
     }
   }
 
  private:
-  LocalIsolate* local_isolate_;
+  MaglevCompilationInfo* compilation_info_;
   Graph* graph_;
 
-  ValueNode* BuildInlineFunction(MaglevCallerDetails* details) {
-    compiler::JSHeapBroker* broker = details->callee->broker();
-    compiler::BytecodeArrayRef bytecode =
-        details->callee->shared_function_info().GetBytecodeArray(broker);
+  compiler::JSHeapBroker* broker() const { return compilation_info_->broker(); }
+  Zone* zone() const { return compilation_info_->zone(); }
+
+  MaglevCallSiteInfo* ChooseNextCallSite() {
+    auto it =
+        v8_flags.maglev_inlining_following_eager_order
+            ? std::ranges::find_if(graph_->inlineable_calls(),
+                                   [](auto* site) { return site != nullptr; })
+            : std::ranges::max_element(
+                  graph_->inlineable_calls(),
+                  [](const MaglevCallSiteInfo* info1,
+                     const MaglevCallSiteInfo* info2) {
+                    if (info1 == nullptr || info2 == nullptr) {
+                      return info2 != nullptr;
+                    }
+                    return info1->score < info2->score;
+                  });
+    if (it == graph_->inlineable_calls().end()) return nullptr;
+    MaglevCallSiteInfo* call_site = *it;
+    *it = nullptr;  // Erase call site.
+    return call_site;
+  }
+
+  MaybeReduceResult BuildInlineFunction(MaglevCallSiteInfo* call_site) {
+    CallKnownJSFunction* call_node = call_site->generic_call_node;
+    BasicBlock* call_block = call_node->owner();
+    MaglevCallerDetails* caller_details = &call_site->caller_details;
+    DeoptFrame* caller_deopt_frame = caller_details->deopt_frame;
+    const MaglevCompilationUnit* caller_unit =
+        &caller_deopt_frame->GetCompilationUnit();
+    compiler::SharedFunctionInfoRef shared = call_node->shared_function_info();
+
+    if (!call_block || call_block->is_dead()) {
+      // The block containing the call is unreachable, and it was previously
+      // removed. Do not try to inline the call.
+      return ReduceResult::Fail();
+    }
+
+    if (v8_flags.trace_maglev_inlining) {
+      std::cout << "  non-eager inlining " << shared << std::endl;
+    }
+
+    // Truncate the basic block and remove the generic call node.
+    ExceptionHandlerInfo::List rem_handlers_in_call_block;
+    call_block->exception_handlers().TruncateAt(
+        &rem_handlers_in_call_block, call_node->exception_handler_info());
+    ZoneVector<Node*> rem_nodes_in_call_block =
+        call_block->Split(call_node, zone());
+
+    // Create a new compilation unit.
+    MaglevCompilationUnit* inner_unit = MaglevCompilationUnit::NewInner(
+        zone(), caller_unit, shared, call_site->feedback_cell);
+
+    compiler::BytecodeArrayRef bytecode = shared.GetBytecodeArray(broker());
     graph_->add_inlined_bytecode_size(bytecode.length());
 
     // Create a new graph builder for the inlined function.
-    MaglevGraphBuilder inner_graph_builder(local_isolate_, details->callee,
-                                           graph_, details);
+    LocalIsolate* local_isolate = broker()->local_isolate_or_isolate();
+    MaglevGraphBuilder inner_graph_builder(local_isolate, inner_unit, graph_,
+                                           &call_site->caller_details);
 
-    CallKnownJSFunction* generic_node = details->generic_call_node;
-    BasicBlock* call_block = generic_node->owner();
+    // Update caller deopt frame with inlined arguments.
+    caller_details->deopt_frame =
+        inner_graph_builder.AddInlinedArgumentsToDeoptFrame(
+            caller_deopt_frame, inner_unit, call_node->closure().node(),
+            call_site->caller_details.arguments);
 
     // We truncate the graph to build the function in-place, preserving the
     // invariant that all jumps move forward (except JumpLoop).
     std::vector<BasicBlock*> saved_bb = TruncateGraphAt(call_block);
-
-    // Truncate the basic block and remove the generic call node.
-    ControlNode* control_node = call_block->control_node();
-    ZoneVector<Node*> rem_nodes_in_call_block =
-        call_block->Split(generic_node, details->callee->zone());
+    ControlNode* control_node = call_block->reset_control_node();
 
     // Set the inner graph builder to build in the truncated call block.
     inner_graph_builder.set_current_block(call_block);
 
     ReduceResult result = inner_graph_builder.BuildInlineFunction(
-        generic_node->context().node(), generic_node->closure().node(),
-        generic_node->new_target().node());
+        caller_deopt_frame->GetSourcePosition(), call_node->context().node(),
+        call_node->closure().node(), call_node->new_target().node());
 
     if (result.IsDoneWithAbort()) {
+      // Since the rest of the block is dead, these nodes don't belong
+      // to any basic block anymore.
+      for (auto node : rem_nodes_in_call_block) {
+        node->set_owner(nullptr);
+      }
       // Restore the rest of the graph.
-      // TODO(victorgomes): Some of these basic blocks might be unreachable now.
-      // Remove them in a different pass.
       for (auto bb : saved_bb) {
         graph_->Add(bb);
       }
-      return nullptr;
+      RemovePredecessorFollowing(control_node, call_block);
+      // TODO(victorgomes): We probably don't need to iterate all the graph to
+      // remove unreachable blocks, but only the successors of control_node in
+      // saved_bbs.
+      RemoveUnreachableBlocks();
+      return result;
     }
 
     DCHECK(result.IsDoneWithValue());
@@ -151,6 +169,8 @@ class MaglevInliner {
     BasicBlock* final_block = inner_graph_builder.FinishInlinedBlockForCaller(
         control_node, rem_nodes_in_call_block);
     DCHECK_NOT_NULL(final_block);
+    final_block->exception_handlers().Append(
+        std::move(rem_handlers_in_call_block));
 
     // Update the predecessor of the successors of the {final_block}, that were
     // previously pointing to {call_block}.
@@ -164,7 +184,15 @@ class MaglevInliner {
       graph_->Add(bb);
     }
 
-    return returned_value;
+    if (auto alloc = returned_value->TryCast<InlinedAllocation>()) {
+      // TODO(victorgomes): Support eliding VOs.
+      alloc->ForceEscaping();
+#ifdef DEBUG
+      alloc->set_is_returned_value_from_inline_call();
+#endif  // DEBUG
+    }
+    call_node->OverwriteWithIdentityTo(returned_value);
+    return ReduceResult::Done();
   }
 
   // Truncates the graph at the given basic block `block`.  All blocks
@@ -187,8 +215,8 @@ class MaglevInliner {
   ValueNode* AddNodeAtBlockEnd(MaglevGraphBuilder& builder,
                                std::initializer_list<ValueNode*> inputs,
                                Args&&... args) {
-    ValueNode* node = NodeBase::New<Node>(builder.zone(), inputs,
-                                          std::forward<Args>(args)...);
+    ValueNode* node =
+        NodeBase::New<Node>(zone(), inputs, std::forward<Args>(args)...);
     DCHECK(!node->properties().can_eager_deopt());
     DCHECK(!node->properties().can_lazy_deopt());
     builder.node_buffer().push_back(node);
@@ -236,6 +264,75 @@ class MaglevInliner {
         break;
       }
     }
+  }
+
+  void RemovePredecessorFollowing(ControlNode* control,
+                                  BasicBlock* call_block) {
+    BasicBlock::ForEachSuccessorFollowing(control, [&](BasicBlock* succ) {
+      if (!succ->has_state()) return;
+      if (succ->is_loop() && succ->backedge_predecessor() == call_block) {
+        succ->state()->TurnLoopIntoRegularBlock();
+        return;
+      }
+      for (int i = succ->predecessor_count() - 1; i >= 0; i--) {
+        if (succ->predecessor_at(i) == call_block) {
+          succ->state()->RemovePredecessorAt(i);
+        }
+      }
+    });
+  }
+
+  void RemoveUnreachableBlocks() {
+    std::vector<bool> reachable_blocks(graph_->max_block_id(), false);
+    std::vector<BasicBlock*> worklist;
+
+    DCHECK(!graph_->blocks().empty());
+    BasicBlock* initial_bb = graph_->blocks().front();
+    worklist.push_back(initial_bb);
+    reachable_blocks[initial_bb->id()] = true;
+    DCHECK(!initial_bb->is_loop());
+
+    while (!worklist.empty()) {
+      BasicBlock* current = worklist.back();
+      worklist.pop_back();
+
+      for (auto handler : current->exception_handlers()) {
+        if (!handler->HasExceptionHandler()) continue;
+        if (handler->ShouldLazyDeopt()) continue;
+        BasicBlock* catch_block = handler->catch_block();
+        if (!reachable_blocks[catch_block->id()]) {
+          reachable_blocks[catch_block->id()] = true;
+          worklist.push_back(catch_block);
+        }
+      }
+
+      current->ForEachSuccessor([&](BasicBlock* succ) {
+        if (!reachable_blocks[succ->id()]) {
+          reachable_blocks[succ->id()] = true;
+          worklist.push_back(succ);
+        }
+      });
+    }
+
+    // Sweep dead blocks and remove unreachable predecessors.
+    graph_->IterateGraphAndSweepDeadBlocks([&](BasicBlock* bb) {
+      if (!reachable_blocks[bb->id()]) return true;
+      // If block doesn't have a merge state, it has only one predecessor, so
+      // it must be the reachable one.
+      if (!bb->has_state()) return false;
+      if (bb->is_loop() &&
+          !reachable_blocks[bb->backedge_predecessor()->id()]) {
+        // If the backedge predecessor is not reachable, we can turn the loop
+        // into a regular block.
+        bb->state()->TurnLoopIntoRegularBlock();
+      }
+      for (int i = bb->predecessor_count() - 1; i >= 0; i--) {
+        if (!reachable_blocks[bb->predecessor_at(i)->id()]) {
+          bb->state()->RemovePredecessorAt(i);
+        }
+      }
+      return false;
+    });
   }
 };
 

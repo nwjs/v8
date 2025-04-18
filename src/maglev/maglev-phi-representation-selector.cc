@@ -95,7 +95,7 @@ MaglevPhiRepresentationSelector::ProcessPhi(Phi* node) {
   // based on the ValueRepresentation of its inputs.
   ValueRepresentationSet input_reprs;
   HoistTypeList hoist_untagging;
-  hoist_untagging.resize_and_init(node->input_count(), HoistType::kNone);
+  hoist_untagging.resize(node->input_count(), HoistType::kNone);
 
   bool has_tagged_phi_input = false;
   for (int i = 0; i < node->input_count(); i++) {
@@ -1103,17 +1103,6 @@ void MaglevPhiRepresentationSelector::FixLoopPhisBackedge(BasicBlock* block) {
   }
 }
 
-template <typename DeoptInfoT>
-void MaglevPhiRepresentationSelector::BypassIdentities(DeoptInfoT* deopt_info) {
-  detail::DeepForEachInputRemovingIdentities(
-      deopt_info, [&](ValueNode* node, InputLocation* input) {});
-}
-
-template void MaglevPhiRepresentationSelector::BypassIdentities<EagerDeoptInfo>(
-    EagerDeoptInfo*);
-template void MaglevPhiRepresentationSelector::BypassIdentities<LazyDeoptInfo>(
-    LazyDeoptInfo*);
-
 ValueNode* MaglevPhiRepresentationSelector::AddNodeAtBlockEnd(
     ValueNode* node, BasicBlock* block, DeoptFrame* deopt_frame) {
   return AddNode(node, block, NewNodePosition::kEndOfBlock, nullptr,
@@ -1159,19 +1148,19 @@ void MaglevPhiRepresentationSelector::PreparePhiTaggings(
     phi_taggings_.StartNewSnapshot();
     return;
   }
-  old_block->SetSnapshot(phi_taggings_.Seal());
+  snapshots_.emplace(old_block->id(), phi_taggings_.Seal());
 
   // Setting up new snapshot
   predecessors_.clear();
 
   if (!new_block->is_merge_block()) {
     BasicBlock* pred = new_block->predecessor();
-    predecessors_.push_back(pred->snapshot());
+    predecessors_.push_back(snapshots_.at(pred->id()));
   } else {
     int skip_backedge = new_block->is_loop();
     for (int i = 0; i < new_block->predecessor_count() - skip_backedge; i++) {
       BasicBlock* pred = new_block->predecessor_at(i);
-      predecessors_.push_back(pred->snapshot());
+      predecessors_.push_back(snapshots_.at(pred->id()));
     }
   }
 

@@ -24,22 +24,19 @@ using NodeConstIterator = ZoneVector<Node*>::const_iterator;
 
 class BasicBlock {
  public:
-  using Snapshot = compiler::turboshaft::SnapshotTable<ValueNode*>::Snapshot;
-  using MaybeSnapshot =
-      compiler::turboshaft::SnapshotTable<ValueNode*>::MaybeSnapshot;
-
   explicit BasicBlock(MergePointInterpreterFrameState* state, Zone* zone)
       : type_(state ? kMerge : kOther),
         nodes_(zone),
         control_node_(nullptr),
-        state_(state),
-        reload_hints_(0, zone),
-        spill_hints_(0, zone) {}
+        state_(state) {}
 
   NodeIdT first_id() const {
     if (has_phi()) return phis()->first()->id();
     return first_non_phi_id();
   }
+
+  // For GDB: Print any basic block with `print bb->Print()`.
+  void Print() const;
 
   NodeIdT first_non_phi_id() const {
     for (const Node* node : nodes_) {
@@ -68,6 +65,13 @@ class BasicBlock {
     control_node_ = control_node;
   }
 
+  ControlNode* reset_control_node() {
+    DCHECK_NOT_NULL(control_node_);
+    ControlNode* control = control_node_;
+    control_node_ = nullptr;
+    return control;
+  }
+
   // Moves all nodes after |node| to the resulting ZoneVector, while keeping all
   // nodes before |node| in the basic block. |node| itself is dropped.
   ZoneVector<Node*> Split(Node* node, Zone* zone) {
@@ -75,10 +79,12 @@ class BasicBlock {
     for (; split < nodes_.size(); split++) {
       if (nodes_[split] == node) break;
     }
-    CHECK_LT(split, nodes_.size());
+    DCHECK_NE(split, nodes_.size());
     size_t after_split = split + 1;
     ZoneVector<Node*> result(nodes_.size() - after_split, zone);
-    result.insert(0, nodes_.begin() + after_split, nodes_.end());
+    for (size_t i = 0; i < result.size(); i++) {
+      result[i] = nodes_[i + after_split];
+    }
     nodes_.resize(split);
     return result;
   }
@@ -131,6 +137,10 @@ class BasicBlock {
     is_start_block_of_switch_case_ = value;
   }
 
+  bool is_dead() const { return is_dead_; }
+
+  void mark_dead() { is_dead_ = true; }
+
   Phi::List* phis() const {
     DCHECK(has_phi());
     return state_->phis();
@@ -138,6 +148,14 @@ class BasicBlock {
   void AddPhi(Phi* phi) const {
     DCHECK(has_state());
     state_->phis()->Add(phi);
+  }
+
+  ExceptionHandlerInfo::List& exception_handlers() {
+    return exception_handlers_;
+  }
+
+  void AddExceptionHandler(ExceptionHandlerInfo* handler) {
+    exception_handlers_.Add(handler);
   }
 
   int predecessor_count() const {
@@ -179,8 +197,7 @@ class BasicBlock {
   }
 
   template <typename Func>
-  void ForEachSuccessor(Func&& functor) const {
-    ControlNode* control = control_node();
+  static void ForEachSuccessorFollowing(ControlNode* control, Func&& functor) {
     if (auto unconditional_control =
             control->TryCast<UnconditionalControlNode>()) {
       functor(unconditional_control->target());
@@ -197,10 +214,16 @@ class BasicBlock {
     }
   }
 
+  template <typename Func>
+  void ForEachSuccessor(Func&& functor) const {
+    ControlNode* control = control_node();
+    ForEachSuccessorFollowing(control, functor);
+  }
+
   Label* label() {
     // If this fails, jump threading is missing for the node. See
     // MaglevCodeGeneratingNodeProcessor::PatchJumps.
-    DCHECK_EQ(this, RealJumpTarget());
+    DCHECK_EQ(this, ComputeRealJumpTarget());
     return &label_;
   }
   MergePointInterpreterFrameState* state() const {
@@ -213,23 +236,9 @@ class BasicBlock {
     return has_state() && state_->is_exception_handler();
   }
 
-  Snapshot snapshot() const {
-    DCHECK(snapshot_.has_value());
-    return snapshot_.value();
-  }
-
-  void SetSnapshot(Snapshot snapshot) { snapshot_.Set(snapshot); }
-
-  ZonePtrList<ValueNode>& reload_hints() { return reload_hints_; }
-  ZonePtrList<ValueNode>& spill_hints() { return spill_hints_; }
-
   // If the basic block is an empty (unnecessary) block containing only an
   // unconditional jump to the successor block, return the successor block.
-  BasicBlock* RealJumpTarget() {
-    if (real_jump_target_cache_ != nullptr) {
-      return real_jump_target_cache_;
-    }
-
+  BasicBlock* ComputeRealJumpTarget() {
     BasicBlock* current = this;
     while (true) {
       if (!current->nodes_.empty() || current->is_loop() ||
@@ -247,12 +256,24 @@ class BasicBlock {
       }
       current = next;
     }
-    real_jump_target_cache_ = current;
     return current;
   }
 
   bool is_deferred() const { return deferred_; }
   void set_deferred(bool deferred) { deferred_ = deferred; }
+
+  using Id = uint32_t;
+  constexpr static Id kInvalidBlockId = 0xffffffff;
+
+  void set_id(Id id) {
+    DCHECK(!has_id());
+    id_ = id;
+  }
+  bool has_id() const { return id_ != kInvalidBlockId; }
+  Id id() const {
+    DCHECK(has_id());
+    return id_;
+  }
 
  private:
   bool HasPhisOrRegisterMerges() const {
@@ -290,14 +311,17 @@ class BasicBlock {
     return has_register_merge;
   }
 
-  enum : uint8_t {
-    kMerge,
-    kEdgeSplit,
-    kOther
-  } type_;
-  bool is_start_block_of_switch_case_ = false;
+  enum : uint8_t { kMerge, kEdgeSplit, kOther } type_;
+  bool deferred_ : 1 = false;
+  bool is_start_block_of_switch_case_ : 1 = false;
+  bool is_dead_ : 1 = false;
+
+  Id id_ = kInvalidBlockId;
+
   ZoneVector<Node*> nodes_;
   ControlNode* control_node_;
+  ExceptionHandlerInfo::List exception_handlers_;
+
   union {
     MergePointInterpreterFrameState* state_;
     MergePointRegisterState* edge_split_block_register_state_;
@@ -305,16 +329,14 @@ class BasicBlock {
   // For kEdgeSplit and kOther blocks.
   BasicBlock* predecessor_ = nullptr;
   Label label_;
-  // Hints about which nodes should be in registers or spilled when entering
-  // this block. Only relevant for loop headers.
-  ZonePtrList<ValueNode> reload_hints_;
-  ZonePtrList<ValueNode> spill_hints_;
-  // {snapshot_} is used during PhiRepresentationSelection in order to track to
-  // phi tagging nodes that come out of this basic block.
-  MaybeSnapshot snapshot_;
-  BasicBlock* real_jump_target_cache_ = nullptr;
-  bool deferred_ = false;
+
+  inline void check_layout();
 };
+
+void BasicBlock::check_layout() {
+  // Ensure non pointer sized values are nicely packed.
+  static_assert(offsetof(BasicBlock, nodes_) == 8);
+}
 
 inline base::SmallVector<BasicBlock*, 2> BasicBlock::successors() const {
   ControlNode* control = control_node();

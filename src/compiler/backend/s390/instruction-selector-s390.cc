@@ -873,9 +873,9 @@ void VisitBinOp(InstructionSelectorT* selector, OpIndex node,
 }  // namespace
 
 void InstructionSelectorT::VisitStackSlot(OpIndex node) {
-  StackSlotRepresentation rep = this->stack_slot_representation_of(node);
-  int slot =
-      frame_->AllocateSpillSlot(rep.size(), rep.alignment(), rep.is_tagged());
+  const StackSlotOp& stack_slot = Cast<StackSlotOp>(node);
+  int slot = frame_->AllocateSpillSlot(stack_slot.size, stack_slot.alignment,
+                                       stack_slot.is_tagged);
   OperandGenerator g(this);
 
   Emit(kArchStackSlot, g.DefineAsRegister(node),
@@ -2426,7 +2426,7 @@ void InstructionSelectorT::VisitWord32AtomicStore(OpIndex node) {
 void VisitAtomicExchange(InstructionSelectorT* selector, OpIndex node,
                          ArchOpcode opcode, AtomicWidth width) {
   S390OperandGeneratorT g(selector);
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
   OpIndex value = atomic_op.value();
@@ -2484,10 +2484,10 @@ void InstructionSelectorT::VisitWord64AtomicExchange(OpIndex node) {
 void VisitAtomicCompareExchange(InstructionSelectorT* selector, OpIndex node,
                                 ArchOpcode opcode, AtomicWidth width) {
   S390OperandGeneratorT g(selector);
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
-  OpIndex old_value = atomic_op.expected();
+  OpIndex old_value = atomic_op.expected().value();
   OpIndex new_value = atomic_op.value();
 
   InstructionOperand inputs[4];
@@ -2554,7 +2554,7 @@ void InstructionSelectorT::VisitWord64AtomicCompareExchange(OpIndex node) {
 void VisitAtomicBinop(InstructionSelectorT* selector, OpIndex node,
                       ArchOpcode opcode, AtomicWidth width) {
   S390OperandGeneratorT g(selector);
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
   OpIndex value = atomic_op.value();

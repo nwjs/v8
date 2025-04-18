@@ -77,17 +77,16 @@ class WasmStreaming::WasmStreamingImpl {
     streaming_decoder_->Finish(can_use_compiled_module);
   }
 
-  void Abort(MaybeLocal<Value> exception) {
+  void Abort(i::MaybeHandle<i::JSAny> exception) {
     i::HandleScope scope(i_isolate_);
     streaming_decoder_->Abort();
 
     // If no exception value is provided, we do not reject the promise. This can
     // happen when streaming compilation gets aborted when no script execution
     // is allowed anymore, e.g. when a browser tab gets refreshed.
-    if (exception.IsEmpty()) return;
+    if (exception.is_null()) return;
 
-    resolver_->OnCompilationFailed(
-        Utils::OpenDirectHandle(*exception.ToLocalChecked()));
+    resolver_->OnCompilationFailed(exception.ToHandleChecked());
   }
 
   bool SetCompiledModuleBytes(base::Vector<const uint8_t> bytes) {
@@ -136,7 +135,12 @@ void WasmStreaming::Finish(bool can_use_compiled_module) {
 
 void WasmStreaming::Abort(MaybeLocal<Value> exception) {
   TRACE_EVENT0("v8.wasm", "wasm.AbortStreaming");
-  impl_->Abort(exception);
+  i::MaybeHandle<i::JSAny> maybe_exception;
+  if (!exception.IsEmpty()) {
+    maybe_exception =
+        Cast<i::JSAny>(Utils::OpenHandle(*exception.ToLocalChecked()));
+  }
+  impl_->Abort(maybe_exception);
 }
 
 bool WasmStreaming::SetCompiledModuleBytes(const uint8_t* bytes, size_t size) {
@@ -166,18 +170,6 @@ std::shared_ptr<WasmStreaming> WasmStreaming::Unpack(Isolate* isolate,
 }
 
 namespace {
-
-#define ASSIGN(type, var, expr)                          \
-  Local<type> var;                                       \
-  do {                                                   \
-    if (!expr.ToLocal(&var)) {                           \
-      DCHECK(i_isolate->has_exception());                \
-      return;                                            \
-    } else {                                             \
-      if (i_isolate->is_execution_terminating()) return; \
-      DCHECK(!i_isolate->has_exception());               \
-    }                                                    \
-  } while (false)
 
 i::DirectHandle<i::String> v8_str(i::Isolate* isolate, const char* str) {
   return isolate->factory()->NewStringFromAsciiChecked(str);
@@ -301,7 +293,7 @@ class AsyncCompilationResolver : public i::wasm::CompilationResultResolver {
              WasmAsyncSuccess::kSuccess);
   }
 
-  void OnCompilationFailed(i::DirectHandle<i::Object> error_reason) override {
+  void OnCompilationFailed(i::DirectHandle<i::JSAny> error_reason) override {
     if (finished_) return;
     finished_ = true;
     if (context_.IsEmpty()) return;
@@ -348,7 +340,7 @@ class InstantiateModuleResultResolver
              WasmAsyncSuccess::kSuccess);
   }
 
-  void OnInstantiationFailed(i::DirectHandle<i::Object> error_reason) override {
+  void OnInstantiationFailed(i::DirectHandle<i::JSAny> error_reason) override {
     if (context_.IsEmpty()) return;
     auto callback = reinterpret_cast<i::Isolate*>(isolate_)
                         ->wasm_async_resolve_promise_callback();
@@ -427,7 +419,7 @@ class InstantiateBytesResultResolver
              success);
   }
 
-  void OnInstantiationFailed(i::DirectHandle<i::Object> error_reason) override {
+  void OnInstantiationFailed(i::DirectHandle<i::JSAny> error_reason) override {
     if (context_.IsEmpty()) return;
     auto callback = reinterpret_cast<i::Isolate*>(isolate_)
                         ->wasm_async_resolve_promise_callback();
@@ -480,7 +472,7 @@ class AsyncInstantiateCompileResultResolver
         result, ImportsAsMaybeReceiver(imports_.Get(isolate_)));
   }
 
-  void OnCompilationFailed(i::DirectHandle<i::Object> error_reason) override {
+  void OnCompilationFailed(i::DirectHandle<i::JSAny> error_reason) override {
     if (finished_) return;
     finished_ = true;
     if (context_.IsEmpty()) return;
@@ -683,16 +675,7 @@ class WasmJSApiScope {
   WasmJSApiScope(const WasmJSApiScope&) = delete;
   WasmJSApiScope& operator=(const WasmJSApiScope&) = delete;
 
-#if DEBUG
-  ~WasmJSApiScope() {
-    // If there was an exception we should not have a return value set.
-    DCHECK_IMPLIES(i_isolate()->has_exception() || thrower_.error(),
-                   callback_info_.GetReturnValue().Get()->IsUndefined());
-  }
-#endif
-
   void AssertException() const {
-    DCHECK(callback_info_.GetReturnValue().Get()->IsUndefined());
     DCHECK(i_isolate()->has_exception() || thrower_.error());
   }
 
@@ -728,10 +711,12 @@ void WebAssemblyCompileImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   RecordCompilationMethod(i_isolate, kAsyncCompilation);
 
   Local<Context> context = isolate->GetCurrentContext();
-  ASSIGN(Promise::Resolver, promise_resolver, Promise::Resolver::New(context));
+  Local<Promise::Resolver> promise_resolver;
+  if (!Promise::Resolver::New(context).ToLocal(&promise_resolver)) {
+    return js_api_scope.AssertException();
+  }
   Local<Promise> promise = promise_resolver->GetPromise();
-  v8::ReturnValue<v8::Value> return_value = info.GetReturnValue();
-  return_value.Set(promise);
+  info.GetReturnValue().Set(promise);
 
   std::shared_ptr<i::wasm::CompilationResultResolver> resolver(
       new AsyncCompilationResolver(isolate, context, promise_resolver));
@@ -757,9 +742,10 @@ void WebAssemblyCompileImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
       ArgumentToCompileOptions(info[1], i_isolate, enabled_features);
   if (i_isolate->has_exception()) {
     if (i_isolate->is_execution_terminating()) return;
-    resolver->OnCompilationFailed(
-        direct_handle(i_isolate->exception(), i_isolate));
+    i::DirectHandle<i::JSAny> exception(Cast<i::JSAny>(i_isolate->exception()),
+                                        i_isolate);
     i_isolate->clear_exception();
+    resolver->OnCompilationFailed(exception);
     return;
   }
   i::wasm::GetWasmEngine()->AsyncCompile(
@@ -797,26 +783,16 @@ void WasmStreamingPromiseFailedCallback(
   streaming->Abort(info[0]);
 }
 
-// WebAssembly.compileStreaming(Response | Promise<Response>, options)
-//   -> Promise<WebAssembly.Module>
-void WebAssemblyCompileStreaming(
-    const v8::FunctionCallbackInfo<v8::Value>& info) {
-  WasmJSApiScope js_api_scope{info, "WebAssembly.compileStreaming()"};
+void StartAsyncCompilationWithResolver(
+    WasmJSApiScope& js_api_scope, Local<Value> response_or_promise,
+    Local<Value> options_arg_value,
+    std::shared_ptr<i::wasm::CompilationResultResolver> resolver) {
   auto [isolate, i_isolate, thrower] = js_api_scope.isolates_and_thrower();
-  RecordCompilationMethod(i_isolate, kStreamingCompilation);
+
   Local<Context> context = isolate->GetCurrentContext();
-
-  // Create and assign the return value of this function.
-  ASSIGN(Promise::Resolver, promise_resolver, Promise::Resolver::New(context));
-  Local<Promise> promise = promise_resolver->GetPromise();
-  info.GetReturnValue().Set(promise);
-
-  // Prepare the CompilationResultResolver for the compilation.
-  auto resolver = std::make_shared<AsyncCompilationResolver>(isolate, context,
-                                                             promise_resolver);
-
   i::DirectHandle<i::NativeContext> native_context =
-      i_isolate->native_context();
+      Utils::OpenHandle(*context);
+
   if (!i::wasm::IsWasmCodegenAllowed(i_isolate, native_context)) {
     i::DirectHandle<i::String> error =
         i::wasm::ErrorStringForCodegen(i_isolate, native_context);
@@ -827,12 +803,13 @@ void WebAssemblyCompileStreaming(
 
   auto enabled_features = WasmEnabledFeatures::FromIsolate(i_isolate);
   CompileTimeImports compile_imports =
-      ArgumentToCompileOptions(info[1], i_isolate, enabled_features);
+      ArgumentToCompileOptions(options_arg_value, i_isolate, enabled_features);
   if (i_isolate->has_exception()) {
     if (i_isolate->is_execution_terminating()) return;
-    resolver->OnCompilationFailed(
-        direct_handle(i_isolate->exception(), i_isolate));
+    i::DirectHandle<i::JSAny> exception(Cast<i::JSAny>(i_isolate->exception()),
+                                        i_isolate);
     i_isolate->clear_exception();
+    resolver->OnCompilationFailed(exception);
     return;
   }
 
@@ -846,12 +823,15 @@ void WebAssemblyCompileStreaming(
       i::Managed<WasmStreaming>::From(i_isolate, 0, streaming);
 
   DCHECK_NOT_NULL(i_isolate->wasm_streaming_callback());
-  ASSIGN(v8::Function, compile_callback,
-         v8::Function::New(context, i_isolate->wasm_streaming_callback(),
-                           Utils::ToLocal(i::Cast<i::Object>(data)), 1));
-  ASSIGN(v8::Function, reject_callback,
-         v8::Function::New(context, WasmStreamingPromiseFailedCallback,
-                           Utils::ToLocal(i::Cast<i::Object>(data)), 1));
+  Local<v8::Function> compile_callback, reject_callback;
+  if (!v8::Function::New(context, i_isolate->wasm_streaming_callback(),
+                         Utils::ToLocal(i::Cast<i::Object>(data)), 1)
+           .ToLocal(&compile_callback) ||
+      !v8::Function::New(context, WasmStreamingPromiseFailedCallback,
+                         Utils::ToLocal(i::Cast<i::Object>(data)), 1)
+           .ToLocal(&reject_callback)) {
+    return js_api_scope.AssertException();
+  }
 
   // The parameter may be of type {Response} or of type {Promise<Response>}.
   // Treat either case of parameter as Promise.resolve(parameter)
@@ -859,11 +839,14 @@ void WebAssemblyCompileStreaming(
 
   // Ending with:
   //    return Promise.resolve(parameter).then(compile_callback);
-  ASSIGN(Promise::Resolver, input_resolver, Promise::Resolver::New(context));
-  if (!input_resolver->Resolve(context, info[0]).IsJust()) return;
+  Local<Promise::Resolver> input_resolver;
+  if (!Promise::Resolver::New(context).ToLocal(&input_resolver) ||
+      input_resolver->Resolve(context, response_or_promise).IsNothing()) {
+    return js_api_scope.AssertException();
+  }
 
   // Calling `then` on the promise can fail if the user monkey-patched stuff,
-  // see https://crbug.com/374820218.
+  // see https://crbug.com/374820218 / https://crbug.com/396461004.
   // If this does not fail, then the {compile_callback} will start streaming
   // compilation, which will eventually resolve the promise we set as result
   // value.
@@ -871,9 +854,32 @@ void WebAssemblyCompileStreaming(
           ->Then(context, compile_callback, reject_callback)
           .IsEmpty()) {
     streaming->Abort(MaybeLocal<Value>{});
-    info.GetReturnValue().SetUndefined();
     return js_api_scope.AssertException();
   }
+}
+
+// WebAssembly.compileStreaming(Response | Promise<Response>, options)
+//   -> Promise<WebAssembly.Module>
+void WebAssemblyCompileStreaming(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  WasmJSApiScope js_api_scope{info, "WebAssembly.compileStreaming()"};
+  auto [isolate, i_isolate, thrower] = js_api_scope.isolates_and_thrower();
+  RecordCompilationMethod(i_isolate, kStreamingCompilation);
+  Local<Context> context = isolate->GetCurrentContext();
+
+  // Create and assign the return value of this function.
+  Local<Promise::Resolver> promise_resolver;
+  if (!Promise::Resolver::New(context).ToLocal(&promise_resolver)) {
+    return js_api_scope.AssertException();
+  }
+  Local<Promise> promise = promise_resolver->GetPromise();
+  info.GetReturnValue().Set(promise);
+
+  // Prepare the CompilationResultResolver for the compilation.
+  auto resolver = std::make_shared<AsyncCompilationResolver>(isolate, context,
+                                                             promise_resolver);
+
+  StartAsyncCompilationWithResolver(js_api_scope, info[0], info[1], resolver);
 }
 
 // WebAssembly.validate(bytes, options) -> bool
@@ -1126,86 +1132,28 @@ void WebAssemblyInstantiateStreaming(
   Local<Context> context = isolate->GetCurrentContext();
 
   // Create and assign the return value of this function.
-  ASSIGN(Promise::Resolver, result_resolver, Promise::Resolver::New(context));
-  Local<Promise> promise = result_resolver->GetPromise();
-  v8::ReturnValue<v8::Value> return_value = info.GetReturnValue();
-  return_value.Set(promise);
-
-  // Create an InstantiateResultResolver in case there is an issue with the
-  // passed parameters.
-  std::unique_ptr<i::wasm::InstantiationResultResolver> resolver(
-      new InstantiateModuleResultResolver(isolate, context, result_resolver));
-
-  i::DirectHandle<i::NativeContext> native_context =
-      i_isolate->native_context();
-  if (!i::wasm::IsWasmCodegenAllowed(i_isolate, native_context)) {
-    i::DirectHandle<i::String> error =
-        i::wasm::ErrorStringForCodegen(i_isolate, native_context);
-    thrower.CompileError("%s", error->ToCString().get());
-    resolver->OnInstantiationFailed(thrower.Reify());
-    return;
+  Local<Promise::Resolver> result_resolver;
+  if (!Promise::Resolver::New(context).ToLocal(&result_resolver)) {
+    return js_api_scope.AssertException();
   }
+  Local<Promise> promise = result_resolver->GetPromise();
+  info.GetReturnValue().Set(promise);
 
   // If info.Length < 2, this will be undefined - see FunctionCallbackInfo.
   Local<Value> ffi = info[1];
 
   if (!ffi->IsUndefined() && !ffi->IsObject()) {
     thrower.TypeError("Argument 1 must be an object");
-    resolver->OnInstantiationFailed(thrower.Reify());
+    InstantiateModuleResultResolver resolver(isolate, context, result_resolver);
+    resolver.OnInstantiationFailed(thrower.Reify());
     return;
   }
 
-  // We start compilation now, we have no use for the
-  // {InstantiationResultResolver}.
-  resolver.reset();
-
-  std::shared_ptr<i::wasm::CompilationResultResolver> compilation_resolver(
-      new AsyncInstantiateCompileResultResolver(isolate, context,
-                                                result_resolver, ffi));
-
-  auto enabled_features = WasmEnabledFeatures::FromIsolate(i_isolate);
-  CompileTimeImports compile_imports =
-      ArgumentToCompileOptions(info[2], i_isolate, enabled_features);
-  if (i_isolate->has_exception()) {
-    if (i_isolate->is_execution_terminating()) return;
-    compilation_resolver->OnCompilationFailed(
-        direct_handle(i_isolate->exception(), i_isolate));
-    i_isolate->clear_exception();
-    return;
-  }
-
-  // Allocate the streaming decoder in a Managed so we can pass it to the
-  // embedder.
-  i::DirectHandle<i::Managed<WasmStreaming>> data =
-      i::Managed<WasmStreaming>::From(
-          i_isolate, 0,
-          std::make_shared<WasmStreaming>(
-              std::make_unique<WasmStreaming::WasmStreamingImpl>(
-                  i_isolate, js_api_scope.api_name(),
-                  std::move(compile_imports), compilation_resolver)));
-
-  DCHECK_NOT_NULL(i_isolate->wasm_streaming_callback());
-  ASSIGN(v8::Function, compile_callback,
-         v8::Function::New(context, i_isolate->wasm_streaming_callback(),
-                           Utils::ToLocal(i::Cast<i::Object>(data)), 1));
-  ASSIGN(v8::Function, reject_callback,
-         v8::Function::New(context, WasmStreamingPromiseFailedCallback,
-                           Utils::ToLocal(i::Cast<i::Object>(data)), 1));
-
-  // The parameter may be of type {Response} or of type {Promise<Response>}.
-  // Treat either case of parameter as Promise.resolve(parameter)
-  // as per https://www.w3.org/2001/tag/doc/promises-guide#resolve-arguments
-
-  // Ending with:
-  //    return Promise.resolve(parameter).then(compile_callback);
-  ASSIGN(Promise::Resolver, input_resolver, Promise::Resolver::New(context));
-  if (!input_resolver->Resolve(context, info[0]).IsJust()) return;
-
-  // We do not have any use of the result here. The {compile_callback} will
-  // start streaming compilation, which will eventually resolve the promise we
-  // set as result value.
-  USE(input_resolver->GetPromise()->Then(context, compile_callback,
-                                         reject_callback));
+  auto compilation_resolver =
+      std::make_shared<AsyncInstantiateCompileResultResolver>(
+          isolate, context, result_resolver, ffi);
+  StartAsyncCompilationWithResolver(js_api_scope, info[0], info[2],
+                                    std::move(compilation_resolver));
 }
 
 // WebAssembly.instantiate(module, imports) -> WebAssembly.Instance
@@ -1220,7 +1168,10 @@ void WebAssemblyInstantiateImpl(
 
   Local<Context> context = isolate->GetCurrentContext();
 
-  ASSIGN(Promise::Resolver, promise_resolver, Promise::Resolver::New(context));
+  Local<Promise::Resolver> promise_resolver;
+  if (!Promise::Resolver::New(context).ToLocal(&promise_resolver)) {
+    return js_api_scope.AssertException();
+  }
   Local<Promise> promise = promise_resolver->GetPromise();
   info.GetReturnValue().Set(promise);
 
@@ -1288,9 +1239,10 @@ void WebAssemblyInstantiateImpl(
       ArgumentToCompileOptions(info[2], i_isolate, enabled_features);
   if (i_isolate->has_exception()) {
     if (i_isolate->is_execution_terminating()) return;
-    compilation_resolver->OnCompilationFailed(
-        direct_handle(i_isolate->exception(), i_isolate));
+    i::DirectHandle<i::JSAny> exception(Cast<i::JSAny>(i_isolate->exception()),
+                                        i_isolate);
     i_isolate->clear_exception();
+    compilation_resolver->OnCompilationFailed(exception);
     return;
   }
 
@@ -2219,6 +2171,18 @@ void WebAssemblyExceptionImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
     thrower.TypeError("Argument 0 cannot be WebAssembly.JSTag");
     return;
   }
+  const i::wasm::CanonicalSig* sig =
+      i::wasm::GetTypeCanonicalizer()->LookupFunctionSignature(
+          i::wasm::CanonicalTypeIndex{
+              static_cast<uint32_t>(tag_object->canonical_type_index())});
+
+  if (sig->return_count() != 0) {
+    thrower.TypeError(
+        "Invalid WebAssembly tag (return values not permitted in Exception "
+        "tag)");
+    return;
+  }
+
   uint32_t size = GetEncodedSize(tag_object);
   i::DirectHandle<i::WasmExceptionPackage> runtime_exception =
       i::WasmExceptionPackage::New(i_isolate, tag, size);
@@ -2551,6 +2515,8 @@ void WebAssemblyFunctionType(const v8::FunctionCallbackInfo<v8::Value>& info) {
 
 constexpr const char* kName_WasmGlobalObject = "WebAssembly.Global";
 constexpr const char* kName_WasmMemoryObject = "WebAssembly.Memory";
+constexpr const char* kName_WasmMemoryMapDescriptor =
+    "WebAssembly.MemoryMapDescriptor";
 constexpr const char* kName_WasmInstanceObject = "WebAssembly.Instance";
 constexpr const char* kName_WasmTableObject = "WebAssembly.Table";
 constexpr const char* kName_WasmTagObject = "WebAssembly.Tag";
@@ -2747,22 +2713,22 @@ void WebAssemblyTableType(const v8::FunctionCallbackInfo<v8::Value>& info) {
   info.GetReturnValue().Set(Utils::ToLocal(type));
 }
 
-// WebAssembly.Memory.map()
-void WebAssemblyMemoryMapImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
+// WebAssembly.MemoryMapDescriptor.map()
+void WebAssemblyMemoryMapDescriptorMapImpl(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
   CHECK(i::v8_flags.experimental_wasm_memory_control);
-  WasmJSApiScope js_api_scope{info, "WebAssembly.Memory.map()"};
+  WasmJSApiScope js_api_scope{info, "WebAssembly.MemoryMapDescriptor.map()"};
   auto [isolate, i_isolate, thrower] = js_api_scope.isolates_and_thrower();
-  EXTRACT_THIS(receiver, WasmMemoryObject);
+  EXTRACT_THIS(receiver, WasmMemoryMapDescriptor);
 
-  i::DirectHandle<i::WasmMemoryMapDescriptor> descriptor;
+  i::DirectHandle<i::WasmMemoryObject> memory;
   {
-    i::DirectHandle<i::Object> descriptor_param =
-        Utils::OpenDirectHandle(*info[0]);
-    if (!i::IsWasmMemoryMapDescriptor(*descriptor_param)) {
-      thrower.TypeError("Receiver is not a WebAssembly.MemoryMapDescriptor");
+    i::DirectHandle<i::Object> memory_param = Utils::OpenDirectHandle(*info[0]);
+    if (!i::IsWasmMemoryObject(*memory_param)) {
+      thrower.TypeError("Parameter is not a WebAssembly.Memory");
       return js_api_scope.AssertException();
     }
-    descriptor = i::Cast<i::WasmMemoryMapDescriptor>(descriptor_param);
+    memory = i::Cast<i::WasmMemoryObject>(memory_param);
   }
 
   Local<Context> context = isolate->GetCurrentContext();
@@ -2771,13 +2737,30 @@ void WebAssemblyMemoryMapImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   if (!offset.has_value()) {
     return js_api_scope.AssertException();
   }
-  size_t mapped_size = receiver->MapDescriptor(descriptor, offset.value());
+  size_t mapped_size = receiver->MapDescriptor(memory, offset.value());
   if (!mapped_size) {
     thrower.RuntimeError(
         "Failed to map the MemoryMapDescriptor to WebAssembly memory.");
     return js_api_scope.AssertException();
   }
+  receiver->set_memory(MakeWeak(*memory));
+  receiver->set_offset(offset.value());
+  receiver->set_size(static_cast<uint32_t>(mapped_size));
   info.GetReturnValue().Set(static_cast<int64_t>(mapped_size));
+}
+
+// WebAssembly.MemoryMapDescriptor.unmap()
+void WebAssemblyMemoryMapDescriptorUnmapImpl(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::v8_flags.experimental_wasm_memory_control);
+  WasmJSApiScope js_api_scope{info, "WebAssembly.MemoryMapDescriptor.unmap()"};
+  auto [isolate, i_isolate, thrower] = js_api_scope.isolates_and_thrower();
+  EXTRACT_THIS(receiver, WasmMemoryMapDescriptor);
+
+  if (!receiver->UnmapDescriptor()) {
+    thrower.RangeError("Failed to unmap the MemoryMapDescriptor.");
+    return;
+  }
 }
 
 // WebAssembly.Memory.grow(num) -> num
@@ -2796,7 +2779,7 @@ void WebAssemblyMemoryGrowImpl(
   i::DirectHandle<i::JSArrayBuffer> old_buffer(receiver->array_buffer(),
                                                i_isolate);
 
-  uint64_t old_pages = old_buffer->byte_length() / i::wasm::kWasmPageSize;
+  uint64_t old_pages = old_buffer->GetByteLength() / i::wasm::kWasmPageSize;
   uint64_t max_pages = receiver->maximum_pages();
 
   if (delta_pages > max_pages - old_pages) {
@@ -2838,6 +2821,63 @@ void WebAssemblyMemoryGetBufferImpl(
       return;
     }
   }
+  info.GetReturnValue().Set(Utils::ToLocal(buffer));
+}
+
+// WebAssembly.Memory.toFixedLengthBuffer() -> ArrayBuffer
+void WebAssemblyMemoryToFixedLengthBufferImpl(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  WasmJSApiScope js_api_scope{info, "WebAssembly.Memory.toFixedLengthBuffer()"};
+  auto [isolate, i_isolate, thrower] = js_api_scope.isolates_and_thrower();
+  EXTRACT_THIS(receiver, WasmMemoryObject);
+
+  i::DirectHandle<i::Object> buffer_obj(receiver->array_buffer(), i_isolate);
+  DCHECK(IsJSArrayBuffer(*buffer_obj));
+  i::DirectHandle<i::JSArrayBuffer> buffer(
+      i::Cast<i::JSArrayBuffer>(*buffer_obj), i_isolate);
+  if (buffer->is_resizable_by_js()) {
+    buffer = i::WasmMemoryObject::ToFixedLengthBuffer(i_isolate, receiver);
+  }
+  if (buffer->is_shared()) {
+    Maybe<bool> result =
+        buffer->SetIntegrityLevel(i_isolate, buffer, i::FROZEN, i::kDontThrow);
+    if (!result.FromJust()) {
+      thrower.TypeError(
+          "Status of setting SetIntegrityLevel of buffer is false.");
+      return;
+    }
+  }
+  v8::ReturnValue<v8::Value> return_value = info.GetReturnValue();
+  return_value.Set(Utils::ToLocal(buffer));
+}
+
+// WebAssembly.Memory.toResizableBuffer() -> ArrayBuffer
+void WebAssemblyMemoryToResizableBufferImpl(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  WasmJSApiScope js_api_scope{info, "WebAssembly.Memory.toResizableBuffer()"};
+  auto [isolate, i_isolate, thrower] = js_api_scope.isolates_and_thrower();
+  EXTRACT_THIS(receiver, WasmMemoryObject);
+
+  i::DirectHandle<i::Object> buffer_obj(receiver->array_buffer(), i_isolate);
+  DCHECK(IsJSArrayBuffer(*buffer_obj));
+  i::DirectHandle<i::JSArrayBuffer> buffer(
+      i::Cast<i::JSArrayBuffer>(*buffer_obj), i_isolate);
+  if (!buffer->is_resizable_by_js()) {
+    if (!receiver->has_maximum_pages()) {
+      thrower.TypeError("Memory must have a maximum");
+      return;
+    }
+    buffer = i::WasmMemoryObject::ToResizableBuffer(i_isolate, receiver);
+  }
+  if (buffer->is_shared()) {
+    Maybe<bool> result =
+        buffer->SetIntegrityLevel(i_isolate, buffer, i::FROZEN, i::kDontThrow);
+    if (!result.FromJust()) {
+      thrower.TypeError(
+          "Status of setting SetIntegrityLevel of buffer is false.");
+      return;
+    }
+  }
   v8::ReturnValue<v8::Value> return_value = info.GetReturnValue();
   return_value.Set(Utils::ToLocal(buffer));
 }
@@ -2849,7 +2889,7 @@ void WebAssemblyMemoryType(const v8::FunctionCallbackInfo<v8::Value>& info) {
   EXTRACT_THIS(memory, WasmMemoryObject);
 
   i::DirectHandle<i::JSArrayBuffer> buffer(memory->array_buffer(), i_isolate);
-  size_t curr_size = buffer->byte_length() / i::wasm::kWasmPageSize;
+  size_t curr_size = buffer->GetByteLength() / i::wasm::kWasmPageSize;
   DCHECK_LE(curr_size, std::numeric_limits<uint32_t>::max());
   uint32_t min_size = static_cast<uint32_t>(curr_size);
   std::optional<uint32_t> max_size;
@@ -2931,13 +2971,15 @@ void WebAssemblyExceptionGetArgImpl(
       case i::wasm::kRefNull:
         decode_index++;
         break;
+      case i::wasm::kS128:
+        decode_index += 8;
+        break;
       case i::wasm::kI8:
       case i::wasm::kI16:
       case i::wasm::kF16:
       case i::wasm::kVoid:
       case i::wasm::kTop:
       case i::wasm::kBottom:
-      case i::wasm::kS128:
         UNREACHABLE();
     }
   }
@@ -3514,7 +3556,8 @@ void WasmJs::InstallModule(Isolate* isolate,
             native_context->abstract_module_source_prototype(), isolate);
     ApiNatives::AddDataProperty(
         isolate, intrinsic_abstract_module_source_interface_template,
-        v8_str(isolate, "prototype"), abstract_module_source_prototype, NONE);
+        isolate->factory()->prototype_string(),
+        abstract_module_source_prototype, NONE);
 
     // Check that this is a reinstallation of the Module object.
     DirectHandle<String> name = v8_str(isolate, "Module");
@@ -3525,6 +3568,12 @@ void WasmJs::InstallModule(Isolate* isolate,
         CreateFunc(isolate, name, wasm::WebAssemblyModule, true,
                    SideEffectType::kHasNoSideEffect,
                    intrinsic_abstract_module_source_interface_template);
+    // WebAssembly.Module is a subclass of %AbstractModuleSource%, hence
+    // Object.GetPrototypeOf(WebAssembly.Module) === %AbstractModuleSource%.
+    JSObject::ForceSetPrototype(
+        isolate, module_constructor,
+        direct_handle(native_context->abstract_module_source_function(),
+                      isolate));
     module_constructor->shared()->set_length(1);
     JSObject::SetOwnPropertyIgnoreAttributes(webassembly, name,
                                              module_constructor, DONT_ENUM)
@@ -3635,6 +3684,10 @@ void WasmJs::Install(Isolate* isolate) {
     // don't install WebAssembly.promising and WebAssembly.Suspending.
     isolate->WasmInitJSPIFeature();
   }
+
+  if (enabled_features.has_rab_integration()) {
+    InstallResizableBufferIntegration(isolate, native_context, webassembly);
+  }
 }
 
 // static
@@ -3710,11 +3763,6 @@ void WasmJs::InstallMemoryControl(Isolate* isolate,
   // by the caller.
   DCHECK(webassembly->map()->is_extensible());
 
-  DirectHandle<JSObject> memory_proto = direct_handle(
-      Cast<JSObject>(context->wasm_memory_constructor()->instance_prototype()),
-      isolate);
-  InstallFunc(isolate, memory_proto, "map", wasm::WebAssemblyMemoryMap, 1);
-
   DirectHandle<JSFunction> descriptor_constructor =
       InstallConstructorFunc(isolate, webassembly, "MemoryMapDescriptor",
                              wasm::WebAssemblyMemoryMapDescriptor);
@@ -3722,6 +3770,14 @@ void WasmJs::InstallMemoryControl(Isolate* isolate,
       isolate, descriptor_constructor, WASM_MEMORY_MAP_DESCRIPTOR_TYPE,
       WasmMemoryMapDescriptor::kHeaderSize, "WebAssembly.MemoryMapDescriptor");
   context->set_wasm_memory_map_descriptor_constructor(*descriptor_constructor);
+
+  DirectHandle<JSObject> descriptor_proto = direct_handle(
+      Cast<JSObject>(descriptor_constructor->instance_prototype()), isolate);
+
+  InstallFunc(isolate, descriptor_proto, "map",
+              wasm::WebAssemblyMemoryMapDescriptorMap, 2);
+  InstallFunc(isolate, descriptor_proto, "unmap",
+              wasm::WebAssemblyMemoryMapDescriptorUnmap, 0);
 }
 
 // Return true only if this call resulted in installation of type reflection.
@@ -3808,6 +3864,23 @@ bool WasmJs::InstallTypeReflection(Isolate* isolate,
   // Make all exported functions an instance of {WebAssembly.Function}.
   context->set_wasm_exported_function_map(*function_map);
   return true;
+}
+
+// static
+void WasmJs::InstallResizableBufferIntegration(
+    Isolate* isolate, DirectHandle<NativeContext> context,
+    DirectHandle<JSObject> webassembly) {
+  // Extensibility of the `WebAssembly` object should already have been checked
+  // by the caller.
+  DCHECK(webassembly->map()->is_extensible());
+
+  DirectHandle<JSObject> memory_proto = direct_handle(
+      Cast<JSObject>(context->wasm_memory_constructor()->instance_prototype()),
+      isolate);
+  InstallFunc(isolate, memory_proto, "toFixedLengthBuffer",
+              wasm::WebAssemblyMemoryToFixedLengthBuffer, 0);
+  InstallFunc(isolate, memory_proto, "toResizableBuffer",
+              wasm::WebAssemblyMemoryToResizableBuffer, 0);
 }
 
 namespace wasm {

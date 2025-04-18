@@ -881,7 +881,7 @@ void SetInstanceMemory(Tagged<WasmTrustedInstanceData> trusted_instance_data,
   CHECK_IMPLIES(use_trap_handler, backing_store->has_guard_regions());
   // We checked this before, but a malicious worker thread with an in-sandbox
   // corruption primitive could have modified it since then.
-  size_t byte_length = buffer->byte_length();
+  size_t byte_length = buffer->GetByteLength();
   SBXCHECK_GE(byte_length, memory.min_memory_size);
 
   trusted_instance_data->SetRawMemory(
@@ -920,6 +920,10 @@ DirectHandle<WasmMemoryObject> WasmMemoryObject::New(
 #endif
   memory_object->set_instances(ReadOnlyRoots{isolate}.empty_weak_array_list());
 
+  if (buffer->is_resizable_by_js()) {
+    memory_object->FixUpResizableArrayBuffer(*buffer);
+  }
+
   std::shared_ptr<BackingStore> backing_store = buffer->GetBackingStore();
   if (buffer->is_shared()) {
     // Only Wasm memory can be shared (in contrast to asm.js memory).
@@ -929,8 +933,8 @@ DirectHandle<WasmMemoryObject> WasmMemoryObject::New(
     CHECK(!backing_store->is_shared());
   }
 
-  // For debugging purposes we memorize a link from the JSArrayBuffer
-  // to its owning WasmMemoryObject instance.
+  // Memorize a link from the JSArrayBuffer to its owning WasmMemoryObject
+  // instance.
   DirectHandle<Symbol> symbol =
       isolate->factory()->array_buffer_wasm_memory_symbol();
   Object::SetProperty(isolate, buffer, symbol, memory_object).Check();
@@ -1016,11 +1020,39 @@ void WasmMemoryObject::UseInInstance(
   memory->set_instances(*instances);
 }
 
-void WasmMemoryObject::SetNewBuffer(Tagged<JSArrayBuffer> new_buffer) {
+void WasmMemoryObject::SetNewBuffer(Isolate* isolate,
+                                    Tagged<JSArrayBuffer> new_buffer) {
   DisallowGarbageCollection no_gc;
+  const bool new_buffer_is_resizable_by_js = new_buffer->is_resizable_by_js();
+  if (new_buffer_is_resizable_by_js) {
+    FixUpResizableArrayBuffer(*new_buffer);
+  }
+  Tagged<JSArrayBuffer> old_buffer = array_buffer();
   set_array_buffer(new_buffer);
+  // Iterating and updating all instances is a slow operation, and is required
+  // when the pointer to memory or size of memory changes.
+  //
+  // When refreshing the buffer for changing the resizability of the JS-exposed
+  // (S)AB, both the data pointer and size stay the same, only the JS object
+  // changes.
+  //
+  // When refreshing the buffer for growing a memory exposing a fixed-length
+  // (S)AB (i.e. both the old and new buffers are !is_resizable_by_js()), the
+  // size is changing, and updating the instances is needed.
+  //
+  // This function is never called in a way such that both the old and new
+  // (S)ABs are resizable. Once a Wasm memory exposes a resizable (S)AB,
+  // changing the size does not refresh the buffer.
+  DCHECK(!old_buffer->is_resizable_by_js() ||
+         !new_buffer->is_resizable_by_js());
+  if (!old_buffer->is_resizable_by_js() && !new_buffer_is_resizable_by_js) {
+    UpdateInstances(isolate);
+  }
+}
+
+void WasmMemoryObject::UpdateInstances(Isolate* isolate) {
+  DisallowGarbageCollection no_gc;
   Tagged<WeakArrayList> instances = this->instances();
-  Isolate* isolate = Isolate::Current();
   for (int i = 0, len = instances->length(); i < len; ++i) {
     Tagged<MaybeObject> elem = instances->Get(i);
     if (elem.IsCleared()) continue;
@@ -1034,10 +1066,107 @@ void WasmMemoryObject::SetNewBuffer(Tagged<JSArrayBuffer> new_buffer) {
     int num_memories = memory_objects->length();
     for (int mem_idx = 0; mem_idx < num_memories; ++mem_idx) {
       if (memory_objects->get(mem_idx) == *this) {
-        SetInstanceMemory(trusted_data, new_buffer, mem_idx);
+        SetInstanceMemory(trusted_data, array_buffer(), mem_idx);
       }
     }
   }
+}
+
+void WasmMemoryObject::FixUpResizableArrayBuffer(
+    Tagged<JSArrayBuffer> new_buffer) {
+  DCHECK(has_maximum_pages());
+  DCHECK(new_buffer->is_resizable_by_js());
+  DisallowGarbageCollection no_gc;
+  if (new_buffer->is_shared()) new_buffer->set_byte_length(0);
+  // Unlike JS-created resizable buffers, Wasm memories' backing store maximum
+  // may differ from the exposed maximum.
+  uintptr_t max_byte_length;
+  if constexpr (kSystemPointerSize == 4) {
+    // The spec says the maximum number of pages for 32-bit memories is 65536,
+    // which means the maximum byte size is 65536 * 65536 (= 2^32), which is
+    // UINT32_MAX+1. BackingStores, ArrayBuffers, and TypedArrays represent byte
+    // lengths as uintptr_t, and UINT32_MAX+1 is not representable on 32bit.
+    //
+    // As a willful violation and gross hack, if we're exposing a Wasm memory
+    // with an unrepresentable maximum, subtract one page size.
+    uint64_t max_byte_length64 =
+        static_cast<uint64_t>(maximum_pages()) * wasm::kWasmPageSize;
+    if (max_byte_length64 > std::numeric_limits<uintptr_t>::max()) {
+      max_byte_length64 =
+          std::numeric_limits<uintptr_t>::max() - wasm::kWasmPageSize;
+      CHECK(new_buffer->GetBackingStore()->max_byte_length() <=
+            max_byte_length64);
+    }
+    max_byte_length = static_cast<uintptr_t>(max_byte_length64);
+  } else {
+    max_byte_length = maximum_pages() * wasm::kWasmPageSize;
+  }
+  new_buffer->set_max_byte_length(max_byte_length);
+}
+
+// static
+DirectHandle<JSArrayBuffer> WasmMemoryObject::RefreshBuffer(
+    Isolate* isolate, DirectHandle<WasmMemoryObject> memory_object,
+    std::shared_ptr<BackingStore> new_backing_store) {
+  // Detach old and create a new one with the new backing store.
+  DirectHandle<JSArrayBuffer> old_buffer(memory_object->array_buffer(),
+                                         isolate);
+#ifdef DEBUG
+  void* old_data_pointer = old_buffer->backing_store();
+  size_t old_byte_length = old_buffer->byte_length();
+#endif
+  JSArrayBuffer::Detach(old_buffer, true).Check();
+  DirectHandle<JSArrayBuffer> new_buffer =
+      isolate->factory()->NewJSArrayBuffer(std::move(new_backing_store));
+#ifdef DEBUG
+  bool data_pointer_unchanged = new_buffer->backing_store() == old_data_pointer;
+  bool byte_length_unchanged = new_buffer->byte_length() == old_byte_length;
+  bool resizability_changed =
+      old_buffer->is_resizable_by_js() != new_buffer->is_resizable_by_js();
+  // SetNewBuffer only calls UpdateInstances if resizability didn't change,
+  // which depends on resizability changing not changing the data pointer or
+  // byte length. See comment in SetNewBuffer.
+  DCHECK_IMPLIES(resizability_changed,
+                 data_pointer_unchanged && byte_length_unchanged);
+#endif
+  memory_object->SetNewBuffer(isolate, *new_buffer);
+  // Memorize a link from the JSArrayBuffer to its owning WasmMemoryObject
+  // instance.
+  DirectHandle<Symbol> symbol =
+      isolate->factory()->array_buffer_wasm_memory_symbol();
+  Object::SetProperty(isolate, new_buffer, symbol, memory_object).Check();
+  return new_buffer;
+}
+
+// static
+DirectHandle<JSArrayBuffer> WasmMemoryObject::RefreshSharedBuffer(
+    Isolate* isolate, DirectHandle<WasmMemoryObject> memory_object,
+    ResizableFlag resizable_by_js) {
+  DirectHandle<JSArrayBuffer> old_buffer(memory_object->array_buffer(),
+                                         isolate);
+  std::shared_ptr<BackingStore> backing_store = old_buffer->GetBackingStore();
+  // Wasm memory always has a BackingStore.
+  CHECK_NOT_NULL(backing_store);
+  CHECK(backing_store->is_wasm_memory());
+  CHECK(backing_store->is_shared());
+
+  // Keep a raw pointer to the backing store for a CHECK later one. Make it
+  // {void*} so we do not accidentally try to use it for anything else.
+  void* expected_backing_store = backing_store.get();
+
+  DirectHandle<JSArrayBuffer> new_buffer =
+      isolate->factory()->NewJSSharedArrayBuffer(std::move(backing_store));
+  CHECK_EQ(expected_backing_store, new_buffer->GetBackingStore().get());
+  if (resizable_by_js == ResizableFlag::kResizable) {
+    new_buffer->set_is_resizable_by_js(true);
+  }
+  memory_object->SetNewBuffer(isolate, *new_buffer);
+  // Memorize a link from the JSArrayBuffer to its owning WasmMemoryObject
+  // instance.
+  DirectHandle<Symbol> symbol =
+      isolate->factory()->array_buffer_wasm_memory_symbol();
+  Object::SetProperty(isolate, new_buffer, symbol, memory_object).Check();
+  return new_buffer;
 }
 
 // static
@@ -1049,7 +1178,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
                                          isolate);
 
   std::shared_ptr<BackingStore> backing_store = old_buffer->GetBackingStore();
-  // Only Wasm memory can grow, and Wasm memory always has a backing store.
+  // Wasm memory can grow, and Wasm memory always has a backing store.
   DCHECK_NOT_NULL(backing_store);
 
   // Check for maximum memory size.
@@ -1057,7 +1186,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
   // {BackingStore::CopyWasmMemory}, and is irrelevant for
   // {GrowWasmMemoryInPlace} because memory is never allocated with more
   // capacity than that limit.
-  size_t old_size = old_buffer->byte_length();
+  size_t old_size = old_buffer->GetByteLength();
   DCHECK_EQ(0, old_size % wasm::kWasmPageSize);
   size_t old_pages = old_size / wasm::kWasmPageSize;
   size_t max_pages = memory_object->is_memory64() ? wasm::max_mem64_pages()
@@ -1069,8 +1198,9 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
   DCHECK_GE(max_pages, old_pages);
   if (pages > max_pages - old_pages) return -1;
 
-  const bool must_grow_in_place =
-      old_buffer->is_shared() || backing_store->has_guard_regions();
+  const bool must_grow_in_place = old_buffer->is_shared() ||
+                                  backing_store->has_guard_regions() ||
+                                  backing_store->is_resizable_by_js();
   const bool try_grow_in_place =
       must_grow_in_place || !v8_flags.stress_wasm_memory_moving;
 
@@ -1091,8 +1221,10 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
   if (old_buffer->is_shared()) {
     DCHECK(result_inplace.has_value());
     backing_store->BroadcastSharedWasmMemoryGrow(isolate);
-    // Broadcasting the update should update this memory object too.
-    CHECK_NE(*old_buffer, memory_object->array_buffer());
+    if (!old_buffer->is_resizable_by_js()) {
+      // Broadcasting the update should update this memory object too.
+      CHECK_NE(*old_buffer, memory_object->array_buffer());
+    }
     size_t new_pages = result_inplace.value() + pages;
     // If the allocation succeeded, then this can't possibly overflow:
     size_t new_byte_length = new_pages * wasm::kWasmPageSize;
@@ -1101,32 +1233,31 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
     // grow the same memory object can come in from different workers.
     // It is also possible that a call to Grow was in progress when
     // handling this call.
-    CHECK_LE(new_byte_length, memory_object->array_buffer()->byte_length());
+    CHECK_LE(new_byte_length, memory_object->array_buffer()->GetByteLength());
     // As {old_pages} was read racefully, we return here the synchronized
     // value provided by {GrowWasmMemoryInPlace}, to provide the atomic
     // read-modify-write behavior required by the spec.
     return static_cast<int32_t>(result_inplace.value());  // success
   }
 
-  // Check if the non-shared memory could grow in-place.
-  if (result_inplace.has_value()) {
-    // Detach old and create a new one with the grown backing store.
-    JSArrayBuffer::Detach(old_buffer, true).Check();
-    DirectHandle<JSArrayBuffer> new_buffer =
-        isolate->factory()->NewJSArrayBuffer(std::move(backing_store));
-    memory_object->SetNewBuffer(*new_buffer);
-    // For debugging purposes we memorize a link from the JSArrayBuffer
-    // to its owning WasmMemoryObject instance.
-    DirectHandle<Symbol> symbol =
-        isolate->factory()->array_buffer_wasm_memory_symbol();
-    Object::SetProperty(isolate, new_buffer, symbol, memory_object).Check();
-    DCHECK_EQ(result_inplace.value(), old_pages);
-    return static_cast<int32_t>(result_inplace.value());  // success
-  }
-
   size_t new_pages = old_pages + pages;
   // Check for overflow (should be excluded via {max_pages} above).
   DCHECK_LE(old_pages, new_pages);
+
+  // Check if the non-shared memory could grow in-place.
+  if (result_inplace.has_value()) {
+    if (memory_object->array_buffer()->is_resizable_by_js()) {
+      memory_object->array_buffer()->set_byte_length(new_pages *
+                                                     wasm::kWasmPageSize);
+      memory_object->UpdateInstances(isolate);
+    } else {
+      RefreshBuffer(isolate, memory_object, std::move(backing_store));
+    }
+    DCHECK_EQ(result_inplace.value(), old_pages);
+    return static_cast<int32_t>(result_inplace.value());  // success
+  }
+  DCHECK(!memory_object->array_buffer()->is_resizable_by_js());
+
   // Trying to grow in-place without actually growing must always succeed.
   DCHECK_IMPLIES(try_grow_in_place, old_pages < new_pages);
 
@@ -1156,17 +1287,44 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
     return -1;
   }
 
-  // Detach old and create a new one with the new backing store.
-  JSArrayBuffer::Detach(old_buffer, true).Check();
-  DirectHandle<JSArrayBuffer> new_buffer =
-      isolate->factory()->NewJSArrayBuffer(std::move(new_backing_store));
-  memory_object->SetNewBuffer(*new_buffer);
-  // For debugging purposes we memorize a link from the JSArrayBuffer
-  // to its owning WasmMemoryObject instance.
-  DirectHandle<Symbol> symbol =
-      isolate->factory()->array_buffer_wasm_memory_symbol();
-  Object::SetProperty(isolate, new_buffer, symbol, memory_object).Check();
+  RefreshBuffer(isolate, memory_object, std::move(new_backing_store));
+
   return static_cast<int32_t>(old_pages);  // success
+}
+
+// static
+DirectHandle<JSArrayBuffer> WasmMemoryObject::ToFixedLengthBuffer(
+    Isolate* isolate, DirectHandle<WasmMemoryObject> memory_object) {
+  DirectHandle<JSArrayBuffer> old_buffer(memory_object->array_buffer(),
+                                         isolate);
+  DCHECK(old_buffer->is_resizable_by_js());
+  if (old_buffer->is_shared()) {
+    return RefreshSharedBuffer(isolate, memory_object,
+                               ResizableFlag::kNotResizable);
+  }
+  std::shared_ptr<BackingStore> backing_store = old_buffer->GetBackingStore();
+  DCHECK_NOT_NULL(backing_store);
+  backing_store->MakeWasmMemoryResizableByJS(false);
+  return RefreshBuffer(isolate, memory_object, std::move(backing_store));
+}
+
+// static
+DirectHandle<JSArrayBuffer> WasmMemoryObject::ToResizableBuffer(
+    Isolate* isolate, DirectHandle<WasmMemoryObject> memory_object) {
+  // Resizable ArrayBuffers require a maximum size during creation. Mirror the
+  // requirement when reflecting Wasm memory as a resizable buffer.
+  DCHECK(memory_object->has_maximum_pages());
+  DirectHandle<JSArrayBuffer> old_buffer(memory_object->array_buffer(),
+                                         isolate);
+  DCHECK(!old_buffer->is_resizable_by_js());
+  if (old_buffer->is_shared()) {
+    return RefreshSharedBuffer(isolate, memory_object,
+                               ResizableFlag::kResizable);
+  }
+  std::shared_ptr<BackingStore> backing_store = old_buffer->GetBackingStore();
+  DCHECK_NOT_NULL(backing_store);
+  backing_store->MakeWasmMemoryResizableByJS(true);
+  return RefreshBuffer(isolate, memory_object, std::move(backing_store));
 }
 
 MaybeDirectHandle<WasmMemoryMapDescriptor>
@@ -1177,11 +1335,7 @@ WasmMemoryMapDescriptor::NewFromAnonymous(Isolate* isolate, size_t length) {
       isolate->native_context()->wasm_memory_map_descriptor_constructor(),
       isolate);
 
-  auto descriptor_object = Cast<WasmMemoryMapDescriptor>(
-      isolate->factory()->NewJSObject(descriptor_ctor, AllocationType::kOld));
-
   int file_descriptor = memfd_create("wasm_memory_map_descriptor", MFD_CLOEXEC);
-  printf("Create file descriptor: %d\n", file_descriptor);
   if (file_descriptor == -1) {
     return {};
   }
@@ -1189,12 +1343,8 @@ WasmMemoryMapDescriptor::NewFromAnonymous(Isolate* isolate, size_t length) {
   if (ret_val == -1) {
     return {};
   }
-  v8::WasmMemoryMapDescriptor::WasmFileDescriptor wasm_fd =
-      static_cast<v8::WasmMemoryMapDescriptor::WasmFileDescriptor>(
-          file_descriptor);
-  descriptor_object->set_file_descriptor(wasm_fd);
 
-  return descriptor_object;
+  return NewFromFileDescriptor(isolate, file_descriptor);
 #else   // V8_TARGET_OS_LINUX
   return {};
 #endif  // V8_TARGET_OS_LINUX
@@ -1212,27 +1362,36 @@ WasmMemoryMapDescriptor::NewFromFileDescriptor(Isolate* isolate,
       isolate->factory()->NewJSObject(descriptor_ctor, AllocationType::kOld));
 
   descriptor_object->set_file_descriptor(file_descriptor);
+  descriptor_object->set_memory(ClearedValue(isolate));
+  descriptor_object->set_offset(0);
+  descriptor_object->set_size(0);
 
   return descriptor_object;
 }
 
-size_t WasmMemoryObject::MapDescriptor(
-    DirectHandle<WasmMemoryMapDescriptor> descriptor, size_t offset) {
+size_t WasmMemoryMapDescriptor::MapDescriptor(
+    DirectHandle<WasmMemoryObject> memory, size_t offset) {
 #if V8_TARGET_OS_LINUX
   CHECK(v8_flags.experimental_wasm_memory_control);
-  if (this->array_buffer()->is_shared()) {
+  if (memory->array_buffer()->is_shared()) {
     // TODO(ahaas): Handle concurrent calls to `MapDescriptor`. To prevent
     // concurrency issues, we disable `MapDescriptor` for shared wasm memories
     // so far.
     return 0;
   }
+  if (memory->is_memory64()) {
+    // TODO(ahaas): Handle memory64. So far the offset in the
+    // MemoryMapDescriptor is only an uint32. Either the offset has to be
+    // interpreted as a wasm memory page, or be extended to an uint64.
+    return 0;
+  }
 
   uint8_t* target =
-      reinterpret_cast<uint8_t*>(this->array_buffer()->backing_store()) +
+      reinterpret_cast<uint8_t*>(memory->array_buffer()->backing_store()) +
       offset;
 
   struct stat stat_for_size;
-  if (fstat(descriptor->file_descriptor(), &stat_for_size) == -1) {
+  if (fstat(this->file_descriptor(), &stat_for_size) == -1) {
     // Could not determine file size.
     return 0;
   }
@@ -1243,21 +1402,53 @@ size_t WasmMemoryObject::MapDescriptor(
     // Overflow
     return 0;
   }
-  if (size + offset > this->array_buffer()->byte_length()) {
+  if (size + offset > memory->array_buffer()->GetByteLength()) {
     return 0;
   }
 
-  void* ret_val =
-      mmap(target, size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED,
-           descriptor->file_descriptor(), 0);
-  if (ret_val == MAP_FAILED) {
-    printf("%s\n", strerror(errno));
-    return 0;
-  }
-  DCHECK_EQ(ret_val, target);
+  void* ret_val = mmap(target, size, PROT_READ | PROT_WRITE,
+                       MAP_FIXED | MAP_SHARED, this->file_descriptor(), 0);
+  CHECK_NE(ret_val, MAP_FAILED);
+  CHECK_EQ(ret_val, target);
   return size;
 #else
   return 0;
+#endif
+}
+
+bool WasmMemoryMapDescriptor::UnmapDescriptor() {
+#if V8_TARGET_OS_LINUX
+  CHECK(v8_flags.experimental_wasm_memory_control);
+  DisallowGarbageCollection no_gc;
+
+  i::Tagged<i::WasmMemoryObject> memory =
+      Cast<i::WasmMemoryObject>(MakeStrong(this->memory()));
+  if (memory.is_null()) {
+    return true;
+  }
+  uint32_t offset = this->offset();
+  uint32_t size = this->size();
+
+  // The following checks already passed during `MapDescriptor`, and they should
+  // still pass.
+  CHECK(!memory->is_memory64());
+  CHECK(!memory->array_buffer()->is_shared());
+  CHECK_EQ(size % GetArrayBufferPageAllocator()->AllocatePageSize(), 0);
+  CHECK_GE(size + offset, size);
+  CHECK_LE(size + offset, memory->array_buffer()->byte_length());
+
+  uint8_t* target =
+      reinterpret_cast<uint8_t*>(memory->array_buffer()->backing_store()) +
+      offset;
+
+  void* ret_val = mmap(target, size, PROT_READ | PROT_WRITE,
+                       MAP_FIXED | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+  CHECK_NE(ret_val, MAP_FAILED);
+  CHECK_EQ(ret_val, target);
+  return true;
+#else
+  return false;
 #endif
 }
 
@@ -1308,7 +1499,7 @@ MaybeDirectHandle<WasmGlobalObject> WasmGlobalObject::New(
     }
 
     // Check that the offset is in bounds.
-    CHECK_LE(offset + type_size, untagged_buffer->byte_length());
+    CHECK_LE(offset + type_size, untagged_buffer->GetByteLength());
 
     global_obj->set_untagged_buffer(*untagged_buffer);
   }
@@ -1544,7 +1735,7 @@ DirectHandle<WasmTrustedInstanceData> WasmTrustedInstanceData::New(
   int num_imported_functions = module->num_imported_functions;
   DirectHandle<WasmDispatchTable> dispatch_table_for_imports =
       isolate->factory()->NewWasmDispatchTable(num_imported_functions,
-                                               wasm::kCanonicalFuncRef);
+                                               wasm::kWasmFuncRef);
   DirectHandle<FixedArray> well_known_imports =
       isolate->factory()->NewFixedArray(num_imported_functions);
 
@@ -1581,7 +1772,7 @@ DirectHandle<WasmTrustedInstanceData> WasmTrustedInstanceData::New(
   // TODO(clemensb): Should we have singleton empty dispatch table in the
   // trusted space?
   DirectHandle<WasmDispatchTable> empty_dispatch_table =
-      isolate->factory()->NewWasmDispatchTable(0, wasm::kCanonicalFuncRef);
+      isolate->factory()->NewWasmDispatchTable(0, wasm::kWasmFuncRef);
   DirectHandle<ProtectedFixedArray> empty_protected_fixed_array =
       isolate->factory()->empty_protected_fixed_array();
 
@@ -2019,6 +2210,62 @@ const wasm::CanonicalStructType* WasmStruct::GcSafeType(Tagged<Map> map) {
   // pointer being intact in the old location.
   Tagged<WasmTypeInfo> type_info = UncheckedCast<WasmTypeInfo>(raw);
   return wasm::GetTypeCanonicalizer()->LookupStruct(type_info->type_index());
+}
+
+// Allocates a Wasm Struct that is a descriptor for another type, leaving
+// its fields uninitialized.
+// Descriptor structs have a 1:1 relationship with the internal "RTT" (aka
+// v8::internal::Map) of the struct type they are describing, so this RTT
+// is allocated along with the descriptor below, and the links between them
+// are set up. RTTs with custom descriptors always are subtypes of the
+// canonical RTT for the same type, so that canonical RTT is installed as the
+// super-RTT of the customized RTT.
+// The RTT/map of the descriptor itself is provided by the caller as {map}.
+//
+// The eventual on-heap object structure will be something like the following,
+// where (A) is the object returned by this function, and (B) is allocated
+// along with it. There will likely be many instance of (C), and they will be
+// allocated (much) later, by one or more {struct.new} instructions that
+// take (A) as input and retrieve (B) from it.
+//
+//   Wasm struct (C):                    Wasm Descriptor Struct (A):
+//   +-----------+                       +-----------+
+//   | Map       |------\                | Map       |
+//   +-----------+      |                +-----------+
+//   | hash      |      |                | hash      |
+//   +-----------+      |       /--------| RTT       |
+//   | fields... |      v  (B)  v        +-----------+
+//   |           |   +-------------+     | fields... |
+//   +-----------+   | Meta-map    |     |           |
+//                   +-------------+     +-----------+
+//                   | ...         |         ^
+//                   | Descriptor  |---------/
+//                   | ...         |
+//                   +-------------+
+// static
+DirectHandle<WasmStruct> WasmStruct::AllocateDescriptorUninitialized(
+    Isolate* isolate, DirectHandle<WasmTrustedInstanceData> trusted_data,
+    wasm::ModuleTypeIndex index, DirectHandle<Map> map) {
+  const wasm::WasmModule* module = trusted_data->module();
+  const wasm::TypeDefinition& type = module->type(index);
+  DCHECK(type.is_descriptor());
+  // TODO(jkummerow): Figure out support for shared objects.
+  if (type.is_shared) UNIMPLEMENTED();
+  wasm::CanonicalTypeIndex described_index =
+      module->canonical_type_id(type.describes);
+  DirectHandle<Map> rtt_parent{
+      Cast<Map>(trusted_data->managed_object_maps()->get(type.describes.index)),
+      isolate};
+  DirectHandle<Map> rtt = CreateStructMap(isolate, described_index, rtt_parent);
+  DirectHandle<WasmStruct> descriptor =
+      isolate->factory()->NewWasmStructUninitialized(type.struct_type, map,
+                                                     AllocationType::kOld);
+  // The struct's body is uninitialized. As soon as we return, callers will
+  // take care of that. Until then, no allocations are allowed.
+  DisallowGarbageCollection no_gc;
+  descriptor->set_described_rtt(*rtt);
+  rtt->set_custom_descriptor(*descriptor);
+  return descriptor;
 }
 
 wasm::WasmValue WasmStruct::GetFieldValue(uint32_t index) {
@@ -2611,10 +2858,9 @@ DirectHandle<WasmContinuationObject> WasmContinuationObject::New(
   stack->jmpbuf()->sp = stack->base();
   stack->jmpbuf()->fp = kNullAddress;
   stack->jmpbuf()->state = state;
-  wasm::JumpBuffer* jmpbuf = stack->jmpbuf();
   DirectHandle<WasmContinuationObject> result =
-      isolate->factory()->NewWasmContinuationObject(
-          reinterpret_cast<Address>(jmpbuf), stack, parent, allocation_type);
+      isolate->factory()->NewWasmContinuationObject(stack, parent,
+                                                    allocation_type);
   return result;
 }
 
@@ -2883,6 +3129,63 @@ bool WasmJSFunction::IsWasmJSFunction(Tagged<Object> object) {
   return js_function->shared()->HasWasmJSFunctionData();
 }
 
+DirectHandle<Map> CreateStructMap(Isolate* isolate,
+                                  wasm::CanonicalTypeIndex struct_index,
+                                  DirectHandle<Map> opt_rtt_parent) {
+  const wasm::CanonicalStructType* type =
+      wasm::GetTypeCanonicalizer()->LookupStruct(struct_index);
+  const int inobject_properties = 0;
+  // We have to use the variable size sentinel because the instance size
+  // stored directly in a Map is capped at 255 pointer sizes.
+  const int map_instance_size = kVariableSizeSentinel;
+  const InstanceType instance_type = WASM_STRUCT_TYPE;
+  // TODO(jkummerow): If NO_ELEMENTS were supported, we could use that here.
+  const ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND;
+  const wasm::CanonicalValueType no_array_element = wasm::kWasmBottom;
+  constexpr bool shared = false;  // TODO(42204563): Implement.
+  // If we had a CanonicalHeapType, we could use that here.
+  wasm::CanonicalValueType heaptype = wasm::CanonicalValueType::Ref(
+      struct_index, shared, wasm::RefTypeKind::kStruct);
+  DirectHandle<WasmTypeInfo> type_info = isolate->factory()->NewWasmTypeInfo(
+      heaptype, no_array_element, opt_rtt_parent);
+  DirectHandle<Map> map = isolate->factory()->NewContextlessMap(
+      instance_type, map_instance_size, elements_kind, inobject_properties);
+  map->set_wasm_type_info(*type_info);
+  map->SetInstanceDescriptors(isolate,
+                              *isolate->factory()->empty_descriptor_array(), 0,
+                              SKIP_WRITE_BARRIER);
+  map->set_is_extensible(false);
+  const int real_instance_size = WasmStruct::Size(type);
+  WasmStruct::EncodeInstanceSizeInMap(real_instance_size, *map);
+  return map;
+}
+
+DirectHandle<Map> CreateArrayMap(Isolate* isolate,
+                                 wasm::CanonicalTypeIndex array_index,
+                                 DirectHandle<Map> opt_rtt_parent) {
+  const wasm::CanonicalArrayType* type =
+      wasm::GetTypeCanonicalizer()->LookupArray(array_index);
+  wasm::CanonicalValueType element_type = type->element_type();
+  const int inobject_properties = 0;
+  const int instance_size = kVariableSizeSentinel;
+  const InstanceType instance_type = WASM_ARRAY_TYPE;
+  const ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND;
+  constexpr bool shared = false;  // TODO(42204563): Implement.
+  wasm::CanonicalValueType heaptype = wasm::CanonicalValueType::Ref(
+      array_index, shared, wasm::RefTypeKind::kArray);
+  DirectHandle<WasmTypeInfo> type_info = isolate->factory()->NewWasmTypeInfo(
+      heaptype, element_type, opt_rtt_parent);
+  DirectHandle<Map> map = isolate->factory()->NewContextlessMap(
+      instance_type, instance_size, elements_kind, inobject_properties);
+  map->set_wasm_type_info(*type_info);
+  map->SetInstanceDescriptors(isolate,
+                              *isolate->factory()->empty_descriptor_array(), 0,
+                              SKIP_WRITE_BARRIER);
+  map->set_is_extensible(false);
+  WasmArray::EncodeElementSizeInMap(element_type.value_kind_size(), *map);
+  return map;
+}
+
 DirectHandle<Map> CreateFuncRefMap(Isolate* isolate,
                                    wasm::CanonicalTypeIndex type,
                                    DirectHandle<Map> opt_rtt_parent) {
@@ -3109,10 +3412,8 @@ Handle<AsmWasmData> AsmWasmData::New(
     Isolate* isolate, std::shared_ptr<wasm::NativeModule> native_module,
     DirectHandle<HeapNumber> uses_bitset) {
   const WasmModule* module = native_module->module();
-  const bool kUsesLiftoff = false;
   size_t memory_estimate =
-      wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
-          module, kUsesLiftoff, wasm::kNoDynamicTiering) +
+      wasm::WasmCodeManager::EstimateNativeModuleCodeSize(module) +
       wasm::WasmCodeManager::EstimateNativeModuleMetaDataSize(module);
   DirectHandle<Managed<wasm::NativeModule>> managed_native_module =
       Managed<wasm::NativeModule>::From(isolate, memory_estimate,

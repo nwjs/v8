@@ -1874,7 +1874,6 @@ DirectHandle<WasmSuspenderObject> Factory::NewWasmSuspenderObject() {
   suspender->set_promise(*promise);
   suspender->set_resume(*undefined_value());
   suspender->set_reject(*undefined_value());
-  suspender->set_state(WasmSuspenderObject::kInactive);
   // Instantiate the callable object which resumes this Suspender. This will be
   // used implicitly as the onFulfilled callback of the returned JS promise.
   DirectHandle<WasmResumeData> resume_data =
@@ -2074,17 +2073,15 @@ DirectHandle<Object> Factory::NewWasmArrayFromElementSegment(
   return direct_handle(result, isolate());
 }
 
-#if V8_ENABLE_DRUMBRAKE
 Handle<WasmStruct> Factory::NewWasmStructUninitialized(
-    const wasm::StructType* type, DirectHandle<Map> map) {
-  Tagged<HeapObject> raw =
-      AllocateRaw(WasmStruct::Size(type), AllocationType::kYoung);
+    const wasm::StructType* type, DirectHandle<Map> map,
+    AllocationType allocation) {
+  Tagged<HeapObject> raw = AllocateRaw(WasmStruct::Size(type), allocation);
   raw->set_map_after_allocation(isolate(), *map);
   Tagged<WasmStruct> result = Cast<WasmStruct>(raw);
   result->set_raw_properties_or_hash(*empty_fixed_array(), kRelaxedStore);
   return handle(result, isolate());
 }
-#endif  // V8_ENABLE_DRUMBRAKE
 
 DirectHandle<WasmStruct> Factory::NewWasmStruct(const wasm::StructType* type,
                                                 wasm::WasmValue* args,
@@ -2110,12 +2107,11 @@ DirectHandle<WasmStruct> Factory::NewWasmStruct(const wasm::StructType* type,
 }
 
 DirectHandle<WasmContinuationObject> Factory::NewWasmContinuationObject(
-    Address jmpbuf, wasm::StackMemory* stack, DirectHandle<HeapObject> parent,
+    wasm::StackMemory* stack, DirectHandle<HeapObject> parent,
     AllocationType allocation) {
   Tagged<Map> map = *wasm_continuation_object_map();
   auto result = Cast<WasmContinuationObject>(
       AllocateRawWithImmortalMap(map->instance_size(), allocation, map));
-  result->init_jmpbuf(isolate(), jmpbuf);
   result->init_stack(isolate(), reinterpret_cast<Address>(stack));
   result->set_parent(Cast<UnionOf<Undefined, WasmContinuationObject>>(*parent));
   return direct_handle(result, isolate());
@@ -2338,9 +2334,13 @@ Tagged<Map> Factory::InitializeMap(Tagged<Map> map, InstanceType type,
   map->init_prototype_and_constructor_or_back_pointer(roots);
   map->set_instance_size(instance_size);
   if (InstanceTypeChecker::IsJSObject(type)) {
+    // JSObjects that may be allocated in RO space must have RO maps.
+    DCHECK_IMPLIES(InstanceTypeChecker::IsMaybeReadOnlyJSObject(type),
+                   ReadOnlyHeap::Contains(map));
     // Shared space JS objects have fixed layout and can have RO maps. No other
     // JS objects have RO maps.
-    DCHECK_IMPLIES(!IsAlwaysSharedSpaceJSObjectMap(*map),
+    DCHECK_IMPLIES(!IsMaybeReadOnlyJSObjectMap(*map) &&
+                       !IsAlwaysSharedSpaceJSObjectMap(*map),
                    !ReadOnlyHeap::Contains(map));
     map->SetInObjectPropertiesStartInWords(instance_size / kTaggedSize -
                                            inobject_properties);
@@ -4608,12 +4608,18 @@ Handle<JSAtomicsCondition> Factory::NewJSAtomicsCondition() {
 }
 
 namespace {
-inline void InitializeTemplate(Tagged<TemplateInfo> that, ReadOnlyRoots roots,
-                               bool do_not_cache) {
+inline void InitializeTemplate(Tagged<TemplateInfo> that, bool is_cacheable) {
+  that->set_template_info_flags(0);
+  that->set_serial_number(TemplateInfo::kUninitializedSerialNumber);
+  that->set_is_cacheable(is_cacheable);
+}
+
+inline void InitializeTemplateWithProperties(
+    Tagged<TemplateInfoWithProperties> that, ReadOnlyRoots roots,
+    bool is_cacheable) {
+  InitializeTemplate(that, is_cacheable);
+
   that->set_number_of_properties(0);
-  int serial_number =
-      do_not_cache ? TemplateInfo::kDoNotCache : TemplateInfo::kUncached;
-  that->set_serial_number(serial_number);
   that->set_property_list(roots.undefined_value(), SKIP_WRITE_BARRIER);
   that->set_property_accessors(roots.undefined_value(), SKIP_WRITE_BARRIER);
 }
@@ -4632,7 +4638,7 @@ DirectHandle<FunctionTemplateInfo> Factory::NewFunctionTemplateInfo(
     DisallowGarbageCollection no_gc;
     Tagged<FunctionTemplateInfo> raw = *obj;
     ReadOnlyRoots roots(isolate());
-    InitializeTemplate(raw, roots, do_not_cache);
+    InitializeTemplateWithProperties(raw, roots, !do_not_cache);
     raw->set_class_name(roots.undefined_value(), SKIP_WRITE_BARRIER);
     raw->set_interface_name(roots.undefined_value(), SKIP_WRITE_BARRIER);
     raw->set_signature(roots.undefined_value(), SKIP_WRITE_BARRIER);
@@ -4668,7 +4674,7 @@ DirectHandle<ObjectTemplateInfo> Factory::NewObjectTemplateInfo(
     DisallowGarbageCollection no_gc;
     Tagged<ObjectTemplateInfo> raw = *obj;
     ReadOnlyRoots roots(isolate());
-    InitializeTemplate(raw, roots, do_not_cache);
+    InitializeTemplateWithProperties(raw, roots, !do_not_cache);
     if (constructor.is_null()) {
       raw->set_constructor(roots.undefined_value(), SKIP_WRITE_BARRIER);
     } else {
@@ -4685,8 +4691,8 @@ DirectHandle<DictionaryTemplateInfo> Factory::NewDictionaryTemplateInfo(
   DirectHandle<Map> map = dictionary_template_info_map();
   Tagged<DictionaryTemplateInfo> obj = Cast<DictionaryTemplateInfo>(
       AllocateRawWithImmortalMap(size, AllocationType::kOld, *map));
+  InitializeTemplate(obj, true);
   obj->set_property_names(*property_names);
-  obj->set_serial_number(TemplateInfo::kUncached);
   return direct_handle(obj, isolate());
 }
 

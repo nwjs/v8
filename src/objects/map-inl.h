@@ -5,6 +5,9 @@
 #ifndef V8_OBJECTS_MAP_INL_H_
 #define V8_OBJECTS_MAP_INL_H_
 
+#include "src/objects/map.h"
+// Include the non-inl header before the rest of the headers.
+
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/api-callbacks-inl.h"
@@ -16,7 +19,6 @@
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/js-function-inl.h"
 #include "src/objects/map-updater.h"
-#include "src/objects/map.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/property.h"
 #include "src/objects/prototype-info-inl.h"
@@ -42,6 +44,11 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(Map)
 
 ACCESSORS(Map, instance_descriptors, Tagged<DescriptorArray>,
           kInstanceDescriptorsOffset)
+#if V8_ENABLE_WEBASSEMBLY
+ACCESSORS_CHECKED(Map, custom_descriptor, Tagged<WasmStruct>,
+                  kInstanceDescriptorsOffset, IsWasmStructMap(*this))
+#endif  // V8_ENABLE_WEBASSEMBLY
+
 RELAXED_ACCESSORS(Map, instance_descriptors, Tagged<DescriptorArray>,
                   kInstanceDescriptorsOffset)
 RELEASE_ACQUIRE_ACCESSORS(Map, instance_descriptors, Tagged<DescriptorArray>,
@@ -722,11 +729,16 @@ void Map::NotifyLeafMapLayoutChange(Isolate* isolate) {
 bool Map::CanTransition() const {
   // Only JSObject and subtypes have map transitions and back pointers.
   const InstanceType type = instance_type();
+  // JSExternalObjects are non-extensible and thus the map is allocated in
+  // read only sapce.
+  DCHECK_IMPLIES(InstanceTypeChecker::IsMaybeReadOnlyJSObject(type),
+                 HeapLayout::InReadOnlySpace(*this));
   // Shared JS objects have fixed shapes and do not transition. Their maps are
   // either in shared space or RO space.
   DCHECK_IMPLIES(InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(type),
                  HeapLayout::InAnySharedSpace(*this));
   return InstanceTypeChecker::IsJSObject(type) &&
+         !InstanceTypeChecker::IsMaybeReadOnlyJSObject(type) &&
          !InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(type);
 }
 

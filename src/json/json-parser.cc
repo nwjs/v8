@@ -743,7 +743,7 @@ class JSDataObjectBuilder {
   };
   JSDataObjectBuilder(Isolate* isolate, ElementsKind elements_kind,
                       int expected_named_properties,
-                      Handle<Map> expected_final_map,
+                      DirectHandle<Map> expected_final_map,
                       HeapNumberMode heap_number_mode)
       : isolate_(isolate),
         elements_kind_(elements_kind),
@@ -994,7 +994,7 @@ class JSDataObjectBuilder {
       base::Vector<const Char> key_chars, GetKeyFunction&& get_key,
       Handle<String>* key_out) {
     Handle<String> expected_key;
-    Handle<Map> target_map;
+    DirectHandle<Map> target_map;
 
     InternalIndex descriptor_index(current_property_index_);
     if (IsOnExpectedFinalMapFastPath()) {
@@ -1197,13 +1197,13 @@ class JSDataObjectBuilder {
   int expected_property_count_;
   HeapNumberMode heap_number_mode_;
 
-  Handle<Map> map_;
+  DirectHandle<Map> map_;
   int current_property_index_ = 0;
   int extra_heap_numbers_needed_ = 0;
 
   Handle<JSObject> object_;
 
-  Handle<Map> expected_final_map_ = {};
+  DirectHandle<Map> expected_final_map_ = {};
   int property_count_in_expected_final_map_ = 0;
 };
 
@@ -1287,7 +1287,7 @@ class JsonParser<Char>::NamedPropertyIterator {
 template <typename Char>
 template <bool should_track_json_source>
 Handle<JSObject> JsonParser<Char>::BuildJsonObject(const JsonContinuation& cont,
-                                                   Handle<Map> feedback) {
+                                                   DirectHandle<Map> feedback) {
   if (!feedback.is_null() && feedback->is_deprecated()) {
     feedback = Map::Update(isolate_, feedback);
   }
@@ -1509,7 +1509,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonObject(Handle<Map> feedback) {
 
   Expect(JsonToken::RBRACE, MessageTemplate::kJsonParseExpectedCommaOrRBrace);
   Handle<Object> result = BuildJsonObject<false>(cont, feedback);
-  property_stack_.resize_no_init(cont.index);
+  property_stack_.resize(cont.index);
   return cont.scope.CloseAndEscape(result);
 }
 
@@ -1587,8 +1587,8 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonArray() {
         elements->set(i++, element);
       }
     }
-    smi_elements_.resize_no_init(0);
-    double_elements_.resize_no_init(0);
+    smi_elements_.resize(0);
+    double_elements_.resize(0);
     return handle_scope.CloseAndEscape(array);
   }
   // Otherwise, we fell out of the while loop above because the next element
@@ -1597,11 +1597,11 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonArray() {
   for (int element : smi_elements_) {
     element_stack_.emplace_back(handle(Smi::FromInt(element), isolate_));
   }
-  smi_elements_.resize_no_init(0);
+  smi_elements_.resize(0);
   for (double element : double_elements_) {
     element_stack_.emplace_back(factory()->NewNumber(element));
   }
-  double_elements_.resize_no_init(0);
+  double_elements_.resize(0);
 
   Handle<Object> value;
   if (V8_UNLIKELY(!ParseJsonValueRecursive().ToHandle(&value))) return {};
@@ -1624,7 +1624,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonArray() {
 
   Expect(JsonToken::RBRACK, MessageTemplate::kJsonParseExpectedCommaOrRBrack);
   Handle<Object> result = BuildJsonArray(start);
-  element_stack_.resize_no_init(start);
+  element_stack_.resize(start);
   return handle_scope.CloseAndEscape(result);
 }
 
@@ -1890,7 +1890,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
                   isolate(), table, key,
                   {property_val_node, property_snapshot});
             }
-            property_val_node_stack.resize_no_init(cont.index);
+            property_val_node_stack.resize(cont.index);
             DisallowGarbageCollection no_gc;
             Tagged<ObjectTwoHashTable> raw_table = *table;
             value = cont.scope.CloseAndEscape(value);
@@ -1898,7 +1898,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
           } else {
             value = cont.scope.CloseAndEscape(value);
           }
-          property_stack_.resize_no_init(cont.index);
+          property_stack_.resize(cont.index);
 
           // Pop the continuation.
           cont = std::move(cont_stack.back());
@@ -1934,14 +1934,14 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue() {
               raw_val_node_and_snapshot_array->set(i * 2 + 1,
                                                    *element_stack_[start + i]);
             }
-            element_val_node_stack.resize_no_init(cont.index);
+            element_val_node_stack.resize(cont.index);
             value = cont.scope.CloseAndEscape(value);
             val_node = cont.scope.CloseAndEscape(
                 handle(raw_val_node_and_snapshot_array, isolate_));
           } else {
             value = cont.scope.CloseAndEscape(value);
           }
-          element_stack_.resize_no_init(cont.index);
+          element_stack_.resize(cont.index);
           // Pop the continuation.
           cont = std::move(cont_stack.back());
           cont_stack.pop_back();

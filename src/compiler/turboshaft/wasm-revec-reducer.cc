@@ -80,37 +80,41 @@ class StoreLoadInfo {
         SetInvalid();
         return;
       }
-      // const_op->word64() won't be greater than uint32::max under 32-bits wasm
-      // memory.
-      DCHECK_EQ(const_op->word64(), const_op->word32());
-      offset_ = const_op->word32();
-    }
-    const ChangeOp* change = nullptr;
-    if constexpr (std::is_same_v<Op, Simd128LoadTransformOp>) {
-      change = graph->Get(op->index()).template TryCast<ChangeOp>();
+      offset_ = const_op->word64();
+      index_ = &(graph->Get(op->index()));
     } else {
-      if (!op->index().has_value()) return;
-      change = graph->Get(op->index().value()).template TryCast<ChangeOp>();
-    }
-    if (change == nullptr) {
-      SetInvalid();
-      return;
-    }
-    DCHECK_EQ(change->kind, ChangeOp::Kind::kZeroExtend);
-    const Operation* change_input = &graph->Get(change->input());
-    if (const ConstantOp* const_op = change_input->TryCast<ConstantOp>()) {
-      DCHECK_EQ(const_op->kind, ConstantOp::Kind::kWord32);
-      int new_offset;
-      if (base::bits::SignedAddOverflow32(static_cast<int>(const_op->word32()),
-                                          offset_, &new_offset)) {
-        // offset is overflow
+      if (!op->index().has_value()) {
         SetInvalid();
         return;
       }
-      offset_ = new_offset;
-      return;
+      index_ = &(graph->Get(op->index().value()));
     }
-    index_ = change_input;
+
+    if (const ChangeOp* change_op = index_->TryCast<ChangeOp>()) {
+      DCHECK_EQ(change_op->kind, ChangeOp::Kind::kZeroExtend);
+      index_ = &graph->Get(change_op->input());
+      // If index_ is constant, add the constant to offset_ and set index_ to
+      // nullptr
+      if (const ConstantOp* const_op = index_->TryCast<ConstantOp>()) {
+        DCHECK_EQ(const_op->kind, ConstantOp::Kind::kWord32);
+        int32_t new_offset;
+        if (base::bits::SignedAddOverflow32(
+                static_cast<int32_t>(const_op->word32()),
+                static_cast<int32_t>(offset_), &new_offset)) {
+          // offset is overflow
+          SetInvalid();
+          return;
+        }
+        offset_ = new_offset;
+        index_ = nullptr;
+      }
+    } else {  // memory64
+      if (const ConstantOp* const_op = index_->TryCast<ConstantOp>()) {
+        DCHECK_EQ(const_op->kind, ConstantOp::Kind::kWord64);
+        offset_ += const_op->word64();
+        index_ = nullptr;
+      }
+    }
   }
 
   std::optional<int> operator-(const StoreLoadInfo<Op>& rhs) const {
@@ -139,7 +143,7 @@ class StoreLoadInfo {
   bool IsValid() const { return op_ != nullptr; }
 
   const Operation* index() const { return index_; }
-  int offset() const { return offset_; }
+  int64_t offset() const { return offset_; }
   const Op* op() const { return op_; }
 
  private:
@@ -148,7 +152,7 @@ class StoreLoadInfo {
   const Op* op_;
   const Operation* base_ = nullptr;
   const Operation* index_ = nullptr;
-  int offset_;
+  int64_t offset_;
 };
 
 struct StoreInfoCompare {
@@ -780,24 +784,6 @@ bool SLPTree::TryMatchExtendIntToF32x4(const NodeGroup& node_group,
   return true;
 }
 
-bool CannotSwapProtectedLoads(OpEffects first, OpEffects second) {
-  EffectDimensions produces = first.produces;
-  // The control flow effects produces by Loads are due to trap handler. We can
-  // ignore this kind of effect when swapping two Loads that both have trap
-  // handler.
-  produces.control_flow = false;
-  return produces.bits() & (second.consumes.bits());
-}
-
-bool IsProtectedLoad(Operation& op) {
-  if (op.opcode == Opcode::kLoad) {
-    return op.Cast<LoadOp>().kind.with_trap_handler;
-  } else if (op.opcode == Opcode::kSimd128LoadTransform) {
-    return op.Cast<Simd128LoadTransformOp>().load_kind.with_trap_handler;
-  }
-  return false;
-}
-
 bool SLPTree::IsSideEffectFree(OpIndex first, OpIndex second) {
   DCHECK_LE(first.offset(), second.offset());
   if (first == second) return true;
@@ -805,8 +791,8 @@ bool SLPTree::IsSideEffectFree(OpIndex first, OpIndex second) {
   OpIndex prev_node = graph().PreviousIndex(second);
   while (prev_node != first) {
     OpEffects prev_effects = graph().Get(prev_node).Effects();
-    if ((IsProtectedLoad(graph().Get(second)) &&
-         IsProtectedLoad(graph().Get(prev_node)))
+    if ((graph().Get(second).IsProtectedLoad() &&
+         graph().Get(prev_node).IsProtectedLoad())
             ? CannotSwapProtectedLoads(prev_effects, effects)
             : CannotSwapOperations(prev_effects, effects)) {
       TRACE("break side effect %d, %d\n", prev_node.id(), second.id());

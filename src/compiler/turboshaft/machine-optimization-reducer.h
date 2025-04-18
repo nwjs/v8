@@ -854,9 +854,10 @@ class MachineOptimizationReducer : public Next {
           is_64 ? static_cast<int64_t>(right_value)
                 : int64_t{static_cast<int32_t>(right_value)};
       // (a <op> k1) <op> k2  =>  a <op> (k1 <op> k2)
-      if (V<Word> a, k1; WordBinopOp::IsAssociative(kind) &&
-                         matcher_.MatchWordBinop(left, &a, &k1, kind, rep) &&
-                         matcher_.Is<ConstantOp>(k1)) {
+      if (V<Word> a, k1;
+          WordBinopOp::IsAssociative(kind) &&
+          matcher_.MatchWordBinop<Word>(left, &a, &k1, kind, rep) &&
+          matcher_.Is<ConstantOp>(k1)) {
         V<Word> k2 = right;
         // This optimization allows to do constant folding of `k1` and `k2`.
         // However, if (a <op> k1) has to be calculated anyways, then constant
@@ -2458,10 +2459,10 @@ class MachineOptimizationReducer : public Next {
   }
 
   bool IsFloat32ConvertedToFloat64(V<Any> value) {
-    if (V<Float32> input;
-        matcher_.MatchChange(value, &input, ChangeOp::Kind::kFloatConversion,
-                             RegisterRepresentation::Float32(),
-                             RegisterRepresentation::Float64())) {
+    if (V<Float32> input; matcher_.MatchChange<Float32>(
+            value, &input, ChangeOp::Kind::kFloatConversion, {},
+            RegisterRepresentation::Float32(),
+            RegisterRepresentation::Float64())) {
       return true;
     }
     if (double c;
@@ -2472,10 +2473,10 @@ class MachineOptimizationReducer : public Next {
   }
 
   V<Float32> UndoFloat32ToFloat64Conversion(V<Float64> value) {
-    if (V<Float32> input;
-        matcher_.MatchChange(value, &input, ChangeOp::Kind::kFloatConversion,
-                             RegisterRepresentation::Float32(),
-                             RegisterRepresentation::Float64())) {
+    if (V<Float32> input; matcher_.MatchChange<Float32>(
+            value, &input, ChangeOp::Kind::kFloatConversion, {},
+            RegisterRepresentation::Float32(),
+            RegisterRepresentation::Float64())) {
       return input;
     }
     if (double c;

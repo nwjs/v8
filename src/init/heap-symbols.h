@@ -850,6 +850,7 @@
   V(_, toString_string, "toString")                                           \
   V(_, true_string, "true")                                                   \
   V(_, total_string, "total")                                                 \
+  V(_, TypedArrayLength_string, "get TypedArray.prototype.length")            \
   V(_, TypeError_string, "TypeError")                                         \
   V(_, Uint16Array_string, "Uint16Array")                                     \
   V(_, Uint32Array_string, "Uint32Array")                                     \
@@ -974,7 +975,6 @@
   F(MC_INCREMENTAL_EMBEDDER_TRACING)                               \
   F(MC_INCREMENTAL_EXTERNAL_EPILOGUE)                              \
   F(MC_INCREMENTAL_EXTERNAL_PROLOGUE)                              \
-  F(MC_INCREMENTAL_FINALIZE)                                       \
   F(MC_INCREMENTAL_LAYOUT_CHANGE)                                  \
   F(MC_INCREMENTAL_START)                                          \
   F(MC_INCREMENTAL_SWEEPING)
@@ -1028,6 +1028,7 @@
   F(SCAVENGER)                                          \
   F(SCAVENGER_COMPLETE_SWEEP_ARRAY_BUFFERS)             \
   F(SCAVENGER_FREE_REMEMBERED_SET)                      \
+  F(SCAVENGER_RESIZE_NEW_SPACE)                         \
   F(SCAVENGER_SCAVENGE)                                 \
   F(SCAVENGER_SCAVENGE_WEAK_GLOBAL_HANDLES_IDENTIFY)    \
   F(SCAVENGER_SCAVENGE_WEAK_GLOBAL_HANDLES_PROCESS)     \
@@ -1075,6 +1076,7 @@
   F(MC_EVACUATE_COPY)                            \
   F(MC_EVACUATE_COPY_PARALLEL)                   \
   F(MC_EVACUATE_EPILOGUE)                        \
+  F(MC_EVACUATE_PIN_PAGES)                       \
   F(MC_EVACUATE_PROLOGUE)                        \
   F(MC_EVACUATE_REBALANCE)                       \
   F(MC_EVACUATE_UPDATE_POINTERS)                 \

@@ -631,14 +631,13 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
   FastApiCallReducerAssembler(
       JSCallReducer* reducer, Node* node,
       const FunctionTemplateInfoRef function_template_info,
-      FastApiCallFunction c_function, Node* receiver, Node* holder,
+      FastApiCallFunction c_function, Node* receiver,
       const SharedFunctionInfoRef shared, Node* target, const int arity,
       Node* effect)
       : JSCallReducerAssembler(reducer, node),
         c_function_(c_function),
         function_template_info_(function_template_info),
         receiver_(receiver),
-        holder_(holder),
         shared_(shared),
         target_(target),
         arity_(arity) {
@@ -726,7 +725,6 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
     inputs[cursor++] = ExternalConstant(function_reference);
     inputs[cursor++] = NumberConstant(arity_);
     inputs[cursor++] = HeapConstant(function_template_info_.object());
-    inputs[cursor++] = holder_;
     inputs[cursor++] = receiver_;
     for (int i = 0; i < arity_; ++i) {
       inputs[cursor++] = Argument(i);
@@ -745,9 +743,9 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
  private:
   static constexpr int kEffectAndControl = 2;
 
-  // Api function address, argc, FunctionTemplateInfo, holder, context.
+  // Api function address, argc, FunctionTemplateInfo, context.
   // See CallApiCallbackOptimizedDescriptor.
-  static constexpr int kSlowBuiltinParams = 5;
+  static constexpr int kSlowBuiltinParams = 4;
   static constexpr int kReceiver = 1;
 
   // Enough for creating FastApiCall node with two JS arguments.
@@ -763,7 +761,6 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
   FastApiCallFunction c_function_;
   const FunctionTemplateInfoRef function_template_info_;
   Node* const receiver_;
-  Node* const holder_;
   const SharedFunctionInfoRef shared_;
   Node* const target_;
   const int arity_;
@@ -1353,9 +1350,11 @@ TNode<Object> IteratingArrayBuiltinReducerAssembler::ReduceArrayPrototypeAt(
         SpeculationMode::kDisallowSpeculation, CallFeedbackRelation::kTarget);
     Node* fallback_builtin = node_ptr()->InputAt(0);
 
-    TNode<Object> res = AddNode<Object>(graph()->NewNode(
-        op, fallback_builtin, receiver, index, n.feedback_vector(),
-        ContextInput(), n.frame_state(), effect(), control()));
+    TNode<Object> res = MayThrow(_ {
+      return AddNode<Object>(graph()->NewNode(
+          op, fallback_builtin, receiver, index, n.feedback_vector(),
+          ContextInput(), n.frame_state(), effect(), control()));
+    });
     Goto(&out, res);
   } else {
     Goto(&out, UndefinedConstant());
@@ -3800,11 +3799,11 @@ bool CanInlineJSToWasmCall(const wasm::CanonicalSig* wasm_signature) {
 
   for (auto type : wasm_signature->all()) {
 #if defined(V8_TARGET_ARCH_32_BIT)
-    if (type == wasm::kCanonicalI64) return false;
+    if (type == wasm::kWasmI64) return false;
 #endif
-    if (type != wasm::kCanonicalI32 && type != wasm::kCanonicalI64 &&
-        type != wasm::kCanonicalF32 && type != wasm::kCanonicalF64 &&
-        type != wasm::kCanonicalExternRef) {
+    if (type != wasm::kWasmI32 && type != wasm::kWasmI64 &&
+        type != wasm::kWasmF32 && type != wasm::kWasmF64 &&
+        type != wasm::kWasmExternRef) {
       return false;
     }
   }
@@ -3896,7 +3895,6 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
   Node* receiver = (p.convert_mode() == ConvertReceiverMode::kNullOrUndefined)
                        ? global_proxy
                        : n.receiver();
-  Node* holder;
   Node* context = n.context();
   Effect effect = n.effect();
   Control control = n.control();
@@ -3929,7 +3927,7 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
     //     are considered compatible at that point, and the {receiver}
     //     will be pass as the {holder}.
     //
-    receiver = holder = effect = graph()->NewNode(
+    receiver = effect = graph()->NewNode(
         simplified()->ConvertReceiver(p.convert_mode()), receiver,
         jsgraph()->ConstantNoHole(native_context(), broker()), global_proxy,
         effect, control);
@@ -4003,11 +4001,6 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
       // map checks or stability dependencies.
       inference.RelyOnMapsPreferStability(dependencies(), jsgraph(), &effect,
                                           control, p.feedback());
-
-      // Determine the appropriate holder for the {lookup}.
-      holder = api_holder.lookup == CallOptimization::kHolderFound
-                   ? jsgraph()->ConstantNoHole(*api_holder.holder, broker())
-                   : receiver;
     } else {
       // We don't have enough information to eliminate the access check
       // and/or the compatible receiver check, so use the generic builtin
@@ -4027,7 +4020,7 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
       // The CallFunctionTemplate builtin requires the {receiver} to be
       // an actual JSReceiver, so make sure we do the proper conversion
       // first if necessary.
-      receiver = holder = effect = graph()->NewNode(
+      receiver = effect = graph()->NewNode(
           simplified()->ConvertReceiver(p.convert_mode()), receiver,
           jsgraph()->ConstantNoHole(native_context(), broker()), global_proxy,
           effect, control);
@@ -4070,8 +4063,8 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
 
   if (c_function.address) {
     FastApiCallReducerAssembler a(this, node, function_template_info,
-                                  c_function, receiver, holder, shared, target,
-                                  argc, effect);
+                                  c_function, receiver, shared, target, argc,
+                                  effect);
     Node* fast_call_subgraph = a.ReduceFastApiCall();
 
     return Replace(fast_call_subgraph);
@@ -4102,11 +4095,10 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
   node->InsertInput(
       graph()->zone(), 3,
       jsgraph()->HeapConstantNoHole(function_template_info.object()));
-  node->InsertInput(graph()->zone(), 4, holder);
-  node->ReplaceInput(5, receiver);  // Update receiver input.
+  node->ReplaceInput(4, receiver);  // Update receiver input.
   // 6 + argc is context input.
-  node->ReplaceInput(6 + argc + 1, continuation_frame_state);
-  node->ReplaceInput(6 + argc + 2, effect);
+  node->ReplaceInput(5 + argc + 1, continuation_frame_state);
+  node->ReplaceInput(5 + argc + 2, effect);
   NodeProperties::ChangeOp(node, common()->Call(call_descriptor));
   return Changed(node);
 }
@@ -6368,15 +6360,20 @@ Reduction JSCallReducer::ReduceArrayPrototypeSlice(Node* node) {
 
   // Optimize for the case where we simply clone the {receiver}, i.e. when the
   // {start} is zero and the {end} is undefined (meaning it will be set to
-  // {receiver}s "length" property). This logic should be in sync with
-  // ReduceArrayPrototypeSlice (to a reasonable degree). This is because
-  // CloneFastJSArray produces arrays which are potentially COW. If there's a
-  // discrepancy, TF generates code which produces a COW array and then expects
-  // it to be non-COW (or the other way around) -> immediate deopt.
+  // {receiver}s "length" property).
+
+  // This logic should be in sync with ArrayPrototypeSlice (to a reasonable
+  // degree). This is because CloneFastJSArray produces arrays which are
+  // potentially COW. If there's a discrepancy, TF generates code which produces
+  // a COW array and then expects it to be non-COW (or the other way around) ->
+  // immediate deopt.
+
+  // LINT.IfChange(ArrayPrototypeSlice)
   if (!NumberMatcher(start).Is(0) ||
       !HeapObjectMatcher(end).Is(factory()->undefined_value())) {
     return NoChange();
   }
+  // LINT.ThenChange(/src/builtins/array-slice.tq:ArrayPrototypeSlice)
 
   MapInference inference(broker(), receiver, effect);
   if (!inference.HaveMaps()) return NoChange();

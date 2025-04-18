@@ -604,21 +604,27 @@ void InstructionSelectorT::VisitSimd128ReverseBytes(OpIndex node) {
   UNREACHABLE();
 }
 
+void InstructionSelectorT::VisitWord32Ctz(OpIndex node) {
+  RiscvOperandGeneratorT g(this);
+  Emit(kRiscvCtzw, g.DefineAsRegister(node),
+       g.UseRegister(this->input_at(node, 0)));
+}
+
 void InstructionSelectorT::VisitWord64Ctz(OpIndex node) {
   RiscvOperandGeneratorT g(this);
-  Emit(kRiscvCtz64, g.DefineAsRegister(node),
+  Emit(kRiscvCtz, g.DefineAsRegister(node),
        g.UseRegister(this->input_at(node, 0)));
 }
 
 void InstructionSelectorT::VisitWord32Popcnt(OpIndex node) {
   RiscvOperandGeneratorT g(this);
-  Emit(kRiscvPopcnt32, g.DefineAsRegister(node),
+  Emit(kRiscvCpopw, g.DefineAsRegister(node),
        g.UseRegister(this->input_at(node, 0)));
 }
 
 void InstructionSelectorT::VisitWord64Popcnt(OpIndex node) {
   RiscvOperandGeneratorT g(this);
-  Emit(kRiscvPopcnt64, g.DefineAsRegister(node),
+  Emit(kRiscvCpop, g.DefineAsRegister(node),
        g.UseRegister(this->input_at(node, 0)));
 }
 
@@ -1208,8 +1214,8 @@ void InstructionSelectorT::VisitUnalignedLoad(OpIndex node) {
   auto load = this->load_view(node);
   LoadRepresentation load_rep = load.loaded_rep();
   RiscvOperandGeneratorT g(this);
-  OpIndex base = this->input_at(node, 0);
-  OpIndex index = this->input_at(node, 1);
+  OpIndex base = load.base();
+  OpIndex index = load.index();
 
   InstructionCode opcode = kArchNop;
   switch (load_rep.representation()) {
@@ -1272,68 +1278,67 @@ void InstructionSelectorT::VisitUnalignedLoad(OpIndex node) {
 }
 
 void InstructionSelectorT::VisitUnalignedStore(OpIndex node) {
-  UNIMPLEMENTED();
-  //   RiscvOperandGeneratorT g(this);
-  //   Node* base = this->input_at(node, 0);
-  //   Node* index = this->input_at(node, 1);
-  //   Node* value = node->InputAt(2);
+  RiscvOperandGeneratorT g(this);
+  auto store_view = this->store_view(node);
+  DCHECK_EQ(store_view.displacement(), 0);
+  OpIndex base = store_view.base();
+  OpIndex index = this->value(store_view.index());
+  OpIndex value = store_view.value();
 
-  //   UnalignedStoreRepresentation rep =
-  //       UnalignedStoreRepresentationOf(node->op());
-  //   ArchOpcode opcode;
-  //   switch (rep) {
-  //     case MachineRepresentation::kFloat32:
-  //       opcode = kRiscvUStoreFloat;
-  //       break;
-  //     case MachineRepresentation::kFloat64:
-  //       opcode = kRiscvUStoreDouble;
-  //       break;
-  //     case MachineRepresentation::kWord8:
-  //       opcode = kRiscvSb;
-  //       break;
-  //     case MachineRepresentation::kWord16:
-  //       opcode = kRiscvUsh;
-  //       break;
-  //     case MachineRepresentation::kWord32:
-  //       opcode = kRiscvUsw;
-  //       break;
-  //     case MachineRepresentation::kTaggedSigned:   // Fall through.
-  //     case MachineRepresentation::kTaggedPointer:  // Fall through.
-  //     case MachineRepresentation::kTagged:         // Fall through.
-  //     case MachineRepresentation::kWord64:
-  //       opcode = kRiscvUsd;
-  //       break;
-  //     case MachineRepresentation::kSimd128:
-  //       opcode = kRiscvRvvSt;
-  //       break;
-  //     case MachineRepresentation::kSimd256:            // Fall through.
-  //     case MachineRepresentation::kBit:                // Fall through.
-  //     case MachineRepresentation::kCompressedPointer:  // Fall through.
-  //     case MachineRepresentation::kCompressed:         // Fall through.
-  //     case MachineRepresentation::kSandboxedPointer:   // Fall through.
-  //     case MachineRepresentation::kMapWord:            // Fall through.
-  //     case MachineRepresentation::kIndirectPointer:    // Fall through.
-  //     case MachineRepresentation::kProtectedPointer:   // Fall through.
-  //     case MachineRepresentation::kFloat16:            // Fall through.
-  //     case MachineRepresentation::kFloat16RawBits:     // Fall through.
-  //     case MachineRepresentation::kNone:
-  //       UNREACHABLE();
-  //   }
+  MachineRepresentation rep = store_view.stored_rep().representation();
 
-  //   if (g.CanBeImmediate(index, opcode)) {
-  //     Emit(opcode | AddressingModeField::encode(kMode_MRI), g.NoOutput(),
-  //          g.UseRegister(base), g.UseImmediate(index),
-  //          g.UseRegisterOrImmediateZero(value));
-  //   } else {
-  //     InstructionOperand addr_reg = g.TempRegister();
-  //     Emit(kRiscvAdd64 | AddressingModeField::encode(kMode_None), addr_reg,
-  //          g.UseRegister(index), g.UseRegister(base));
-  //     // Emit desired store opcode, using temp addr_reg.
-  //     Emit(opcode | AddressingModeField::encode(kMode_MRI), g.NoOutput(),
-  //          addr_reg, g.TempImmediate(0),
-  //          g.UseRegisterOrImmediateZero(value));
-  //   }
-  // }
+  ArchOpcode opcode;
+  switch (rep) {
+    case MachineRepresentation::kFloat32:
+      opcode = kRiscvUStoreFloat;
+      break;
+    case MachineRepresentation::kFloat64:
+      opcode = kRiscvUStoreDouble;
+      break;
+    case MachineRepresentation::kWord8:
+      opcode = kRiscvSb;
+      break;
+    case MachineRepresentation::kWord16:
+      opcode = kRiscvUsh;
+      break;
+    case MachineRepresentation::kWord32:
+      opcode = kRiscvUsw;
+      break;
+    case MachineRepresentation::kTaggedSigned:   // Fall through.
+    case MachineRepresentation::kTaggedPointer:  // Fall through.
+    case MachineRepresentation::kTagged:         // Fall through.
+    case MachineRepresentation::kWord64:
+      opcode = kRiscvUsd;
+      break;
+    case MachineRepresentation::kSimd128:
+      opcode = kRiscvRvvSt;
+      break;
+    case MachineRepresentation::kSimd256:            // Fall through.
+    case MachineRepresentation::kBit:                // Fall through.
+    case MachineRepresentation::kCompressedPointer:  // Fall through.
+    case MachineRepresentation::kCompressed:         // Fall through.
+    case MachineRepresentation::kSandboxedPointer:   // Fall through.
+    case MachineRepresentation::kMapWord:            // Fall through.
+    case MachineRepresentation::kIndirectPointer:    // Fall through.
+    case MachineRepresentation::kProtectedPointer:   // Fall through.
+    case MachineRepresentation::kFloat16:            // Fall through.
+    case MachineRepresentation::kFloat16RawBits:     // Fall through.
+    case MachineRepresentation::kNone:
+      UNREACHABLE();
+  }
+
+  if (g.CanBeImmediate(index, opcode)) {
+    Emit(opcode | AddressingModeField::encode(kMode_MRI), g.NoOutput(),
+         g.UseRegister(base), g.UseImmediate(index),
+         g.UseRegisterOrImmediateZero(value));
+  } else {
+    InstructionOperand addr_reg = g.TempRegister();
+    Emit(kRiscvAdd64 | AddressingModeField::encode(kMode_None), addr_reg,
+         g.UseRegister(index), g.UseRegister(base));
+    // Emit desired store opcode, using temp addr_reg.
+    Emit(opcode | AddressingModeField::encode(kMode_MRI), g.NoOutput(),
+         addr_reg, g.TempImmediate(0), g.UseRegisterOrImmediateZero(value));
+  }
 }
 
 namespace {
@@ -1638,7 +1643,7 @@ void VisitAtomicBinop(InstructionSelectorT* selector, OpIndex node,
                       MemoryAccessKind access_kind) {
   using OpIndex = OpIndex;
   RiscvOperandGeneratorT g(selector);
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
   OpIndex value = atomic_op.value();
@@ -1983,7 +1988,7 @@ void VisitAtomicExchange(InstructionSelectorT* selector, OpIndex node,
                          ArchOpcode opcode, AtomicWidth width,
                          MemoryAccessKind access_kind) {
   using OpIndex = OpIndex;
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   RiscvOperandGeneratorT g(selector);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
@@ -2014,10 +2019,10 @@ void VisitAtomicCompareExchange(InstructionSelectorT* selector, OpIndex node,
                                 MemoryAccessKind access_kind) {
   RiscvOperandGeneratorT g(selector);
   using OpIndex = OpIndex;
-  auto atomic_op = selector->atomic_rmw_view(node);
+  const AtomicRMWOp& atomic_op = selector->Cast<AtomicRMWOp>(node);
   OpIndex base = atomic_op.base();
   OpIndex index = atomic_op.index();
-  OpIndex old_value = atomic_op.expected();
+  OpIndex old_value = atomic_op.expected().value();
   OpIndex new_value = atomic_op.value();
 
   AddressingMode addressing_mode = kMode_MRI;
@@ -2287,21 +2292,24 @@ void InstructionSelectorT::VisitF64x2Max(OpIndex node) {
 MachineOperatorBuilder::Flags
 InstructionSelector::SupportedMachineOperatorFlags() {
   MachineOperatorBuilder::Flags flags = MachineOperatorBuilder::kNoFlags;
-  return flags | MachineOperatorBuilder::kWord32Ctz |
-         MachineOperatorBuilder::kWord64Ctz |
-         MachineOperatorBuilder::kWord32Popcnt |
-         MachineOperatorBuilder::kWord64Popcnt |
-         MachineOperatorBuilder::kWord32ShiftIsSafe |
-         MachineOperatorBuilder::kInt32DivIsSafe |
-         MachineOperatorBuilder::kUint32DivIsSafe |
-         MachineOperatorBuilder::kFloat64RoundDown |
-         MachineOperatorBuilder::kFloat32RoundDown |
-         MachineOperatorBuilder::kFloat64RoundUp |
-         MachineOperatorBuilder::kFloat32RoundUp |
-         MachineOperatorBuilder::kFloat64RoundTruncate |
-         MachineOperatorBuilder::kFloat32RoundTruncate |
-         MachineOperatorBuilder::kFloat64RoundTiesEven |
-         MachineOperatorBuilder::kFloat32RoundTiesEven;
+  flags |= MachineOperatorBuilder::kWord32ShiftIsSafe |
+           MachineOperatorBuilder::kInt32DivIsSafe |
+           MachineOperatorBuilder::kUint32DivIsSafe |
+           MachineOperatorBuilder::kFloat64RoundDown |
+           MachineOperatorBuilder::kFloat32RoundDown |
+           MachineOperatorBuilder::kFloat64RoundUp |
+           MachineOperatorBuilder::kFloat32RoundUp |
+           MachineOperatorBuilder::kFloat64RoundTruncate |
+           MachineOperatorBuilder::kFloat32RoundTruncate |
+           MachineOperatorBuilder::kFloat64RoundTiesEven |
+           MachineOperatorBuilder::kFloat32RoundTiesEven;
+  if (CpuFeatures::IsSupported(ZBB)) {
+    flags |= MachineOperatorBuilder::kWord32Ctz |
+             MachineOperatorBuilder::kWord64Ctz |
+             MachineOperatorBuilder::kWord32Popcnt |
+             MachineOperatorBuilder::kWord64Popcnt;
+  }
+  return flags;
 }
 
 }  // namespace compiler

@@ -41,7 +41,7 @@ enum class PriorityMode : bool { kDontApply, kApply };
  * multiple task queues executed by threads different system-level priorities
  * (where available) to schedule tasks.
  */
-V8_EXPORT std::unique_ptr<v8::Platform> NewDefaultPlatform(
+V8_PLATFORM_EXPORT std::unique_ptr<v8::Platform> NewDefaultPlatform(
     int thread_pool_size = 0,
     IdleTaskSupport idle_task_support = IdleTaskSupport::kDisabled,
     InProcessStackDumping in_process_stack_dumping =
@@ -80,8 +80,7 @@ V8_PLATFORM_EXPORT std::unique_ptr<v8::JobHandle> NewDefaultJobHandle(
  * the |behavior| parameter, this call does not block if no task is pending. The
  * |platform| has to be created using |NewDefaultPlatform|.
  */
-
-V8_EXPORT bool PumpMessageLoop(
+V8_PLATFORM_EXPORT bool PumpMessageLoop(
     v8::Platform* platform, v8::Isolate* isolate,
     MessageLoopBehavior behavior = MessageLoopBehavior::kDoNotWait);
 
@@ -92,7 +91,7 @@ V8_EXPORT bool PumpMessageLoop(
  * This call does not block if no task is pending. The |platform| has to be
  * created using |NewDefaultPlatform|.
  */
-V8_EXPORT void RunIdleTasks(v8::Platform* platform,
+V8_PLATFORM_EXPORT void RunIdleTasks(v8::Platform* platform,
                                      v8::Isolate* isolate,
                                      double idle_time_in_seconds);
 

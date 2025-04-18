@@ -57,7 +57,7 @@ class V8_EXPORT_PRIVATE CompilationResultResolver {
  public:
   virtual void OnCompilationSucceeded(
       DirectHandle<WasmModuleObject> result) = 0;
-  virtual void OnCompilationFailed(DirectHandle<Object> error_reason) = 0;
+  virtual void OnCompilationFailed(DirectHandle<JSAny> error_reason) = 0;
   virtual ~CompilationResultResolver() = default;
 };
 
@@ -65,7 +65,7 @@ class V8_EXPORT_PRIVATE InstantiationResultResolver {
  public:
   virtual void OnInstantiationSucceeded(
       DirectHandle<WasmInstanceObject> result) = 0;
-  virtual void OnInstantiationFailed(DirectHandle<Object> error_reason) = 0;
+  virtual void OnInstantiationFailed(DirectHandle<JSAny> error_reason) = 0;
   virtual ~InstantiationResultResolver() = default;
 };
 
@@ -372,10 +372,10 @@ class V8_EXPORT_PRIVATE WasmEngine {
 
   // Add potentially dead code. The occurrence in the set of potentially dead
   // code counts as a reference, and is decremented on the next GC.
-  // Returns {true} if the code was added to the set of potentially dead code,
-  // {false} if an entry already exists. The ref count is *unchanged* in any
-  // case.
-  V8_WARN_UNUSED_RESULT bool AddPotentiallyDeadCode(WasmCode*);
+  void AddPotentiallyDeadCode(WasmCode*);
+
+  // Allow tests to trigger a GC independently of adding potentially dead code.
+  void TriggerCodeGCForTesting();
 
   // Free dead code.
   using DeadCodeMap = std::unordered_map<NativeModule*, std::vector<WasmCode*>>;
@@ -451,6 +451,7 @@ class V8_EXPORT_PRIVATE WasmEngine {
       const char* api_method_name,
       std::shared_ptr<CompilationResultResolver> resolver, int compilation_id);
 
+  void TriggerCodeGC_Locked(size_t dead_code_limit);
   void TriggerGC(int8_t gc_sequence_index);
 
   // Remove an isolate from the outstanding isolates of the current GC. Returns

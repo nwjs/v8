@@ -530,11 +530,13 @@ namespace internal {
   F(ActiveTierIsSparkplug, 1, 1)              \
   F(ActiveTierIsMaglev, 1, 1)                 \
   F(ActiveTierIsTurbofan, 1, 1)               \
+  F(ArrayBufferDetachForceWasm, 1, 1)         \
   F(ArrayIteratorProtector, 0, 1)             \
   F(ArraySpeciesProtector, 0, 1)              \
   F(BaselineOsr, -1, 1)                       \
   F(BenchMaglev, 2, 1)                        \
   F(BenchTurbofan, 2, 1)                      \
+  F(CheckNoWriteBarrierNeeded, 2, 1)          \
   F(ClearFunctionFeedback, 1, 1)              \
   F(ClearMegamorphicStubCache, 0, 1)          \
   F(CompleteInobjectSlackTracking, 1, 1)      \
@@ -604,7 +606,6 @@ namespace internal {
   F(IsEfficiencyModeEnabled, 0, 1)            \
   F(IsInPlaceInternalizableString, 1, 1)      \
   F(IsInternalizedString, 1, 1)               \
-  F(IsNoWriteBarrierNeeded, 1, 1)             \
   F(StringToCString, 1, 1)                    \
   F(StringUtf8Value, 1, 1)                    \
   F(IsMaglevEnabled, 0, 1)                    \
@@ -709,6 +710,7 @@ namespace internal {
   F(TierUpWasmToJSWrapper, 1, 1)              \
   F(WasmTriggerTierUp, 1, 1)                  \
   F(WasmDebugBreak, 0, 1)                     \
+  F(WasmAllocateDescriptorStruct, 3, 1)       \
   F(WasmArrayCopy, 5, 1)                      \
   F(WasmArrayNewSegment, 5, 1)                \
   F(WasmArrayInitSegment, 6, 1)               \
@@ -740,6 +742,7 @@ namespace internal {
   F(DeserializeWasmModule, 2, 1)                                \
   F(DisallowWasmCodegen, 1, 1)                                  \
   F(FlushLiftoffCode, 0, 1)                                     \
+  F(WasmTriggerCodeGC, 0, 1)                                    \
   F(EstimateCurrentMemoryConsumption, 0, 1)                     \
   F(FreezeWasmLazyCompilation, 1, 1)                            \
   F(GetWasmExceptionTagId, 2, 1)                                \
@@ -1091,8 +1094,9 @@ enum class OptimizationStatus {
   kIsLazy = 1 << 18,
   kTopmostFrameIsMaglev = 1 << 19,
   kOptimizeOnNextCallOptimizesToMaglev = 1 << 20,
-  kMarkedForMaglevOptimization = 1 << 21,
-  kMarkedForConcurrentMaglevOptimization = 1 << 22,
+  kOptimizeMaglevOptimizesToTurbofan = 1 << 21,
+  kMarkedForMaglevOptimization = 1 << 22,
+  kMarkedForConcurrentMaglevOptimization = 1 << 23,
 };
 
 // The number of isolates used for testing in d8.

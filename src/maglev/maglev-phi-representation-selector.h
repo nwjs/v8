@@ -113,17 +113,6 @@ class MaglevPhiRepresentationSelector {
       result = UpdateNonUntaggingNodeInputs(n, state);
     }
 
-    // It's important to check the properties of {node} rather than the static
-    // properties of `NodeT`, because `UpdateUntaggingOfPhi` could have changed
-    // the opcode of {node}, potentially converting a deopting node into a
-    // non-deopting one.
-    if (node->properties().can_eager_deopt()) {
-      BypassIdentities(node->eager_deopt_info());
-    }
-    if (node->properties().can_lazy_deopt()) {
-      BypassIdentities(node->lazy_deopt_info());
-    }
-
     return result;
   }
 
@@ -207,10 +196,6 @@ class MaglevPhiRepresentationSelector {
   // been updated to Identity, FixLoopPhisBackedge unwraps those Identity.
   void FixLoopPhisBackedge(BasicBlock* block);
 
-  // Replaces Identity nodes by their inputs in {deopt_info}
-  template <typename DeoptInfoT>
-  void BypassIdentities(DeoptInfoT* deopt_info);
-
   void PreparePhiTaggings(BasicBlock* old_block, const BasicBlock* new_block);
 
   MaglevGraphLabeller* graph_labeller() const {
@@ -230,6 +215,9 @@ class MaglevPhiRepresentationSelector {
   ZoneVector<Snapshot> predecessors_;
 
   ZoneVector<Node*> new_nodes_at_start_;
+
+  absl::flat_hash_map<BasicBlock::Id, Snapshot> snapshots_;
+
 #ifdef DEBUG
   std::unordered_set<NodeBase*> new_nodes_;
 #endif

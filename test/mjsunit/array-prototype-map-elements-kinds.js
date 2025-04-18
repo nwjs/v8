@@ -6,6 +6,10 @@
 
 load('test/mjsunit/elements-kinds-helpers.js');
 
+function identity(x) {
+  return x;
+}
+
 function plusOne(x) {
   return x + 1;
 }
@@ -22,6 +26,54 @@ function wrapInObject(x) {
   return {a: x};
 }
 
+function unwrapObject(x) {
+  return x.a;
+}
+
+let ix = 0;
+function transitionFromSmiToDouble(x) {
+  if (ix++ == 0) {
+    return 0;
+  }
+  return 1.1;
+}
+
+function transitionFromSmiToObject(x) {
+  if (ix++ == 0) {
+    return 0;
+  }
+  return {a: 1};
+}
+
+function transitionFromDoubleToObject(x) {
+  if (ix++ == 0) {
+    return 1.1;
+  }
+  return {a: 1};
+}
+
+function transitionFromObjectToDouble(x) {
+  if (ix++ == 0) {
+    return {a: 1};
+  }
+  return 1.1;
+}
+
+function resetTransitionFunctions() {
+  ix = 0;
+}
+
+(function testPackedSmiElementsWithIdentity() {
+  function foo(a) {
+    return a.map(identity);
+  }
+  %PrepareFunctionForOptimization(foo);
+
+  const array = [1, 2, 3];
+  const result = foo(array);
+  assertTrue(HasPackedSmiElements(result));
+})();
+
 (function testPackedSmiElements() {
   function foo(a) {
     return a.map(plusOne);
@@ -31,9 +83,6 @@ function wrapInObject(x) {
   const result = foo(array);
   assertTrue(HasPackedSmiElements(result));
 })();
-
-// The only way to end up with a holey result is to start with a holey elements
-// kind; the mapper function cannot insert holes into the array.
 
 (function testHoleySmiElements() {
   function foo(a) {
@@ -125,56 +174,135 @@ function wrapInObject(x) {
   assertTrue(HasHoleyObjectElements(result));
 })();
 
-(function testDictionaryElements1() {
+(function testFromObjectToPackedSmi() {
   function foo(a) {
-    return a.map(plusOne);
+    return a.map(unwrapObject);
   }
 
-  const array = [1, 2, 3];
-  for (let i = 0; i < 100000; i += 100) {
-    array[i] = 0;
-    if (%HasDictionaryElements(array)) {
-      break;
-    }
-  }
-  assertTrue(%HasDictionaryElements(array));
+  const array = [{a: 1}, {a: 2}, {a: 3}];
+  const result = foo(array);
+  assertTrue(HasPackedSmiElements(result));
+})();
 
+(function testFromObjectToHoleySmi() {
+  function foo(a) {
+    return a.map(unwrapObject);
+  }
+
+  const array = [{a: 1}, {a: 2}, , {a: 3}];
   const result = foo(array);
   assertTrue(HasHoleySmiElements(result));
 })();
 
-(function testDictionaryElements2() {
+(function testTransitionFromPackedSmiToDoubleWhileMapping() {
+  resetTransitionFunctions();
+
   function foo(a) {
-    return a.map(plusOne);
+    return a.map(transitionFromSmiToDouble);
   }
 
-  const array = [1, 2, 3];
-  for (let i = 0; i < 100000; i += 100) {
-    array[i] = 0.1;
-    if (%HasDictionaryElements(array)) {
-      break;
-    }
-  }
-  assertTrue(%HasDictionaryElements(array));
+  const array = [0, 0, 0];
+  const result = foo(array);
+  assertTrue(HasPackedDoubleElements(result));
+})();
 
+(function testTransitionFromHoleySmiToDoubleWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromSmiToDouble);
+  }
+
+  const array = [0, 0, , 0];
   const result = foo(array);
   assertTrue(HasHoleyDoubleElements(result));
 })();
 
-(function testDictionaryElements3() {
+(function testTransitionFromPackedSmiToObjectWhileMapping() {
+  resetTransitionFunctions();
+
   function foo(a) {
-    return a.map(plusOneInObject);
+    return a.map(transitionFromSmiToObject);
   }
 
-  const array = [{a: 1}, {a: 2}, {a: 3}];
-  for (let i = 0; i < 100000; i += 100) {
-    array[i] = {a: 0};
-    if (%HasDictionaryElements(array)) {
-      break;
-    }
-  }
-  assertTrue(%HasDictionaryElements(array));
+  const array = [0, 0, 0];
+  const result = foo(array);
+  assertTrue(HasPackedObjectElements(result));
+})();
 
+(function testTransitionFromHoleySmiToObjectWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromSmiToObject);
+  }
+
+  const array = [0, 0, , 0];
   const result = foo(array);
   assertTrue(HasHoleyObjectElements(result));
+})();
+
+(function testTransitionFromPackedSmiToDoubleToObjectWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromDoubleToObject);
+  }
+
+  const array = [0, 0, 0];
+  const result = foo(array);
+  assertTrue(HasPackedObjectElements(result));
+})();
+
+(function testTransitionFromHoleySmiToDoubleToObjectWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromDoubleToObject);
+  }
+
+  const array = [0, 0, , 0];
+  const result = foo(array);
+  assertTrue(HasHoleyObjectElements(result));
+})();
+
+(function testTransitionFromPackedSmiToObjectToDoubleWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromObjectToDouble);
+  }
+
+  const array = [0, 0, 0];
+  const result = foo(array);
+  assertTrue(HasPackedObjectElements(result));
+})();
+
+(function testTransitionFromHoleySmiToObjectToDoubleWhileMapping() {
+  resetTransitionFunctions();
+
+  function foo(a) {
+    return a.map(transitionFromObjectToDouble);
+  }
+
+  const array = [0, 0, , 0];
+  const result = foo(array);
+  assertTrue(HasHoleyObjectElements(result));
+})();
+
+(function testMapperReducesLength() {
+  let array = [0, 1, 2];
+  function evil(x) {
+    if (x == 1) {
+      array.length = 1;
+    }
+    return x;
+  }
+  function foo(a) {
+    return a.map(evil);
+  }
+
+  const result = foo(array);
+  assertTrue(HasHoleySmiElements(result));
+  assertEquals(undefined, result[2]);
 })();

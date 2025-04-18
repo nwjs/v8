@@ -1187,6 +1187,18 @@ RUNTIME_FUNCTION(Runtime_WasmArrayCopy) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
+RUNTIME_FUNCTION(Runtime_WasmAllocateDescriptorStruct) {
+  ClearThreadInWasmScope flag_scope(isolate);
+  HandleScope scope(isolate);
+  DCHECK_EQ(3, args.length());
+  DirectHandle<WasmTrustedInstanceData> trusted_data{
+      Cast<WasmTrustedInstanceData>(args[0]), isolate};
+  DirectHandle<Map> map{Cast<Map>(args[1]), isolate};
+  wasm::ModuleTypeIndex type_index{args.positive_smi_value_at(2)};
+  return *WasmStruct::AllocateDescriptorUninitialized(isolate, trusted_data,
+                                                      type_index, map);
+}
+
 RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
   ClearThreadInWasmScope flag_scope(isolate);
   HandleScope scope(isolate);
@@ -1368,16 +1380,16 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
       isolate->roots_table().slot(RootIndex::kActiveSuspender);
   suspender->set_parent(
       Cast<UnionOf<Undefined, WasmSuspenderObject>>(*active_suspender_slot));
-  suspender->set_state(WasmSuspenderObject::kActive);
   suspender->set_continuation(*target);
   active_suspender_slot.store(*suspender);
 
   // Stack limit will be updated in WasmReturnPromiseOnSuspendAsm builtin.
-  wasm::JumpBuffer* jmpbuf = reinterpret_cast<wasm::JumpBuffer*>(
-      parent->ReadExternalPointerField<kWasmContinuationJmpbufTag>(
-          WasmContinuationObject::kJmpbufOffset, isolate));
-  DCHECK_EQ(jmpbuf->state, wasm::JumpBuffer::Active);
-  jmpbuf->state = wasm::JumpBuffer::Inactive;
+  wasm::StackMemory* stack = reinterpret_cast<wasm::StackMemory*>(
+      parent->ReadExternalPointerField<kWasmStackMemoryTag>(
+          WasmContinuationObject::kStackOffset, isolate));
+  DCHECK_EQ(stack->jmpbuf()->state, wasm::JumpBuffer::Active);
+  stack->jmpbuf()->state = wasm::JumpBuffer::Inactive;
+
   return *suspender;
 }
 
@@ -1398,7 +1410,8 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
       }                                                                        \
       return ReadOnlyRoots(isolate).exception();                               \
     }                                                                          \
-    DCHECK(!isolate->has_exception());                                         \
+    DCHECK(!isolate->has_exception() ||                                        \
+           IsTerminationException(isolate->exception()));                      \
     return *result;                                                            \
   } while (false)
 

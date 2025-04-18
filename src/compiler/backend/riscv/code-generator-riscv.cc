@@ -1018,14 +1018,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kArchSetStackPointer: {
       DCHECK(instr->InputAt(0)->IsRegister());
-#ifdef V8_TARGET_ARCH_RISCV64
       if (masm()->options().enable_simulator_code) {
         __ RecordComment("-- Set simulator stack limit --");
         __ LoadStackLimit(kSimulatorBreakArgument,
                           StackLimitKind::kRealStackLimit);
         __ break_(kExceptionIsSwitchStackLimit);
       }
-#endif
       __ Move(sp, i.InputRegister(0));
       break;
     }
@@ -1348,27 +1346,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kRiscvClz64:
       __ Clz64(i.OutputRegister(), i.InputOrZeroRegister(0));
       break;
-    case kRiscvCtz64: {
-      Register src = i.InputRegister(0);
-      Register dst = i.OutputRegister();
-      __ Ctz64(dst, src);
-    } break;
-    case kRiscvPopcnt64: {
-      Register src = i.InputRegister(0);
-      Register dst = i.OutputRegister();
-      __ Popcnt64(dst, src, kScratchReg);
-    } break;
 #endif
-    case kRiscvCtz32: {
-      Register src = i.InputRegister(0);
-      Register dst = i.OutputRegister();
-      __ Ctz32(dst, src);
-    } break;
-    case kRiscvPopcnt32: {
-      Register src = i.InputRegister(0);
-      Register dst = i.OutputRegister();
-      __ Popcnt32(dst, src, kScratchReg);
-    } break;
     case kRiscvShl32:
       if (instr->InputAt(1)->IsRegister()) {
         __ Sll32(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
@@ -2476,46 +2454,49 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 #if V8_TARGET_ARCH_RISCV64
     case kRiscvStoreCompressTagged: {
       MemOperand mem = i.MemoryOperand(1);
-      __ StoreTaggedField(i.InputOrZeroRegister(0), mem);
+      __ StoreTaggedField(i.InputOrZeroRegister(0), mem, trapper);
       break;
     }
     case kRiscvLoadDecompressTaggedSigned: {
       CHECK(instr->HasOutput());
       Register result = i.OutputRegister();
       MemOperand operand = i.MemoryOperand();
-      __ DecompressTaggedSigned(result, operand);
+      __ DecompressTaggedSigned(result, operand, trapper);
       break;
     }
     case kRiscvLoadDecompressTagged: {
       CHECK(instr->HasOutput());
       Register result = i.OutputRegister();
       MemOperand operand = i.MemoryOperand();
-      __ DecompressTagged(result, operand);
+      __ DecompressTagged(result, operand, trapper);
       break;
     }
-    case kRiscvLoadDecodeSandboxedPointer:
-      __ LoadSandboxedPointerField(i.OutputRegister(), i.MemoryOperand());
+    case kRiscvLoadDecodeSandboxedPointer: {
+      __ LoadSandboxedPointerField(i.OutputRegister(), i.MemoryOperand(),
+                                   trapper);
       break;
+    }
     case kRiscvStoreEncodeSandboxedPointer: {
       MemOperand mem = i.MemoryOperand(1);
-      __ StoreSandboxedPointerField(i.InputOrZeroRegister(0), mem);
+      __ StoreSandboxedPointerField(i.InputOrZeroRegister(0), mem, trapper);
       break;
     }
     case kRiscvStoreIndirectPointer: {
       MemOperand mem = i.MemoryOperand(1);
-      __ StoreIndirectPointerField(i.InputOrZeroRegister(0), mem);
+      __ StoreIndirectPointerField(i.InputOrZeroRegister(0), mem, trapper);
       break;
     }
     case kRiscvAtomicLoadDecompressTaggedSigned:
-      __ AtomicDecompressTaggedSigned(i.OutputRegister(), i.MemoryOperand());
+      __ AtomicDecompressTaggedSigned(i.OutputRegister(), i.MemoryOperand(),
+                                      trapper);
       break;
     case kRiscvAtomicLoadDecompressTagged:
-      __ AtomicDecompressTagged(i.OutputRegister(), i.MemoryOperand());
+      __ AtomicDecompressTagged(i.OutputRegister(), i.MemoryOperand(), trapper);
       break;
     case kRiscvAtomicStoreCompressTagged: {
       size_t index = 0;
       MemOperand mem = i.MemoryOperand(&index);
-      __ AtomicStoreTaggedField(i.InputOrZeroRegister(index), mem);
+      __ AtomicStoreTaggedField(i.InputOrZeroRegister(index), mem, trapper);
       break;
     }
     case kRiscvLoadDecompressProtected: {

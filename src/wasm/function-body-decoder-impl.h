@@ -215,6 +215,8 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
                                              WasmEnabledFeatures enabled) {
   auto [heap_index, length] =
       decoder->read_i33v<ValidationTag>(pc, "heap type");
+  Exactness exactness = Exactness::kAnySubtype;
+  uint32_t type_index;
   if (heap_index < 0) {
     int64_t min_1_byte_leb128 = -64;
     if (!VALIDATE(heap_index >= min_1_byte_leb128)) {
@@ -256,6 +258,7 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
               decoder, pc,
               "invalid heap type '%s', enable with --experimental-wasm-exnref",
               HeapType::from_code(code, is_shared).name().c_str());
+          return {kWasmBottom, 0};
         }
         return {HeapType::from_code(code, is_shared), length};
       case kStringRefCode:
@@ -268,6 +271,7 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
               "invalid heap type '%s', enable with "
               "--experimental-wasm-stringref",
               HeapType::from_code(code, is_shared).name().c_str());
+          return {kWasmBottom, 0};
         }
         return {HeapType::from_code(code, is_shared), length};
       case kNoContCode:
@@ -278,30 +282,45 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
               "invalid heap type '%s', enable with "
               "--experimental-wasm-wasmfx",
               HeapType::from_code(code, is_shared).name().c_str());
+          return {kWasmBottom, 0};
         }
         return {HeapType::from_code(code, is_shared), length};
+      case kExactCode: {
+        if (!VALIDATE(enabled.has_custom_descriptors())) {
+          DecodeError<ValidationTag>(decoder, pc,
+                                     "invalid heap type 'exact', enable with "
+                                     "--experimental-wasm-custom-descriptors");
+          return {kWasmBottom, 0};
+        }
+        auto [nested_index, index_length] =
+            decoder->read_u32v<ValidationTag>(pc + 1, "type index");
+        type_index = nested_index;
+        exactness = Exactness::kExact;
+        length += index_length;
+        break;
+      }
       default:
         DecodeError<ValidationTag>(decoder, pc, "Unknown heap type %" PRId64,
                                    heap_index);
         return {kWasmBottom, length};
     }
   } else {
-    uint32_t type_index = static_cast<uint32_t>(heap_index);
-    if (!VALIDATE(type_index < kV8MaxWasmTypes)) {
-      DecodeError<ValidationTag>(
-          decoder, pc,
-          "Type index %u is greater than the maximum number %zu "
-          "of type definitions supported by V8",
-          type_index, kV8MaxWasmTypes);
-      return {kWasmBottom, length};
-    }
-    // We don't have a module yet, so we can only fill in default values:
-    bool kDefaultShared = false;
-    RefTypeKind kDefaultKind = RefTypeKind::kOther;
-    return {HeapType::Index(ModuleTypeIndex{type_index}, kDefaultShared,
-                            kDefaultKind),
-            length};
+    type_index = static_cast<uint32_t>(heap_index);
   }
+  if (!VALIDATE(type_index < kV8MaxWasmTypes)) {
+    DecodeError<ValidationTag>(
+        decoder, pc,
+        "Type index %u is greater than the maximum number %zu "
+        "of type definitions supported by V8",
+        type_index, kV8MaxWasmTypes);
+    return {kWasmBottom, length};
+  }
+  // We don't have a module yet, so we can only fill in default values:
+  bool kDefaultShared = false;
+  RefTypeKind kDefaultKind = RefTypeKind::kOther;
+  return {HeapType::Index(ModuleTypeIndex{type_index}, kDefaultShared,
+                          kDefaultKind, exactness),
+          length};
 }
 
 // Read a value type starting at address {pc} using {decoder}.
@@ -356,6 +375,7 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
                            : ValueType::Ref(HeapType::from_code(code, false));
       return {type, 1};
     }
+    case kContRefCode:
     case kNoContCode:
       if (!VALIDATE(enabled.has_wasmfx())) {
         DecodeError<ValidationTag>(
@@ -364,16 +384,7 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
             HeapType::from_code(code, false).name().c_str());
         return {kWasmBottom, 0};
       }
-      return {kWasmNullContRef, 1};
-    case kContRefCode:
-      if (!VALIDATE(enabled.has_wasmfx())) {
-        DecodeError<ValidationTag>(
-            decoder, pc,
-            "invalid value type '%s', enable with --experimental-wasm-wasmfx",
-            HeapType::from_code(code, false).name().c_str());
-        return {kWasmBottom, 0};
-      }
-      return {kWasmContRef, 1};
+      return {code == kContRefCode ? kWasmContRef : kWasmNullContRef, 1};
     case kI32Code:
       return {kWasmI32, 1};
     case kI64Code:
@@ -415,6 +426,7 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
     case kI8Code:
     case kI16Code:
     case kF16Code:
+    case kExactCode:
       // Fall through to the error reporting below.
       break;
   }
@@ -1210,9 +1222,10 @@ struct ControlBase : public PcForErrors<ValidationTag::validate> {
     Value* result)                                                             \
   F(RefNull, ValueType type, Value* result)                                    \
   F(RefFunc, uint32_t function_index, Value* result)                           \
-  F(StructNew, const StructIndexImmediate& imm, const Value args[],            \
-    Value* result)                                                             \
-  F(StructNewDefault, const StructIndexImmediate& imm, Value* result)          \
+  F(StructNew, const StructIndexImmediate& imm, const Value& descriptor,       \
+    const Value args[], Value* result)                                         \
+  F(StructNewDefault, const StructIndexImmediate& imm,                         \
+    const Value& descriptor, Value* result)                                    \
   F(ArrayNew, const ArrayIndexImmediate& imm, const Value& length,             \
     const Value& initial_value, Value* result)                                 \
   F(ArrayNewDefault, const ArrayIndexImmediate& imm, const Value& length,      \
@@ -1335,19 +1348,20 @@ struct ControlBase : public PcForErrors<ValidationTag::validate> {
     const Value& length)                                                       \
   F(I31GetS, const Value& input, Value* result)                                \
   F(I31GetU, const Value& input, Value* result)                                \
-  F(RefTest, ModuleTypeIndex ref_index, const Value& obj, Value* result,       \
+  F(RefGetDesc, const Value& ref, Value* desc)                                 \
+  F(RefTest, HeapType target_type, const Value& obj, Value* result,            \
     bool null_succeeds)                                                        \
   F(RefTestAbstract, const Value& obj, HeapType type, Value* result,           \
     bool null_succeeds)                                                        \
-  F(RefCast, ModuleTypeIndex ref_index, const Value& obj, Value* result,       \
-    bool null_succeeds)                                                        \
+  F(RefCast, const Value& obj, Value* result)                                  \
+  F(RefCastDesc, const Value& obj, const Value& desc, Value* result)           \
   F(RefCastAbstract, const Value& obj, HeapType type, Value* result,           \
     bool null_succeeds)                                                        \
   F(AssertNullTypecheck, const Value& obj, Value* result)                      \
   F(AssertNotNullTypecheck, const Value& obj, Value* result)                   \
-  F(BrOnCast, ModuleTypeIndex ref_index, const Value& obj,                     \
-    Value* result_on_branch, uint32_t depth, bool null_succeeds)               \
-  F(BrOnCastFail, ModuleTypeIndex ref_index, const Value& obj,                 \
+  F(BrOnCast, HeapType target_type, const Value& obj, Value* result_on_branch, \
+    uint32_t depth, bool null_succeeds)                                        \
+  F(BrOnCastFail, HeapType target_type, const Value& obj,                      \
     Value* result_on_fallthrough, uint32_t depth, bool null_succeeds)          \
   F(BrOnCastAbstract, const Value& obj, HeapType type,                         \
     Value* result_on_branch, uint32_t depth, bool null_succeeds)               \
@@ -2377,6 +2391,20 @@ class WasmDecoder : public Decoder {
             return length;
         }
       }
+      case kAsmJsPrefix: {
+        uint32_t length;
+        std::tie(opcode, length) =
+            decoder->read_prefixed_opcode<ValidationTag>(pc);
+        switch (opcode) {
+          FOREACH_ASMJS_COMPAT_OPCODE(DECLARE_OPCODE_CASE)
+          return length;
+          default:
+            // This path is only possible if we are validating.
+            V8_ASSUME(ValidationTag::validate);
+            decoder->DecodeError(pc, "invalid opcode");
+            return length;
+        }
+      }
       case kSimdPrefix: {
         uint32_t length;
         std::tie(opcode, length) =
@@ -2454,7 +2482,8 @@ class WasmDecoder : public Decoder {
             decoder->read_prefixed_opcode<ValidationTag>(pc, "gc_index");
         switch (opcode) {
           case kExprStructNew:
-          case kExprStructNewDefault: {
+          case kExprStructNewDefault:
+          case kExprRefGetDesc: {
             StructIndexImmediate imm(decoder, pc + length, validate);
             (ios.TypeIndex(imm), ...);
             return length + imm.length;
@@ -2511,6 +2540,8 @@ class WasmDecoder : public Decoder {
           case kExprRefCast:
           case kExprRefCastNull:
           case kExprRefCastNop:
+          case kExprRefCastDesc:
+          case kExprRefCastDescNull:
           case kExprRefTest:
           case kExprRefTestNull: {
             HeapTypeImmediate imm(WasmEnabledFeatures::All(), decoder,
@@ -2519,7 +2550,9 @@ class WasmDecoder : public Decoder {
             return length + imm.length;
           }
           case kExprBrOnCast:
-          case kExprBrOnCastFail: {
+          case kExprBrOnCastFail:
+          case kExprBrOnCastDesc:
+          case kExprBrOnCastDescFail: {
             BrOnCastImmediate flags_imm(decoder, pc + length, validate);
             BranchDepthImmediate branch(decoder, pc + length + flags_imm.length,
                                         validate);
@@ -2537,8 +2570,14 @@ class WasmDecoder : public Decoder {
             // pretend that we have two ValueTypes; whereas the mjsunit
             // module builder format cares only about the encapsulated
             // HeapTypes (and the raw flags value, see callback above).
-            (ios.ValueType(source_imm, flags_imm.flags.src_is_null), ...);
-            (ios.ValueType(target_imm, flags_imm.flags.res_is_null), ...);
+            (ios.ValueType(ValueType::RefMaybeNull(
+                 source_imm.type,
+                 flags_imm.flags.src_is_null ? kNullable : kNonNullable)),
+             ...);
+            (ios.ValueType(ValueType::RefMaybeNull(
+                 target_imm.type,
+                 flags_imm.flags.res_is_null ? kNullable : kNonNullable)),
+             ...);
             return length + flags_imm.length + branch.length +
                    source_imm.length + target_imm.length;
           }
@@ -2611,10 +2650,6 @@ class WasmDecoder : public Decoder {
       }
 
         // clang-format off
-      /********** Asmjs opcodes **********/
-      FOREACH_ASMJS_COMPAT_OPCODE(DECLARE_OPCODE_CASE)
-        return 1;
-
       // Prefixed opcodes (already handled, included here for completeness of
       // switch)
       FOREACH_SIMD_OPCODE(DECLARE_OPCODE_CASE)
@@ -2622,8 +2657,9 @@ class WasmDecoder : public Decoder {
       FOREACH_ATOMIC_OPCODE(DECLARE_OPCODE_CASE)
       FOREACH_ATOMIC_0_OPERAND_OPCODE(DECLARE_OPCODE_CASE)
       FOREACH_GC_OPCODE(DECLARE_OPCODE_CASE)
+      FOREACH_ASMJS_COMPAT_OPCODE(DECLARE_OPCODE_CASE)
         UNREACHABLE();
-        // clang-format on
+      // clang-format on
 #undef DECLARE_OPCODE_CASE
     }
     // Invalid modules will reach this point.
@@ -3206,6 +3242,10 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
                              : WasmDetectedFeature::legacy_eh);
     TagIndexImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
+    if (imm.tag->sig->return_count() != 0) {
+      this->DecodeError("tag signature %u has non-void return", imm.index);
+      return 0;
+    }
     PoppedArgVector args = PopArgs(imm.tag->ToFunctionSig());
     CALL_INTERFACE_IF_OK_AND_REACHABLE(Throw, imm, args.data());
     MarkMightThrow();
@@ -3245,6 +3285,13 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     current_code_reachable_and_ok_ = VALIDATE(this->ok()) && c->reachable();
     RollbackLocalsInitialization(c);
     const WasmTagSig* sig = imm.tag->sig;
+
+    // tags can have return values, so we have to check.
+    if (sig->return_count() != 0) {
+      this->DecodeError("tag signature %u has non-void return", imm.index);
+      return 0;
+    }
+
     stack_.EnsureMoreCapacity(static_cast<int>(sig->parameter_count()),
                               this->zone_);
     for (ValueType type : sig->parameters()) Push(type);
@@ -3344,9 +3391,17 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         this->DecodeError("invalid catch kind in try table");
         return 0;
       }
-      if ((catch_case.kind == kCatch || catch_case.kind == kCatchRef) &&
-          !this->Validate(this->pc_, catch_case.maybe_tag.tag_imm)) {
-        return 0;
+      if ((catch_case.kind == kCatch || catch_case.kind == kCatchRef)) {
+        if (!this->Validate(this->pc_, catch_case.maybe_tag.tag_imm)) {
+          return 0;
+        }
+        const WasmTagSig* sig = catch_case.maybe_tag.tag_imm.tag->sig;
+        if (sig->return_count() != 0) {
+          // tags can have return values, so we have to check.
+          this->DecodeError("tag signature %u has non-void return",
+                            catch_case.maybe_tag.tag_imm.index);
+          return 0;
+        }
       }
       catch_case.br_imm.depth += 1;
       if (!this->Validate(this->pc_, catch_case.br_imm, control_.size())) {
@@ -4113,6 +4168,14 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     return DecodeNumericOpcode(full_opcode, opcode_length);
   }
 
+  DECODE(AsmJs) {
+    auto [full_opcode, opcode_length] =
+        this->template read_prefixed_opcode<ValidationTag>(this->pc_,
+                                                           "asmjs index");
+    trace_msg->AppendOpcode(full_opcode);
+    return DecodeAsmJsOpcode(full_opcode, opcode_length);
+  }
+
   DECODE(Simd) {
     this->detected_->add_simd();
     if (!CheckHardwareSupportsSimd()) {
@@ -4167,22 +4230,16 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   FOREACH_SIMPLE_PROTOTYPE_OPCODE(SIMPLE_PROTOTYPE_CASE)
 #undef SIMPLE_PROTOTYPE_CASE
 
-  DECODE(UnknownOrAsmJs) {
-    // Deal with special asmjs opcodes.
-    if (!VALIDATE(is_asmjs_module(this->module_))) {
-      this->DecodeError("Invalid opcode 0x%x", opcode);
-      return 0;
-    }
-    const FunctionSig* sig = WasmOpcodes::AsmjsSignature(opcode);
-    DCHECK_NOT_NULL(sig);
-    return BuildSimpleOperator(opcode, sig);
-  }
-
 #undef DECODE
 
   static int NonConstError(WasmFullDecoder* decoder, WasmOpcode opcode) {
     decoder->DecodeError("opcode %s is not allowed in constant expressions",
                          WasmOpcodes::OpcodeName(opcode));
+    return 0;
+  }
+
+  static int UnknownOpcodeError(WasmFullDecoder* decoder, WasmOpcode opcode) {
+    decoder->DecodeError("Invalid opcode 0x%x", opcode);
     return 0;
   }
 
@@ -4270,13 +4327,14 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     DECODE_IMPL(CallRef);
     DECODE_IMPL(ReturnCallRef);
     DECODE_IMPL2(kNumericPrefix, Numeric);
+    DECODE_IMPL2(kAsmJsPrefix, AsmJs);
     DECODE_IMPL_CONST2(kSimdPrefix, Simd);
     DECODE_IMPL2(kAtomicPrefix, Atomic);
     DECODE_IMPL_CONST2(kGCPrefix, GC);
 #define SIMPLE_PROTOTYPE_CASE(name, ...) DECODE_IMPL(name);
     FOREACH_SIMPLE_PROTOTYPE_OPCODE(SIMPLE_PROTOTYPE_CASE)
 #undef SIMPLE_PROTOTYPE_CASE
-    return &WasmFullDecoder::DecodeUnknownOrAsmJs;
+    return &WasmFullDecoder::UnknownOpcodeError;
   }
 
 #undef DECODE_IMPL
@@ -4833,6 +4891,15 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     return 0;                                                             \
   }
 
+  Value PopDescriptor(ModuleTypeIndex described_index) {
+    const TypeDefinition& type = this->module_->type(described_index);
+    if (!type.has_descriptor()) return Value{nullptr, kWasmVoid};
+    DCHECK(this->enabled_.has_custom_descriptors());
+    ValueType desc_type =
+        ValueType::RefNull(this->module_->heap_type(type.descriptor)).AsExact();
+    return Pop(desc_type);
+  }
+
   int DecodeGCOpcode(WasmOpcode opcode, uint32_t opcode_length) {
     // Bigger GC opcodes are handled via {DecodeStringRefOpcode}, so we can
     // assume here that opcodes are within [0xfb00, 0xfbff].
@@ -4842,9 +4909,12 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       case kExprStructNew: {
         StructIndexImmediate imm(this, this->pc_ + opcode_length, validate);
         if (!this->Validate(this->pc_ + opcode_length, imm)) return 0;
+        Value descriptor = PopDescriptor(imm.index);
         PoppedArgVector args = PopArgs(imm.struct_type);
-        Value* value = Push(ValueType::Ref(imm.heap_type()));
-        CALL_INTERFACE_IF_OK_AND_REACHABLE(StructNew, imm, args.data(), value);
+        Value* value =
+            Push(ValueType::Ref(imm.heap_type()).AsExactIfProposalEnabled());
+        CALL_INTERFACE_IF_OK_AND_REACHABLE(StructNew, imm, descriptor,
+                                           args.data(), value);
         return opcode_length + imm.length;
       }
       case kExprStructNewDefault: {
@@ -4862,8 +4932,11 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
             }
           }
         }
-        Value* value = Push(ValueType::Ref(imm.heap_type()));
-        CALL_INTERFACE_IF_OK_AND_REACHABLE(StructNewDefault, imm, value);
+        Value descriptor = PopDescriptor(imm.index);
+        Value* value =
+            Push(ValueType::Ref(imm.heap_type()).AsExactIfProposalEnabled());
+        CALL_INTERFACE_IF_OK_AND_REACHABLE(StructNewDefault, imm, descriptor,
+                                           value);
         return opcode_length + imm.length;
       }
       case kExprStructGet: {
@@ -5254,6 +5327,75 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         CALL_INTERFACE_IF_OK_AND_REACHABLE(I31GetU, i31, value);
         return opcode_length;
       }
+      case kExprRefGetDesc: {
+        NON_CONST_ONLY
+        CHECK_PROTOTYPE_OPCODE(custom_descriptors);
+        // We may need to generalize this to any TypeIndex in the future, but
+        // for now only structs can have descriptors.
+        StructIndexImmediate imm(this, this->pc_ + opcode_length, validate);
+        if (!this->Validate(this->pc_ + opcode_length, imm)) return 0;
+        const TypeDefinition& type = this->module_->type(imm.index);
+        if (!VALIDATE(type.has_descriptor())) {
+          this->DecodeError(
+              this->pc_ + opcode_length,
+              "Invalid type for ref.get_desc: type %s has no custom descriptor",
+              imm.heap_type().name().c_str());
+          return 0;
+        }
+        Value ref = Pop(ValueType::RefNull(imm.heap_type()));
+        Value* desc =
+            Push(ValueType::Ref(this->module_->heap_type(type.descriptor))
+                     .AsExact(ref.type.exactness()));
+        CALL_INTERFACE_IF_OK_AND_REACHABLE(RefGetDesc, ref, desc);
+        return opcode_length + imm.length;
+      }
+      case kExprRefCastDesc:
+      case kExprRefCastDescNull: {
+        NON_CONST_ONLY
+        CHECK_PROTOTYPE_OPCODE(custom_descriptors);
+        HeapTypeImmediate imm(this->enabled_, this, this->pc_ + opcode_length,
+                              validate);
+        if (!this->Validate(this->pc_ + opcode_length, imm)) return 0;
+        if (!VALIDATE(imm.type.has_index())) {
+          this->DecodeError(
+              this->pc_ + opcode_length,
+              "ref.cast_desc: immediate type must have an index, but was %s",
+              imm.type.name().c_str());
+          return 0;
+        }
+        ModuleTypeIndex expected_desc_index =
+            this->module_->type(imm.type.ref_index()).descriptor;
+        if (!VALIDATE(expected_desc_index.valid())) {
+          this->DecodeError(
+              this->pc_ + opcode_length,
+              "ref.cast_desc: immediate type %s must have a descriptor",
+              imm.type.name().c_str());
+          return 0;
+        }
+        ValueType expected_desc_type =
+            ValueType::RefNull(this->module_->heap_type(expected_desc_index))
+                .AsExact(imm.type.exactness());
+        Value desc = Pop(expected_desc_type);
+        // We will have to generalize the object's expected type to "top type of
+        // imm.type" if/when values outside the anyref hierarchy can have custom
+        // descriptors. This DCHECK should point that out when the time comes:
+        DCHECK_EQ(imm.type.ref_type_kind(), RefTypeKind::kStruct);
+        ValueType expected_obj_type = ValueType::Generic(
+            GenericKind::kAny, kNullable, imm.type.is_shared());
+        Value obj = Pop(expected_obj_type);
+
+        bool null_succeeds = (opcode == kExprRefCastDescNull);
+        ValueType target_type = ValueType::RefMaybeNull(
+            imm.type, null_succeeds ? kNullable : kNonNullable);
+        Value* value = Push(target_type);
+
+        // TODO(403372470): Do we need to special-case casts that always fail
+        // or always succeed?
+
+        CALL_INTERFACE_IF_OK_AND_REACHABLE(RefCastDesc, obj, desc, value);
+
+        return opcode_length + imm.length;
+      }
       case kExprRefCast:
       case kExprRefCastNull: {
         NON_CONST_ONLY
@@ -5318,8 +5460,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
             }
           } else {
             if (target_type.is_index()) {
-              CALL_INTERFACE(RefCast, target_type.ref_index(), obj, value,
-                             null_succeeds);
+              CALL_INTERFACE(RefCast, obj, value);
             } else {
               CALL_INTERFACE(RefCastAbstract, obj, target_type, value,
                              null_succeeds);
@@ -5385,8 +5526,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
             CALL_INTERFACE(I32Const, result, 0);
           } else {
             if (imm.type.is_index()) {
-              CALL_INTERFACE(RefTest, imm.type.ref_index(), obj, result,
-                             null_succeeds);
+              CALL_INTERFACE(RefTest, imm.type, obj, result, null_succeeds);
             } else {
               CALL_INTERFACE(RefTestAbstract, obj, target_type, result,
                              null_succeeds);
@@ -5398,7 +5538,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       case kExprRefCastNop: {
         NON_CONST_ONLY
         // Temporary non-standard instruction, for performance experiments.
-        if (!VALIDATE(this->enabled_.has_ref_cast_nop())) {
+        if (!VALIDATE(v8_flags.experimental_wasm_ref_cast_nop)) {
           this->DecodeError(
               "Invalid opcode 0xfb4c (enable with "
               "--experimental-wasm-ref-cast-nop)");
@@ -5429,10 +5569,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       case kExprBrOnCast:
       case kExprBrOnCastFail: {
         NON_CONST_ONLY
-        uint32_t pc_offset = opcode_length;
-        BrOnCastImmediate flags_imm(this, this->pc_ + pc_offset, validate);
-        pc_offset += flags_imm.length;
-        return ParseBrOnCast(opcode, pc_offset, flags_imm.flags);
+        return ParseBrOnCast(opcode, opcode_length);
       }
       case kExprAnyConvertExtern: {
         Value extern_val = Pop(kWasmExternRef);
@@ -5460,17 +5597,16 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
 
   enum class WasmArrayAccess { kRead, kWrite };
 
-  int ParseBrOnCast(WasmOpcode opcode, uint32_t opcode_length,
-                    BrOnCastFlags flags) {
-    BranchDepthImmediate branch_depth(this, this->pc_ + opcode_length,
-                                      validate);
-    if (!this->Validate(this->pc_ + opcode_length, branch_depth,
-                        control_.size())) {
+  int ParseBrOnCast(WasmOpcode opcode, uint32_t pc_offset) {
+    BrOnCastImmediate flags_imm(this, this->pc_ + pc_offset, validate);
+    pc_offset += flags_imm.length;
+    BrOnCastFlags flags = flags_imm.flags;
+
+    BranchDepthImmediate branch_depth(this, this->pc_ + pc_offset, validate);
+    if (!this->Validate(this->pc_ + pc_offset, branch_depth, control_.size())) {
       return 0;
     }
-    uint32_t pc_offset = opcode_length + branch_depth.length;
-
-    Value obj = Pop();
+    pc_offset += branch_depth.length;
 
     HeapTypeImmediate src_imm(this->enabled_, this, this->pc_ + pc_offset,
                               validate);
@@ -5478,11 +5614,10 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     pc_offset += src_imm.length;
     ValueType src_type = ValueType::RefMaybeNull(
         src_imm.type, flags.src_is_null ? kNullable : kNonNullable);
-    ValidateStackValue(0, obj, src_type);
 
-    HeapTypeImmediate target_imm(this->enabled_, this, this->pc_ + pc_offset,
-                                 validate);
-    if (!this->Validate(this->pc_ + pc_offset, target_imm)) return 0;
+    const uint8_t* target_imm_pc = this->pc_ + pc_offset;
+    HeapTypeImmediate target_imm(this->enabled_, this, target_imm_pc, validate);
+    if (!this->Validate(target_imm_pc, target_imm)) return 0;
     pc_offset += target_imm.length;
     bool null_succeeds = flags.res_is_null;
     ValueType target_type = ValueType::RefMaybeNull(
@@ -5494,6 +5629,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
                         target_type.name().c_str(), src_type.name().c_str());
       return 0;
     }
+
+    Value obj = Pop(src_type);
 
     if (!VALIDATE(
             (obj.type.is_object_reference() &&
@@ -5544,8 +5681,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         } else if (V8_LIKELY(!TypeCheckAlwaysFails(obj, target_type.heap_type(),
                                                    null_succeeds))) {
           if (target_imm.type.is_index()) {
-            CALL_INTERFACE(BrOnCast, target_imm.type.ref_index(), obj,
-                           value_on_branch, branch_depth.depth, null_succeeds);
+            CALL_INTERFACE(BrOnCast, target_imm.type, obj, value_on_branch,
+                           branch_depth.depth, null_succeeds);
           } else {
             CALL_INTERFACE(BrOnCastAbstract, obj, target_type.heap_type(),
                            value_on_branch, branch_depth.depth, null_succeeds);
@@ -5610,7 +5747,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
           }
         } else {
           if (target_imm.type.is_index()) {
-            CALL_INTERFACE(BrOnCastFail, target_imm.type.ref_index(), obj,
+            CALL_INTERFACE(BrOnCastFail, target_imm.type, obj,
                            &result_on_fallthrough, branch_depth.depth,
                            null_succeeds);
           } else {
@@ -6184,6 +6321,32 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         this->DecodeError("invalid numeric opcode: 0x%x", opcode);
         return 0;
     }
+  }
+
+  unsigned DecodeAsmJsOpcode(WasmOpcode opcode, uint32_t opcode_length) {
+    if ((opcode >> 8) != kAsmJsPrefix) {
+      this->DecodeError("Invalid opcode: 0x%x", opcode);
+      return 0;
+    }
+
+    switch (opcode) {
+#define ASMJS_CASE(Op, ...) case kExpr##Op:
+      FOREACH_ASMJS_COMPAT_OPCODE(ASMJS_CASE)
+#undef ASMJS_CASE
+      {
+        // Deal with special asmjs opcodes.
+        if (!VALIDATE(is_asmjs_module(this->module_)))
+          break;
+        const FunctionSig* asmJsSig = WasmOpcodes::AsmjsSignature(opcode);
+        DCHECK_NOT_NULL(asmJsSig);
+        BuildSimpleOperator(opcode, asmJsSig);
+        return opcode_length;
+      }
+      default:
+        break;
+    }
+    this->DecodeError("Invalid opcode: 0x%x", opcode);
+    return 0;
   }
 
   V8_INLINE Value CreateValue(ValueType type) { return Value{this->pc_, type}; }

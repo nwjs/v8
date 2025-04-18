@@ -1756,7 +1756,12 @@ Maybe<bool> Object::LessThanOrEqual(Isolate* isolate, DirectHandle<Object> x,
 MaybeHandle<Object> Object::GetPropertyOrElement(Isolate* isolate,
                                                  DirectHandle<JSAny> object,
                                                  DirectHandle<Name> name) {
-  PropertyKey key(isolate, name);
+  return GetPropertyOrElement(isolate, object, PropertyKey(isolate, name));
+}
+
+MaybeHandle<Object> Object::GetPropertyOrElement(Isolate* isolate,
+                                                 DirectHandle<JSAny> object,
+                                                 PropertyKey key) {
   LookupIterator it(isolate, object, key);
   return GetProperty(&it);
 }
@@ -1765,19 +1770,17 @@ MaybeDirectHandle<Object> Object::SetPropertyOrElement(
     Isolate* isolate, DirectHandle<JSAny> object, DirectHandle<Name> name,
     DirectHandle<Object> value, Maybe<ShouldThrow> should_throw,
     StoreOrigin store_origin) {
-  PropertyKey key(isolate, name);
+  return SetPropertyOrElement(isolate, object, PropertyKey(isolate, name),
+                              value, should_throw, store_origin);
+}
+
+MaybeDirectHandle<Object> Object::SetPropertyOrElement(
+    Isolate* isolate, DirectHandle<JSAny> object, PropertyKey key,
+    DirectHandle<Object> value, Maybe<ShouldThrow> should_throw,
+    StoreOrigin store_origin) {
   LookupIterator it(isolate, object, key);
   MAYBE_RETURN_NULL(SetProperty(&it, value, store_origin, should_throw));
   return value;
-}
-
-MaybeDirectHandle<Object> Object::GetPropertyOrElement(
-    DirectHandle<JSAny> receiver, DirectHandle<Name> name,
-    DirectHandle<JSReceiver> holder) {
-  Isolate* isolate = holder->GetIsolate();
-  PropertyKey key(isolate, name);
-  LookupIterator it(isolate, receiver, key, holder);
-  return GetProperty(&it);
 }
 
 // static
@@ -1819,6 +1822,10 @@ Tagged<Object> Object::GetSimpleHash(Tagged<Object> object) {
   } else if (InstanceTypeChecker::IsScript(instance_type)) {
     int id = Cast<Script>(object)->id();
     return Smi::FromInt(ComputeUnseededHash(id) & Smi::kMaxValue);
+  } else if (InstanceTypeChecker::IsTemplateInfo(instance_type)) {
+    uint32_t hash = Cast<TemplateInfo>(object)->GetHash();
+    DCHECK_EQ(hash, hash & Smi::kMaxValue);
+    return Smi::FromInt(hash);
   }
 
   DCHECK(!InstanceTypeChecker::IsHole(instance_type));

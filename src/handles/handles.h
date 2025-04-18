@@ -96,10 +96,13 @@ class HandleBase {
 #ifdef V8_ENABLE_DIRECT_HANDLE
   friend class DirectHandleBase;
 
-  static Address* indirect_handle(Address object);
-  static Address* indirect_handle(Address object, Isolate* isolate);
-  static Address* indirect_handle(Address object, LocalIsolate* isolate);
-  static Address* indirect_handle(Address object, LocalHeap* local_heap);
+  V8_EXPORT_PRIVATE static Address* indirect_handle(Address object);
+  V8_EXPORT_PRIVATE static Address* indirect_handle(Address object,
+                                                    Isolate* isolate);
+  V8_EXPORT_PRIVATE static Address* indirect_handle(Address object,
+                                                    LocalIsolate* isolate);
+  V8_EXPORT_PRIVATE static Address* indirect_handle(Address object,
+                                                    LocalHeap* local_heap);
 
   template <typename T>
   friend IndirectHandle<T> indirect_handle(DirectHandle<T> handle);
@@ -649,10 +652,7 @@ IndirectHandle<T> indirect_handle(DirectHandle<T> handle,
 template <typename T>
 class V8_TRIVIAL_ABI DirectHandle :
 #ifdef ENABLE_SLOW_DCHECKS
-    // TODO(42203211): Setting this to true enables the check for
-    // stack-allocated "fake" direct handles disabled in non-CSS builds.
-    // Consider enabling it, if it is not too expensive even as a SLOW_DCHECK.
-    public api_internal::StackAllocated<false>
+    public api_internal::StackAllocated<true>
 #else
     public api_internal::StackAllocated<false>
 #endif
@@ -1107,9 +1107,9 @@ class DirectHandleSmallVector {
   }
 
   void erase(iterator erase_start) { backing_.erase(erase_start.base()); }
-  void resize_no_init(size_t new_size) { backing_.resize_no_init(new_size); }
-  void resize_and_init(size_t new_size, const_reference initial_value = {}) {
-    backing_.resize_and_init(new_size, initial_value);
+  void resize(size_t new_size) { backing_.resize(new_size); }
+  void resize(size_t new_size, const_reference initial_value) {
+    backing_.resize(new_size, initial_value);
   }
 
   void reserve(size_t n) { backing_.reserve(n); }
@@ -1135,7 +1135,6 @@ struct is_direct_handle<DirectHandle<T>> : public std::true_type {};
 
 }  // namespace internal
 
-#ifdef V8_ENABLE_DIRECT_HANDLE
 #if defined(ENABLE_SLOW_DCHECKS) && V8_HAS_ATTRIBUTE_TRIVIAL_ABI
 // In this configuration, DirectHandle is not trivially copyable (i.e., it is
 // not an instance of `std::is_trivially_copyable`), because the copy
@@ -1147,16 +1146,7 @@ namespace base {
 template <typename T>
 struct is_trivially_copyable<::v8::internal::DirectHandle<T>>
     : public std::true_type {};
-
-// Similarly for trivially destructible. By forcing instances of
-// `v8::base::is_trivially_destructible` for DirectHandleUnchecked<T>, we allow
-// the construction of the v8::base::SmallVector backing store in
-// DirectHandleSmallVector.
-template <typename T>
-struct is_trivially_destructible<::v8::internal::DirectHandleUnchecked<T>>
-    : public std::true_type {};
 }  // namespace base
-#endif
 #endif
 
 }  // namespace v8

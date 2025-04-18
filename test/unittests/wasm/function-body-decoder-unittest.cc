@@ -133,8 +133,8 @@ class TestModuleBuilder {
 
   HeapType AddStruct(std::initializer_list<F> fields,
                      ModuleTypeIndex supertype = kNoSuperType) {
-    StructType::Builder type_builder(&mod.signature_zone,
-                                     static_cast<uint32_t>(fields.size()));
+    StructType::Builder type_builder(
+        &mod.signature_zone, static_cast<uint32_t>(fields.size()), false);
     for (F field : fields) {
       type_builder.AddField(field.first, field.second);
     }
@@ -3055,6 +3055,22 @@ TEST_F(FunctionBodyDecoderTest, TryTable) {
                  ex, U32V_1(0), kExprEnd, kExprUnreachable, kExprEnd},
                 kAppendEnd,
                 "catch kind generates 1 operand, target block expects 0");
+}
+
+TEST_F(FunctionBodyDecoderTest, BadTryTable) {
+  WASM_FEATURE_SCOPE(exnref);
+  WASM_FEATURE_SCOPE(wasmfx);
+  uint8_t ex = builder.AddException(sigs.v_v());
+  uint8_t bd = builder.AddException(sigs.i_i());
+  ExpectValidates(sigs.v_v(),
+                  {WASM_TRY_TABLE_OP, U32V_1(1), CatchKind::kCatch, ex,
+                   U32V_1(0), kExprEnd},
+                  kAppendEnd);
+  // Using a handler tag for the exception tag
+  ExpectFailure(sigs.v_v(),
+                {WASM_TRY_TABLE_OP, U32V_1(1), CatchKind::kCatch, bd, U32V_1(0),
+                 kExprEnd},
+                kAppendEnd, "tag signature 1 has non-void return");
 }
 
 TEST_F(FunctionBodyDecoderTest, MultiValBlock1) {

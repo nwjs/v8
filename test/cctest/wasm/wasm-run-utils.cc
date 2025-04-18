@@ -61,6 +61,13 @@ TestingModuleBuilder::TestingModuleBuilder(
       isolate_(isolate ? isolate : CcTest::InitIsolateOnce()),
       enabled_features_(WasmEnabledFeatures::FromIsolate(isolate_)),
       execution_tier_(tier) {
+  // In this test setup, the NativeModule gets allocated before functions get
+  // added. The tiering budget array, which gets allocated in the NativeModule
+  // constructor, therefore does not have slots for functions that get added
+  // later. By disabling dynamic tiering, the tiering budget does not get
+  // accessed by generated code.
+  v8_flags.wasm_dynamic_tiering = false;
+
   WasmJs::Install(isolate_);
   test_module_->untagged_globals_buffer_size = kMaxGlobalsSize;
   // The GlobalsData must be located inside the sandbox, so allocate it from the
@@ -431,23 +438,20 @@ const WasmGlobal* TestingModuleBuilder::AddGlobal(ValueType type) {
 }
 
 DirectHandle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
-  // In this test setup, the NativeModule gets allocated before functions get
-  // added. The tiering budget array, which gets allocated in the NativeModule
-  // constructor, therefore does not have slots for functions that get added
-  // later. By disabling dynamic tiering, the tiering budget does not get
-  // accessed by generated code.
-  FlagScope<bool> no_dynamic_tiering(&v8_flags.wasm_dynamic_tiering, false);
-  const bool kUsesLiftoff = true;
   // Compute the estimate based on {kMaxFunctions} because we might still add
   // functions later. Assume 1k of code per function.
   int estimated_code_section_length = kMaxFunctions * 1024;
+  // Pretend to have `kMaxFunctions` already when allocating the `NativeModule`.
+  DCHECK_EQ(0, test_module_->num_declared_functions);
+  test_module_->num_declared_functions = kMaxFunctions;
   size_t code_size_estimate =
       wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
-          kMaxFunctions, 0, estimated_code_section_length, kUsesLiftoff,
-          DynamicTiering{v8_flags.wasm_dynamic_tiering.value()});
+          kMaxFunctions, estimated_code_section_length);
   auto native_module = GetWasmEngine()->NewNativeModule(
       isolate_, enabled_features_, WasmDetectedFeatures{}, CompileTimeImports{},
       test_module_, code_size_estimate);
+  // Reset the declared functions; functions will be added later in the test.
+  test_module_->num_declared_functions = 0;
   native_module->SetWireBytes(base::OwnedVector<const uint8_t>());
   native_module->compilation_state()->set_compilation_id(0);
   constexpr base::Vector<const char> kNoSourceUrl{"", 0};
@@ -462,7 +466,6 @@ DirectHandle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
   DirectHandle<WasmModuleObject> module_object =
       WasmModuleObject::New(isolate_, std::move(native_module), script);
   native_module_ = module_object->native_module();
-  native_module_->ReserveCodeTableForTesting(kMaxFunctions);
 
   DirectHandle<WasmTrustedInstanceData> trusted_data =
       WasmTrustedInstanceData::New(isolate_, module_object, false);

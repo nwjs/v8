@@ -85,6 +85,7 @@
 #include "src/heap/new-spaces.h"
 #include "src/heap/object-lock.h"
 #include "src/heap/object-stats.h"
+#include "src/heap/page-pool.h"
 #include "src/heap/paged-spaces-inl.h"
 #include "src/heap/parked-scope.h"
 #include "src/heap/pretenuring-handler.h"
@@ -360,12 +361,6 @@ size_t Heap::CommittedOldGenerationMemory() {
   }
   return total + lo_space_->Size() + code_lo_space_->Size() +
          trusted_lo_space_->Size();
-}
-
-size_t Heap::CommittedMemoryOfPool() {
-  if (!HasBeenSetUp()) return 0;
-
-  return memory_allocator()->pool()->CommittedBufferedMemory();
 }
 
 size_t Heap::CommittedMemory() {
@@ -661,9 +656,9 @@ void Heap::PrintShortHeapStatistics() {
                (this->SizeOfObjects() + ro_space->Size()) / KB,
                (this->Available()) / KB, sweeping_in_progress() ? "*" : "",
                (this->CommittedMemory() + ro_space->CommittedMemory()) / KB);
+  const size_t chunks = memory_allocator()->GetPooledChunksCount();
   PrintIsolate(isolate_, "Pool buffering %zu chunks of committed: %6zu KB\n",
-               memory_allocator()->pool()->NumberOfCommittedChunks(),
-               CommittedMemoryOfPool() / KB);
+               chunks, (chunks * PageMetadata::kPageSize) / KB);
   PrintIsolate(isolate_, "External memory reported: %6" PRId64 " KB\n",
                external_memory() / KB);
   PrintIsolate(isolate_, "Backing store memory: %6" PRIu64 " KB\n",
@@ -1143,7 +1138,7 @@ void Heap::GarbageCollectionEpilogueInSafepoint(GarbageCollector collector) {
     }
     // Discard memory if the GC was requested to reduce memory.
     if (ShouldReduceMemory()) {
-      memory_allocator_->pool()->ReleasePooledChunks();
+      memory_allocator_->ReleasePooledChunksImmediately();
 #if V8_ENABLE_WEBASSEMBLY
       isolate_->stack_pool().ReleaseFinishedStacks();
 #endif
@@ -1552,6 +1547,8 @@ void Heap::SetOldGenerationAndGlobalAllocationLimit(
 }
 
 void Heap::ResetOldGenerationAndGlobalAllocationLimit() {
+  DCHECK_IMPLIES(initial_size_overwritten_, !configured_);
+
   SetOldGenerationAndGlobalAllocationLimit(
       initial_old_generation_size_,
       GlobalMemorySizeFromV8Size(initial_old_generation_size_));
@@ -1858,7 +1855,9 @@ class IdleTaskOnContextDispose : public CancelableIdleTask {
 int Heap::NotifyContextDisposed(bool has_dependent_context) {
   if (!has_dependent_context) {
     tracer()->ResetSurvivalEvents();
-    ResetOldGenerationAndGlobalAllocationLimit();
+    if (!initial_size_overwritten_) {
+      ResetOldGenerationAndGlobalAllocationLimit();
+    }
     if (memory_reducer_) {
       memory_reducer_->NotifyPossibleGarbage();
     }
@@ -1883,6 +1882,7 @@ void Heap::StartIncrementalMarking(GCFlags gc_flags,
   DCHECK(incremental_marking()->IsStopped());
   CHECK_IMPLIES(!v8_flags.allow_allocation_in_fast_api_call,
                 !isolate()->InFastCCall());
+  DCHECK_EQ(isolate(), Isolate::TryGetCurrent());
 
   if (v8_flags.separate_gc_phases && gc_callbacks_depth_ > 0) {
     // Do not start incremental marking while invoking GC callbacks.
@@ -2371,8 +2371,12 @@ void Heap::ResumeConcurrentThreadsInClients(
 
 bool Heap::CollectGarbageShared(LocalHeap* local_heap,
                                 GarbageCollectionReason gc_reason) {
-  CHECK(deserialization_complete());
   DCHECK(isolate()->has_shared_space());
+
+  if (V8_UNLIKELY(!deserialization_complete_)) {
+    CHECK(always_allocate());
+    FatalProcessOutOfMemory("GC during deserialization");
+  }
 
   Isolate* shared_space_isolate = isolate()->shared_space_isolate();
   return shared_space_isolate->heap()->CollectGarbageFromAnyThread(local_heap,
@@ -3848,7 +3852,8 @@ size_t ComputeReducedNewSpaceSize(NewSpace* new_space) {
       std::max(new_space->MinimumCapacity(), 2 * new_space->Size());
   size_t rounded_new_capacity =
       ::RoundUp(new_capacity, PageMetadata::kPageSize);
-  return rounded_new_capacity;
+  DCHECK_LE(new_space->TotalCapacity(), new_space->MaximumCapacity());
+  return std::min(new_space->TotalCapacity(), rounded_new_capacity);
 }
 }  // anonymous namespace
 
@@ -4857,7 +4862,7 @@ void Heap::IterateBuiltins(RootVisitor* v) {
 
 void Heap::IterateStackRoots(RootVisitor* v) { isolate_->Iterate(v); }
 
-void Heap::IterateConservativeStackRoots(RootVisitor* v,
+void Heap::IterateConservativeStackRoots(RootVisitor* root_visitor,
                                          IterateRootsMode roots_mode) {
 #ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
   if (!IsGCWithStack()) return;
@@ -4867,12 +4872,24 @@ void Heap::IterateConservativeStackRoots(RootVisitor* v,
                               ? isolate()->shared_space_isolate()
                               : isolate();
 
-  ConservativeStackVisitor stack_visitor(main_isolate, v);
-  if (IsGCWithMainThreadStack()) {
-    stack().IteratePointersUntilMarker(&stack_visitor);
-  }
-  stack().IterateBackgroundStacks(&stack_visitor);
+  ConservativeStackVisitor stack_visitor(main_isolate, root_visitor);
+  IterateConservativeStackRoots(&stack_visitor);
 #endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+}
+
+void Heap::IterateConservativeStackRoots(
+    ::heap::base::StackVisitor* stack_visitor) {
+  DCHECK(IsGCWithStack());
+
+  if (IsGCWithMainThreadStack()) {
+    stack().IteratePointersUntilMarker(stack_visitor);
+  }
+  stack().IterateBackgroundStacks(stack_visitor);
+}
+
+void Heap::IterateRootsForPrecisePinning(RootVisitor* visitor) {
+  IterateStackRoots(visitor);
+  isolate()->handle_scope_implementer()->Iterate(visitor);
 }
 
 // static
@@ -5384,6 +5401,11 @@ bool Heap::ShouldExpandYoungGenerationOnSlowAllocation(size_t allocation_size) {
   return false;
 }
 
+bool Heap::IsNewSpaceAllowedToGrowAboveTargetCapacity() const {
+  return always_allocate() || gc_state() == TEAR_DOWN ||
+         incremental_marking()->IsMarking();
+}
+
 Heap::HeapGrowingMode Heap::CurrentHeapGrowingMode() {
   if (ShouldReduceMemory() || v8_flags.stress_compaction) {
     return Heap::HeapGrowingMode::kMinimal;
@@ -5809,11 +5831,6 @@ void Heap::SetUpSpaces(LinearAllocationArea& new_allocation_info,
   space_[CODE_SPACE] = std::make_unique<CodeSpace>(this);
   code_space_ = static_cast<CodeSpace*>(space_[CODE_SPACE].get());
 
-  if (isolate()->is_shared_space_isolate()) {
-    space_[SHARED_SPACE] = std::make_unique<SharedSpace>(this);
-    shared_space_ = static_cast<SharedSpace*>(space_[SHARED_SPACE].get());
-  }
-
   space_[LO_SPACE] = std::make_unique<OldLargeObjectSpace>(this);
   lo_space_ = static_cast<OldLargeObjectSpace*>(space_[LO_SPACE].get());
 
@@ -5830,6 +5847,10 @@ void Heap::SetUpSpaces(LinearAllocationArea& new_allocation_info,
 
   if (isolate()->is_shared_space_isolate()) {
     DCHECK(!v8_flags.sticky_mark_bits);
+
+    space_[SHARED_SPACE] = std::make_unique<SharedSpace>(this);
+    shared_space_ = static_cast<SharedSpace*>(space_[SHARED_SPACE].get());
+
     space_[SHARED_LO_SPACE] = std::make_unique<SharedLargeObjectSpace>(this);
     shared_lo_space_ =
         static_cast<SharedLargeObjectSpace*>(space_[SHARED_LO_SPACE].get());
@@ -6045,11 +6066,8 @@ EmbedderRootsHandler* Heap::GetEmbedderRootsHandler() const {
 }
 
 void Heap::AttachCppHeap(v8::CppHeap* cpp_heap) {
-  // The API function should be a noop in case a CppHeap was passed on Isolate
-  // creation.
-  if (owning_cpp_heap_) {
-    return;
-  }
+  // Only a single CppHeap can be attached at a time.
+  CHECK(!owning_cpp_heap_);
 
   CHECK_IMPLIES(incremental_marking(), !incremental_marking()->IsMarking());
   CppHeap::From(cpp_heap)->AttachIsolate(isolate());
@@ -6227,6 +6245,7 @@ void Heap::TearDown() {
 
   read_only_space_ = nullptr;
 
+  memory_allocator()->pool()->ReleaseOnTearDown(isolate());
   memory_allocator()->TearDown();
 
   StrongRootsEntry* next = nullptr;
@@ -6343,12 +6362,13 @@ void Heap::AddRetainedMaps(DirectHandle<NativeContext> context,
                            GlobalHandleVector<Map> maps) {
   Handle<WeakArrayList> array(Cast<WeakArrayList>(context->retained_maps()),
                               isolate());
-  if (array->IsFull()) {
+  int new_maps_size = static_cast<int>(maps.size()) * kRetainMapEntrySize;
+  if (array->length() + new_maps_size > array->capacity()) {
     CompactRetainedMaps(*array);
   }
   int cur_length = array->length();
-  array = WeakArrayList::EnsureSpace(
-      isolate(), array, cur_length + static_cast<int>(maps.size()) * 2);
+  array =
+      WeakArrayList::EnsureSpace(isolate(), array, cur_length + new_maps_size);
   if (*array != context->retained_maps()) {
     context->set_retained_maps(*array);
   }
@@ -6366,7 +6386,7 @@ void Heap::AddRetainedMaps(DirectHandle<NativeContext> context,
       raw_array->Set(cur_length, MakeWeak(*map));
       raw_array->Set(cur_length + 1,
                      Smi::FromInt(v8_flags.retain_maps_for_n_gc));
-      cur_length += 2;
+      cur_length += kRetainMapEntrySize;
       raw_array->set_length(cur_length);
 
       map->set_is_in_retained_map_list(true);
@@ -6378,7 +6398,7 @@ void Heap::CompactRetainedMaps(Tagged<WeakArrayList> retained_maps) {
   int length = retained_maps->length();
   int new_length = 0;
   // This loop compacts the array by removing cleared weak cells.
-  for (int i = 0; i < length; i += 2) {
+  for (int i = 0; i < length; i += kRetainMapEntrySize) {
     Tagged<MaybeObject> maybe_object = retained_maps->Get(i);
     if (maybe_object.IsCleared()) {
       continue;
@@ -6392,7 +6412,7 @@ void Heap::CompactRetainedMaps(Tagged<WeakArrayList> retained_maps) {
       retained_maps->Set(new_length, maybe_object);
       retained_maps->Set(new_length + 1, age);
     }
-    new_length += 2;
+    new_length += kRetainMapEntrySize;
   }
   Tagged<HeapObject> undefined = ReadOnlyRoots(this).undefined_value();
   for (int i = new_length; i < length; i++) {

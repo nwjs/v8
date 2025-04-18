@@ -326,6 +326,13 @@ class WasmMemoryMapDescriptor
       Isolate* isolate,
       v8::WasmMemoryMapDescriptor::WasmFileDescriptor file_descriptor);
 
+  // Returns the number of bytes that got mapped into the WebAssembly.Memory.
+  V8_EXPORT_PRIVATE size_t MapDescriptor(DirectHandle<WasmMemoryObject> memory,
+                                         size_t offset);
+
+  // Returns `false` if an error occurred, otherwise `true`.
+  V8_EXPORT_PRIVATE bool UnmapDescriptor();
+
   class BodyDescriptor;
 
   TQ_OBJECT_CONSTRUCTORS(WasmMemoryMapDescriptor)
@@ -363,15 +370,53 @@ class WasmMemoryObject
 
   // Assign a new (grown) buffer to this memory, also updating the shortcut
   // fields of all instances that use this memory.
-  void SetNewBuffer(Tagged<JSArrayBuffer> new_buffer);
+  void SetNewBuffer(Isolate* isolate, Tagged<JSArrayBuffer> new_buffer);
+
+  // Updates all WebAssembly instances that use this Memory as a memory, after
+  // growing or refreshing the memory.
+  void UpdateInstances(Isolate* isolate);
+
+  // Fix up a resizable ArrayBuffer that exposes Wasm memory.
+  //
+  // Usually, an ArrayBuffer is setup from metadata on its BackingStore.
+  // However, ABs that are actually WebAssembly memories may have metadata that
+  // diverge from their BackingStore's.
+  //
+  // SABs' is_resizable_by_js may be true even when the BackingStore's
+  // equivalent field is false. This happens when there are both growable and
+  // non-growable SABs pointing to the same shared WebAssembly memory.
+  //
+  // AB and SABs' max_byte_length is the requested max passed to the
+  // WebAssembly.Memory constructor, while the BackingStore's max is an
+  // engine-determined heuristic that may be smaller.
+  //
+  // Both divergences are impossible for JS-created buffers.
+  void FixUpResizableArrayBuffer(Tagged<JSArrayBuffer> new_buffer);
+
+  // Detaches the existing buffer, makes a new buffer backed by
+  // new_backing_store, and update all the links.
+  static DirectHandle<JSArrayBuffer> RefreshBuffer(
+      Isolate* isolate, DirectHandle<WasmMemoryObject> memory,
+      std::shared_ptr<BackingStore> new_backing_store);
+
+  // Makes a new SharedArrayBuffer backed by the same backing store.
+  static DirectHandle<JSArrayBuffer> RefreshSharedBuffer(
+      Isolate* isolate, DirectHandle<WasmMemoryObject> memory,
+      ResizableFlag resizable_by_js);
 
   V8_EXPORT_PRIVATE static int32_t Grow(Isolate*,
                                         DirectHandle<WasmMemoryObject>,
                                         uint32_t pages);
 
-  // Returns the number of bytes that got mapped into the WebAssembly.Memory.
-  V8_EXPORT_PRIVATE size_t MapDescriptor(
-      DirectHandle<WasmMemoryMapDescriptor> descriptor, size_t offset);
+  // Makes the ArrayBuffer fixed-length. Assumes the current ArrayBuffer is
+  // resizable. Detaches the existing buffer if it is not shared.
+  static DirectHandle<JSArrayBuffer> ToFixedLengthBuffer(
+      Isolate* isolate, DirectHandle<WasmMemoryObject> memory);
+
+  // Makes the ArrayBuffer resizable by JS. Assumes the current ArrayBuffer is
+  // fixed-length. Detaches the existing buffer if it is not shared.
+  static DirectHandle<JSArrayBuffer> ToResizableBuffer(
+      Isolate* isolate, DirectHandle<WasmMemoryObject> memory);
 
   static constexpr int kNoMaximum = -1;
 
@@ -1387,10 +1432,14 @@ class WasmStruct : public TorqueGeneratedWasmStruct<WasmStruct, WasmObject> {
   // Returns the ObjectSlot for tagged value at given offset.
   inline ObjectSlot RawField(int raw_offset);
 
-  V8_EXPORT_PRIVATE wasm::WasmValue GetFieldValue(uint32_t field_index);
+  // Only for structs whose type describes another type.
+  static DirectHandle<WasmStruct> AllocateDescriptorUninitialized(
+      Isolate* isolate, DirectHandle<WasmTrustedInstanceData> trusted_data,
+      wasm::ModuleTypeIndex index, DirectHandle<Map> map);
+  inline Tagged<Map> get_described_rtt() const;
+  inline void set_described_rtt(Tagged<Map> rtt);
 
-  static inline void SetField(Isolate* isolate, DirectHandle<WasmStruct> obj,
-                              uint32_t field_index, DirectHandle<Object> value);
+  V8_EXPORT_PRIVATE wasm::WasmValue GetFieldValue(uint32_t field_index);
 
   DECL_PRINTER(WasmStruct)
 
@@ -1477,15 +1526,13 @@ class WasmContinuationObject
       wasm::JumpBuffer::StackState state, DirectHandle<HeapObject> parent,
       AllocationType allocation_type = AllocationType::kYoung);
 
-  DECL_EXTERNAL_POINTER_ACCESSORS(jmpbuf, Address)
   DECL_EXTERNAL_POINTER_ACCESSORS(stack, Address)
 
   DECL_PRINTER(WasmContinuationObject)
 
   using BodyDescriptor = StackedBodyDescriptor<
       FixedBodyDescriptorFor<WasmContinuationObject>,
-      WithExternalPointer<kStackOffset, kWasmStackMemoryTag>,
-      WithExternalPointer<kJmpbufOffset, kWasmContinuationJmpbufTag>>;
+      WithExternalPointer<kStackOffset, kWasmStackMemoryTag>>;
 
  private:
   TQ_OBJECT_CONSTRUCTORS(WasmContinuationObject)
@@ -1540,6 +1587,14 @@ class WasmNull : public TorqueGeneratedWasmNull<WasmNull, HeapObject> {
 };
 
 #undef DECL_OPTIONAL_ACCESSORS
+
+DirectHandle<Map> CreateStructMap(Isolate* isolate,
+                                  wasm::CanonicalTypeIndex type,
+                                  DirectHandle<Map> opt_rtt_parent);
+
+DirectHandle<Map> CreateArrayMap(Isolate* isolate,
+                                 wasm::CanonicalTypeIndex array_index,
+                                 DirectHandle<Map> opt_rtt_parent);
 
 DirectHandle<Map> CreateFuncRefMap(Isolate* isolate,
                                    wasm::CanonicalTypeIndex type,
