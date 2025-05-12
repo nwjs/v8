@@ -528,8 +528,6 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(WasmLoadSourceMapCallback, wasm_load_source_map_callback, nullptr)      \
   V(WasmImportedStringsEnabledCallback,                                     \
     wasm_imported_strings_enabled_callback, nullptr)                        \
-  V(JavaScriptCompileHintsMagicEnabledCallback,                             \
-    compile_hints_magic_enabled_callback, nullptr)                          \
   V(WasmJSPIEnabledCallback, wasm_jspi_enabled_callback, nullptr)           \
   V(IsJSApiWrapperNativeErrorCallback,                                      \
     is_js_api_wrapper_native_error_callback, nullptr)                       \
@@ -657,10 +655,16 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   static Isolate* New();
   static Isolate* New(IsolateGroup* isolate_group);
 
-  // Deletes Isolate object. Must be used instead of delete operator.
-  // Destroys the non-default isolates.
-  // Sets default isolate into "has_been_disposed" state rather then destroying,
-  // for legacy API reasons.
+  // Deinitialize Isolate object. Must be used instead of delete operator.
+  // Destroys the non-default isolates. Sets default isolate into
+  // "has_been_disposed" state rather then destroying, for legacy API reasons.
+  // Another Free() call must be done after the isolate is deinitialized.
+  // This gives the embedder a chance to clean up before the address is released
+  // (which maybe reused in the next allocation).
+  static void Deinitialize(Isolate* isolate);
+  // Frees the address of the isolate. Must be called after Deinitialize().
+  static void Free(Isolate* isolate);
+  // A convenience helper that deinitializes and frees the isolate.
   static void Delete(Isolate* isolate);
 
   void SetUpFromReadOnlyArtifacts(ReadOnlyArtifacts* artifacts);
@@ -2332,17 +2336,15 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return wasm_stacks_;
   }
 
-  // Sets the new stack limit, updates the central stack info and checks the
-  // validity of the switch.
-  void SwitchStacks(Tagged<WasmContinuationObject> source_continuation,
-                    Tagged<WasmContinuationObject> target_continuation);
+  // Updates the stack limit, parent pointer and central stack info.
+  void SwitchStacks(wasm::StackMemory* from, wasm::StackMemory* to);
 
   // Retires the stack owned by {continuation}, to be called when returning or
   // throwing from this continuation.
   // This updates the {StackMemory} state, removes it from the global
   // {wasm_stacks_} vector and nulls the EPT entry. This does not update the
   // {ActiveContinuation} root or the stack limit.
-  void RetireWasmStack(Tagged<WasmContinuationObject> continuation);
+  void RetireWasmStack(wasm::StackMemory* stack);
 #else
   bool IsOnCentralStack() { return true; }
 #endif
@@ -2351,6 +2353,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // allocated variables per ScopeInfo for debug-evaluate.
   // We also store a strong reference to the outer ScopeInfo to keep all
   // blocklists along a scope chain alive.
+  void LocalsBlockListCacheRehash();
   void LocalsBlockListCacheSet(DirectHandle<ScopeInfo> scope_info,
                                DirectHandle<ScopeInfo> outer_scope_info,
                                DirectHandle<StringSet> locals_blocklist);

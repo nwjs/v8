@@ -874,10 +874,25 @@ class V8_EXPORT Isolate {
   void Exit();
 
   /**
-   * Disposes the isolate.  The isolate must not be entered by any
+   * Deinitializes and frees the isolate. The isolate must not be entered by any
    * thread to be disposable.
    */
   void Dispose();
+
+  /**
+   * Deinitializes the isolate, but does not free the address. The isolate must
+   * not be entered by any thread to be deinitializable. Embedders must call
+   * Isolate::Free() to free the isolate afterwards.
+   */
+  void Deinitialize();
+
+  /**
+   * Frees the memory allocated for the isolate. Can only be called after the
+   * Isolate has already been deinitialized with Isolate::Deinitialize(). After
+   * the isolate is freed, the next call to Isolate::New() or
+   * Isolate::Allocate() might return the same address that just get freed.
+   */
+  static void Free(Isolate* isolate);
 
   /**
    * Dumps activated low-level V8 internal stats. This can be used instead
@@ -1675,16 +1690,6 @@ class V8_EXPORT Isolate {
   void SetWasmJSPIEnabledCallback(WasmJSPIEnabledCallback callback);
 
   /**
-   * Register callback to control whether compile hints magic comments are
-   * enabled.
-   */
-  V8_DEPRECATED(
-      "Will be removed, use ScriptCompiler::CompileOptions for enabling the "
-      "compile hints magic comments")
-  void SetJavaScriptCompileHintsMagicEnabledCallback(
-      JavaScriptCompileHintsMagicEnabledCallback callback);
-
-  /**
    * This function can be called by the embedder to signal V8 that the dynamic
    * enabling of features has finished. V8 can now set up dynamically added
    * features.
@@ -1706,7 +1711,7 @@ class V8_EXPORT Isolate {
    * If data is specified, it will be passed to the callback when it is called.
    * Otherwise, the exception object will be passed to the callback instead.
    */
-  bool AddMessageListener(MessageCallback that,
+  bool AddMessageListener(MessageCallback callback,
                           Local<Value> data = Local<Value>());
 
   /**
@@ -1720,14 +1725,14 @@ class V8_EXPORT Isolate {
    *
    * A listener can listen for particular error levels by providing a mask.
    */
-  bool AddMessageListenerWithErrorLevel(MessageCallback that,
+  bool AddMessageListenerWithErrorLevel(MessageCallback callback,
                                         int message_levels,
                                         Local<Value> data = Local<Value>());
 
   /**
    * Remove all message listeners from the specified callback function.
    */
-  void RemoveMessageListeners(MessageCallback that);
+  void RemoveMessageListeners(MessageCallback callback);
 
   /** Callback function for reporting failed access checks.*/
   void SetFailedAccessCheckCallbackFunction(FailedAccessCheckCallback);
@@ -1797,6 +1802,21 @@ class V8_EXPORT Isolate {
    * Otherwise returns an empty string.
    */
   std::string GetDefaultLocale();
+
+  /**
+   * Returns a canonical and case-regularized form of locale if Intl support is
+   * enabled. If the locale is not syntactically well-formed, throws a
+   * RangeError.
+   *
+   * If Intl support is not enabled, returns Nothing<std::string>().
+   *
+   * Corresponds to the combination of the abstract operations
+   * IsStructurallyValidLanguageTag and CanonicalizeUnicodeLocaleId. See:
+   * https://tc39.es/ecma402/#sec-isstructurallyvalidlanguagetag
+   * https://tc39.es/ecma402/#sec-canonicalizeunicodelocaleid
+   */
+  V8_WARN_UNUSED_RESULT Maybe<std::string>
+  ValidateAndCanonicalizeUnicodeLocaleId(std::string_view locale);
 
   /**
    * Returns the hash seed for that isolate, for testing purposes.
