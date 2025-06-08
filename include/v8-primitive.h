@@ -654,11 +654,10 @@ class V8_EXPORT String : public Name {
   bool StringEquals(Local<String> str) const;
 
   /**
-   * Converts an object to a UTF-8-encoded character array.  Useful if
-   * you want to print the object.  If conversion to a string fails
-   * (e.g. due to an exception in the toString() method of the object)
-   * then the length() method returns 0 and the * operator returns
-   * NULL.
+   * Converts an object to a null-terminated UTF-8-encoded character array.
+   * Useful if you want to print the object.  If conversion to a string fails
+   * (e.g. due to an exception in the toString() method of the object) then the
+   * length() method returns 0 and the * operator returns NULL.
    *
    * WARNING: This will unconditionally copy the contents of the JavaScript
    * string, and should be avoided in situations where performance is a concern.
@@ -668,8 +667,7 @@ class V8_EXPORT String : public Name {
    public:
    V8_DEPRECATED("Use Isolate version")
                   explicit Utf8Value(Local<v8::Value> obj);
-    Utf8Value(Isolate* isolate, Local<v8::Value> obj,
-              WriteOptions options = REPLACE_INVALID_UTF8);
+    Utf8Value(Isolate* isolate, Local<v8::Value> obj);
     ~Utf8Value();
     char* operator*() { return str_; }
     const char* operator*() const { return str_; }
@@ -1016,7 +1014,7 @@ String::ExternalStringResource* String::GetExternalStringResource() const {
 
   ExternalStringResource* result;
   if (I::IsExternalTwoByteString(I::GetInstanceType(obj))) {
-    Isolate* isolate = I::GetIsolateForSandbox(obj);
+    Isolate* isolate = I::GetCurrentIsolateForSandbox();
     A value = I::ReadExternalPointerField<internal::kExternalStringResourceTag>(
         isolate, obj, I::kStringResourceOffset);
     result = reinterpret_cast<String::ExternalStringResource*>(value);
@@ -1061,7 +1059,7 @@ String::ExternalStringResourceBase* String::GetExternalStringResourceBase(
   ExternalStringResourceBase* resource;
   if (type == I::kExternalOneByteRepresentationTag ||
       type == I::kExternalTwoByteRepresentationTag) {
-    Isolate* isolate = I::GetIsolateForSandbox(obj);
+    Isolate* isolate = I::GetCurrentIsolateForSandbox();
     A value = I::ReadExternalPointerField<internal::kExternalStringResourceTag>(
         isolate, obj, I::kStringResourceOffset);
     resource = reinterpret_cast<ExternalStringResourceBase*>(value);
