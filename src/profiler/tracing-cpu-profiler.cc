@@ -80,9 +80,11 @@ void TracingCpuProfilerImpl::OnTraceDisabled() {
   // It could be a long time until the Isolate next runs any JS which could be
   // interrupted, and we'd rather not leave the sampler thread running during
   // that time, so also post a task to run any interrupts.
+  std::shared_ptr<v8::TaskRunner> task_runner =
   V8::GetCurrentPlatform()
-      ->GetForegroundTaskRunner(reinterpret_cast<v8::Isolate*>(isolate_))
-      ->PostTask(std::make_unique<RunInterruptsTask>(isolate_));
+      ->GetForegroundTaskRunner(reinterpret_cast<v8::Isolate*>(isolate_));
+  if (task_runner) //NWJS#8266
+      task_runner->PostTask(std::make_unique<RunInterruptsTask>(isolate_));
 }
 
 void TracingCpuProfilerImpl::StartProfiling() {
