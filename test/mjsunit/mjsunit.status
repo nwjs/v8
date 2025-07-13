@@ -38,6 +38,7 @@
   'wasm/gc-js-interop-helpers': [SKIP],
   'wasm/gc-js-interop-export': [SKIP],
   'wasm/wasm-module-builder': [SKIP],
+  'sandbox/wasm-jspi': [SKIP],
   'compiler/fast-api-helpers': [SKIP],
   'typedarray-helpers': [SKIP],
 
@@ -71,6 +72,9 @@
   'wasm/shared-memory-worker-explicit-gc-stress': [PASS, SLOW],
   'wasm/shared-memory-worker-gc': [PASS, SLOW],
   'wasm/shared-memory-worker-gc-stress': [PASS, SLOW],
+
+  # Requires throwing exception due to stack overflow.
+  'maglev/regress-421228426': [PASS, SLOW, ['mode == debug', SKIP]],
 
   # https://crbug.com/1129854
   'tools/log': ['arch == arm or arch == arm64', SKIP],
@@ -138,6 +142,7 @@
 
   # Slow tests.
   'array-functions-prototype-misc': [PASS, SLOW],
+  'array-tostring-stack-overflow': [PASS, SLOW, ['arch != x64', SKIP]],
   'asm/embenchen/*': [PASS, SLOW, NO_VARIANTS],
   'asm/poppler/*': [PASS, SLOW, NO_VARIANTS],
   'compiler/deopt-pretenure': [PASS, SLOW],
@@ -255,6 +260,9 @@
   # TODO(thibaudm): Register allocation struggles with the function in this
   # test, which has the maximum allowed number of parameters.
   'regress/regress-crbug-724153': [SLOW],
+
+  # BUG(https://crbug.com/420932895): Very slow in many configurations.
+  'random-bit-correlations': [PASS, ['mode == debug or simulator_run', SKIP]],
 }],  # ALWAYS
 
 ################################################################################
@@ -438,6 +446,7 @@
   'json': [PASS, SLOW],
   'regress/asm/regress-775710': [PASS, SLOW],
   'regress/regress-crbug-820312': [PASS, SLOW],
+  'regress/regress-904275': [PASS, SLOW],
   'wasm/wasm-interpreter': [PASS, SLOW],
 
   # BUG(v8:7880): Slow tests.
@@ -608,6 +617,7 @@
   'regress/wasm/regress-336214779': [SKIP],
   'regress/wasm/regress-372261626': [SKIP],
   'regress/wasm/regress-377620832': [SKIP],
+  'regress/wasm/regress-410295354': [SKIP],
   'wasm/exnref*': [SKIP],
   'wasm/gc-casts-exnref': [SKIP],
   'wasm/gc-casts-invalid': [SKIP],
@@ -1515,6 +1525,9 @@
   'regress/regress-748069': [SKIP],
   'regress/regress-779407': [SKIP],
   'regress/regress-852258': [SKIP],
+  # Segfault, probably due to an uncaught stack overflow.
+  # See chromium:419744840.
+  'regress/regress-408820921': [SKIP],
 }],  # 'system == android'
 
 ##############################################################################
@@ -1578,6 +1591,11 @@
   'harmony/atomics-waitasync-1thread-wake-up-simple': [SKIP],
   'harmony/atomics-waitasync-worker-shutdown-before-wait-finished-timeout': [SKIP],
   'harmony/atomics-waitasync-worker-shutdown-before-wait-finished-no-timeout': [SKIP],
+
+  # Code coverage tests are not supported in multiple isolates because the
+  # counters are shared across isolates.
+  'wasm/wasm-code-coverage': [SKIP],
+
 }],  # 'isolates'
 
 ##############################################################################
@@ -1840,7 +1858,10 @@
   'd8/flush-denormals-flag': [SKIP],
   'd8/flush-denormals-helper': [SKIP],
   'd8/flush-denormals-worker': [SKIP],
-  'wasm/denormals': [SKIP]
+  'wasm/denormals': [SKIP],
+
+  # Wasm code coverage is not supported yet.
+  'wasm/wasm-code-coverage': [SKIP],
 }],  # arch in [ppc64, s390x]'
 
 ##############################################################################
@@ -2282,6 +2303,12 @@
 }],  # variant == maglev
 
 ##############################################################################
+['variant != default', {
+  # BUG(https://crbug.com/420932895): Very slow in many configurations.
+  'random-bit-correlations': [SKIP],
+}],  # variant != default
+
+##############################################################################
 ['no_simd_hardware == True', {
   'wasm/deopt/deopt-many-params-many-locals-s128': [SKIP],
   'wasm/deopt/deopt-non-inlined-target': [SKIP],
@@ -2639,6 +2666,7 @@
   'compiler/fast-api-attributes': [FAIL],
   'compiler/fast-api-calls': [FAIL],
   'compiler/fast-api-calls-8args': [FAIL],
+  'compiler/fast-api-calls-nested': [FAIL],
   'compiler/fast-api-calls-string': [FAIL],
   'compiler/fast-api-calls-pointer': [FAIL],
   'compiler/fast-api-calls-64-bit-integer-values': [FAIL],
@@ -2826,6 +2854,11 @@
   'regress/regress-678917': [SKIP],
   'maglev/regress-1407606': [SKIP],
 }],  # variant == conservative_stack_scanning
+
+##############################################################################
+['variant == code_serializer', {
+  'compiler/fast-api-calls-nested': [SKIP],
+}],  # variant == code_serializer
 
 ##############################################################################
 ['variant in [jit_fuzzing, jit_fuzzing_maglev]', {

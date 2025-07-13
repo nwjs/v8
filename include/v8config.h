@@ -85,6 +85,7 @@ path. Add it with -I<path> to the command line
 //  V8_OS_DARWIN        - Darwin (macOS, iOS)
 //  V8_OS_MACOS         - macOS
 //  V8_OS_IOS           - iOS
+//  V8_OS_TVOS          - tvOS (also sets V8_OS_IOS)
 //  V8_OS_NETBSD        - NetBSD
 //  V8_OS_OPENBSD       - OpenBSD
 //  V8_OS_POSIX         - POSIX compatible (mostly everything except Windows)
@@ -108,6 +109,9 @@ path. Add it with -I<path> to the command line
 # if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 #  define V8_OS_IOS 1
 #  define V8_OS_STRING "ios"
+#  if defined(TARGET_OS_TV) && TARGET_OS_TV
+#   define V8_OS_TVOS 1
+#  endif
 # else
 #  define V8_OS_MACOS 1
 #  define V8_OS_STRING "macos"
@@ -187,6 +191,7 @@ path. Add it with -I<path> to the command line
 //  V8_TARGET_OS_ANDROID
 //  V8_TARGET_OS_FUCHSIA
 //  V8_TARGET_OS_IOS
+//  V8_TARGET_OS_TVOS (also sets V8_TARGET_OS_IOS)
 //  V8_TARGET_OS_LINUX
 //  V8_TARGET_OS_MACOS
 //  V8_TARGET_OS_WIN
@@ -200,6 +205,7 @@ path. Add it with -I<path> to the command line
 # if !defined(V8_TARGET_OS_ANDROID) \
   && !defined(V8_TARGET_OS_FUCHSIA) \
   && !defined(V8_TARGET_OS_IOS) \
+  && !defined(V8_TARGET_OS_TVOS) \
   && !defined(V8_TARGET_OS_LINUX) \
   && !defined(V8_TARGET_OS_MACOS) \
   && !defined(V8_TARGET_OS_WIN) \
@@ -212,6 +218,7 @@ path. Add it with -I<path> to the command line
 # if defined(V8_TARGET_OS_ANDROID) \
   || defined(V8_TARGET_OS_FUCHSIA) \
   || defined(V8_TARGET_OS_IOS) \
+  || defined(V8_TARGET_OS_TVOS) \
   || defined(V8_TARGET_OS_LINUX) \
   || defined(V8_TARGET_OS_MACOS) \
   || defined(V8_TARGET_OS_WIN) \
@@ -230,6 +237,10 @@ path. Add it with -I<path> to the command line
 
 #ifdef V8_OS_IOS
 # define V8_TARGET_OS_IOS
+#endif
+
+#ifdef V8_OS_TVOS
+# define V8_TARGET_OS_TVOS
 #endif
 
 #ifdef V8_OS_LINUX
@@ -794,7 +805,8 @@ V8 shared library set USING_V8_SHARED.
 #else  // V8_OS_WIN
 
 // Setup for Linux shared library export.
-#if V8_HAS_ATTRIBUTE_VISIBILITY && (defined(BUILDING_V8_SHARED) || USING_V8_SHARED)
+#if (V8_HAS_ATTRIBUTE_VISIBILITY && \
+     (defined(BUILDING_V8_SHARED) || USING_V8_SHARED))
 # define V8_EXPORT __attribute__((visibility("default")))
 #else
 # define V8_EXPORT
@@ -942,8 +954,10 @@ V8 shared library set USING_V8_SHARED.
 #if (V8_TARGET_ARCH_MIPS64 && !(V8_HOST_ARCH_X64 || V8_HOST_ARCH_MIPS64))
 #error Target architecture mips64 is only supported on mips64 and x64 host
 #endif
-#if (V8_TARGET_ARCH_RISCV64 && !(V8_HOST_ARCH_X64 || V8_HOST_ARCH_RISCV64))
-#error Target architecture riscv64 is only supported on riscv64 and x64 host
+#if (V8_TARGET_ARCH_RISCV64 && \
+     !(V8_HOST_ARCH_X64 || V8_HOST_ARCH_ARM64 || V8_HOST_ARCH_RISCV64))
+#error Target architecture riscv64 is only supported on riscv64, x64, and \
+arm64 host
 #endif
 #if (V8_TARGET_ARCH_RISCV32 && !(V8_HOST_ARCH_IA32 || V8_HOST_ARCH_RISCV32))
 #error Target architecture riscv32 is only supported on riscv32 and ia32 host

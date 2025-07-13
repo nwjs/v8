@@ -16,6 +16,7 @@
 #include <set>
 #include <sstream>
 
+#include "src/base/fpu.h"
 #include "src/base/hashing.h"
 #include "src/base/lazy-instance.h"
 #include "src/base/platform/platform.h"
@@ -450,6 +451,9 @@ uint32_t ComputeFlagListHash() {
   std::ostringstream modified_args_as_string;
   if (COMPRESS_POINTERS_BOOL) modified_args_as_string << "ptr-compr";
   if (DEBUG_BOOL) modified_args_as_string << "debug";
+  if (base::FPU::GetFlushDenormals()) {
+    modified_args_as_string << "flush-denormals";
+  }
 
 #ifdef DEBUG
   // These two sets are used to check that we don't leave out any flags
@@ -1144,6 +1148,12 @@ void FlagList::ResolveContradictionsWhenFuzzing() {
       // List of flags that shouldn't be used when --fuzzing or
       // --correctness-fuzzer-suppressions is passed. These flags will be reset
       // to their defaults.
+
+      // https://crbug.com/419424082
+      RESET_WHEN_CORRECTNESS_FUZZING(default_to_experimental_regexp_engine),
+      RESET_WHEN_CORRECTNESS_FUZZING(enable_experimental_regexp_engine),
+      RESET_WHEN_CORRECTNESS_FUZZING(
+          experimental_regexp_engine_capture_group_opt),
 
       // https://crbug.com/369652671
       RESET_WHEN_CORRECTNESS_FUZZING(stress_lazy_compilation),
