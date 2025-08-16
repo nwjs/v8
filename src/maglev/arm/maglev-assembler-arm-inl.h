@@ -216,9 +216,9 @@ inline void MaglevAssembler::BindBlock(BasicBlock* block) {
   bind(block->label());
 }
 
-inline void MaglevAssembler::SmiTagInt32AndSetFlags(Register dst,
-                                                    Register src) {
+inline Condition MaglevAssembler::TrySmiTagInt32(Register dst, Register src) {
   add(dst, src, src, SetCC);
+  return kNoOverflow;
 }
 
 inline void MaglevAssembler::CheckInt32IsSmi(Register obj, Label* fail,
@@ -995,10 +995,6 @@ void MaglevAssembler::JumpIfHoleNan(DoubleRegister value, Register scratch,
                masm->VmovHigh(scratch, value);
                masm->CompareInt32AndJumpIf(scratch, kHoleNanUpper32, kEqual,
                                            *is_hole);
-#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
-               masm->CompareInt32AndJumpIf(scratch, kUndefinedNanUpper32,
-                                           kEqual, *is_hole);
-#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
                masm->Jump(*is_not_hole);
              },
              value, scratch, is_hole, is_not_hole));

@@ -61,6 +61,11 @@ void PrintDouble(std::ostream& os, double val) {
     // 9007199254740991.0 instead of 9.0072e+15
     int64_t i = static_cast<int64_t>(val);
     os << i << ".0";
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  } else if (std::isnan(val)) {
+    os << val << " (0x" << std::hex << base::double_to_uint64(val) << std::dec
+       << ")";
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
   } else {
     os << val;
   }
@@ -197,12 +202,10 @@ void PrintDictionaryContents(std::ostream& os, Tagged<T> dict) {
   DisallowGarbageCollection no_gc;
   ReadOnlyRoots roots = GetReadOnlyRoots();
 
-  if (dict->Capacity() == 0) {
-    return;
-  }
+  if (dict->Capacity() == 0) return;
 
 #ifdef V8_ENABLE_SWISS_NAME_DICTIONARY
-  Isolate* isolate = GetIsolateFromWritableObject(dict);
+  Isolate* isolate = Isolate::Current();
   // IterateEntries for SwissNameDictionary needs to create a handle.
   HandleScope scope(isolate);
 #endif
@@ -629,6 +632,23 @@ void PrintTypedArrayElements(std::ostream& os, const ElementType* data_ptr,
     if (previous_index != i - 1) {
       ss << '-' << (i - 1);
     }
+#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+    if constexpr (std::is_floating_point_v<ElementType>) {
+      if (std::isnan(previous_value)) {
+        os << std::setw(12) << ss.str() << ": " << +previous_value << " (0x"
+           << std::hex;
+        if constexpr (std::is_same_v<ElementType, float>) {
+          os << base::bit_cast<uint32_t>(previous_value);
+        } else {
+          os << base::bit_cast<uint64_t>(previous_value);
+        }
+        os << std::dec << ")";
+        previous_index = i;
+        previous_value = value;
+        continue;
+      }
+    }
+#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
     os << std::setw(12) << ss.str() << ": " << +previous_value;
     previous_index = i;
     previous_value = value;
@@ -1696,8 +1716,7 @@ void FeedbackCell::FeedbackCellPrint(std::ostream& os) {
         TryCast(value(), &fbv) && fbv->tiering_in_progress()) {
       os << "in_progress ";
     }
-    jdt->PrintCurrentTieringRequest(dispatch_handle(),
-                                    GetIsolateFromWritableObject(*this), os);
+    jdt->PrintCurrentTieringRequest(dispatch_handle(), Isolate::Current(), os);
   }
 
 #endif  // V8_ENABLE_LEAPTIERING
@@ -1748,7 +1767,8 @@ void FeedbackMetadata::FeedbackMetadataPrint(std::ostream& os) {
   os << "\n - slot_count: " << slot_count();
   os << "\n - create_closure_slot_count: " << create_closure_slot_count();
 
-  FeedbackMetadataIterator iter(*this);
+  DisallowGarbageCollection no_gc;
+  FeedbackMetadataIterator iter(*this, no_gc);
   while (iter.HasNext()) {
     FeedbackSlot slot = iter.Next();
     FeedbackSlotKind kind = iter.kind();
@@ -1792,7 +1812,8 @@ void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
   os << "\n - closure feedback cell array: ";
   closure_feedback_cell_array()->ClosureFeedbackCellArrayPrint(os);
 
-  FeedbackMetadataIterator iter(metadata());
+  DisallowGarbageCollection no_gc;
+  FeedbackMetadataIterator iter(metadata(), no_gc);
   while (iter.HasNext()) {
     FeedbackSlot slot = iter.Next();
     FeedbackSlotKind kind = iter.kind();
@@ -2167,24 +2188,18 @@ void JSFinalizationRegistry::JSFinalizationRegistryPrint(std::ostream& os) {
 
 void JSSharedArray::JSSharedArrayPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSSharedArray");
-  Isolate* isolate = GetIsolateFromWritableObject(*this);
-  os << "\n - isolate: " << isolate;
   if (HeapLayout::InWritableSharedSpace(*this)) os << " (shared)";
   JSObjectPrintBody(os, *this);
 }
 
 void JSSharedStruct::JSSharedStructPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSSharedStruct");
-  Isolate* isolate = GetIsolateFromWritableObject(*this);
-  os << "\n - isolate: " << isolate;
   if (HeapLayout::InWritableSharedSpace(*this)) os << " (shared)";
   JSObjectPrintBody(os, *this);
 }
 
 void JSAtomicsMutex::JSAtomicsMutexPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSAtomicsMutex");
-  Isolate* isolate = GetIsolateFromWritableObject(*this);
-  os << "\n - isolate: " << isolate;
   if (HeapLayout::InWritableSharedSpace(*this)) os << " (shared)";
   os << "\n - state: " << this->state();
   os << "\n - owner_thread_id: " << this->owner_thread_id();
@@ -2193,8 +2208,6 @@ void JSAtomicsMutex::JSAtomicsMutexPrint(std::ostream& os) {
 
 void JSAtomicsCondition::JSAtomicsConditionPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSAtomicsCondition");
-  Isolate* isolate = GetIsolateFromWritableObject(*this);
-  os << "\n - isolate: " << isolate;
   if (HeapLayout::InWritableSharedSpace(*this)) os << " (shared)";
   os << "\n - state: " << this->state();
   JSObjectPrintBody(os, *this);
@@ -2294,7 +2307,7 @@ void JSWeakSet::JSWeakSetPrint(std::ostream& os) {
 void JSArrayBuffer::JSArrayBufferPrint(std::ostream& os) {
   JSAPIObjectWithEmbedderSlotsPrintHeader(os, *this, "JSArrayBuffer");
   os << "\n - backing_store: " << backing_store();
-  os << "\n - byte_length: " << byte_length();
+  os << "\n - byte_length: " << GetByteLength();
   os << "\n - max_byte_length: " << max_byte_length();
   os << "\n - detach key: " << detach_key();
   if (is_external()) os << "\n - external";
@@ -2546,6 +2559,13 @@ void SharedFunctionInfoWrapper::SharedFunctionInfoWrapperPrint(
     std::ostream& os) {
   PrintHeader(os, "SharedFunctionInfoWrapper");
   os << "\n    sfi: " << Brief(shared_info());
+}
+
+void InterpreterData::InterpreterDataPrint(std::ostream& os) {
+  PrintHeader(os, "InterpreterData");
+  os << "\n - bytecode_array: " << Brief(bytecode_array());
+  os << "\n - interpreter_trampoline: " << Brief(interpreter_trampoline());
+  os << "\n";
 }
 
 void JSGlobalProxy::JSGlobalProxyPrint(std::ostream& os) {
@@ -3074,11 +3094,12 @@ void WasmImportData::WasmImportDataPrint(std::ostream& os) {
 
 void WasmInternalFunction::WasmInternalFunctionPrint(std::ostream& os) {
   PrintHeader(os, "WasmInternalFunction");
-  os << "\n - call target: "
-     << wasm::GetProcessWideWasmCodePointerTable()
-            ->GetEntrypointWithoutSignatureCheck(call_target());
   os << "\n - implicit arg: " << Brief(implicit_arg());
   os << "\n - external: " << Brief(external());
+  os << "\n - function_index: " << function_index();
+  os << "\n - call target: [" << call_target().value() << "] -> "
+     << AsHex::Address(wasm::GetProcessWideWasmCodePointerTable()
+                           ->GetEntrypointWithoutSignatureCheck(call_target()));
   os << "\n";
 }
 
@@ -3111,7 +3132,7 @@ void WasmDescriptorOptions::WasmDescriptorOptionsPrint(std::ostream& os) {
 
 void WasmModuleObject::WasmModuleObjectPrint(std::ostream& os) {
   PrintHeader(os, "WasmModuleObject");
-  os << "\n - module: " << module();
+  os << "\n - module: " << native_module()->module();
   os << "\n - native module: " << native_module();
   os << "\n - script: " << Brief(script());
   os << "\n";
@@ -3519,15 +3540,55 @@ void PreparseData::PreparseDataPrint(std::ostream& os) {
   os << "\n - data_length: " << data_length();
   os << "\n - children_length: " << children_length();
   if (data_length() > 0) {
-    os << "\n - data-start: " << (address() + kDataStartOffset);
+    os << "\n - data-start: " << reinterpret_cast<Address>(data());
   }
   if (children_length() > 0) {
-    os << "\n - children-start: " << inner_start_offset();
+    os << "\n - children-start: " << reinterpret_cast<Address>(children());
   }
   for (int i = 0; i < children_length(); ++i) {
     os << "\n - [" << i << "]: " << Brief(get_child(i));
   }
   os << "\n";
+}
+
+void UncompiledDataWithoutPreparseData::UncompiledDataWithoutPreparseDataPrint(
+    std::ostream& os) {
+  PrintHeader(os, "UncompiledDataWithoutPreparseData");
+  os << "\n - inferred_name: " << Brief(inferred_name());
+  os << "\n - start_position: " << start_position();
+  os << "\n - end_position: " << end_position();
+  os << '\n';
+}
+
+void UncompiledDataWithPreparseData::UncompiledDataWithPreparseDataPrint(
+    std::ostream& os) {
+  PrintHeader(os, "UncompiledDataWithPreparseData");
+  os << "\n - inferred_name: " << Brief(inferred_name());
+  os << "\n - start_position: " << start_position();
+  os << "\n - end_position: " << end_position();
+  os << "\n - preparse_data: " << Brief(preparse_data());
+  os << '\n';
+}
+
+void UncompiledDataWithoutPreparseDataWithJob::
+    UncompiledDataWithoutPreparseDataWithJobPrint(std::ostream& os) {
+  PrintHeader(os, "UncompiledDataWithoutPreparseDataWithJob");
+  os << "\n - inferred_name: " << Brief(inferred_name());
+  os << "\n - start_position: " << start_position();
+  os << "\n - end_position: " << end_position();
+  os << "\n - job: " << job();
+  os << '\n';
+}
+
+void UncompiledDataWithPreparseDataAndJob::
+    UncompiledDataWithPreparseDataAndJobPrint(std::ostream& os) {
+  PrintHeader(os, "UncompiledDataWithPreparseDataAndJob");
+  os << "\n - inferred_name: " << Brief(inferred_name());
+  os << "\n - start_position: " << start_position();
+  os << "\n - end_position: " << end_position();
+  os << "\n - preparse_data: " << Brief(preparse_data());
+  os << "\n - job: " << job();
+  os << '\n';
 }
 
 void HeapNumber::HeapNumberPrint(std::ostream& os) {
@@ -4068,7 +4129,7 @@ void Map::MapPrint(std::ostream& os) {
   if (!HeapLayout::InReadOnlySpace(*this)) {
     Isolate* isolate = HeapLayout::InWritableSharedSpace(*this)
                            ? Isolate::Current()->shared_space_isolate()
-                           : GetIsolateFromWritableObject(*this);
+                           : Isolate::Current();
     TransitionsAccessor transitions(isolate, *this);
     int nof_transitions = transitions.NumberOfTransitions();
     if (nof_transitions > 0 || transitions.HasPrototypeTransitions() ||
@@ -4187,13 +4248,14 @@ void TransitionsAccessor::PrintOneTransition(std::ostream& os, Tagged<Name> key,
 }
 
 void TransitionArray::PrintInternal(std::ostream& os) {
+  Isolate* isolate = Isolate::Current();
   {
     int num_transitions = number_of_transitions();
     os << "\n   Transitions #" << num_transitions << ":";
     for (int i = 0; i < num_transitions; i++) {
       Tagged<Name> key = GetKey(i);
       Tagged<Map> target;
-      GetTargetIfExists(i, GetIsolateFromWritableObject(*this), &target);
+      GetTargetIfExists(i, isolate, &target);
       TransitionsAccessor::PrintOneTransition(os, key, target);
     }
   }

@@ -84,6 +84,9 @@ extern runtime WasmLiftoffDeoptFinish(NoContext, WasmTrustedInstanceData):
 
 extern runtime PropagateException(NoContext): JSAny;
 extern runtime AllocateInSharedHeap(Context, Smi, Smi): HeapObject;
+
+extern runtime WasmConfigureAllPrototypesOpt(
+    Context, Object, JSAny, WasmTrustedInstanceData): Object;
 }
 
 extern operator '.wasm_exported_function_data' macro
@@ -498,6 +501,14 @@ builtin WasmTraceEnter(): JSAny {
 
 builtin WasmTraceExit(info: Smi): JSAny {
   tail runtime::WasmTraceExit(LoadContextFromFrame(), info);
+}
+
+builtin WasmConfigureAllPrototypesOpt(buffer: Object, constructors: JSAny):
+    Object {
+  const instance = LoadInstanceDataFromFrame();
+  const context = LoadContextFromInstanceData(instance);
+  tail runtime::WasmConfigureAllPrototypesOpt(
+      context, buffer, constructors, instance);
 }
 
 builtin WasmAllocateJSArray(implicit context: Context)(size: Smi): JSArray {
@@ -929,16 +940,6 @@ macro GetRefAt<T: type, From: type>(base: From, offset: intptr): &T {
 }
 
 extern macro LoadPointerFromRootRegister(intptr): RawPtr;
-
-const kThreadInWasmFlagAddressOffset: constexpr intptr
-    generates 'Isolate::thread_in_wasm_flag_address_offset()';
-
-macro ModifyThreadInWasmFlag(newValue: int32): void {
-  const threadInWasmFlagAddress =
-      LoadPointerFromRootRegister(kThreadInWasmFlagAddressOffset);
-  const threadInWasmFlagRef = GetRefAt<int32>(threadInWasmFlagAddress, 0);
-  *threadInWasmFlagRef = newValue;
-}
 
 builtin WasmStringNewWtf8(
     offset: uintptr, size: uint32, memory: uint32, utf8Variant: Smi): String
@@ -1600,11 +1601,9 @@ builtin WasmFastApiCallTypeCheckAndUpdateIC(
     receiver: JSAny): Smi {
   try {
     const rec = Cast<JSReceiver>(receiver) otherwise goto IllegalCast;
-    ModifyThreadInWasmFlag(0);
     // We don't care about the actual compatible receiver; we just rely
     // on this helper throwing an exception when there isn't one.
     GetCompatibleReceiver(rec, data.signature, context);
-    ModifyThreadInWasmFlag(1);
     data.cached_map = StrongToWeak(rec.map);
     return 1;
   } label IllegalCast {

@@ -110,33 +110,6 @@ CallKnownJSFunction::CallKnownJSFunction(
   set_input(kNewTargetIndex, new_target);
 }
 
-void NodeBase::change_input(int index, ValueNode* node) {
-  DCHECK_NE(input(index).node(), nullptr);
-  if (input(index).node() == node) return;
-  // After the AnyUseMarkingProcessor the use count can be -1.
-  if (input(index).node()->is_used()) {
-    input(index).node()->remove_use();
-  } else {
-    DCHECK_EQ(input(index).node()->use_count(), -1);
-  }
-
-#ifdef DEBUG
-  input(index) = Input(nullptr);
-#endif
-  set_input(index, node);
-}
-
-void ValueNode::remove_use() {
-  // Make sure a saturated use count won't drop below zero.
-  DCHECK_GT(use_count_, 0);
-  use_count_--;
-  if (auto alloc = TryCast<InlinedAllocation>()) {
-    // Unfortunately we cannot know if the removed use was escaping or not. To
-    // be safe we need to assume it wasn't.
-    alloc->RemoveNonEscapingUses(1);
-  }
-}
-
 void NodeBase::OverwriteWithIdentityTo(ValueNode* node) {
   // OverwriteWith() checks if the node we're overwriting to has the same
   // input count and the same properties. Here we don't need to do that, since
@@ -144,10 +117,41 @@ void NodeBase::OverwriteWithIdentityTo(ValueNode* node) {
   // there is at least 1 input. Since the first input is always the one
   // closest to the input_base().
   DCHECK_GE(input_count(), 1);
-  set_opcode(NodeBase::opcode_of<Identity>);
-  set_properties(OpProperties::Pure());
+  // Remove use of all inputs first.
+  for (Input& input : *this) {
+    input.clear();
+  }
+  // Unfortunately we cannot remove uses from deopt frames, since these could be
+  // shared with other nodes.
+  set_opcode(Opcode::kIdentity);
+  set_properties(StaticPropertiesForOpcode(Opcode::kIdentity));
   bitfield_ = InputCountField::update(bitfield_, 1);
-  change_input(0, node);
+  set_input(0, node);
+}
+
+void NodeBase::OverwriteWithReturnValue(ValueNode* node) {
+  DCHECK_EQ(opcode(), Opcode::kCallKnownJSFunction);
+  // This node might eventually be overwritten by conversion nodes which need
+  // a register snapshot.
+  DCHECK(properties().needs_register_snapshot());
+  if (node->is_tagged()) {
+    return OverwriteWithIdentityTo(node);
+  }
+  DCHECK_GE(input_count(), 1);
+  // Remove use of all inputs first.
+  for (Input& input : *this) {
+    input.clear();
+  }
+  // Unfortunately we cannot remove uses from deopt frames, since these could be
+  // shared with other nodes.
+  RegisterSnapshot registers = register_snapshot();
+  set_opcode(Opcode::kReturnedValue);
+  set_properties(StaticPropertiesForOpcode(Opcode::kReturnedValue));
+  bitfield_ = InputCountField::update(bitfield_, 1);
+  // After updating the input count, the possition of the register snapshot is
+  // wrong. We simply write a copy to the new location.
+  set_register_snapshot(registers);
+  set_input(0, node);
 }
 
 }  // namespace maglev

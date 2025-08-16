@@ -288,7 +288,7 @@ struct KnownNodeAspects {
                                        LoopEffects* loop_effects,
                                        Zone* zone) const;
 
-  void ClearUnstableNodeAspects();
+  void ClearUnstableNodeAspects(bool is_tracing_enabled);
 
   void ClearUnstableMaps() {
     // A side effect could change existing objects' maps. For stable maps we
@@ -341,7 +341,30 @@ struct KnownNodeAspects {
     if (IsValid(info_it)) return &info_it->second;
     auto res = &node_infos.emplace(node, NodeInfo()).first->second;
     res->IntersectType(node->GetStaticType(broker));
+    if (auto alloc = node->TryCast<InlinedAllocation>()) {
+      if (alloc->object()->has_static_map()) {
+        compiler::MapRef map = alloc->object()->map();
+        res->SetPossibleMaps(PossibleMaps{map}, !map.is_stable(),
+                             StaticTypeForMap(map, broker), broker);
+      }
+    }
     return res;
+  }
+
+  std::optional<PossibleMaps> TryGetPossibleMaps(ValueNode* node) {
+    DCHECK_NOT_NULL(node);
+    if (NodeInfo* info = TryGetInfoFor(node)) {
+      if (info->possible_maps_are_known()) {
+        return info->possible_maps();
+      }
+      return {};
+    }
+    if (auto alloc = node->TryCast<InlinedAllocation>()) {
+      if (alloc->object()->has_static_map()) {
+        return PossibleMaps{alloc->object()->map()};
+      }
+    }
+    return {};
   }
 
   NodeType GetType(compiler::JSHeapBroker* broker, ValueNode* node) const {
@@ -372,10 +395,11 @@ struct KnownNodeAspects {
   }
 
   bool CheckType(compiler::JSHeapBroker* broker, ValueNode* node, NodeType type,
-                 NodeType* current_type) {
+                 NodeType* current_type = nullptr) {
     NodeType static_type = node->GetStaticType(broker);
     if (current_type) *current_type = static_type;
     if (NodeTypeIs(static_type, type)) return true;
+    if (IsEmptyNodeType(IntersectType(static_type, type))) return false;
     auto it = FindInfo(node);
     if (!IsValid(it)) return false;
     if (current_type) *current_type = it->second.type();
@@ -404,7 +428,7 @@ struct KnownNodeAspects {
   }
 
   bool EnsureType(compiler::JSHeapBroker* broker, ValueNode* node,
-                  NodeType type, NodeType* old_type) {
+                  NodeType type, NodeType* old_type = nullptr) {
     NodeType static_type = node->GetStaticType(broker);
     if (old_type) *old_type = static_type;
     if (NodeTypeIs(static_type, type)) return true;
@@ -1015,16 +1039,19 @@ class MergePointInterpreterFrameState {
     frame_state_.set_virtual_objects(vos);
   }
 
-  void PrintVirtualObjects(MaglevGraphLabeller* labeller,
+  void PrintVirtualObjects(const MaglevCompilationUnit& unit,
                            VirtualObjectList from_ifs,
                            const char* prelude = nullptr) {
-    if (!v8_flags.trace_maglev_graph_building) return;
+    if (V8_LIKELY(!v8_flags.trace_maglev_graph_building ||
+                  !unit.is_tracing_enabled())) {
+      return;
+    }
     if (prelude) {
       std::cout << prelude << std::endl;
     }
-    from_ifs.Print(std::cout, "* VOs (Interpreter Frame State): ", labeller);
-    frame_state_.virtual_objects().Print(
-        std::cout, "* VOs (Merge Frame State): ", labeller);
+    from_ifs.Print(std::cout, "* VOs (Interpreter Frame State): ");
+    frame_state_.virtual_objects().Print(std::cout,
+                                         "* VOs (Merge Frame State): ");
   }
 
   bool is_loop() const {
@@ -1249,18 +1276,19 @@ struct LoopEffects {
   }
 };
 
-void InterpreterFrameState::CopyFrom(const MaglevCompilationUnit& info,
+void InterpreterFrameState::CopyFrom(const MaglevCompilationUnit& unit,
                                      MergePointInterpreterFrameState& state,
                                      bool preserve_known_node_aspects = false,
                                      Zone* zone = nullptr) {
   DCHECK_IMPLIES(preserve_known_node_aspects, zone);
-  if (v8_flags.trace_maglev_graph_building) {
+  if (V8_UNLIKELY(v8_flags.trace_maglev_graph_building &&
+                  unit.is_tracing_enabled())) {
     std::cout << "- Copying frame state from merge @" << &state << std::endl;
-    state.PrintVirtualObjects(info.graph_labeller(), virtual_objects());
+    state.PrintVirtualObjects(unit, virtual_objects());
   }
   virtual_objects_.Snapshot();
   state.frame_state().ForEachValue(
-      info, [&](ValueNode* value, interpreter::Register reg) {
+      unit, [&](ValueNode* value, interpreter::Register reg) {
         frame_[reg] = value;
       });
   if (preserve_known_node_aspects) {

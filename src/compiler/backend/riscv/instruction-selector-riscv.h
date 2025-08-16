@@ -14,6 +14,7 @@
 #include "src/compiler/backend/instruction-codes.h"
 #include "src/compiler/backend/instruction-selector-impl.h"
 #include "src/compiler/backend/instruction-selector.h"
+#include "src/compiler/backend/riscv/register-constraints-riscv.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/turboshaft/operation-matcher.h"
 #include "src/compiler/turboshaft/operations.h"
@@ -28,6 +29,47 @@ namespace compiler {
 #define TRACE(...) PrintF(__VA_ARGS__)
 
 using namespace turboshaft;  // NOLINT(build/namespaces)
+
+static int EncodeElementWidth(VSew sew) {
+  // We currently encode the element size in 2 bits.
+  // The lane size field has 8 free bits, so there is plenty of room.
+  static_assert((0 <= static_cast<int>(VSew::E8)) &&
+                (static_cast<int>(VSew::E64) <= 3));
+#ifdef DEBUG
+  // In debug mode, we mark one bit to indicate that the lane size is
+  // populated.
+  return LaneSizeField::encode(0x4 | sew);
+#else
+  return LaneSizeField::encode(sew);
+#endif
+}
+
+static int EncodeRegisterConstraint(RiscvRegisterConstraint constraint) {
+  // The element width is encoded in 3 bits, which leaves us some bits
+  // for asserting that the register constraints are correct.
+#ifdef DEBUG
+  static_assert(static_cast<int>(VSew::E64) <= 3);
+  DCHECK(static_cast<int>(constraint) <= 0xF);
+  return LaneSizeField::encode(static_cast<int>(constraint) << 3);
+#else
+  return 0;
+#endif
+}
+
+static VSew ByteSizeToSew(int byte_size) {
+  switch (byte_size) {
+    case 1:
+      return VSew::E8;
+    case 2:
+      return VSew::E16;
+    case 4:
+      return VSew::E32;
+    case 8:
+      return VSew::E64;
+    default:
+      UNREACHABLE();
+  }
+}
 
 // Adds RISC-V-specific methods for generating InstructionOperands.
 
@@ -297,7 +339,7 @@ void InstructionSelector::VisitAbortCSADcheck(OpIndex node) {
 }
 
 void EmitS128Load(InstructionSelector* selector, OpIndex node,
-                  InstructionCode opcode, VSew sew, Vlmul lmul);
+                  InstructionCode opcode);
 
 void InstructionSelector::VisitLoadTransform(OpIndex node) {
   const Simd128LoadTransformOp& op =
@@ -306,88 +348,88 @@ void InstructionSelector::VisitLoadTransform(OpIndex node) {
   InstructionCode opcode = kArchNop;
   switch (op.transform_kind) {
     case Simd128LoadTransformOp::TransformKind::k8Splat:
-      opcode = kRiscvS128LoadSplat;
+      opcode = kRiscvS128LoadSplat | EncodeElementWidth(E8);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E8, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k16Splat:
-      opcode = kRiscvS128LoadSplat;
+      opcode = kRiscvS128LoadSplat | EncodeElementWidth(E16);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E16, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k32Splat:
-      opcode = kRiscvS128LoadSplat;
+      opcode = kRiscvS128LoadSplat | EncodeElementWidth(E32);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E32, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k64Splat:
-      opcode = kRiscvS128LoadSplat;
+      opcode = kRiscvS128LoadSplat | EncodeElementWidth(E64);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E64, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k8x8S:
-      opcode = kRiscvS128Load64ExtendS;
+      opcode = kRiscvS128Load64ExtendS | EncodeElementWidth(E16);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E16, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k8x8U:
-      opcode = kRiscvS128Load64ExtendU;
+      opcode = kRiscvS128Load64ExtendU | EncodeElementWidth(E16);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E16, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k16x4S:
-      opcode = kRiscvS128Load64ExtendS;
+      opcode = kRiscvS128Load64ExtendS | EncodeElementWidth(E32);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E32, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k16x4U:
-      opcode = kRiscvS128Load64ExtendU;
+      opcode = kRiscvS128Load64ExtendU | EncodeElementWidth(E32);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E32, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k32x2S:
-      opcode = kRiscvS128Load64ExtendS;
+      opcode = kRiscvS128Load64ExtendS | EncodeElementWidth(E64);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E64, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k32x2U:
-      opcode = kRiscvS128Load64ExtendU;
+      opcode = kRiscvS128Load64ExtendU | EncodeElementWidth(E64);
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E64, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k32Zero:
       opcode = kRiscvS128Load32Zero;
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E32, m1);
+      EmitS128Load(this, node, opcode);
       break;
     case Simd128LoadTransformOp::TransformKind::k64Zero:
       opcode = kRiscvS128Load64Zero;
       if (is_protected) {
         opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
       }
-      EmitS128Load(this, node, opcode, E64, m1);
+      EmitS128Load(this, node, opcode);
       break;
     default:
       UNIMPLEMENTED();
@@ -826,7 +868,15 @@ void InstructionSelector::VisitWord32Shr(OpIndex node) {
 }
 
 void InstructionSelector::VisitWord32Sar(OpIndex node) {
-  // todo(RISCV): Optimize it
+  const ShiftOp& shift = Get(node).Cast<ShiftOp>();
+  const Operation& lhs = Get(shift.left());
+  if (lhs.Is<Opmask::kTruncateWord64ToWord32>() &&
+      CanCover(node, lhs.input(0))) {
+    RiscvOperandGenerator g(this);
+    Emit(kRiscvSar32, g.DefineAsRegister(node), g.UseRegister(lhs.input(0)),
+         g.UseOperand(shift.right(), kRiscvSar32));
+    return;
+  }
   VisitRRO(this, kRiscvSar32, node);
 }
 
@@ -837,12 +887,10 @@ void InstructionSelector::VisitI32x4ExtAddPairwiseI16x8S(OpIndex node) {
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
   InstructionOperand src = g.UseUniqueRegister(op.input(0));
-  Emit(kRiscvVrgather, src1, src, g.UseImmediate64(0x0006000400020000),
-       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(m1)));
-  Emit(kRiscvVrgather, src2, src, g.UseImmediate64(0x0007000500030001),
-       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(m1)));
-  Emit(kRiscvVwaddVv, g.DefineAsRegister(node), src1, src2,
-       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(mf2)));
+  InstructionOperand temps[] = {src1, src2};
+  size_t temps_count = arraysize(temps);
+  InstructionCode opcode = kRiscvExtAddPairwiseS | EncodeElementWidth(E16);
+  Emit(opcode, g.DefineAsRegister(node), src, temps_count, temps);
 }
 
 void InstructionSelector::VisitI32x4ExtAddPairwiseI16x8U(OpIndex node) {
@@ -852,12 +900,10 @@ void InstructionSelector::VisitI32x4ExtAddPairwiseI16x8U(OpIndex node) {
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
   InstructionOperand src = g.UseUniqueRegister(op.input(0));
-  Emit(kRiscvVrgather, src1, src, g.UseImmediate64(0x0006000400020000),
-       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(m1)));
-  Emit(kRiscvVrgather, src2, src, g.UseImmediate64(0x0007000500030001),
-       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(m1)));
-  Emit(kRiscvVwadduVv, g.DefineAsRegister(node), src1, src2,
-       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(mf2)));
+  InstructionOperand temps[] = {src1, src2};
+  size_t temps_count = arraysize(temps);
+  InstructionCode opcode = kRiscvExtAddPairwiseU | EncodeElementWidth(E16);
+  Emit(opcode, g.DefineAsRegister(node), src, temps_count, temps);
 }
 
 void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16S(OpIndex node) {
@@ -867,12 +913,10 @@ void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16S(OpIndex node) {
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
   InstructionOperand src = g.UseUniqueRegister(op.input(0));
-  Emit(kRiscvVrgather, src1, src, g.UseImmediate64(0x0E0C0A0806040200),
-       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(m1)));
-  Emit(kRiscvVrgather, src2, src, g.UseImmediate64(0x0F0D0B0907050301),
-       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(m1)));
-  Emit(kRiscvVwaddVv, g.DefineAsRegister(node), src1, src2,
-       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(mf2)));
+  InstructionOperand temps[] = {src1, src2};
+  size_t temps_count = arraysize(temps);
+  InstructionCode opcode = kRiscvExtAddPairwiseS | EncodeElementWidth(E8);
+  Emit(opcode, g.DefineAsRegister(node), src, temps_count, temps);
 }
 
 void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16U(OpIndex node) {
@@ -882,19 +926,17 @@ void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16U(OpIndex node) {
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
   InstructionOperand src = g.UseUniqueRegister(op.input(0));
-  Emit(kRiscvVrgather, src1, src, g.UseImmediate64(0x0E0C0A0806040200),
-       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(m1)));
-  Emit(kRiscvVrgather, src2, src, g.UseImmediate64(0x0F0D0B0907050301),
-       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(m1)));
-  Emit(kRiscvVwadduVv, g.DefineAsRegister(node), src1, src2,
-       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(mf2)));
+  InstructionOperand temps[] = {src1, src2};
+  size_t temps_count = arraysize(temps);
+  InstructionCode opcode = kRiscvExtAddPairwiseU | EncodeElementWidth(E8);
+  Emit(opcode, g.DefineAsRegister(node), src, temps_count, temps);
 }
 
 #define SIMD_INT_TYPE_LIST(V) \
-  V(I64x2, E64, m1)           \
-  V(I32x4, E32, m1)           \
-  V(I16x8, E16, m1)           \
-  V(I8x16, E8, m1)
+  V(I64x2, E64)               \
+  V(I32x4, E32)               \
+  V(I16x8, E16)               \
+  V(I8x16, E8)
 
 #define SIMD_TYPE_LIST(V) \
   V(F32x4)                \
@@ -903,27 +945,27 @@ void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16U(OpIndex node) {
   V(I16x8)                \
   V(I8x16)
 
-#define SIMD_UNOP_LIST2(V)                 \
-  V(F32x4Splat, kRiscvVfmvVf, E32, m1)     \
-  V(I8x16Neg, kRiscvVnegVv, E8, m1)        \
-  V(I16x8Neg, kRiscvVnegVv, E16, m1)       \
-  V(I32x4Neg, kRiscvVnegVv, E32, m1)       \
-  V(I64x2Neg, kRiscvVnegVv, E64, m1)       \
-  V(I8x16Splat, kRiscvVmv, E8, m1)         \
-  V(I16x8Splat, kRiscvVmv, E16, m1)        \
-  V(I32x4Splat, kRiscvVmv, E32, m1)        \
-  V(I64x2Splat, kRiscvVmv, E64, m1)        \
-  V(F32x4Neg, kRiscvVfnegVv, E32, m1)      \
-  V(F64x2Neg, kRiscvVfnegVv, E64, m1)      \
-  V(F64x2Splat, kRiscvVfmvVf, E64, m1)     \
-  V(I32x4AllTrue, kRiscvVAllTrue, E32, m1) \
-  V(I16x8AllTrue, kRiscvVAllTrue, E16, m1) \
-  V(I8x16AllTrue, kRiscvVAllTrue, E8, m1)  \
-  V(I64x2AllTrue, kRiscvVAllTrue, E64, m1) \
-  V(I64x2Abs, kRiscvVAbs, E64, m1)         \
-  V(I32x4Abs, kRiscvVAbs, E32, m1)         \
-  V(I16x8Abs, kRiscvVAbs, E16, m1)         \
-  V(I8x16Abs, kRiscvVAbs, E8, m1)
+#define SIMD_UNOP_LIST2(V)             \
+  V(F32x4Splat, kRiscvVfmvVf, E32)     \
+  V(I8x16Neg, kRiscvVnegVv, E8)        \
+  V(I16x8Neg, kRiscvVnegVv, E16)       \
+  V(I32x4Neg, kRiscvVnegVv, E32)       \
+  V(I64x2Neg, kRiscvVnegVv, E64)       \
+  V(I8x16Splat, kRiscvVmv, E8)         \
+  V(I16x8Splat, kRiscvVmv, E16)        \
+  V(I32x4Splat, kRiscvVmv, E32)        \
+  V(I64x2Splat, kRiscvVmv, E64)        \
+  V(F32x4Neg, kRiscvVfnegVv, E32)      \
+  V(F64x2Neg, kRiscvVfnegVv, E64)      \
+  V(F64x2Splat, kRiscvVfmvVf, E64)     \
+  V(I32x4AllTrue, kRiscvVAllTrue, E32) \
+  V(I16x8AllTrue, kRiscvVAllTrue, E16) \
+  V(I8x16AllTrue, kRiscvVAllTrue, E8)  \
+  V(I64x2AllTrue, kRiscvVAllTrue, E64) \
+  V(I64x2Abs, kRiscvVAbs, E64)         \
+  V(I32x4Abs, kRiscvVAbs, E32)         \
+  V(I16x8Abs, kRiscvVAbs, E16)         \
+  V(I8x16Abs, kRiscvVAbs, E8)
 
 #define SIMD_UNOP_LIST(V)                                       \
   V(F64x2Abs, kRiscvF64x2Abs)                                   \
@@ -974,73 +1016,73 @@ void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16U(OpIndex node) {
   V(I8x16ShrS)                \
   V(I8x16ShrU)
 
-#define SIMD_BINOP_LIST(V)                    \
-  V(I64x2Add, kRiscvVaddVv, E64, m1)          \
-  V(I32x4Add, kRiscvVaddVv, E32, m1)          \
-  V(I16x8Add, kRiscvVaddVv, E16, m1)          \
-  V(I8x16Add, kRiscvVaddVv, E8, m1)           \
-  V(I64x2Sub, kRiscvVsubVv, E64, m1)          \
-  V(I32x4Sub, kRiscvVsubVv, E32, m1)          \
-  V(I16x8Sub, kRiscvVsubVv, E16, m1)          \
-  V(I8x16Sub, kRiscvVsubVv, E8, m1)           \
-  V(I32x4MaxU, kRiscvVmaxuVv, E32, m1)        \
-  V(I16x8MaxU, kRiscvVmaxuVv, E16, m1)        \
-  V(I8x16MaxU, kRiscvVmaxuVv, E8, m1)         \
-  V(I32x4MaxS, kRiscvVmax, E32, m1)           \
-  V(I16x8MaxS, kRiscvVmax, E16, m1)           \
-  V(I8x16MaxS, kRiscvVmax, E8, m1)            \
-  V(I32x4MinS, kRiscvVminsVv, E32, m1)        \
-  V(I16x8MinS, kRiscvVminsVv, E16, m1)        \
-  V(I8x16MinS, kRiscvVminsVv, E8, m1)         \
-  V(I32x4MinU, kRiscvVminuVv, E32, m1)        \
-  V(I16x8MinU, kRiscvVminuVv, E16, m1)        \
-  V(I8x16MinU, kRiscvVminuVv, E8, m1)         \
-  V(I64x2Mul, kRiscvVmulVv, E64, m1)          \
-  V(I32x4Mul, kRiscvVmulVv, E32, m1)          \
-  V(I16x8Mul, kRiscvVmulVv, E16, m1)          \
-  V(I64x2GtS, kRiscvVgtsVv, E64, m1)          \
-  V(I32x4GtS, kRiscvVgtsVv, E32, m1)          \
-  V(I16x8GtS, kRiscvVgtsVv, E16, m1)          \
-  V(I8x16GtS, kRiscvVgtsVv, E8, m1)           \
-  V(I64x2GeS, kRiscvVgesVv, E64, m1)          \
-  V(I32x4GeS, kRiscvVgesVv, E32, m1)          \
-  V(I16x8GeS, kRiscvVgesVv, E16, m1)          \
-  V(I8x16GeS, kRiscvVgesVv, E8, m1)           \
-  V(I32x4GeU, kRiscvVgeuVv, E32, m1)          \
-  V(I16x8GeU, kRiscvVgeuVv, E16, m1)          \
-  V(I8x16GeU, kRiscvVgeuVv, E8, m1)           \
-  V(I32x4GtU, kRiscvVgtuVv, E32, m1)          \
-  V(I16x8GtU, kRiscvVgtuVv, E16, m1)          \
-  V(I8x16GtU, kRiscvVgtuVv, E8, m1)           \
-  V(I64x2Eq, kRiscvVeqVv, E64, m1)            \
-  V(I32x4Eq, kRiscvVeqVv, E32, m1)            \
-  V(I16x8Eq, kRiscvVeqVv, E16, m1)            \
-  V(I8x16Eq, kRiscvVeqVv, E8, m1)             \
-  V(I64x2Ne, kRiscvVneVv, E64, m1)            \
-  V(I32x4Ne, kRiscvVneVv, E32, m1)            \
-  V(I16x8Ne, kRiscvVneVv, E16, m1)            \
-  V(I8x16Ne, kRiscvVneVv, E8, m1)             \
-  V(I16x8AddSatS, kRiscvVaddSatSVv, E16, m1)  \
-  V(I8x16AddSatS, kRiscvVaddSatSVv, E8, m1)   \
-  V(I16x8AddSatU, kRiscvVaddSatUVv, E16, m1)  \
-  V(I8x16AddSatU, kRiscvVaddSatUVv, E8, m1)   \
-  V(I16x8SubSatS, kRiscvVsubSatSVv, E16, m1)  \
-  V(I8x16SubSatS, kRiscvVsubSatSVv, E8, m1)   \
-  V(I16x8SubSatU, kRiscvVsubSatUVv, E16, m1)  \
-  V(I8x16SubSatU, kRiscvVsubSatUVv, E8, m1)   \
-  V(F64x2Add, kRiscvVfaddVv, E64, m1)         \
-  V(F32x4Add, kRiscvVfaddVv, E32, m1)         \
-  V(F64x2Sub, kRiscvVfsubVv, E64, m1)         \
-  V(F32x4Sub, kRiscvVfsubVv, E32, m1)         \
-  V(F64x2Mul, kRiscvVfmulVv, E64, m1)         \
-  V(F32x4Mul, kRiscvVfmulVv, E32, m1)         \
-  V(F64x2Div, kRiscvVfdivVv, E64, m1)         \
-  V(F32x4Div, kRiscvVfdivVv, E32, m1)         \
-  V(S128And, kRiscvVandVv, E8, m1)            \
-  V(S128Or, kRiscvVorVv, E8, m1)              \
-  V(S128Xor, kRiscvVxorVv, E8, m1)            \
-  V(I16x8Q15MulRSatS, kRiscvVsmulVv, E16, m1) \
-  V(I16x8RelaxedQ15MulRS, kRiscvVsmulVv, E16, m1)
+#define SIMD_BINOP_LIST(V)                \
+  V(I64x2Add, kRiscvVaddVv, E64)          \
+  V(I32x4Add, kRiscvVaddVv, E32)          \
+  V(I16x8Add, kRiscvVaddVv, E16)          \
+  V(I8x16Add, kRiscvVaddVv, E8)           \
+  V(I64x2Sub, kRiscvVsubVv, E64)          \
+  V(I32x4Sub, kRiscvVsubVv, E32)          \
+  V(I16x8Sub, kRiscvVsubVv, E16)          \
+  V(I8x16Sub, kRiscvVsubVv, E8)           \
+  V(I32x4MaxU, kRiscvVmaxuVv, E32)        \
+  V(I16x8MaxU, kRiscvVmaxuVv, E16)        \
+  V(I8x16MaxU, kRiscvVmaxuVv, E8)         \
+  V(I32x4MaxS, kRiscvVmax, E32)           \
+  V(I16x8MaxS, kRiscvVmax, E16)           \
+  V(I8x16MaxS, kRiscvVmax, E8)            \
+  V(I32x4MinS, kRiscvVminsVv, E32)        \
+  V(I16x8MinS, kRiscvVminsVv, E16)        \
+  V(I8x16MinS, kRiscvVminsVv, E8)         \
+  V(I32x4MinU, kRiscvVminuVv, E32)        \
+  V(I16x8MinU, kRiscvVminuVv, E16)        \
+  V(I8x16MinU, kRiscvVminuVv, E8)         \
+  V(I64x2Mul, kRiscvVmulVv, E64)          \
+  V(I32x4Mul, kRiscvVmulVv, E32)          \
+  V(I16x8Mul, kRiscvVmulVv, E16)          \
+  V(I64x2GtS, kRiscvVgtsVv, E64)          \
+  V(I32x4GtS, kRiscvVgtsVv, E32)          \
+  V(I16x8GtS, kRiscvVgtsVv, E16)          \
+  V(I8x16GtS, kRiscvVgtsVv, E8)           \
+  V(I64x2GeS, kRiscvVgesVv, E64)          \
+  V(I32x4GeS, kRiscvVgesVv, E32)          \
+  V(I16x8GeS, kRiscvVgesVv, E16)          \
+  V(I8x16GeS, kRiscvVgesVv, E8)           \
+  V(I32x4GeU, kRiscvVgeuVv, E32)          \
+  V(I16x8GeU, kRiscvVgeuVv, E16)          \
+  V(I8x16GeU, kRiscvVgeuVv, E8)           \
+  V(I32x4GtU, kRiscvVgtuVv, E32)          \
+  V(I16x8GtU, kRiscvVgtuVv, E16)          \
+  V(I8x16GtU, kRiscvVgtuVv, E8)           \
+  V(I64x2Eq, kRiscvVeqVv, E64)            \
+  V(I32x4Eq, kRiscvVeqVv, E32)            \
+  V(I16x8Eq, kRiscvVeqVv, E16)            \
+  V(I8x16Eq, kRiscvVeqVv, E8)             \
+  V(I64x2Ne, kRiscvVneVv, E64)            \
+  V(I32x4Ne, kRiscvVneVv, E32)            \
+  V(I16x8Ne, kRiscvVneVv, E16)            \
+  V(I8x16Ne, kRiscvVneVv, E8)             \
+  V(I16x8AddSatS, kRiscvVaddSatSVv, E16)  \
+  V(I8x16AddSatS, kRiscvVaddSatSVv, E8)   \
+  V(I16x8AddSatU, kRiscvVaddSatUVv, E16)  \
+  V(I8x16AddSatU, kRiscvVaddSatUVv, E8)   \
+  V(I16x8SubSatS, kRiscvVsubSatSVv, E16)  \
+  V(I8x16SubSatS, kRiscvVsubSatSVv, E8)   \
+  V(I16x8SubSatU, kRiscvVsubSatUVv, E16)  \
+  V(I8x16SubSatU, kRiscvVsubSatUVv, E8)   \
+  V(F64x2Add, kRiscvVfaddVv, E64)         \
+  V(F32x4Add, kRiscvVfaddVv, E32)         \
+  V(F64x2Sub, kRiscvVfsubVv, E64)         \
+  V(F32x4Sub, kRiscvVfsubVv, E32)         \
+  V(F64x2Mul, kRiscvVfmulVv, E64)         \
+  V(F32x4Mul, kRiscvVfmulVv, E32)         \
+  V(F64x2Div, kRiscvVfdivVv, E64)         \
+  V(F32x4Div, kRiscvVfdivVv, E32)         \
+  V(S128And, kRiscvVandVv, E8)            \
+  V(S128Or, kRiscvVorVv, E8)              \
+  V(S128Xor, kRiscvVxorVv, E8)            \
+  V(I16x8Q15MulRSatS, kRiscvVsmulVv, E16) \
+  V(I16x8RelaxedQ15MulRS, kRiscvVsmulVv, E16)
 
 #define UNIMPLEMENTED_SIMD_FP16_OP_LIST(V) \
   V(F16x8Splat)                            \
@@ -1084,13 +1126,10 @@ UNIMPLEMENTED_SIMD_FP16_OP_LIST(SIMD_VISIT_UNIMPL_FP16_OP)
 
 void InstructionSelector::VisitS128AndNot(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVnotVv, temp1, g.UseRegister(op.input(1)),
-             g.UseImmediate(E8), g.UseImmediate(m1));
-  this->Emit(kRiscvVandVv, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
-             temp1, g.UseImmediate(E8), g.UseImmediate(m1));
+  Emit(kRiscvS128AndNot, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitS128Const(OpIndex node) {
@@ -1160,28 +1199,27 @@ SIMD_UNOP_LIST(SIMD_VISIT_UNOP)
 SIMD_SHIFT_OP_LIST(SIMD_VISIT_SHIFT_OP)
 #undef SIMD_VISIT_SHIFT_OP
 
-#define SIMD_VISIT_BINOP_RVV(Name, instruction, VSEW, LMUL)            \
+#define SIMD_VISIT_BINOP_RVV(Name, instruction, VSEW)                  \
                                                                        \
   void InstructionSelector::Visit##Name(OpIndex node) {                \
     RiscvOperandGenerator g(this);                                     \
     const Operation& op = this->Get(node);                             \
     DCHECK_EQ(op.input_count, 2);                                      \
-    this->Emit(instruction, g.DefineAsRegister(node),                  \
-               g.UseRegister(op.input(0)), g.UseRegister(op.input(1)), \
-               g.UseImmediate(VSEW), g.UseImmediate(LMUL));            \
+    InstructionCode opcode = instruction | EncodeElementWidth(VSEW);   \
+    Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)), \
+         g.UseRegister(op.input(1)));                                  \
   }
 SIMD_BINOP_LIST(SIMD_VISIT_BINOP_RVV)
 #undef SIMD_VISIT_BINOP_RVV
 
-#define SIMD_VISIT_UNOP2(Name, instruction, VSEW, LMUL)          \
-                                                                 \
-  void InstructionSelector::Visit##Name(OpIndex node) {          \
-    RiscvOperandGenerator g(this);                               \
-    const Operation& op = this->Get(node);                       \
-    DCHECK_EQ(op.input_count, 1);                                \
-    this->Emit(instruction, g.DefineAsRegister(node),            \
-               g.UseRegister(op.input(0)), g.UseImmediate(VSEW), \
-               g.UseImmediate(LMUL));                            \
+#define SIMD_VISIT_UNOP2(Name, instruction, VSEW)                       \
+                                                                        \
+  void InstructionSelector::Visit##Name(OpIndex node) {                 \
+    RiscvOperandGenerator g(this);                                      \
+    const Operation& op = this->Get(node);                              \
+    DCHECK_EQ(op.input_count, 1);                                       \
+    InstructionCode opcode = instruction | EncodeElementWidth(VSEW);    \
+    Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0))); \
   }
 SIMD_UNOP_LIST2(SIMD_VISIT_UNOP2)
 #undef SIMD_VISIT_UNOP2
@@ -1214,56 +1252,38 @@ VISIT_SIMD_QFMOP(F32x4Qfms, kRiscvF32x4Qfms)
 
 void InstructionSelector::VisitF32x4Min(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
-  InstructionOperand mask_reg = g.TempFpRegister(v0);
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVmfeqVv, temp1, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmfeqVv, temp2, g.UseRegister(op.input(1)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVandVv, mask_reg, temp2, temp1, g.UseImmediate(E32),
-             g.UseImmediate(m1));
-
-  InstructionOperand NaN = g.TempFpRegister(kSimd128ScratchReg);
-  InstructionOperand result = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, NaN, g.UseImmediate(0x7FC00000), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVfminVv, result, g.UseRegister(op.input(1)),
-             g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1), g.UseImmediate(MaskType::Mask));
-  this->Emit(kRiscvVmv, g.DefineAsRegister(node), result, g.UseImmediate(E32),
-             g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFMin | EncodeElementWidth(E32);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitF32x4Max(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
-  InstructionOperand mask_reg = g.TempFpRegister(v0);
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVmfeqVv, temp1, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmfeqVv, temp2, g.UseRegister(op.input(1)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVandVv, mask_reg, temp2, temp1, g.UseImmediate(E32),
-             g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFMax | EncodeElementWidth(E32);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
+}
 
-  InstructionOperand NaN = g.TempFpRegister(kSimd128ScratchReg);
-  InstructionOperand result = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, NaN, g.UseImmediate(0x7FC00000), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVfmaxVv, result, g.UseRegister(op.input(1)),
-             g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1), g.UseImmediate(MaskType::Mask));
-  this->Emit(kRiscvVmv, g.DefineAsRegister(node), result, g.UseImmediate(E32),
-             g.UseImmediate(m1));
+void InstructionSelector::VisitF64x2Min(OpIndex node) {
+  RiscvOperandGenerator g(this);
+  const Operation& op = this->Get(node);
+  DCHECK_EQ(op.input_count, 2);
+  InstructionCode opcode = kRiscvFMin | EncodeElementWidth(E64);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
+}
+
+void InstructionSelector::VisitF64x2Max(OpIndex node) {
+  RiscvOperandGenerator g(this);
+  const Operation& op = this->Get(node);
+  DCHECK_EQ(op.input_count, 2);
+  InstructionCode opcode = kRiscvFMax | EncodeElementWidth(E64);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitF32x4RelaxedMin(OpIndex node) {
@@ -1284,347 +1304,207 @@ void InstructionSelector::VisitF32x4RelaxedMax(OpIndex node) {
 
 void InstructionSelector::VisitF64x2Eq(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVmfeqVv, temp1, g.UseRegister(op.input(1)),
-             g.UseRegister(op.input(0)), g.UseImmediate(E64),
-             g.UseImmediate(m1));
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, temp2, g.UseImmediate(0), g.UseImmediate(E64),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
-             temp2, g.UseImmediate(E64), g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFEq | EncodeElementWidth(E64);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitF64x2Ne(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
-  this->Emit(kRiscvVmfneVv, temp1, g.UseRegister(op.input(1)),
-             g.UseRegister(op.input(0)), g.UseImmediate(E64),
-             g.UseImmediate(m1));
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, temp2, g.UseImmediate(0), g.UseImmediate(E64),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
-             temp2, g.UseImmediate(E64), g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFNe | EncodeElementWidth(E64);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitF64x2Lt(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVmfltVv, temp1, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E64),
-             g.UseImmediate(m1));
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, temp2, g.UseImmediate(0), g.UseImmediate(E64),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
-             temp2, g.UseImmediate(E64), g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFLt | EncodeElementWidth(E64);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitF64x2Le(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVmfleVv, temp1, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E64),
-             g.UseImmediate(m1));
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, temp2, g.UseImmediate(0), g.UseImmediate(E64),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
-             temp2, g.UseImmediate(E64), g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFLe | EncodeElementWidth(E64);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitF32x4Eq(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVmfeqVv, temp1, g.UseRegister(op.input(1)),
-             g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, temp2, g.UseImmediate(0), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
-             temp2, g.UseImmediate(E32), g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFEq | EncodeElementWidth(E32);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitF32x4Ne(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVmfneVv, temp1, g.UseRegister(op.input(1)),
-             g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, temp2, g.UseImmediate(0), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
-             temp2, g.UseImmediate(E32), g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFNe | EncodeElementWidth(E32);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitF32x4Lt(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVmfltVv, temp1, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, temp2, g.UseImmediate(0), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
-             temp2, g.UseImmediate(E32), g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFLt | EncodeElementWidth(E32);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitF32x4Le(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  this->Emit(kRiscvVmfleVv, temp1, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, temp2, g.UseImmediate(0), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
-             temp2, g.UseImmediate(E32), g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvFLe | EncodeElementWidth(E32);
+  Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),
+       g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitI32x4SConvertI16x8Low(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
-  this->Emit(kRiscvVmv, temp, g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVsextVf2, g.DefineAsRegister(node), temp,
-             g.UseImmediate(E32), g.UseImmediate(m1));
+  Emit(kRiscvI32x4SConvertI16x8Low, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)));
 }
 
 void InstructionSelector::VisitI32x4UConvertI16x8Low(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
-  this->Emit(kRiscvVmv, temp, g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVzextVf2, g.DefineAsRegister(node), temp,
-             g.UseImmediate(E32), g.UseImmediate(m1));
+  Emit(kRiscvI32x4UConvertI16x8Low, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)));
 }
 
 void InstructionSelector::VisitI16x8SConvertI8x16High(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temp1 = g.TempFpRegister(v0);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
-  Emit(kRiscvVslidedown, temp1, g.UseRegister(op.input(0)), g.UseImmediate(8),
-       g.UseImmediate(E8), g.UseImmediate(m1));
-  Emit(kRiscvVsextVf2, g.DefineAsRegister(node), temp1, g.UseImmediate(E16),
-       g.UseImmediate(m1));
+  Emit(kRiscvI16x8SConvertI8x16High, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)));
 }
 
 void InstructionSelector::VisitI16x8SConvertI32x4(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  InstructionOperand temp = g.TempFpRegister(v26);
-  InstructionOperand temp2 = g.TempFpRegister(v27);
-  this->Emit(kRiscvVmv, temp, g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmv, temp2, g.UseRegister(op.input(1)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVnclip, g.DefineAsRegister(node), temp, g.UseImmediate(0),
-             g.UseImmediate(E16), g.UseImmediate(m1),
-             g.UseImmediate(FPURoundingMode::RNE));
+  InstructionCode opcode = kRiscvI16x8SConvertI32x4;
+  // Request a register group (two adjacent registers starting at an even
+  // index). There is nothing special about the registers, as long as they
+  // are adjacent and start at an even index.
+  // Fixed registers also ensure that the inputs don't overlap with the output.
+  auto input0 = g.UseFixed(op.input(0), v28);
+  auto input1 = g.UseFixed(op.input(1), v29);
+  opcode |= EncodeRegisterConstraint(
+      RiscvRegisterConstraint::kRegisterGroupNoOverlap);
+  Emit(opcode, g.DefineAsRegister(node), input0, input1);
 }
 
 void InstructionSelector::VisitI16x8UConvertI32x4(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  InstructionOperand temp = g.TempFpRegister(v26);
-  InstructionOperand temp2 = g.TempFpRegister(v27);
-  InstructionOperand temp3 = g.TempFpRegister(v26);
-  this->Emit(kRiscvVmv, temp, g.UseRegister(op.input(0)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmv, temp2, g.UseRegister(op.input(1)), g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmax, temp3, temp, g.UseImmediate(0), g.UseImmediate(E32),
-             g.UseImmediate(m2));
-  this->Emit(kRiscvVnclipu, g.DefineAsRegister(node), temp3, g.UseImmediate(0),
-             g.UseImmediate(E16), g.UseImmediate(m1),
-             g.UseImmediate(FPURoundingMode::RNE));
+  InstructionCode opcode = kRiscvI16x8UConvertI32x4;
+  // Request a register group (two adjacent registers starting at an even
+  // index). There is nothing special about the registers, as long as they
+  // are adjacent and start at an even index.
+  // Fixed registers also ensure that the inputs don't overlap with the output.
+  auto input0 = g.UseFixed(op.input(0), v28);
+  auto input1 = g.UseFixed(op.input(1), v29);
+  opcode |= EncodeRegisterConstraint(
+      RiscvRegisterConstraint::kRegisterGroupNoOverlap);
+  Emit(opcode, g.DefineAsRegister(node), input0, input1);
 }
 
 void InstructionSelector::VisitI8x16RoundingAverageU(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVwadduVv, temp, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E8),
-             g.UseImmediate(m1));
-  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg3);
-  this->Emit(kRiscvVwadduWx, temp2, temp, g.UseImmediate(1), g.UseImmediate(E8),
-             g.UseImmediate(m1));
-  InstructionOperand temp3 = g.TempFpRegister(kSimd128ScratchReg3);
-  this->Emit(kRiscvVdivu, temp3, temp2, g.UseImmediate(2), g.UseImmediate(E16),
-             g.UseImmediate(m2));
-  this->Emit(kRiscvVnclipu, g.DefineAsRegister(node), temp3, g.UseImmediate(0),
-             g.UseImmediate(E8), g.UseImmediate(m1),
-             g.UseImmediate(FPURoundingMode::RNE));
+  Emit(kRiscvI8x16RoundingAverageU, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)), g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitI8x16SConvertI16x8(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  InstructionOperand temp = g.TempFpRegister(v26);
-  InstructionOperand temp2 = g.TempFpRegister(v27);
-  this->Emit(kRiscvVmv, temp, g.UseRegister(op.input(0)), g.UseImmediate(E16),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmv, temp2, g.UseRegister(op.input(1)), g.UseImmediate(E16),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVnclip, g.DefineAsRegister(node), temp, g.UseImmediate(0),
-             g.UseImmediate(E8), g.UseImmediate(m1),
-             g.UseImmediate(FPURoundingMode::RNE));
+  InstructionCode opcode = kRiscvI8x16SConvertI16x8;
+  // Request a register group (two adjacent registers starting at an even
+  // index). There is nothing special about the registers, as long as they
+  // are adjacent and start at an even index.
+  // Fixed registers also ensure that the inputs don't overlap with the output.
+  auto input0 = g.UseFixed(op.input(0), v28);
+  auto input1 = g.UseFixed(op.input(1), v29);
+  opcode |= EncodeRegisterConstraint(
+      RiscvRegisterConstraint::kRegisterGroupNoOverlap);
+  Emit(opcode, g.DefineAsRegister(node), input0, input1);
 }
 
 void InstructionSelector::VisitI8x16UConvertI16x8(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  InstructionOperand temp = g.TempFpRegister(v26);
-  InstructionOperand temp2 = g.TempFpRegister(v27);
-  InstructionOperand temp3 = g.TempFpRegister(v26);
-  this->Emit(kRiscvVmv, temp, g.UseRegister(op.input(0)), g.UseImmediate(E16),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmv, temp2, g.UseRegister(op.input(1)), g.UseImmediate(E16),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVmax, temp3, temp, g.UseImmediate(0), g.UseImmediate(E16),
-             g.UseImmediate(m2));
-  this->Emit(kRiscvVnclipu, g.DefineAsRegister(node), temp3, g.UseImmediate(0),
-             g.UseImmediate(E8), g.UseImmediate(m1),
-             g.UseImmediate(FPURoundingMode::RNE));
+  InstructionCode opcode = kRiscvI8x16UConvertI16x8;
+  // Request a register group (two adjacent registers starting at an even
+  // index). There is nothing special about the registers, as long as they
+  // are adjacent and start at an even index.
+  // Fixed registers also ensure that the inputs don't overlap with the output.
+  auto input0 = g.UseFixed(op.input(0), v28);
+  auto input1 = g.UseFixed(op.input(1), v29);
+  opcode |= EncodeRegisterConstraint(
+      RiscvRegisterConstraint::kRegisterGroupNoOverlap);
+  Emit(opcode, g.DefineAsRegister(node), input0, input1);
 }
 
 void InstructionSelector::VisitI16x8RoundingAverageU(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  InstructionOperand temp = g.TempFpRegister(v16);
-  InstructionOperand temp2 = g.TempFpRegister(v16);
-  InstructionOperand temp3 = g.TempFpRegister(v16);
-  this->Emit(kRiscvVwadduVv, temp, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E16),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVwadduWx, temp2, temp, g.UseImmediate(1),
-             g.UseImmediate(E16), g.UseImmediate(m1));
-  this->Emit(kRiscvVdivu, temp3, temp2, g.UseImmediate(2), g.UseImmediate(E32),
-             g.UseImmediate(m2));
-  this->Emit(kRiscvVnclipu, g.DefineAsRegister(node), temp3, g.UseImmediate(0),
-             g.UseImmediate(E16), g.UseImmediate(m1),
-             g.UseImmediate(FPURoundingMode::RNE));
+  Emit(kRiscvI16x8RoundingAverageU, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)), g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitI32x4DotI16x8S(OpIndex node) {
-  constexpr int32_t FIRST_INDEX = 0b01010101;
-  constexpr int32_t SECOND_INDEX = 0b10101010;
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  InstructionOperand temp = g.TempFpRegister(v16);
-  InstructionOperand temp1 = g.TempFpRegister(v14);
-  InstructionOperand temp2 = g.TempFpRegister(v30);
-  InstructionOperand dst = g.DefineAsRegister(node);
-  this->Emit(kRiscvVwmul, temp, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E16),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVcompress, temp2, temp, g.UseImmediate(FIRST_INDEX),
-             g.UseImmediate(E32), g.UseImmediate(m2));
-  this->Emit(kRiscvVcompress, temp1, temp, g.UseImmediate(SECOND_INDEX),
-             g.UseImmediate(E32), g.UseImmediate(m2));
-  this->Emit(kRiscvVaddVv, dst, temp1, temp2, g.UseImmediate(E32),
-             g.UseImmediate(m1));
+  Emit(kRiscvI32x4DotI16x8S, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)), g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitI16x8DotI8x16I7x16S(OpIndex node) {
-  constexpr int32_t FIRST_INDEX = 0b0101010101010101;
-  constexpr int32_t SECOND_INDEX = 0b1010101010101010;
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  InstructionOperand temp = g.TempFpRegister(v16);
-  InstructionOperand temp1 = g.TempFpRegister(v14);
-  InstructionOperand temp2 = g.TempFpRegister(v30);
-  InstructionOperand dst = g.DefineAsRegister(node);
-  this->Emit(kRiscvVwmul, temp, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E8),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVcompress, temp2, temp, g.UseImmediate(FIRST_INDEX),
-             g.UseImmediate(E16), g.UseImmediate(m2));
-  this->Emit(kRiscvVcompress, temp1, temp, g.UseImmediate(SECOND_INDEX),
-             g.UseImmediate(E16), g.UseImmediate(m2));
-  this->Emit(kRiscvVaddVv, dst, temp1, temp2, g.UseImmediate(E16),
-             g.UseImmediate(m1));
+  Emit(kRiscvI16x8DotI8x16I7x16S, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)), g.UseRegister(op.input(1)));
 }
 
 void InstructionSelector::VisitI32x4DotI8x16I7x16AddS(OpIndex node) {
-  constexpr int32_t FIRST_INDEX = 0b0001000100010001;
-  constexpr int32_t SECOND_INDEX = 0b0010001000100010;
-  constexpr int32_t THIRD_INDEX = 0b0100010001000100;
-  constexpr int32_t FOURTH_INDEX = 0b1000100010001000;
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 3);
-  InstructionOperand intermediate = g.TempFpRegister(v12);
-  this->Emit(kRiscvVwmul, intermediate, g.UseRegister(op.input(0)),
-             g.UseRegister(op.input(1)), g.UseImmediate(E8),
-             g.UseImmediate(m1));
-
-  InstructionOperand compressedPart1 = g.TempFpRegister(v14);
-  InstructionOperand compressedPart2 = g.TempFpRegister(v16);
-  this->Emit(kRiscvVcompress, compressedPart2, intermediate,
-             g.UseImmediate(FIRST_INDEX), g.UseImmediate(E16),
-             g.UseImmediate(m2));
-  this->Emit(kRiscvVcompress, compressedPart1, intermediate,
-             g.UseImmediate(SECOND_INDEX), g.UseImmediate(E16),
-             g.UseImmediate(m2));
-
-  InstructionOperand compressedPart3 = g.TempFpRegister(v20);
-  InstructionOperand compressedPart4 = g.TempFpRegister(v26);
-  this->Emit(kRiscvVcompress, compressedPart3, intermediate,
-             g.UseImmediate(THIRD_INDEX), g.UseImmediate(E16),
-             g.UseImmediate(m2));
-  this->Emit(kRiscvVcompress, compressedPart4, intermediate,
-             g.UseImmediate(FOURTH_INDEX), g.UseImmediate(E16),
-             g.UseImmediate(m2));
-
-  InstructionOperand temp2 = g.TempFpRegister(v18);
-  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVwaddVv, temp2, compressedPart1, compressedPart2,
-             g.UseImmediate(E16), g.UseImmediate(m1));
-  this->Emit(kRiscvVwaddVv, temp, compressedPart3, compressedPart4,
-             g.UseImmediate(E16), g.UseImmediate(m1));
-
-  InstructionOperand mul_result = g.TempFpRegister(v16);
-  InstructionOperand dst = g.DefineAsRegister(node);
-  this->Emit(kRiscvVaddVv, mul_result, temp2, temp, g.UseImmediate(E32),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVaddVv, dst, mul_result, g.UseRegister(op.input(2)),
-             g.UseImmediate(E32), g.UseImmediate(m1));
+  InstructionCode opcode = kRiscvI32x4DotI8x16I7x16AddS;
+  // Any even allocatable register can be used as input.
+  auto input0 = g.UseFixed(op.input(0), v12);
+  auto input1 = g.UseFixed(op.input(1), v14);
+  opcode |= EncodeRegisterConstraint(RiscvRegisterConstraint::kEvenRegisters01);
+  Emit(opcode, g.DefineAsRegister(node), input0, input1,
+       g.UseRegister(op.input(2)));
 }
 
 void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
@@ -1668,86 +1548,67 @@ void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
 
 void InstructionSelector::VisitI8x16Swizzle(OpIndex node) {
   RiscvOperandGenerator g(this);
-  InstructionOperand temps[] = {g.TempSimd128Register()};
-  // We don't want input 0 or input 1 to be the same as output, since we will
-  // modify output before do the calculation.
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 2);
-  Emit(kRiscvVrgather, g.DefineAsRegister(node),
-       g.UseUniqueRegister(op.input(0)), g.UseUniqueRegister(op.input(1)),
-       g.UseImmediate(E8), g.UseImmediate(m1), arraysize(temps), temps);
+  InstructionCode opcode = kRiscvVrgather | EncodeElementWidth(E8);
+  auto input0 = g.UseUniqueRegister(op.input(0));
+  auto input1 = g.UseUniqueRegister(op.input(1));
+  opcode |= EncodeRegisterConstraint(
+      RiscvRegisterConstraint::kNoDestinationSourceOverlap);
+  Emit(opcode, g.DefineAsRegister(node), input0, input1);
 }
 
-#define VISIT_BIMASK(TYPE, VSEW, LMUL)                                      \
-                                                                            \
-  void InstructionSelector::Visit##TYPE##BitMask(OpIndex node) {            \
-    RiscvOperandGenerator g(this);                                          \
-    const Operation& op = this->Get(node);                                  \
-    DCHECK_EQ(op.input_count, 1);                                           \
-    InstructionOperand temp = g.TempFpRegister(v16);                        \
-    this->Emit(kRiscvVmslt, temp, g.UseRegister(op.input(0)),               \
-               g.UseImmediate(0), g.UseImmediate(VSEW), g.UseImmediate(m1), \
-               g.UseImmediate(true));                                       \
-    this->Emit(kRiscvVmvXs, g.DefineAsRegister(node), temp,                 \
-               g.UseImmediate(E32), g.UseImmediate(m1));                    \
+#define VISIT_BITMASK(TYPE, VSEW)                                       \
+                                                                        \
+  void InstructionSelector::Visit##TYPE##BitMask(OpIndex node) {        \
+    RiscvOperandGenerator g(this);                                      \
+    const Operation& op = this->Get(node);                              \
+    DCHECK_EQ(op.input_count, 1);                                       \
+    InstructionCode opcode = kRiscvBitMask | EncodeElementWidth(VSEW);  \
+    Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0))); \
   }
 
-SIMD_INT_TYPE_LIST(VISIT_BIMASK)
+SIMD_INT_TYPE_LIST(VISIT_BITMASK)
 #undef VISIT_BIMASK
 
 void InstructionSelector::VisitI32x4SConvertI16x8High(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
-  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVslidedown, temp, g.UseRegister(op.input(0)),
-             g.UseImmediate(4), g.UseImmediate(E16), g.UseImmediate(m1));
-  this->Emit(kRiscvVsextVf2, g.DefineAsRegister(node), temp,
-             g.UseImmediate(E32), g.UseImmediate(m1));
+  Emit(kRiscvI32x4SConvertI16x8High, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)));
 }
 
 void InstructionSelector::VisitI32x4UConvertI16x8High(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
-  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVslidedown, temp, g.UseRegister(op.input(0)),
-             g.UseImmediate(4), g.UseImmediate(E16), g.UseImmediate(m1));
-  this->Emit(kRiscvVzextVf2, g.DefineAsRegister(node), temp,
-             g.UseImmediate(E32), g.UseImmediate(m1));
+  Emit(kRiscvI32x4UConvertI16x8High, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)));
 }
 
 void InstructionSelector::VisitI16x8SConvertI8x16Low(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
-  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
-  this->Emit(kRiscvVmv, temp, g.UseRegister(op.input(0)), g.UseImmediate(E16),
-             g.UseImmediate(m1));
-  this->Emit(kRiscvVsextVf2, g.DefineAsRegister(node), temp,
-             g.UseImmediate(E16), g.UseImmediate(m1));
+  Emit(kRiscvI16x8SConvertI8x16Low, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)));
 }
 
 void InstructionSelector::VisitI16x8UConvertI8x16High(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
-  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
-  Emit(kRiscvVslidedown, temp, g.UseRegister(op.input(0)), g.UseImmediate(8),
-       g.UseImmediate(E8), g.UseImmediate(m1));
-  Emit(kRiscvVzextVf2, g.DefineAsRegister(node), temp, g.UseImmediate(E16),
-       g.UseImmediate(m1));
+  Emit(kRiscvI16x8UConvertI8x16High, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)));
 }
 
 void InstructionSelector::VisitI16x8UConvertI8x16Low(OpIndex node) {
   RiscvOperandGenerator g(this);
   const Operation& op = this->Get(node);
   DCHECK_EQ(op.input_count, 1);
-  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
-  Emit(kRiscvVmv, temp, g.UseRegister(op.input(0)), g.UseImmediate(E16),
-       g.UseImmediate(m1));
-  Emit(kRiscvVzextVf2, g.DefineAsRegister(node), temp, g.UseImmediate(E16),
-       g.UseImmediate(m1));
+  Emit(kRiscvI16x8UConvertI8x16Low, g.DefineAsRegister(node),
+       g.UseRegister(op.input(0)));
 }
 
 void InstructionSelector::VisitSignExtendWord8ToInt32(OpIndex node) {
@@ -1770,60 +1631,52 @@ void InstructionSelector::VisitWord32Clz(OpIndex node) {
   VisitRR(this, kRiscvClz32, node);
 }
 
-#define VISIT_EXT_MUL(OPCODE1, OPCODE2, TYPE)                                \
-                                                                             \
-  void InstructionSelector::Visit##OPCODE1##ExtMulLow##OPCODE2##S(           \
-      OpIndex node) {                                                        \
-    RiscvOperandGenerator g(this);                                           \
-    const Operation& op = this->Get(node);                                   \
-    DCHECK_EQ(op.input_count, 2);                                            \
-    Emit(kRiscvVwmul, g.DefineAsRegister(node),                              \
-         g.UseUniqueRegister(op.input(0)), g.UseUniqueRegister(op.input(1)), \
-         g.UseImmediate(E##TYPE), g.UseImmediate(mf2));                      \
-  }                                                                          \
-                                                                             \
-  void InstructionSelector::Visit##OPCODE1##ExtMulHigh##OPCODE2##S(          \
-      OpIndex node) {                                                        \
-    RiscvOperandGenerator g(this);                                           \
-    const Operation& op = this->Get(node);                                   \
-    DCHECK_EQ(op.input_count, 2);                                            \
-    InstructionOperand t1 = g.TempFpRegister(v16);                           \
-    Emit(kRiscvVslidedown, t1, g.UseUniqueRegister(op.input(0)),             \
-         g.UseImmediate(kRvvVLEN / TYPE / 2), g.UseImmediate(E##TYPE),       \
-         g.UseImmediate(m1));                                                \
-    InstructionOperand t2 = g.TempFpRegister(v17);                           \
-    Emit(kRiscvVslidedown, t2, g.UseUniqueRegister(op.input(1)),             \
-         g.UseImmediate(kRvvVLEN / TYPE / 2), g.UseImmediate(E##TYPE),       \
-         g.UseImmediate(m1));                                                \
-    Emit(kRiscvVwmul, g.DefineAsRegister(node), t1, t2,                      \
-         g.UseImmediate(E##TYPE), g.UseImmediate(mf2));                      \
-  }                                                                          \
-                                                                             \
-  void InstructionSelector::Visit##OPCODE1##ExtMulLow##OPCODE2##U(           \
-      OpIndex node) {                                                        \
-    RiscvOperandGenerator g(this);                                           \
-    const Operation& op = this->Get(node);                                   \
-    DCHECK_EQ(op.input_count, 2);                                            \
-    Emit(kRiscvVwmulu, g.DefineAsRegister(node),                             \
-         g.UseUniqueRegister(op.input(0)), g.UseUniqueRegister(op.input(1)), \
-         g.UseImmediate(E##TYPE), g.UseImmediate(mf2));                      \
-  }                                                                          \
-                                                                             \
-  void InstructionSelector::Visit##OPCODE1##ExtMulHigh##OPCODE2##U(          \
-      OpIndex node) {                                                        \
-    RiscvOperandGenerator g(this);                                           \
-    const Operation& op = this->Get(node);                                   \
-    DCHECK_EQ(op.input_count, 2);                                            \
-    InstructionOperand t1 = g.TempFpRegister(v16);                           \
-    Emit(kRiscvVslidedown, t1, g.UseUniqueRegister(op.input(0)),             \
-         g.UseImmediate(kRvvVLEN / TYPE / 2), g.UseImmediate(E##TYPE),       \
-         g.UseImmediate(m1));                                                \
-    InstructionOperand t2 = g.TempFpRegister(v17);                           \
-    Emit(kRiscvVslidedown, t2, g.UseUniqueRegister(op.input(1)),             \
-         g.UseImmediate(kRvvVLEN / TYPE / 2), g.UseImmediate(E##TYPE),       \
-         g.UseImmediate(m1));                                                \
-    Emit(kRiscvVwmulu, g.DefineAsRegister(node), t1, t2,                     \
-         g.UseImmediate(E##TYPE), g.UseImmediate(mf2));                      \
+#define VISIT_EXT_MUL(OPCODE1, OPCODE2, TYPE)                                 \
+                                                                              \
+  void InstructionSelector::Visit##OPCODE1##ExtMulLow##OPCODE2##S(            \
+      OpIndex node) {                                                         \
+    RiscvOperandGenerator g(this);                                            \
+    const Operation& op = this->Get(node);                                    \
+    DCHECK_EQ(op.input_count, 2);                                             \
+    InstructionCode opcode = kRiscvExtMulLowS | EncodeElementWidth(E##TYPE);  \
+    auto input0 = g.UseUniqueRegister(op.input(0));                           \
+    auto input1 = g.UseUniqueRegister(op.input(1));                           \
+    opcode |= EncodeRegisterConstraint(                                       \
+        RiscvRegisterConstraint::kNoDestinationSourceOverlap);                \
+    Emit(opcode, g.DefineAsRegister(node), input0, input1);                   \
+  }                                                                           \
+                                                                              \
+  void InstructionSelector::Visit##OPCODE1##ExtMulHigh##OPCODE2##S(           \
+      OpIndex node) {                                                         \
+    RiscvOperandGenerator g(this);                                            \
+    const Operation& op = this->Get(node);                                    \
+    DCHECK_EQ(op.input_count, 2);                                             \
+    InstructionCode opcode = kRiscvExtMulHighS | EncodeElementWidth(E##TYPE); \
+    Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),        \
+         g.UseRegister(op.input(1)));                                         \
+  }                                                                           \
+                                                                              \
+  void InstructionSelector::Visit##OPCODE1##ExtMulLow##OPCODE2##U(            \
+      OpIndex node) {                                                         \
+    RiscvOperandGenerator g(this);                                            \
+    const Operation& op = this->Get(node);                                    \
+    DCHECK_EQ(op.input_count, 2);                                             \
+    InstructionCode opcode = kRiscvExtMulLowU | EncodeElementWidth(E##TYPE);  \
+    auto input0 = g.UseUniqueRegister(op.input(0));                           \
+    auto input1 = g.UseUniqueRegister(op.input(1));                           \
+    opcode |= EncodeRegisterConstraint(                                       \
+        RiscvRegisterConstraint::kNoDestinationSourceOverlap);                \
+    Emit(opcode, g.DefineAsRegister(node), input0, input1);                   \
+  }                                                                           \
+                                                                              \
+  void InstructionSelector::Visit##OPCODE1##ExtMulHigh##OPCODE2##U(           \
+      OpIndex node) {                                                         \
+    RiscvOperandGenerator g(this);                                            \
+    const Operation& op = this->Get(node);                                    \
+    DCHECK_EQ(op.input_count, 2);                                             \
+    InstructionCode opcode = kRiscvExtMulHighU | EncodeElementWidth(E##TYPE); \
+    Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)),        \
+         g.UseRegister(op.input(1)));                                         \
   }
 
 VISIT_EXT_MUL(I64x2, I32x4, 32)

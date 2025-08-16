@@ -22,6 +22,7 @@
 #include "src/base/string-format.h"
 #include "src/base/template-utils.h"
 #include "src/base/vector.h"
+#include "src/builtins/constants-table-builder.h"
 #include "src/codegen/callable.h"
 #include "src/codegen/code-factory.h"
 #include "src/codegen/heap-object-list.h"
@@ -47,6 +48,7 @@
 #include "src/compiler/turboshaft/uniform-reducer-adapter.h"
 #include "src/compiler/turboshaft/utils.h"
 #include "src/compiler/write-barrier-kind.h"
+#include "src/execution/isolate.h"
 #include "src/flags/flags.h"
 #include "src/logging/runtime-call-stats.h"
 #include "src/objects/dictionary.h"
@@ -732,6 +734,8 @@ template <typename T>
 using LoopLabelFor = detail::LoopLabelForHelper<T>::type;
 
 Handle<Code> BuiltinCodeHandle(Builtin builtin, Isolate* isolate);
+V8_EXPORT_PRIVATE void CanonicalizeEmbeddedBuiltinsConstantIfNeededImpl(
+    Isolate* isolate, Handle<HeapObject> object);
 
 template <typename Next>
 class TurboshaftAssemblerOpInterface;
@@ -1890,6 +1894,12 @@ class TurboshaftAssemblerOpInterface
                                        FloatRepresentation::Float64());
   }
 
+  V<Float64> Float64Binary(V<Float64> lhs, V<Float64> rhs,
+                           FloatBinopOp::Kind kind) {
+    return ReduceIfReachableFloatBinop(lhs, rhs, kind,
+                                       FloatRepresentation::Float64());
+  }
+
 #define DECL_MULTI_REP_UNARY(name, operation, rep_type, kind)                \
   OpIndex name(OpIndex input, rep_type rep) {                                \
     return ReduceIfReachable##operation(input, operation##Op::Kind::k##kind, \
@@ -2351,6 +2361,7 @@ class TurboshaftAssemblerOpInterface
   V<T> HeapConstant(Handle<T> value)
     requires(is_subtype_v<T, HeapObject>)
   {
+    CanonicalizeEmbeddedBuiltinsConstantIfNeeded(value);
     return ReduceIfReachableConstant(ConstantOp::Kind::kHeapObject,
                                      ConstantOp::Storage{value});
   }
@@ -2375,10 +2386,12 @@ class TurboshaftAssemblerOpInterface
     return HeapConstant(BuiltinCodeHandle(builtin, isolate));
   }
   OpIndex CompressedHeapConstant(Handle<HeapObject> value) {
+    CanonicalizeEmbeddedBuiltinsConstantIfNeeded(value);
     return ReduceIfReachableConstant(ConstantOp::Kind::kHeapObject, value);
   }
   OpIndex TrustedHeapConstant(Handle<HeapObject> value) {
     DCHECK(IsTrustedObject(*value));
+    CanonicalizeEmbeddedBuiltinsConstantIfNeeded(value);
     return ReduceIfReachableConstant(ConstantOp::Kind::kTrustedHeapObject,
                                      value);
   }
@@ -2743,6 +2756,8 @@ class TurboshaftAssemblerOpInterface
   OpIndex MemoryBarrier(AtomicMemoryOrder memory_order) {
     return ReduceIfReachableMemoryBarrier(memory_order);
   }
+
+  OpIndex Pause() { return ReduceIfReachablePause(); }
 
   OpIndex Load(OpIndex base, OptionalOpIndex index, LoadOp::Kind kind,
                MemoryRepresentation loaded_rep,
@@ -3213,6 +3228,10 @@ class TurboshaftAssemblerOpInterface
   void MemoryCopy(V<WordPtr> dst_base, V<WordPtr> src_base,
                   V<WordPtr> num_bytes) {
     ReduceIfReachableMemoryCopy(dst_base, src_base, num_bytes);
+  }
+
+  void MemoryFill(V<WordPtr> dst_base, V<Word32> value, V<WordPtr> num_bytes) {
+    ReduceIfReachableMemoryFill(dst_base, value, num_bytes);
   }
 #endif
 
@@ -4298,9 +4317,11 @@ class TurboshaftAssemblerOpInterface
     Isolate* isolate = Asm().data()->isolate();
     DCHECK_NOT_NULL(isolate);
     DCHECK_EQ(ThreadId::Current(), isolate->thread_id());
-    V<String> string_constant =
-        __ HeapConstantNoHole(isolate->factory()->NewStringFromAsciiChecked(
-            stream.str().c_str(), AllocationType::kOld));
+    const std::string str = stream.str();
+    Handle<String> internalized_string = isolate->factory()->InternalizeString(
+        base::OneByteVector(str.c_str(), str.length()));
+    CanonicalizeEmbeddedBuiltinsConstantIfNeeded(internalized_string);
+    V<String> string_constant = __ HeapConstantNoHole(internalized_string);
 
     AbortCSADcheck(string_constant);
     Unreachable();
@@ -5258,6 +5279,13 @@ class TurboshaftAssemblerOpInterface
   }
   V<Float64> resolve(const ConstOrV<Float64>& v) {
     return v.is_constant() ? Float64Constant(v.constant_value()) : v.value();
+  }
+
+  void CanonicalizeEmbeddedBuiltinsConstantIfNeeded(Handle<HeapObject> object) {
+    Isolate* isolate = __ data() -> isolate();
+    if (!isolate) return;
+    if (!isolate->IsGeneratingEmbeddedBuiltins()) return;
+    CanonicalizeEmbeddedBuiltinsConstantIfNeededImpl(isolate, object);
   }
 
  private:

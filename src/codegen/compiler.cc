@@ -243,27 +243,6 @@ class CompilerTracer : public AllStatic {
     PrintTraceSuffix(scope);
   }
 
-  static void TraceOptimizeForAlwaysOpt(Isolate* isolate,
-                                        DirectHandle<JSFunction> function,
-                                        CodeKind code_kind) {
-    if (!v8_flags.trace_opt) return;
-    CodeTracer::Scope scope(isolate->GetCodeTracer());
-    PrintTracePrefix(scope, "optimizing", function, code_kind);
-    PrintF(scope.file(), " because --always-turbofan");
-    PrintTraceSuffix(scope);
-  }
-
-  static void TraceMarkForAlwaysOpt(Isolate* isolate,
-                                    DirectHandle<JSFunction> function) {
-    if (!v8_flags.trace_opt) return;
-    CodeTracer::Scope scope(isolate->GetCodeTracer());
-    PrintF(scope.file(), "[marking ");
-    ShortPrint(*function, scope.file());
-    PrintF(scope.file(),
-           " for optimized recompilation because --always-turbofan");
-    PrintF(scope.file(), "]\n");
-  }
-
  private:
   static void PrintTracePrefix(const CodeTracer::Scope& scope,
                                const char* header,
@@ -2003,7 +1982,7 @@ void BackgroundCompileTask::Run(
       info.set_consumed_preparse_data(ConsumedPreparseData::For(
           isolate,
           handle(shared_info->uncompiled_data_with_preparse_data(isolate)
-                     ->preparse_data(isolate),
+                     ->preparse_data(),
                  isolate)));
     }
   }
@@ -3059,34 +3038,6 @@ bool Compiler::Compile(Isolate* isolate, DirectHandle<JSFunction> function,
 
   function->UpdateCode(isolate, *code);
 
-  // Optimize now if --always-turbofan is enabled.
-#if V8_ENABLE_WEBASSEMBLY
-  if (v8_flags.always_turbofan && !function->shared()->HasAsmWasmData()) {
-#else
-  if (v8_flags.always_turbofan) {
-#endif  // V8_ENABLE_WEBASSEMBLY
-    DCHECK(!function->tiering_in_progress());
-    CompilerTracer::TraceOptimizeForAlwaysOpt(isolate, function,
-                                              CodeKindForTopTier());
-
-    const CodeKind code_kind = CodeKindForTopTier();
-    const ConcurrencyMode concurrency_mode = ConcurrencyMode::kSynchronous;
-
-    if (v8_flags.stress_concurrent_inlining &&
-        isolate->concurrent_recompilation_enabled() &&
-        isolate->node_observer() == nullptr) {
-      SpawnDuplicateConcurrentJobForStressTesting(isolate, function,
-                                                  concurrency_mode, code_kind);
-    }
-
-    DirectHandle<Code> maybe_code;
-    if (GetOrCompileOptimized(isolate, function, concurrency_mode, code_kind)
-            .ToHandle(&maybe_code)) {
-      code = maybe_code;
-      function->UpdateOptimizedCode(isolate, *code);
-    }
-  }
-
   // Install a feedback vector if necessary.
   if (code->kind() == CodeKind::BASELINE) {
     JSFunction::EnsureFeedbackVector(isolate, function, is_compiled_scope);
@@ -3247,13 +3198,8 @@ void Compiler::CompileOptimized(Isolate* isolate,
   DCHECK_IMPLIES(function->IsTieringRequestedOrInProgress() &&
                      !function->IsLoggingRequested(isolate),
                  function->tiering_in_progress());
-  if (!v8_flags.always_turbofan) {
-    // Before a maglev optimization job is started we might have to compile
-    // bytecode. This can trigger a turbofan compilation if always_turbofan is
-    // set. Therefore we need to skip this dcheck in that case.
-    DCHECK_IMPLIES(!tiering_was_in_progress && function->tiering_in_progress(),
-                   function->ChecksTieringState(isolate));
-  }
+  DCHECK_IMPLIES(!tiering_was_in_progress && function->tiering_in_progress(),
+                 function->ChecksTieringState(isolate));
   DCHECK_IMPLIES(!tiering_was_in_progress && function->tiering_in_progress(),
                  IsConcurrent(mode));
 #endif  // DEBUG
@@ -4605,15 +4551,6 @@ void Compiler::PostInstantiation(Isolate* isolate,
       }
     }
 #endif  // !V8_ENABLE_LEAPTIERING
-
-    if (v8_flags.always_turbofan && shared->allows_lazy_compilation() &&
-        !shared->optimization_disabled(CodeKind::TURBOFAN_JS) &&
-        !function->HasAvailableOptimizedCode(isolate)) {
-      CompilerTracer::TraceMarkForAlwaysOpt(isolate, function);
-      JSFunction::EnsureFeedbackVector(isolate, function, is_compiled_scope);
-      function->RequestOptimization(isolate, CodeKind::TURBOFAN_JS,
-                                    ConcurrencyMode::kSynchronous);
-    }
   }
 
   if (shared->is_toplevel() || shared->is_wrapped()) {

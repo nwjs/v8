@@ -370,7 +370,7 @@ class Heap final {
            collector == GarbageCollector::MINOR_MARK_SWEEPER;
   }
 
-  V8_EXPORT_PRIVATE static bool IsFreeSpaceValid(const FreeSpace* object);
+  V8_EXPORT_PRIVATE bool IsFreeSpaceValid(const FreeSpace* object) const;
 
   static inline GarbageCollector YoungGenerationCollector() {
     return (v8_flags.minor_ms) ? GarbageCollector::MINOR_MARK_SWEEPER
@@ -379,7 +379,6 @@ class Heap final {
 
   // Copy block of memory from src to dst. Size of block should be aligned
   // by pointer size.
-  static inline void CopyBlock(Address dst, Address src, int byte_size);
   static inline void CopyBlock(Address dst, Address src, size_t byte_size);
 
   enum class StackScanMode { kNone, kFull, kSelective };
@@ -1992,7 +1991,10 @@ class Heap final {
   // v8 browsing benchmarks.
   static const int kMaxLoadTimeMs = 7000;
 
+  void NotifyBackgrounded();
+
   V8_EXPORT_PRIVATE bool ShouldOptimizeForLoadTime() const;
+  V8_EXPORT_PRIVATE bool IsLoading() const;
   void NotifyLoadingStarted();
   void NotifyLoadingEnded();
 
@@ -2054,11 +2056,12 @@ class Heap final {
 
   void RecomputeLimits(GarbageCollector collector, base::TimeTicks time);
   void RecomputeLimitsAfterLoadingIfNeeded();
-  struct LimitsCompuatationResult {
+  struct LimitsComputationResult {
     size_t old_generation_allocation_limit;
     size_t global_allocation_limit;
   };
-  static LimitsCompuatationResult ComputeNewAllocationLimits(Heap* heap);
+  static LimitsComputationResult ComputeNewAllocationLimits(Heap* heap);
+  V8_EXPORT_PRIVATE void ComputeAndSetNewAllocationLimits();
 
   // ===========================================================================
   // GC Tasks. =================================================================
@@ -2485,11 +2488,10 @@ class Heap final {
   // Time that the embedder started loading resources, or kLoadTimeNotLoading.
   std::atomic<double> load_start_time_ms_{kLoadTimeNotLoading};
 
-  bool update_allocation_limits_after_loading_ = false;
   // Full GC may trigger during loading due to overshooting allocation limits.
   // In such cases we may want to update the limits again once loading is
   // actually finished.
-  bool is_full_gc_during_loading_ = false;
+  bool update_allocation_limits_after_loading_ = false;
 
   // On-stack address used for selective consevative stack scanning. No value
   // means that selective conservative stack scanning is not enabled.

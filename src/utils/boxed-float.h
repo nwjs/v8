@@ -7,10 +7,12 @@
 
 #include <cmath>
 
+#include "absl/strings/str_format.h"
 #include "src/base/hashing.h"
 #include "src/base/macros.h"
 #include "src/base/numbers/double.h"
 #include "src/common/globals.h"
+#include "src/utils/ostreams.h"
 
 namespace v8 {
 namespace internal {
@@ -21,7 +23,7 @@ namespace internal {
 // the exact bit pattern during deoptimization when passing this value.
 class Float32 {
  public:
-  Float32() = default;
+  constexpr Float32() = default;
 
   // This constructor does not guarantee that bit pattern of the input value
   // is preserved if the input is a NaN.
@@ -33,7 +35,7 @@ class Float32 {
     DCHECK(!std::isnan(value));
   }
 
-  uint32_t get_bits() const { return bit_pattern_; }
+  constexpr uint32_t get_bits() const { return bit_pattern_; }
 
   float get_scalar() const { return base::bit_cast<float>(bit_pattern_); }
 
@@ -45,32 +47,84 @@ class Float32 {
     return nan;
   }
 
-  bool is_quiet_nan() const { return is_nan() && (bit_pattern_ & (1 << 22)); }
+  bool is_quiet_nan() const {
+    return is_nan() && (bit_pattern_ & kQuietNanBit);
+  }
+
+  bool is_inf() const {
+    bool inf = std::isinf(get_scalar());
+    DCHECK_EQ(inf, exponent() == 0xff && mantissa() == 0);
+    return inf;
+  }
+
+  constexpr bool is_negative() const { return bit_pattern_ & kSignBit; }
 
   V8_WARN_UNUSED_RESULT Float32 to_quiet_nan() const {
     DCHECK(is_nan());
-    Float32 quiet_nan{bit_pattern_ | (1 << 22)};
+    Float32 quiet_nan{bit_pattern_ | kQuietNanBit};
     DCHECK(quiet_nan.is_quiet_nan());
     return quiet_nan;
   }
 
-  // Return a pointer to the field storing the bit pattern. Used in code
-  // generation tests to store generated values there directly.
-  uint32_t* get_bits_address() { return &bit_pattern_; }
+  V8_WARN_UNUSED_RESULT Float32 to_negative() const {
+    return Float32::FromBits(bit_pattern_ | kSignBit);
+  }
+
+  constexpr bool operator==(const Float32&) const = default;
+
+  constexpr Float32 operator-() const {
+    return Float32::FromBits(bit_pattern_ ^ kSignBit);
+  }
 
   static constexpr Float32 FromBits(uint32_t bits) { return Float32(bits); }
+
+  // This static constructor allows passing NaNs, but as the signalling bit
+  // might get lost when passing the float parameter we explicitly put this in
+  // the method name, and still DCHECK for it (which might not trigger if a
+  // signalling NaN is implicitly silenced when passed here).
+  static Float32 FromNonSignallingFloat(float value) {
+    Float32 result = Float32::FromBits(base::bit_cast<uint32_t>(value));
+    DCHECK(!result.is_nan() || result.is_quiet_nan());
+    return result;
+  }
+
+  static constexpr Float32 quiet_nan() {
+    return FromBits((0xffu << kExponentShift) | kQuietNanBit);
+  }
+
+  static constexpr Float32 infinity() {
+    return FromBits(0xffu << kExponentShift);
+  }
+
+  // absl stringify support, enabling e.g. FuzzTest outputting Float32 values
+  // instead of printing "unprintable value".
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, Float32 f) {
+    absl::Format(&sink, "%f (0x%08x)", f.get_scalar(), f.get_bits());
+  }
 
  private:
   explicit constexpr Float32(uint32_t bit_pattern)
       : bit_pattern_(bit_pattern) {}
 
-  uint32_t exponent() const { return (bit_pattern_ >> 23) & 0xff; }
-  uint32_t mantissa() const { return bit_pattern_ & ((1 << 23) - 1); }
+  static constexpr int kExponentShift = 23;
+  static constexpr uint32_t kQuietNanBit = 1 << 22;
+  static constexpr uint32_t kSignBit = 1 << 31;
+
+  uint32_t exponent() const { return (bit_pattern_ >> kExponentShift) & 0xff; }
+  uint32_t mantissa() const {
+    return bit_pattern_ & ((1 << kExponentShift) - 1);
+  }
 
   uint32_t bit_pattern_ = 0;
 };
 
 ASSERT_TRIVIALLY_COPYABLE(Float32);
+
+inline std::ostream& operator<<(std::ostream& os, const Float32& float32) {
+  return os << float32.get_scalar() << " ("
+            << AsHex(float32.get_bits(), 8, true) << ")";
+}
 
 // Safety wrapper for a 64-bit floating-point value to make sure we don't lose
 // the exact bit pattern during deoptimization when passing this value.
@@ -117,23 +171,11 @@ class Float64 {
     return quiet_nan;
   }
 
-  // Return a pointer to the field storing the bit pattern. Used in code
-  // generation tests to store generated values there directly.
-  uint64_t* get_bits_address() { return &bit_pattern_; }
-
   static constexpr Float64 FromBits(uint64_t bits) { return Float64(bits); }
 
-  // Unlike doubles, equality is defined as equally behaving as far as the
-  // optimizers are concerned. I.e., two NaN's are equal as long as they are
-  // both the hole nor not.
-  bool operator==(const Float64& other) const {
-    if (is_nan() && other.is_nan()) {
-      return is_hole_nan() == other.is_hole_nan();
-    }
-    return get_scalar() == other.get_scalar();
-  }
+  constexpr bool operator==(const Float64&) const = default;
 
-  friend size_t hash_value(internal::Float64 f64) { return f64.bit_pattern_; }
+  size_t hash_value() const { return base::hash_value(bit_pattern_); }
 
  private:
   explicit constexpr Float64(uint64_t bit_pattern)
@@ -148,15 +190,6 @@ class Float64 {
 ASSERT_TRIVIALLY_COPYABLE(Float64);
 
 }  // namespace internal
-
-namespace base {
-
-inline size_t hash_value(const i::Float64& f64) {
-  return f64.is_nan() ? hash_value(f64.is_hole_nan())
-                      : hash_value(f64.get_bits());
-}
-
-}  // namespace base
 }  // namespace v8
 
 #endif  // V8_UTILS_BOXED_FLOAT_H_

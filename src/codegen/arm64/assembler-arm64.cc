@@ -437,16 +437,10 @@ win64_unwindinfo::BuiltinUnwindInfo Assembler::GetUnwindInfo() const {
 }
 #endif
 
-void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
-  DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
-  for (auto& request : heap_number_requests_) {
-    Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
-    Handle<HeapObject> object =
-        isolate->factory()->NewHeapNumber<AllocationType::kOld>(
-            request.heap_number());
-    EmbeddedObjectIndex index = AddEmbeddedObject(object);
-    set_embedded_object_index_referenced_from(pc, index);
-  }
+void Assembler::PatchInHeapNumberRequest(Address pc,
+                                         Handle<HeapNumber> object) {
+  EmbeddedObjectIndex index = AddEmbeddedObject(object);
+  set_embedded_object_index_referenced_from(pc, index);
 }
 
 void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
@@ -1346,6 +1340,32 @@ void Assembler::ctz(const Register& rd, const Register& rn) {
 
   Emit(0x5ac01800 | SF(rd) | Rd(rd) | Rn(rn));
 }
+
+#define MINMAX(V)                        \
+  V(smax, 0x11c00000, 0x1ac06000, true)  \
+  V(smin, 0x11c80000, 0x1ac06800, true)  \
+  V(umax, 0x11c40000, 0x1ac06400, false) \
+  V(umin, 0x11cc0000, 0x1ac06c00, false)
+
+#define DEFINE_ASM_FUNC(FN, IMMOP, REGOP, SIGNED)                          \
+  void Assembler::FN(const Register& rd, const Register& rn,               \
+                     const Operand& op) {                                  \
+    DCHECK(IsEnabled(CSSC));                                               \
+    DCHECK(rd.IsSameSizeAndType(rn));                                      \
+    Instr i = SF(rd) | Rd(rd) | Rn(rn);                                    \
+    if (op.IsImmediate()) {                                                \
+      int64_t imm = op.ImmediateValue();                                   \
+      i |= SIGNED ? ImmField<17, 10>(imm) : ImmUnsignedField<17, 10>(imm); \
+      Emit(IMMOP | i);                                                     \
+    } else {                                                               \
+      DCHECK(op.IsPlainRegister());                                        \
+      DCHECK(op.reg().IsSameSizeAndType(rd));                              \
+      Emit(REGOP | i | Rm(op.reg()));                                      \
+    }                                                                      \
+  }
+MINMAX(DEFINE_ASM_FUNC)
+#undef DEFINE_ASM_FUNC
+#undef MINMAX
 
 void Assembler::pacib1716() { Emit(PACIB1716); }
 void Assembler::autib1716() { Emit(AUTIB1716); }
@@ -2527,6 +2547,29 @@ void Assembler::cpym(const Register& rd, const Register& rs,
 void Assembler::cpye(const Register& rd, const Register& rs,
                      const Register& rn) {
   cpy(CPYE, rd, rs, rn);
+}
+
+void Assembler::set(MemSetOp op, const Register& rd, const Register& rn,
+                    const Register& rs) {
+  Emit(op | Rd(rd) | Rn(rn) | Rs(rs));
+}
+
+// Set prologue
+void Assembler::setp(const Register& rd, const Register& rn,
+                     const Register& rs) {
+  set(SETP, rd, rn, rs);
+}
+
+// Set main
+void Assembler::setm(const Register& rd, const Register& rn,
+                     const Register& rs) {
+  set(SETM, rd, rn, rs);
+}
+
+// Set epilogue
+void Assembler::sete(const Register& rd, const Register& rn,
+                     const Register& rs) {
+  set(SETE, rd, rn, rs);
 }
 
 void Assembler::mrs(const Register& rt, SystemRegister sysreg) {

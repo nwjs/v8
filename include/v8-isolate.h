@@ -362,7 +362,9 @@ class V8_EXPORT Isolate {
      * for wrapped API objects and are used by the fast C API
      * (for details see v8-fast-api-calls.h).
      */
+    V8_DEPRECATE_SOON("This field is unused.")
     int embedder_wrapper_type_index = -1;
+    V8_DEPRECATE_SOON("This field is unused.")
     int embedder_wrapper_object_index = -1;
 
     /**
@@ -594,8 +596,8 @@ class V8_EXPORT Isolate {
     kWasmSimdOpcodes = 106,
     kVarRedeclaredCatchBinding = 107,
     kWasmRefTypes = 108,
-    kOBSOLETE_WasmBulkMemory = 109,
-    kOBSOLETE_WasmMultiValue = 110,
+    kWasmBulkMemory = 109,
+    kWasmMultiValue = 110,
     kWasmExceptionHandling = 111,
     kInvalidatedMegaDOMProtector = 112,
     kFunctionPrototypeArguments = 113,
@@ -653,13 +655,15 @@ class V8_EXPORT Isolate {
     kFloat16Array = 165,
     kExplicitResourceManagement = 166,
     kWasmBranchHinting = 167,
-    kWasmMultiValue = 168,
+    kWasmMutableGlobals = 168,
     kUint8ArrayToFromBase64AndHex = 169,
     kAtomicsPause = 170,
     kTopLevelAwait = 171,
     kLogicalAssignment = 172,
     kNullishCoalescing = 173,
     kInvalidatedNoDateTimeConfigurationChangeProtector = 174,
+    kWasmNonTrappingFloatToInt = 175,
+    kWasmSignExtensionOps = 176,
 
     // If you add new values here, you'll also need to update Chromium's:
     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to

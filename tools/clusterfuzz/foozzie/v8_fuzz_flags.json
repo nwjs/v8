@@ -28,6 +28,8 @@
   [0.05, "--no-enable-bmi2"],
   [0.05, "--no-enable-lzcnt"],
   [0.05, "--no-enable-popcnt"],
+  [0.02, "--no-flush-bytecode"],
+  [0.02, "--no-lazy"],
   [0.2, "--no-lazy-feedback-allocation"],
   [0.1, "--no-wasm-generic-wrapper"],
   [0.02, "--no-maglev"],
@@ -47,5 +49,6 @@
   [0.1, "--precise-object-pinning"],
   [0.1, "--ephemeron-fixpoint-iterations=0"],
   [0.25, "--experimental-wasm-revectorize"],
-  [0.5, "--additive-safe-int-feedback"]
+  [0.5, "--additive-safe-int-feedback"],
+  [0.1, "--hashes-collide"]
 ]

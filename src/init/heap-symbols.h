@@ -31,7 +31,6 @@
   V(_, decimal_string, "decimal")                                   \
   V(_, dialect_string, "dialect")                                   \
   V(_, digital_string, "digital")                                   \
-  V(_, direction_string, "direction")                               \
   V(_, endRange_string, "endRange")                                 \
   V(_, engineering_string, "engineering")                           \
   V(_, exceptZero_string, "exceptZero")                             \
@@ -45,6 +44,7 @@
   V(_, firstDayOfWeek_string, "firstDayOfWeek")                     \
   V(_, floor_string, "floor")                                       \
   V(_, format_string, "format")                                     \
+  V(_, formatMatcher_string, "formatMatcher")                       \
   V(_, fraction_string, "fraction")                                 \
   V(_, fractionalDigits_string, "fractionalDigits")                 \
   V(_, fractionalSecond_string, "fractionalSecond")                 \
@@ -78,6 +78,7 @@
   V(_, list_string, "list")                                         \
   V(_, literal_string, "literal")                                   \
   V(_, locale_string, "locale")                                     \
+  V(_, localeMatcher_string, "localeMatcher")                       \
   V(_, loose_string, "loose")                                       \
   V(_, lower_string, "lower")                                       \
   V(_, ltr_string, "ltr")                                           \
@@ -112,7 +113,6 @@
   V(_, quarter_string, "quarter")                                   \
   V(_, region_string, "region")                                     \
   V(_, relatedYear_string, "relatedYear")                           \
-  V(_, roundingMode_string, "roundingMode")                         \
   V(_, roundingPriority_string, "roundingPriority")                 \
   V(_, rtl_string, "rtl")                                           \
   V(_, scientific_string, "scientific")                             \
@@ -133,7 +133,6 @@
   V(_, textInfo_string, "textInfo")                                 \
   V(_, timeStyle_string, "timeStyle")                               \
   V(_, timeZones_string, "timeZones")                               \
-  V(_, timeZoneName_string, "timeZoneName")                         \
   V(_, trailingZeroDisplay_string, "trailingZeroDisplay")           \
   V(_, trunc_string, "trunc")                                       \
   V(_, two_digit_string, "2-digit")                                 \
@@ -602,6 +601,7 @@
   V(_, CompileError_string, "CompileError")                                   \
   V(_, calendar_string, "calendar")                                           \
   V(_, calendarId_string, "calendarId")                                       \
+  V(_, calendarName_string, "calendarName")                                   \
   V(_, callee_string, "callee")                                               \
   V(_, caller_string, "caller")                                               \
   V(_, cause_string, "cause")                                                 \
@@ -630,6 +630,8 @@
   V(_, defineProperty_string, "defineProperty")                               \
   V(_, deleteProperty_string, "deleteProperty")                               \
   V(_, detached_string, "detached")                                           \
+  V(_, direction_string, "direction")                                         \
+  V(_, disambiguation_string, "disambiguation")                               \
   V(_, disjunction_string, "disjunction")                                     \
   V(_, disposed_string, "disposed")                                           \
   V(_, done_string, "done")                                                   \
@@ -800,6 +802,7 @@
   V(_, return_string, "return")                                               \
   V(_, revoke_string, "revoke")                                               \
   V(_, roundingIncrement_string, "roundingIncrement")                         \
+  V(_, roundingMode_string, "roundingMode")                                   \
   V(_, RuntimeError_string, "RuntimeError")                                   \
   V(_, WebAssemblyException_string, "WebAssembly.Exception")                  \
   V(_, WebAssemblyModule_string, "WebAssembly.Module")                        \
@@ -849,6 +852,7 @@
   V(_, timed_out_string, "timed-out")                                         \
   V(_, timeZone_string, "timeZone")                                           \
   V(_, timeZoneId_string, "timeZoneId")                                       \
+  V(_, timeZoneName_string, "timeZoneName")                                   \
   V(_, toJSON_string, "toJSON")                                               \
   V(_, toString_string, "toString")                                           \
   V(_, true_string, "true")                                                   \
@@ -920,6 +924,7 @@
   V(_, strict_function_transition_symbol)                 \
   V(_, template_literal_function_literal_id_symbol)       \
   V(_, template_literal_slot_id_symbol)                   \
+  V(_, wasm_asm_single_function_symbol)                   \
   V(_, wasm_cross_instance_call_symbol)                   \
   V(_, wasm_exception_tag_symbol)                         \
   V(_, wasm_exception_values_symbol)                      \

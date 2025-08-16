@@ -774,6 +774,32 @@ void Float64Ieee754Unary::GenerateCode(MaglevAssembler* masm,
   __ Pop(r2, r3, r4, r5);
 }
 
+int Float64Ieee754Binary::MaxCallStackArgs() const { return 0; }
+void Float64Ieee754Binary::SetValueLocationConstraints() {
+  UseFixed(input_lhs(), d0);
+  UseFixed(input_rhs(), d2);
+  DefineSameAsFirst(this);
+}
+void Float64Ieee754Binary::GenerateCode(MaglevAssembler* masm,
+                                        const ProcessingState& state) {
+  FrameScope scope(masm, StackFrame::MANUAL);
+  __ Push(r2, r3, r4, r5);
+  __ PrepareCallCFunction(0, 2);
+  __ CallCFunction(ieee_function_ref(), 0, 2);
+  __ Pop(r2, r3, r4, r5);
+}
+
+void Float64Sqrt::SetValueLocationConstraints() {
+  UseRegister(input());
+  DefineSameAsFirst(this);
+}
+void Float64Sqrt::GenerateCode(MaglevAssembler* masm,
+                               const ProcessingState& state) {
+  DoubleRegister value = ToDoubleRegister(input());
+  DoubleRegister result_register = ToDoubleRegister(result());
+  __ sqdbr(result_register, value);
+}
+
 void LoadTypedArrayLength::SetValueLocationConstraints() {
   UseRegister(receiver_input());
   DefineAsRegister(this);

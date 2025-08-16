@@ -52,48 +52,20 @@ class WasmInJSInliningReducer : public Next {
     // we have TS Wasm-in-JS inlining enabled.
     CHECK(v8_flags.turboshaft_wasm_in_js_inlining);
 
-    const wasm::WasmModule* module =
-        descriptor->js_wasm_call_parameters->module();
     wasm::NativeModule* native_module =
         descriptor->js_wasm_call_parameters->native_module();
     uint32_t func_idx = descriptor->js_wasm_call_parameters->function_index();
 
-    V<Any> result =
-        TryInlineWasmCall(module, native_module, func_idx, arguments);
-    if (result.valid()) {
-      return result;
-    } else {
-      // The JS-to-Wasm wrapper was already inlined by the earlier TurboFan
-      // phase, specifically `JSInliner::ReduceJSWasmCall`. However, it did
-      // not toggle the thread-in-Wasm flag, since we don't want to set it
-      // in the inline case above.
-      // For the non-inline case, we need to toggle the flag now.
-      // TODO(dlehmann,353475584): Reuse the code from
-      // `WasmGraphBuilderBase::BuildModifyThreadInWasmFlag`, but that
-      // requires a different assembler stack...
-      OpIndex isolate_root = __ LoadRootRegister();
-      V<WordPtr> thread_in_wasm_flag_address =
-          __ Load(isolate_root, LoadOp::Kind::RawAligned().Immutable(),
-                  MemoryRepresentation::UintPtr(),
-                  Isolate::thread_in_wasm_flag_address_offset());
-      __ Store(thread_in_wasm_flag_address, __ Word32Constant(1),
-               LoadOp::Kind::RawAligned(), MemoryRepresentation::Int32(),
-               compiler::kNoWriteBarrier);
-
+    V<Any> result = TryInlineWasmCall(native_module, func_idx, arguments);
+    if (!result.valid()) {
       result =
           Next::ReduceCall(callee, frame_state, arguments, descriptor, effects);
-
-      __ Store(thread_in_wasm_flag_address, __ Word32Constant(0),
-               LoadOp::Kind::RawAligned(), MemoryRepresentation::Int32(),
-               compiler::kNoWriteBarrier);
-
-      return result;
     }
+    return result;
   }
 
  private:
-  V<Any> TryInlineWasmCall(const wasm::WasmModule* module,
-                           wasm::NativeModule* native_module, uint32_t func_idx,
+  V<Any> TryInlineWasmCall(wasm::NativeModule* native_module, uint32_t func_idx,
                            base::Vector<const OpIndex> arguments);
 };
 
@@ -668,8 +640,8 @@ class WasmInJsInliningInterface {
   }
 
   void Resume(FullDecoder* decoder, const wasm::ContIndexImmediate& imm,
-              base::Vector<wasm::HandlerCase> handlers, const Value args[],
-              const Value returns[]) {
+              base::Vector<wasm::HandlerCase> handlers, const Value& cont_ref,
+              const Value args[], const Value returns[]) {
     Bailout(decoder);
   }
 
@@ -723,6 +695,8 @@ class WasmInJsInliningInterface {
     Bailout(decoder);
   }
   void AtomicFence(FullDecoder* decoder) { Bailout(decoder); }
+
+  void Pause(FullDecoder* decoder) { Bailout(decoder); }
 
   void StructAtomicRMW(FullDecoder* decoder, WasmOpcode opcode,
                        const Value& struct_object, const FieldImmediate& field,
@@ -1256,8 +1230,9 @@ class WasmInJsInliningInterface {
 
 template <class Next>
 V<Any> WasmInJSInliningReducer<Next>::TryInlineWasmCall(
-    const wasm::WasmModule* module, wasm::NativeModule* native_module,
-    uint32_t func_idx, base::Vector<const OpIndex> arguments) {
+    wasm::NativeModule* native_module, uint32_t func_idx,
+    base::Vector<const OpIndex> arguments) {
+  const wasm::WasmModule* module = native_module->module();
   const wasm::WasmFunction& func = module->functions[func_idx];
 
   TRACE("Considering wasm function ["

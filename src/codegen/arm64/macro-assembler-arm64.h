@@ -622,6 +622,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // MOPS
   inline void Cpy(const Register& rd, const Register& rs, const Register& rn);
+  inline void Set(const Register& rd, const Register& rn, const Register& rs);
 
   inline void Dmb(BarrierDomain domain, BarrierType type);
   inline void Dsb(BarrierDomain domain, BarrierType type);
@@ -1043,6 +1044,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadFeedbackVector(Register dst, Register closure, Register scratch,
                           Label* fbv_undef);
 
+  void LoadInterpreterDataBytecodeArray(Register destination,
+                                        Register interpreter_data);
+  void LoadInterpreterDataInterpreterTrampoline(Register destination,
+                                                Register interpreter_data);
+
   inline void Fmov(VRegister fd, VRegister fn);
   inline void Fmov(VRegister fd, Register rn);
   // Provide explicit double and float interfaces for FP immediate moves, rather
@@ -1259,6 +1265,14 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   inline void Abs(const Register& rd, const Register& rn);
   inline void Cnt(const Register& rd, const Register& rn);
   inline void Ctz(const Register& rd, const Register& rn);
+  inline void Smax(const Register& rd, const Register& rn,
+                   const Operand& operand);
+  inline void Smin(const Register& rd, const Register& rn,
+                   const Operand& operand);
+  inline void Umax(const Register& rd, const Register& rn,
+                   const Operand& operand);
+  inline void Umin(const Register& rd, const Register& rn,
+                   const Operand& operand);
 
   // Poke 'src' onto the stack. The offset is in bytes. The stack pointer must
   // be 16 byte aligned.

@@ -20,6 +20,12 @@ using BlockConstReverseIterator =
     ZoneVector<BasicBlock*>::const_reverse_iterator;
 
 struct MaglevCallSiteInfo;
+class MaglevCallSiteInfoCompare {
+ public:
+  bool operator()(const MaglevCallSiteInfo*, const MaglevCallSiteInfo*);
+};
+using MaglevCallSiteCandidates =
+    ZonePriorityQueue<MaglevCallSiteInfo*, MaglevCallSiteInfoCompare>;
 
 class Graph final : public ZoneObject {
  public:
@@ -47,9 +53,7 @@ class Graph final : public ZoneObject {
         constants_(zone()),
         trusted_constants_(zone()),
         inlined_functions_(zone()),
-        node_buffer_(zone()),
         scope_infos_(zone()) {
-    node_buffer_.reserve(32);
   }
 
   BasicBlock* operator[](int i) { return blocks_[i]; }
@@ -112,6 +116,13 @@ class Graph final : public ZoneObject {
     total_inlined_bytecode_size_ += size;
   }
 
+  int total_inlined_bytecode_size_small() const {
+    return total_inlined_bytecode_size_small_;
+  }
+  void add_inlined_bytecode_size_small(int size) {
+    total_inlined_bytecode_size_small_ += size;
+  }
+
   int total_peeled_bytecode_size() const { return total_peeled_bytecode_size_; }
   void add_peeled_bytecode_size(int size) {
     total_peeled_bytecode_size_ += size;
@@ -137,11 +148,7 @@ class Graph final : public ZoneObject {
   ZoneVector<InitialValue*>& osr_values() { return osr_values_; }
   ZoneVector<InitialValue*>& parameters() { return parameters_; }
 
-  ZoneVector<MaglevCallSiteInfo*>& inlineable_calls() {
-    return inlineable_calls_;
-  }
-
-  ZoneVector<Node*>& node_buffer() { return node_buffer_; }
+  MaglevCallSiteCandidates& inlineable_calls() { return inlineable_calls_; }
 
   // Running JS2, 99.99% of the cases, we have less than 2 dependencies.
   using SmallAllocationVector = SmallZoneVector<InlinedAllocation*, 2>;
@@ -187,6 +194,11 @@ class Graph final : public ZoneObject {
   bool may_have_unreachable_blocks() const {
     return may_have_unreachable_blocks_;
   }
+
+  void set_may_have_truncation(bool value = true) {
+    may_have_truncation_ = value;
+  }
+  bool may_have_truncation() const { return may_have_truncation_; }
 
   // Resolve the scope info of a context value.
   // An empty result means we don't statically know the context's scope.
@@ -247,12 +259,18 @@ class Graph final : public ZoneObject {
 
   BasicBlock::Id max_block_id() const { return max_block_id_; }
 
+  bool is_tracing_enabled() const {
+    return compilation_info_->is_tracing_enabled();
+  }
+
   bool has_graph_labeller() const {
     return compilation_info_->has_graph_labeller();
   }
   MaglevGraphLabeller* graph_labeller() const {
     return compilation_info_->graph_labeller();
   }
+
+  MaglevCompilationInfo* compilation_info() const { return compilation_info_; }
 
  private:
   MaglevCompilationInfo* compilation_info_;
@@ -271,7 +289,7 @@ class Graph final : public ZoneObject {
   // Use the bits of the float as the key.
   ZoneMap<uint64_t, Float64Constant*> float64_constants_;
   ZoneVector<InitialValue*> parameters_;
-  ZoneVector<MaglevCallSiteInfo*> inlineable_calls_;
+  MaglevCallSiteCandidates inlineable_calls_;
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_escape_map_;
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_elide_map_;
   RegList register_inputs_;
@@ -280,14 +298,15 @@ class Graph final : public ZoneObject {
       trusted_constants_;
   ZoneVector<OptimizedCompilationInfo::InlinedFunctionHolder>
       inlined_functions_;
-  ZoneVector<Node*> node_buffer_;
 
   bool has_recursive_calls_ = false;
   int total_inlined_bytecode_size_ = 0;
+  int total_inlined_bytecode_size_small_ = 0;
   int total_peeled_bytecode_size_ = 0;
   uint32_t object_ids_ = 0;
   bool has_resumable_generator_ = false;
   bool may_have_unreachable_blocks_ = false;
+  bool may_have_truncation_ = false;
   ZoneUnorderedMap<ValueNode*, compiler::OptionalScopeInfoRef> scope_infos_;
   BasicBlock::Id max_block_id_ = 0;
   std::unique_ptr<MaglevGraphLabeller> graph_labeller_ = {};
@@ -301,10 +320,10 @@ class Graph final : public ZoneObject {
     static_assert(!NodeT::kProperties.can_throw());
     static_assert(!NodeT::kProperties.can_write());
     if (has_graph_labeller()) graph_labeller()->RegisterNode(node);
-    if (v8_flags.trace_maglev_graph_building) {
-      std::cout << "  " << node << "  "
-                << PrintNodeLabel(graph_labeller(), node) << ": "
-                << PrintNode(graph_labeller(), node) << std::endl;
+    if (V8_UNLIKELY(v8_flags.trace_maglev_graph_building &&
+                    is_tracing_enabled())) {
+      std::cout << "  " << node << "  " << PrintNodeLabel(node) << ": "
+                << PrintNode(node) << std::endl;
     }
     return node;
   }

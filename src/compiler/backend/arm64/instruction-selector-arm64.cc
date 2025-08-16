@@ -37,6 +37,8 @@ enum ImmediateMode {
   kLoadStoreImm64,
   kLoadStoreImm128,
   kConditionalCompareImm,
+  kImm8,   // signed 8-bit immediate
+  kUImm8,  // unsigned 8-bit immediate
   kNoImmediate
 };
 
@@ -166,6 +168,10 @@ class Arm64OperandGenerator final : public OperandGenerator {
         // All possible shifts can be encoded by discarding bits which have no
         // effect.
         return true;
+      case kImm8:
+        return is_int8(value);
+      case kUImm8:
+        return is_uint8(value);
     }
     return false;
   }
@@ -568,7 +574,7 @@ void VisitBinopImpl(InstructionSelector* selector, OpIndex binop_idx,
                     OpIndex left_node, OpIndex right_node,
                     RegisterRepresentation rep, InstructionCode opcode,
                     ImmediateMode operand_mode, FlagsContinuation* cont) {
-  DCHECK(!cont->IsConditionalSet() && !cont->IsConditionalBranch());
+  DCHECK(!cont->IsConditionalTrap() && !cont->IsConditionalBranch());
   Arm64OperandGenerator g(selector);
   constexpr uint32_t kMaxFlagSetInputs = 3;
   constexpr uint32_t kMaxSelectInputs = 2;
@@ -1115,10 +1121,20 @@ void InstructionSelector::VisitLoadTransform(OpIndex node) {
 void InstructionSelector::VisitMemoryCopy(OpIndex node) {
   DCHECK(CpuFeatures::IsSupported(MOPS));
   Arm64OperandGenerator g(this);
-  const auto& memcpy = this->Get(node).Cast<MemoryCopyOp>();
+  const auto& memcpy_op = this->Get(node).Cast<MemoryCopyOp>();
 
-  Emit(kArm64Cpy, g.NoOutput(), g.UseRegister(memcpy.dst_base()),
-       g.UseRegister(memcpy.src_base()), g.UseRegister(memcpy.num_bytes()));
+  Emit(kArm64Cpy, g.NoOutput(), g.UseRegister(memcpy_op.dst_base()),
+       g.UseRegister(memcpy_op.src_base()),
+       g.UseRegister(memcpy_op.num_bytes()));
+}
+
+void InstructionSelector::VisitMemoryFill(OpIndex node) {
+  DCHECK(CpuFeatures::IsSupported(MOPS));
+  Arm64OperandGenerator g(this);
+  const auto& memset_op = this->Get(node).Cast<MemoryFillOp>();
+
+  Emit(kArm64Set, g.NoOutput(), g.UseRegister(memset_op.dst_base()),
+       g.UseRegister(memset_op.value()), g.UseRegister(memset_op.num_bytes()));
 }
 
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -1675,8 +1691,8 @@ static std::optional<CompareChainNode*> FindCompareChain(
 void CombineFlagSettingOps(CompareChainNode* logic_node,
                            InstructionSelector* selector,
                            CompareSequence* sequence) {
-  CompareChainNode* lhs = logic_node->lhs();
-  CompareChainNode* rhs = logic_node->rhs();
+  const CompareChainNode* lhs = logic_node->lhs();
+  const CompareChainNode* rhs = logic_node->rhs();
 
   Arm64OperandGenerator g(selector);
   if (!sequence->HasCompare()) {
@@ -1741,50 +1757,12 @@ void CombineFlagSettingOps(CompareChainNode* logic_node,
   logic_node->SetCondition(user_condition);
 }
 
-static std::optional<FlagsCondition> TryMatchConditionalCompareChainShared(
-    InstructionSelector* selector, Zone* zone, OpIndex node,
-    CompareSequence* sequence) {
-  // Instead of:
-  //  cmp x0, y0
-  //  cset cc0
-  //  cmp x1, y1
-  //  cset cc1
-  //  and/orr
-  // Try to merge logical combinations of flags into:
-  //  cmp x0, y0
-  //  ccmp x1, y1 ..
-  //  cset ..
-  // So, for AND:
-  //  (cset cc1 (ccmp x1 y1 !cc1 cc0 (cmp x0, y0)))
-  // and for ORR:
-  //  (cset cc1 (ccmp x1 y1 cc1 !cc0 (cmp x0, y0))
-
-  // Look for a potential chain.
-  ZoneVector<CompareChainNode*> logic_nodes(zone);
-  auto root =
-      FindCompareChain(OpIndex::Invalid(), node, selector, zone, logic_nodes);
-  if (!root.has_value()) return std::nullopt;
-
-  if (logic_nodes.size() > FlagsContinuation::kMaxCompareChainSize) {
-    return std::nullopt;
-  }
-  if (!logic_nodes.front()->IsLegalFirstCombine()) {
-    return std::nullopt;
-  }
-
-  for (auto* logic_node : logic_nodes) {
-    CombineFlagSettingOps(logic_node, selector, sequence);
-  }
-  DCHECK_LE(sequence->num_ccmps(), FlagsContinuation::kMaxCompareChainSize);
-  return logic_nodes.back()->user_condition();
-}
-
 static void VisitCompareChain(InstructionSelector* selector, OpIndex left_node,
                               OpIndex right_node, RegisterRepresentation rep,
                               InstructionCode opcode,
                               ImmediateMode operand_mode,
                               FlagsContinuation* cont) {
-  DCHECK(cont->IsConditionalSet() || cont->IsConditionalBranch());
+  DCHECK(cont->IsConditionalTrap() || cont->IsConditionalBranch());
   Arm64OperandGenerator g(selector);
   constexpr uint32_t kMaxFlagSetInputs = 2;
   constexpr uint32_t kMaxCcmpOperands =
@@ -1829,53 +1807,65 @@ static void VisitCompareChain(InstructionSelector* selector, OpIndex left_node,
   selector->EmitWithContinuation(opcode, 0, nullptr, input_count, inputs, cont);
 }
 
-static bool TryMatchConditionalCompareChainBranch(InstructionSelector* selector,
-                                                  Zone* zone, OpIndex node,
-                                                  FlagsContinuation* cont) {
-  if (!cont->IsBranch()) return false;
+static bool TryMatchConditionalCompareChain(InstructionSelector* selector,
+                                            Zone* zone, OpIndex node,
+                                            FlagsContinuation* cont) {
+  if (!cont->IsBranch() && !cont->IsTrap()) return false;
   DCHECK(cont->condition() == kNotEqual || cont->condition() == kEqual);
 
-  CompareSequence sequence;
-  auto final_cond =
-      TryMatchConditionalCompareChainShared(selector, zone, node, &sequence);
-  if (final_cond.has_value()) {
-    FlagsCondition condition = cont->condition() == kNotEqual
-                                   ? final_cond.value()
-                                   : NegateFlagsCondition(final_cond.value());
-    FlagsContinuation new_cont = FlagsContinuation::ForConditionalBranch(
-        sequence.ccmps(), sequence.num_ccmps(), condition, cont->true_block(),
-        cont->false_block());
+  // Instead of:
+  //  cmp x0, y0
+  //  cset cc0
+  //  cmp x1, y1
+  //  cset cc1
+  //  and/orr
+  // Try to merge logical combinations of flags into:
+  //  cmp x0, y0
+  //  ccmp x1, y1 ..
+  //  cset ..
+  // So, for AND:
+  //  (cset cc1 (ccmp x1 y1 !cc1 cc0 (cmp x0, y0)))
+  // and for ORR:
+  //  (cset cc1 (ccmp x1 y1 cc1 !cc0 (cmp x0, y0))
 
-    ImmediateMode imm_mode =
-        sequence.IsFloatCmp() ? kNoImmediate : kArithmeticImm;
-    VisitCompareChain(selector, sequence.left(), sequence.right(),
-                      selector->Get(sequence.cmp()).Cast<ComparisonOp>().rep,
-                      sequence.opcode(), imm_mode, &new_cont);
+  // Look for a potential chain.
+  ZoneVector<CompareChainNode*> logic_nodes(zone);
+  auto root =
+      FindCompareChain(OpIndex::Invalid(), node, selector, zone, logic_nodes);
+  if (!root.has_value()) return false;
 
-    return true;
+  if (logic_nodes.size() > FlagsContinuation::kMaxCompareChainSize) {
+    return false;
   }
-  return false;
-}
-
-static bool TryMatchConditionalCompareChainSet(InstructionSelector* selector,
-                                               Zone* zone, OpIndex node) {
-  // Create the cmp + ccmp ... sequence.
-  CompareSequence sequence;
-  auto final_cond =
-      TryMatchConditionalCompareChainShared(selector, zone, node, &sequence);
-  if (final_cond.has_value()) {
-    // The continuation performs the conditional compare and cset.
-    FlagsContinuation cont = FlagsContinuation::ForConditionalSet(
-        sequence.ccmps(), sequence.num_ccmps(), final_cond.value(), node);
-
-    ImmediateMode imm_mode =
-        sequence.IsFloatCmp() ? kNoImmediate : kArithmeticImm;
-    VisitCompareChain(selector, sequence.left(), sequence.right(),
-                      selector->Get(sequence.cmp()).Cast<ComparisonOp>().rep,
-                      sequence.opcode(), imm_mode, &cont);
-    return true;
+  if (!logic_nodes.front()->IsLegalFirstCombine()) {
+    return false;
   }
-  return false;
+
+  CompareSequence sequence;
+  for (CompareChainNode* logic_node : logic_nodes) {
+    CombineFlagSettingOps(logic_node, selector, &sequence);
+  }
+  DCHECK_LE(sequence.num_ccmps(), FlagsContinuation::kMaxCompareChainSize);
+
+  FlagsCondition final_cond = logic_nodes.back()->user_condition();
+  FlagsCondition condition = cont->condition() == kNotEqual
+                                 ? final_cond
+                                 : NegateFlagsCondition(final_cond);
+  FlagsContinuation new_cont =
+      cont->IsBranch() ? FlagsContinuation::ForConditionalBranch(
+                             sequence.ccmps(), sequence.num_ccmps(), condition,
+                             cont->true_block(), cont->false_block())
+                       : FlagsContinuation::ForConditionalTrap(
+                             sequence.ccmps(), sequence.num_ccmps(), condition,
+                             cont->trap_id());
+
+  ImmediateMode imm_mode =
+      sequence.IsFloatCmp() ? kNoImmediate : kArithmeticImm;
+  VisitCompareChain(selector, sequence.left(), sequence.right(),
+                    selector->Get(sequence.cmp()).Cast<ComparisonOp>().rep,
+                    sequence.opcode(), imm_mode, &new_cont);
+
+  return true;
 }
 
 }  // end namespace turboshaft
@@ -1912,10 +1902,6 @@ static void VisitLogical(InstructionSelector* selector, Zone* zone,
       break;
     default:
       UNREACHABLE();
-  }
-
-  if (TryMatchConditionalCompareChainSet(selector, zone, node)) {
-    return;
   }
 
   // Select Logical(y, ~x) for Logical(Xor(x, -1), y).
@@ -3395,6 +3381,91 @@ void VisitWordCompare(InstructionSelector* selector, OpIndex node,
                g.UseOperand(right, immediate_mode), cont);
 }
 
+static bool TryEmitMaxMin(InstructionSelector* selector,
+                          FlagsContinuation* cont, RegisterRepresentation rep,
+                          OpIndex lhs, OpIndex rhs) {
+  if (!CpuFeatures::IsSupported(CSSC) || !cont->IsSelect()) {
+    return false;
+  }
+
+  const FlagsCondition cond = cont->condition();
+  const OpIndex false_value = cont->false_value();
+  const OpIndex true_value = cont->true_value();
+
+  // Try to match one of:
+  //
+  // Select(Cmp(x, y), x, y)
+  // Select(Cmp(x, y), y, x)
+  //
+  // where Cmp is either >, >=, <, or <=, covering all 32-/64-bit
+  // signed/unsigned variants
+  if ((lhs != false_value || rhs != true_value) &&
+      (lhs != true_value || rhs != false_value)) {
+    return false;
+  }
+
+  bool is_signed = false;
+  const bool lhs_is_true_value = lhs == true_value;
+  ArchOpcode opcode = kArchNop;
+
+  switch (cond) {
+    case kSignedGreaterThan:
+    case kSignedGreaterThanOrEqual:
+      is_signed = true;
+      opcode = lhs_is_true_value ? kArm64Smax64 : kArm64Smin64;
+      break;
+    case kSignedLessThan:
+    case kSignedLessThanOrEqual:
+      is_signed = true;
+      opcode = lhs_is_true_value ? kArm64Smin64 : kArm64Smax64;
+      break;
+    case kUnsignedGreaterThan:
+    case kUnsignedGreaterThanOrEqual:
+      opcode = lhs_is_true_value ? kArm64Umax64 : kArm64Umin64;
+      break;
+    case kUnsignedLessThan:
+    case kUnsignedLessThanOrEqual:
+      opcode = lhs_is_true_value ? kArm64Umin64 : kArm64Umax64;
+      break;
+    default:
+      return false;
+  }
+
+  if (rep == RegisterRepresentation::Word32()) {
+    switch (opcode) {
+      case kArm64Smax64:
+        opcode = kArm64Smax32;
+        break;
+      case kArm64Smin64:
+        opcode = kArm64Smin32;
+        break;
+      case kArm64Umax64:
+        opcode = kArm64Umax32;
+        break;
+      case kArm64Umin64:
+        opcode = kArm64Umin32;
+        break;
+      default:
+        UNREACHABLE();
+    }
+  } else {
+    DCHECK_EQ(rep, RegisterRepresentation::Word64());
+  }
+
+  Arm64OperandGenerator g(selector);
+
+  if (!g.IsIntegerConstant(rhs)) {
+    std::swap(lhs, rhs);
+  }
+
+  InstructionOperand inputs[2] = {
+      g.UseRegister(lhs), g.UseOperand(rhs, is_signed ? kImm8 : kUImm8)};
+  InstructionOperand output = g.DefineAsRegister(cont->result());
+
+  selector->Emit(opcode, 1, &output, 2, inputs);
+  return true;
+}
+
 void VisitWord32Compare(InstructionSelector* selector, OpIndex node,
                         FlagsContinuation* cont) {
   const Operation& compare = selector->Get(node);
@@ -3450,7 +3521,11 @@ void VisitWord32Compare(InstructionSelector* selector, OpIndex node,
                      cont);
       return;
     }
+  } else if (TryEmitMaxMin(selector, cont, RegisterRepresentation::Word32(),
+                           lhs, rhs)) {
+    return;
   }
+
   VisitBinop(selector, node, RegisterRepresentation::Word32(), opcode,
              immediate_mode, cont);
 }
@@ -3594,9 +3669,11 @@ void VisitAtomicCompareExchange(InstructionSelector* selector, OpIndex node,
   OpIndex index = atomic_op.index();
   OpIndex old_value = atomic_op.expected().value();
   OpIndex new_value = atomic_op.value();
-  InstructionOperand inputs[] = {g.UseRegister(base), g.UseRegister(index),
-                                 g.UseUniqueRegister(old_value),
-                                 g.UseUniqueRegister(new_value)};
+  bool has_write_barrier = opcode == kAtomicCompareExchangeWithWriteBarrier;
+  InstructionOperand inputs[] = {
+      has_write_barrier ? g.UseUniqueRegister(base) : g.UseRegister(base),
+      has_write_barrier ? g.UseUniqueRegister(index) : g.UseRegister(index),
+      g.UseUniqueRegister(old_value), g.UseUniqueRegister(new_value)};
   InstructionOperand outputs[1];
   InstructionCode code = opcode | AddressingModeField::encode(kMode_MRR) |
                          AtomicWidthField::encode(width);
@@ -3894,6 +3971,9 @@ void InstructionSelector::VisitWordCompareZero(OpIndex user, OpIndex value,
               return VisitWordCompare(this, comparison->left(), kArm64Tst, cont,
                                       kLogical64Imm);
             }
+          } else if (TryEmitMaxMin(this, cont, RegisterRepresentation::Word64(),
+                                   comparison->left(), comparison->right())) {
+            return;
           }
           return VisitWordCompare(this, value, kArm64Cmp, cont, kArithmeticImm);
 
@@ -3983,14 +4063,14 @@ void InstructionSelector::VisitWordCompareZero(OpIndex user, OpIndex value,
     } else if (value_op.Is<Opmask::kWord32Sub>()) {
       return VisitWord32Compare(this, value, cont);
     } else if (value_op.Is<Opmask::kWord32BitwiseAnd>()) {
-      if (TryMatchConditionalCompareChainBranch(this, zone(), value, cont)) {
+      if (TryMatchConditionalCompareChain(this, zone(), value, cont)) {
         return;
       }
       return VisitWordCompare(this, value, kArm64Tst32, cont, kLogical32Imm);
     } else if (value_op.Is<Opmask::kWord64BitwiseAnd>()) {
       return VisitWordCompare(this, value, kArm64Tst, cont, kLogical64Imm);
     } else if (value_op.Is<Opmask::kWord32BitwiseOr>()) {
-      if (TryMatchConditionalCompareChainBranch(this, zone(), value, cont)) {
+      if (TryMatchConditionalCompareChain(this, zone(), value, cont)) {
         return;
       }
     } else if (value_op.Is<StackPointerGreaterThanOp>()) {
@@ -4494,6 +4574,14 @@ void InstructionSelector::VisitWord64AtomicCompareExchange(OpIndex node) {
   }
   VisitAtomicCompareExchange(this, node, opcode, AtomicWidth::kWord64,
                              atomic_op.memory_access_kind);
+}
+
+void InstructionSelector::VisitTaggedAtomicCompareExchange(OpIndex node) {
+  const AtomicRMWOp& atomic_op = Cast<AtomicRMWOp>(node);
+  AtomicWidth width =
+      COMPRESS_POINTERS_BOOL ? AtomicWidth::kWord32 : AtomicWidth::kWord64;
+  VisitAtomicCompareExchange(this, node, kAtomicCompareExchangeWithWriteBarrier,
+                             width, atomic_op.memory_access_kind);
 }
 
 void InstructionSelector::VisitWord32AtomicBinaryOperation(
@@ -5397,43 +5485,56 @@ void ArrangeShuffleTable(Arm64OperandGenerator* g, OpIndex input0,
 }
 
 using CanonicalShuffle = wasm::SimdShuffle::CanonicalShuffle;
-std::optional<ArchOpcode> TryMapCanonicalShuffleToArch(
+std::optional<InstructionCode> TryMapCanonicalShuffleToInstr(
     CanonicalShuffle shuffle) {
-  using CanonicalToArch = std::pair<CanonicalShuffle, ArchOpcode>;
-  constexpr static auto arch_shuffles = std::to_array<CanonicalToArch>({
-      {CanonicalShuffle::kS64x2Even, kArm64S64x2UnzipLeft},
-      {CanonicalShuffle::kS64x2Odd, kArm64S64x2UnzipRight},
-      {CanonicalShuffle::kS64x2Reverse, kArm64S64x2Reverse},
-      {CanonicalShuffle::kS64x2ReverseBytes, kArm64S8x8Reverse},
-      {CanonicalShuffle::kS32x4Even, kArm64S32x4UnzipLeft},
-      {CanonicalShuffle::kS32x4Odd, kArm64S32x4UnzipRight},
-      {CanonicalShuffle::kS32x4InterleaveLowHalves, kArm64S32x4ZipLeft},
-      {CanonicalShuffle::kS32x4InterleaveHighHalves, kArm64S32x4ZipRight},
-      {CanonicalShuffle::kS32x4ReverseBytes, kArm64S8x4Reverse},
-      {CanonicalShuffle::kS32x4Reverse, kArm64S32x4Reverse},
-      {CanonicalShuffle::kS32x2Reverse, kArm64S32x2Reverse},
-      {CanonicalShuffle::kS32x4TransposeEven, kArm64S32x4TransposeLeft},
-      {CanonicalShuffle::kS32x4TransposeOdd, kArm64S32x4TransposeRight},
-      {CanonicalShuffle::kS16x8Even, kArm64S16x8UnzipLeft},
-      {CanonicalShuffle::kS16x8Odd, kArm64S16x8UnzipRight},
-      {CanonicalShuffle::kS16x8InterleaveLowHalves, kArm64S16x8ZipLeft},
-      {CanonicalShuffle::kS16x8InterleaveHighHalves, kArm64S16x8ZipRight},
-      {CanonicalShuffle::kS16x2Reverse, kArm64S16x2Reverse},
-      {CanonicalShuffle::kS16x4Reverse, kArm64S16x4Reverse},
-      {CanonicalShuffle::kS16x8ReverseBytes, kArm64S8x2Reverse},
-      {CanonicalShuffle::kS16x8TransposeEven, kArm64S16x8TransposeLeft},
-      {CanonicalShuffle::kS16x8TransposeOdd, kArm64S16x8TransposeRight},
-      {CanonicalShuffle::kS8x16Even, kArm64S8x16UnzipLeft},
-      {CanonicalShuffle::kS8x16Odd, kArm64S8x16UnzipRight},
-      {CanonicalShuffle::kS8x16InterleaveLowHalves, kArm64S8x16ZipLeft},
-      {CanonicalShuffle::kS8x16InterleaveHighHalves, kArm64S8x16ZipRight},
-      {CanonicalShuffle::kS8x16TransposeEven, kArm64S8x16TransposeLeft},
-      {CanonicalShuffle::kS8x16TransposeOdd, kArm64S8x16TransposeRight},
-  });
+  using CanonicalToInstr = std::pair<CanonicalShuffle, InstructionCode>;
 
-  for (auto& [canonical, arch_opcode] : arch_shuffles) {
+#define CANONICAL_TO_INSTR(canonical, opcode, size)                   \
+  {                                                                   \
+    CanonicalShuffle::canonical, opcode | LaneSizeField::encode(size) \
+  }
+
+  static constexpr std::array arch_shuffles = std::to_array<CanonicalToInstr>({
+      CANONICAL_TO_INSTR(kS64x2Even, kArm64S128UnzipLeft, 64),
+      CANONICAL_TO_INSTR(kS64x2Odd, kArm64S128UnzipRight, 64),
+      {CanonicalShuffle::kS64x2Reverse, kArm64S64x2Reverse},
+      CANONICAL_TO_INSTR(kS64x2ReverseBytes, kArm64S128Rev64, 8),
+      CANONICAL_TO_INSTR(kS32x4Even, kArm64S128UnzipLeft, 32),
+      CANONICAL_TO_INSTR(kS32x4Odd, kArm64S128UnzipRight, 32),
+      CANONICAL_TO_INSTR(kS32x4InterleaveLowHalves, kArm64S128ZipLeft, 32),
+      CANONICAL_TO_INSTR(kS32x4InterleaveHighHalves, kArm64S128ZipRight, 32),
+      {CanonicalShuffle::kS32x4Reverse, kArm64S32x4Reverse},
+      CANONICAL_TO_INSTR(kS32x4ReverseBytes, kArm64S128Rev32, 8),
+      CANONICAL_TO_INSTR(kS32x2Reverse, kArm64S128Rev64, 32),
+      CANONICAL_TO_INSTR(kS32x4TransposeEven, kArm64S128TransposeLeft, 32),
+      CANONICAL_TO_INSTR(kS32x4TransposeOdd, kArm64S128TransposeRight, 32),
+      CANONICAL_TO_INSTR(kS16x8Even, kArm64S128UnzipLeft, 16),
+      CANONICAL_TO_INSTR(kS16x8Odd, kArm64S128UnzipRight, 16),
+      CANONICAL_TO_INSTR(kS16x4Even, kArm64S128LowUnzipLeft, 16),
+      CANONICAL_TO_INSTR(kS16x4Odd, kArm64S128LowUnzipRight, 16),
+      CANONICAL_TO_INSTR(kS16x8InterleaveLowHalves, kArm64S128ZipLeft, 16),
+      CANONICAL_TO_INSTR(kS16x8InterleaveHighHalves, kArm64S128ZipRight, 16),
+      CANONICAL_TO_INSTR(kS16x4InterleaveHighHalves, kArm64S128LowZipRight, 16),
+      CANONICAL_TO_INSTR(kS16x2Reverse, kArm64S128Rev32, 16),
+      CANONICAL_TO_INSTR(kS16x4Reverse, kArm64S128Rev64, 16),
+      CANONICAL_TO_INSTR(kS16x8ReverseBytes, kArm64S128Rev16, 8),
+      CANONICAL_TO_INSTR(kS16x8TransposeEven, kArm64S128TransposeLeft, 16),
+      CANONICAL_TO_INSTR(kS16x8TransposeOdd, kArm64S128TransposeRight, 16),
+      CANONICAL_TO_INSTR(kS8x16Even, kArm64S128UnzipLeft, 8),
+      CANONICAL_TO_INSTR(kS8x16Odd, kArm64S128UnzipRight, 8),
+      CANONICAL_TO_INSTR(kS8x8Even, kArm64S128LowUnzipLeft, 8),
+      CANONICAL_TO_INSTR(kS8x8Odd, kArm64S128LowUnzipRight, 8),
+      CANONICAL_TO_INSTR(kS8x16InterleaveLowHalves, kArm64S128ZipLeft, 8),
+      CANONICAL_TO_INSTR(kS8x16InterleaveHighHalves, kArm64S128ZipRight, 8),
+      CANONICAL_TO_INSTR(kS8x8InterleaveHighHalves, kArm64S128LowZipRight, 8),
+      CANONICAL_TO_INSTR(kS8x16TransposeEven, kArm64S128TransposeLeft, 8),
+      CANONICAL_TO_INSTR(kS8x16TransposeOdd, kArm64S128TransposeRight, 8),
+  });
+#undef CANONICAL_TO_INSTR
+
+  for (const auto& [canonical, instr_opcode] : arch_shuffles) {
     if (canonical == shuffle) {
-      return arch_opcode;
+      return instr_opcode;
     }
   }
   return {};
@@ -5489,32 +5590,85 @@ void InstructionSelector::VisitI8x4Shuffle(OpIndex node) {
 }
 
 void InstructionSelector::VisitI8x8Shuffle(OpIndex node) {
-  Arm64OperandGenerator g(this);
+  std::array<uint8_t, kSimd128HalfSize> shuffle;
+  bool is_swizzle;
   auto view = this->simd_shuffle_view(node);
+  CanonicalizeShuffle<kSimd128Size, kSimd128HalfSize>(view, shuffle.data(),
+                                                      &is_swizzle);
   OpIndex input0 = view.input(0);
   OpIndex input1 = view.input(1);
-  constexpr size_t shuffle_bytes = 8;
-  std::array<uint8_t, shuffle_bytes> shuffle;
-  std::copy(view.data(), view.data() + shuffle_bytes, shuffle.begin());
-  std::array<uint8_t, 2> shuffle32x2;
-  uint8_t shuffle64x1;
-  if (wasm::SimdShuffle::TryMatch64x1Shuffle(shuffle.data(), &shuffle64x1)) {
-    Emit(kArm64S64x1Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-         g.UseRegister(input1), g.UseImmediate(shuffle64x1));
-  } else if (wasm::SimdShuffle::TryMatch32x2Shuffle(shuffle.data(),
-                                                    shuffle32x2.data())) {
-    Emit(kArm64S32x2Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-         g.UseRegister(input1),
-         g.UseImmediate(wasm::SimdShuffle::Pack2Lanes(shuffle32x2)));
-  } else {
-    // Code generator uses vtbl, arrange sources to form a valid lookup table.
-    InstructionOperand src0, src1;
-    ArrangeShuffleTable(&g, input0, input1, &src0, &src1);
-    Emit(kArm64I8x16Shuffle, g.DefineAsRegister(node), src0, src1,
-         g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(&shuffle[0])),
-         g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(&shuffle[4])),
-         g.UseImmediate(0), g.UseImmediate(0));
+  Arm64OperandGenerator g(this);
+
+  const CanonicalShuffle canonical =
+      wasm::SimdShuffle::TryMatchCanonical(shuffle);
+
+  if (std::optional<InstructionCode> instr_opcode =
+          TryMapCanonicalShuffleToInstr(canonical)) {
+    Emit(instr_opcode.value(), g.DefineAsRegister(node), g.UseRegister(input0),
+         g.UseRegister(input1));
+    return;
   }
+
+  uint8_t shuffle64x1;
+  int index = 0;
+  if (wasm::SimdShuffle::TryMatch64x1Shuffle(shuffle.data(), &shuffle64x1)) {
+    if (wasm::SimdShuffle::TryMatchSplat<2, kSimd128Size, kSimd128HalfSize>(
+            shuffle.data(), &index)) {
+      DCHECK(is_swizzle);
+      Emit(kArm64S128Dup | LaneSizeField::encode(64), g.DefineAsRegister(node),
+           g.UseRegister(input0), g.UseImmediate(index));
+    } else {
+      Emit(kArm64S64x1Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
+           g.UseRegister(input1), g.UseImmediate(shuffle64x1));
+    }
+    return;
+  }
+  std::array<uint8_t, 2> shuffle32x2;
+  if (wasm::SimdShuffle::TryMatch32x2Shuffle(shuffle.data(),
+                                             shuffle32x2.data())) {
+    if (wasm::SimdShuffle::TryMatchSplat<4, kSimd128Size, kSimd128HalfSize>(
+            shuffle.data(), &index)) {
+      DCHECK(is_swizzle);
+      Emit(kArm64S128Dup | LaneSizeField::encode(32), g.DefineAsRegister(node),
+           g.UseRegister(input0), g.UseImmediate(index));
+    } else {
+      Emit(kArm64S32x2Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
+           g.UseRegister(input1),
+           g.UseImmediate(wasm::SimdShuffle::Pack2Lanes(shuffle32x2)));
+    }
+    return;
+  }
+  uint8_t shuffle16x4[4];
+  if (wasm::SimdShuffle::TryMatch16x4Shuffle(shuffle.data(), shuffle16x4)) {
+    if (wasm::SimdShuffle::TryMatchSplat<8, kSimd128Size, kSimd128HalfSize>(
+            shuffle.data(), &index)) {
+      DCHECK(is_swizzle);
+      Emit(kArm64S128Dup | LaneSizeField::encode(16), g.DefineAsRegister(node),
+           g.UseRegister(input0), g.UseImmediate(index));
+      return;
+    } else if (canonical == CanonicalShuffle::kIdentity) {
+      // Bypass normal shuffle code generation in this case.
+      // EmitIdentity
+      MarkAsUsed(input0);
+      MarkAsDefined(node);
+      SetRename(node, input0);
+      return;
+    }
+  }
+  if (wasm::SimdShuffle::TryMatchSplat<16, kSimd128Size, kSimd128HalfSize>(
+          shuffle.data(), &index)) {
+    DCHECK(is_swizzle);
+    Emit(kArm64S128Dup | LaneSizeField::encode(8), g.DefineAsRegister(node),
+         g.UseRegister(input0), g.UseImmediate(index));
+    return;
+  }
+
+  InstructionOperand src0, src1;
+  ArrangeShuffleTable(&g, input0, input1, &src0, &src1);
+  Emit(kArm64I8x16Shuffle, g.DefineAsRegister(node), src0, src1,
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(&shuffle[0])),
+       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(&shuffle[4])),
+       g.UseImmediate(0), g.UseImmediate(0));
 }
 
 void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
@@ -5529,9 +5683,9 @@ void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
   const CanonicalShuffle canonical =
       wasm::SimdShuffle::TryMatchCanonical(shuffle);
 
-  if (auto arch_opcode = TryMapCanonicalShuffleToArch(canonical);
-      arch_opcode.has_value()) {
-    Emit(arch_opcode.value(), g.DefineAsRegister(node), g.UseRegister(input0),
+  if (auto instr_opcode = TryMapCanonicalShuffleToInstr(canonical);
+      instr_opcode.has_value()) {
+    Emit(instr_opcode.value(), g.DefineAsRegister(node), g.UseRegister(input0),
          g.UseRegister(input1));
     return;
   }
@@ -5547,9 +5701,9 @@ void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
   if (wasm::SimdShuffle::TryMatch64x2Shuffle(shuffle.data(),
                                              shuffle64x2.data())) {
     if (wasm::SimdShuffle::TryMatchSplat<2>(shuffle.data(), &index)) {
-      DCHECK_GT(2, index);
-      Emit(kArm64S128Dup, g.DefineAsRegister(node), g.UseRegister(input0),
-           g.UseImmediate(2), g.UseImmediate(index % 2));
+      DCHECK(is_swizzle);
+      Emit(kArm64S128Dup | LaneSizeField::encode(64), g.DefineAsRegister(node),
+           g.UseRegister(input0), g.UseImmediate(index));
     } else {
       Emit(kArm64S64x2Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
            g.UseRegister(input1),
@@ -5562,9 +5716,9 @@ void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
   uint8_t to = 0;
   if (wasm::SimdShuffle::TryMatch32x4Shuffle(shuffle.data(), shuffle32x4)) {
     if (wasm::SimdShuffle::TryMatchSplat<4>(shuffle.data(), &index)) {
-      DCHECK_GT(4, index);
-      Emit(kArm64S128Dup, g.DefineAsRegister(node), g.UseRegister(input0),
-           g.UseImmediate(4), g.UseImmediate(index % 4));
+      DCHECK(is_swizzle);
+      Emit(kArm64S128Dup | LaneSizeField::encode(32), g.DefineAsRegister(node),
+           g.UseRegister(input0), g.UseImmediate(index));
     } else if (wasm::SimdShuffle::TryMatch32x4OneLaneSwizzle(shuffle32x4, &from,
                                                              &to)) {
       Emit(kArm64S32x4OneLaneSwizzle, g.DefineAsRegister(node),
@@ -5583,15 +5737,15 @@ void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
     return;
   }
   if (wasm::SimdShuffle::TryMatchSplat<8>(shuffle.data(), &index)) {
-    DCHECK_GT(8, index);
-    Emit(kArm64S128Dup, g.DefineAsRegister(node), g.UseRegister(input0),
-         g.UseImmediate(8), g.UseImmediate(index % 8));
+    DCHECK(is_swizzle);
+    Emit(kArm64S128Dup | LaneSizeField::encode(16), g.DefineAsRegister(node),
+         g.UseRegister(input0), g.UseImmediate(index));
     return;
   }
   if (wasm::SimdShuffle::TryMatchSplat<16>(shuffle.data(), &index)) {
-    DCHECK_GT(16, index);
-    Emit(kArm64S128Dup, g.DefineAsRegister(node), g.UseRegister(input0),
-         g.UseImmediate(16), g.UseImmediate(index % 16));
+    DCHECK(is_swizzle);
+    Emit(kArm64S128Dup | LaneSizeField::encode(8), g.DefineAsRegister(node),
+         g.UseRegister(input0), g.UseImmediate(index));
     return;
   }
   // Code generator uses vtbl, arrange sources to form a valid lookup table.

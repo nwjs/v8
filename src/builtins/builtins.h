@@ -51,12 +51,12 @@ enum class Builtin : int32_t {
   kNoBuiltinId = -1,
 #define DEF_ENUM(Name, ...) k##Name,
   BUILTIN_LIST(DEF_ENUM, DEF_ENUM, DEF_ENUM, DEF_ENUM, DEF_ENUM, DEF_ENUM,
-               DEF_ENUM, DEF_ENUM, DEF_ENUM)
+               DEF_ENUM, DEF_ENUM, DEF_ENUM, DEF_ENUM)
 #undef DEF_ENUM
 #define EXTRACT_NAME(Name, ...) k##Name,
   // Define kFirstBytecodeHandler,
-  kFirstBytecodeHandler =
-      FirstFromVarArgs(BUILTIN_LIST_BYTECODE_HANDLERS(EXTRACT_NAME) 0)
+  kFirstBytecodeHandler = FirstFromVarArgs(
+      BUILTIN_LIST_BYTECODE_HANDLERS(EXTRACT_NAME, EXTRACT_NAME) 0)
 #undef EXTRACT_NAME
 };
 enum class TieringBuiltin : int32_t {
@@ -89,6 +89,32 @@ V8_INLINE constexpr Builtin operator--(Builtin& builtin) {
   return builtin = static_cast<Builtin>(static_cast<type>(builtin) - 1);
 }
 
+V8_INLINE constexpr Builtin operator+(const Builtin& builtin,
+                                      const int offset) {
+  using type = std::underlying_type_t<Builtin>;
+  type b = static_cast<type>(builtin) + offset;
+  return static_cast<Builtin>(b);
+}
+
+V8_INLINE constexpr Builtin operator-(const Builtin& builtin,
+                                      const int offset) {
+  using type = std::underlying_type_t<Builtin>;
+  type b = static_cast<type>(builtin) - offset;
+  return static_cast<Builtin>(b);
+}
+
+V8_INLINE constexpr Builtin& operator+=(Builtin& builtin, const int offset) {
+  using type = std::underlying_type_t<Builtin>;
+  builtin = static_cast<Builtin>(static_cast<type>(builtin) + offset);
+  return builtin;
+}
+
+V8_INLINE constexpr Builtin& operator-=(Builtin& builtin, const int offset) {
+  using type = std::underlying_type_t<Builtin>;
+  builtin = static_cast<Builtin>(static_cast<type>(builtin) - offset);
+  return builtin;
+}
+
 class Builtins {
  public:
   explicit Builtins(Isolate* isolate) : isolate_(isolate) {}
@@ -111,7 +137,7 @@ class Builtins {
 #define ADD_ONE(Name, ...) +1
   static constexpr int kBuiltinCount =
       0 BUILTIN_LIST(ADD_ONE, ADD_ONE, ADD_ONE, ADD_ONE, ADD_ONE, ADD_ONE,
-                     ADD_ONE, ADD_ONE, ADD_ONE);
+                     ADD_ONE, ADD_ONE, ADD_ONE, ADD_ONE);
   static constexpr int kBuiltinTier0Count = 0 BUILTIN_LIST_TIER0(
       ADD_ONE, ADD_ONE, ADD_ONE, ADD_ONE, ADD_ONE, ADD_ONE, ADD_ONE);
 #undef ADD_ONE
@@ -147,7 +173,7 @@ class Builtins {
   case Builtin::k##Name: \
     return HasISXSuffix(#Name);
 
-      BUILTIN_LIST(CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE)
+      BUILTIN_LIST(CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE)
 #undef CASE
       default:
         return false;
@@ -160,7 +186,7 @@ class Builtins {
   case Builtin::k##Name: \
     return HasGenericSuffix(#Name);
 
-      BUILTIN_LIST(CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE)
+      BUILTIN_LIST(CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE, CASE)
 #undef CASE
       default:
         return false;
@@ -168,7 +194,7 @@ class Builtins {
   }
 
   static inline constexpr bool IsGearboxPlaceholder(Builtin builtin) {
-    return IsISXVariant(--builtin);
+    return IsISXVariant(builtin + kGearboxISXBuiltinIdOffset);
   }
 
   static inline constexpr Builtin GetGearboxPlaceholderFromVariant(
@@ -176,17 +202,28 @@ class Builtins {
     DCHECK(IsGenericVariant(builtin) || IsISXVariant(builtin) ||
            IsGearboxPlaceholder(builtin));
     if (IsISXVariant(builtin)) {
-      ++builtin;
+      builtin -= kGearboxISXBuiltinIdOffset;
       DCHECK_LE(builtin, Builtins::kLast);
       return builtin;
     } else if (IsGenericVariant(builtin)) {
-      ++builtin;
-      ++builtin;
+      builtin -= kGearboxGenericBuiltinIdOffset;
       DCHECK_LE(builtin, Builtins::kLast);
       return builtin;
     } else {
       return builtin;
     }
+  }
+
+  static inline constexpr Builtin GetISXVariantFromGearboxPlaceholder(
+      Builtin builtin) {
+    DCHECK(IsGearboxPlaceholder(builtin));
+    return builtin + kGearboxISXBuiltinIdOffset;
+  }
+
+  static inline constexpr Builtin GetGenericVariantFromGearboxPlaceholder(
+      Builtin builtin) {
+    DCHECK(IsGearboxPlaceholder(builtin));
+    return builtin + kGearboxGenericBuiltinIdOffset;
   }
 
   // Now we just use only SSE4_1 as the condition for enabling ISX.
@@ -217,7 +254,7 @@ class Builtins {
   }
 
   // The different builtin kinds are documented in builtins-definitions.h.
-  enum Kind { CPP, TSJ, TFJ, TSC, TFC, TFS, TFH, BCH, ASM };
+  enum Kind { CPP, TFJ_TSA, TFJ, TFC_TSA, TFC, TFS, TFH, BCH_TSA, BCH, ASM };
 
   static BytecodeOffset GetContinuationBytecodeOffset(Builtin builtin);
   static Builtin GetBuiltinFromBytecodeOffset(BytecodeOffset);
@@ -491,7 +528,8 @@ class Builtins {
                               compiler::turboshaft::Graph& graph, Zone* zone);
 
   BUILTIN_LIST(IGNORE_BUILTIN, DECLARE_TS, DECLARE_TF, DECLARE_TS, DECLARE_TF,
-               DECLARE_TF, DECLARE_TF, IGNORE_BUILTIN, DECLARE_ASM)
+               DECLARE_TF, DECLARE_TF, IGNORE_BUILTIN, IGNORE_BUILTIN,
+               DECLARE_ASM)
 
 #undef DECLARE_ASM
 #undef DECLARE_TF

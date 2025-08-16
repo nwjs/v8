@@ -3196,7 +3196,7 @@ void MacroAssembler::JumpIfCodeIsTurbofanned(Register code, Register scratch,
 }
 
 Operand MacroAssembler::ClearedValue() const {
-  return Operand(static_cast<int32_t>(i::ClearedValue(isolate()).ptr()));
+  return Operand(static_cast<int32_t>(i::kClearedWeakValue.ptr()));
 }
 
 Operand MacroAssembler::ReceiverOperand() { return Operand(0); }
@@ -3612,6 +3612,21 @@ void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
   B(fbv_undef);
 
   Bind(&done);
+}
+
+void MacroAssembler::LoadInterpreterDataBytecodeArray(
+    Register destination, Register interpreter_data) {
+  LoadProtectedPointerField(
+      destination, FieldMemOperand(interpreter_data,
+                                   offsetof(InterpreterData, bytecode_array_)));
+}
+
+void MacroAssembler::LoadInterpreterDataInterpreterTrampoline(
+    Register destination, Register interpreter_data) {
+  LoadProtectedPointerField(
+      destination,
+      FieldMemOperand(interpreter_data,
+                      offsetof(InterpreterData, interpreter_trampoline_)));
 }
 
 // Sets condition flags based on comparison, and returns type in type_reg.

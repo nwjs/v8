@@ -129,6 +129,15 @@ namespace internal {
 #define CONVERT_ASCII_STRING \
   return *isolate->factory()->NewStringFromAsciiChecked(value);
 
+// Converts empty to undefined (temporal_capi returns empty era codes when
+// undefined)
+#define CONVERT_NULLABLE_ASCII_STRING                             \
+  if (!value.empty()) {                                           \
+    return *isolate->factory()->NewStringFromAsciiChecked(value); \
+  } else {                                                        \
+    return *isolate->factory()->undefined_value();                \
+  }
+
 // converts nullopt to undefined
 #define CONVERT_NULLABLE_INTEGER                          \
   if (value.has_value()) {                                \
@@ -145,6 +154,12 @@ namespace internal {
   } else {                                                                \
     return *isolate->factory()->undefined_value();                        \
   }
+
+#ifdef TEMPORAL_CAPI_VERSION_0_0_12
+#define CONVERT_MAYBE_RESULT CONVERT_SMI
+#else
+#define CONVERT_MAYBE_RESULT CONVERT_FALLIBLE_INTEGER_AS_NULLABLE
+#endif
 
 #define TEMPORAL_GET_NUMBER_AFTER_DIVID(T, M, field, scale, name)        \
   BUILTIN(Temporal##T##Prototype##M) {                                   \
@@ -196,7 +211,7 @@ TEMPORAL_METHOD2(PlainDate, Compare)
 
 TEMPORAL_GET_RUST(PlainDate, date, CalendarId, calendarId,
                   calendar().identifier, CONVERT_ASCII_STRING)
-TEMPORAL_GET_RUST(PlainDate, date, Era, era, era, CONVERT_ASCII_STRING)
+TEMPORAL_GET_RUST(PlainDate, date, Era, era, era, CONVERT_NULLABLE_ASCII_STRING)
 TEMPORAL_GET_RUST(PlainDate, date, EraYear, eraYear, era_year,
                   CONVERT_NULLABLE_INTEGER)
 TEMPORAL_GET_RUST(PlainDate, date, Year, year, year, CONVERT_INTEGER64)
@@ -205,7 +220,7 @@ TEMPORAL_GET_RUST(PlainDate, date, MonthCode, monthCode, month_code,
                   CONVERT_ASCII_STRING)
 TEMPORAL_GET_RUST(PlainDate, date, Day, day, day, CONVERT_SMI)
 TEMPORAL_GET_RUST(PlainDate, date, DayOfWeek, dayOfWeek, day_of_week,
-                  CONVERT_FALLIBLE_INTEGER_AS_NULLABLE)
+                  CONVERT_MAYBE_RESULT)
 TEMPORAL_GET_RUST(PlainDate, date, DayOfYear, dayOfYear, day_of_year,
                   CONVERT_SMI)
 TEMPORAL_GET_RUST(PlainDate, date, WeekOfYear, weekOfYear, week_of_year,
@@ -213,7 +228,7 @@ TEMPORAL_GET_RUST(PlainDate, date, WeekOfYear, weekOfYear, week_of_year,
 TEMPORAL_GET_RUST(PlainDate, date, YearOfWeek, YearOfWeek, year_of_week,
                   CONVERT_NULLABLE_INTEGER)
 TEMPORAL_GET_RUST(PlainDate, date, DaysInWeek, daysInWeek, days_in_week,
-                  CONVERT_FALLIBLE_INTEGER_AS_NULLABLE)
+                  CONVERT_MAYBE_RESULT)
 TEMPORAL_GET_RUST(PlainDate, date, DaysInMonth, daysInMonth, days_in_month,
                   CONVERT_SMI)
 TEMPORAL_GET_RUST(PlainDate, date, DaysInYear, daysInYear, days_in_year,
@@ -302,7 +317,8 @@ TEMPORAL_METHOD2(PlainDateTime, Compare)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, CalendarId, calendarId,
                   calendar().identifier, CONVERT_ASCII_STRING)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, Year, year, year, CONVERT_INTEGER64)
-TEMPORAL_GET_RUST(PlainDateTime, date_time, Era, era, era, CONVERT_ASCII_STRING)
+TEMPORAL_GET_RUST(PlainDateTime, date_time, Era, era, era,
+                  CONVERT_NULLABLE_ASCII_STRING)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, EraYear, eraYear, era_year,
                   CONVERT_NULLABLE_INTEGER)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, Month, month, month, CONVERT_SMI)
@@ -319,7 +335,7 @@ TEMPORAL_GET_RUST(PlainDateTime, date_time, Microsecond, microsecond,
 TEMPORAL_GET_RUST(PlainDateTime, date_time, Nanosecond, nanosecond, nanosecond,
                   CONVERT_SMI)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, DayOfWeek, dayOfWeek, day_of_week,
-                  CONVERT_FALLIBLE_INTEGER_AS_NULLABLE)
+                  CONVERT_MAYBE_RESULT)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, DayOfYear, dayOfYear, day_of_year,
                   CONVERT_SMI)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, WeekOfYear, weekOfYear,
@@ -327,7 +343,7 @@ TEMPORAL_GET_RUST(PlainDateTime, date_time, WeekOfYear, weekOfYear,
 TEMPORAL_GET_RUST(PlainDateTime, date_time, YearOfWeek, YearOfWeek,
                   year_of_week, CONVERT_NULLABLE_INTEGER)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, DaysInWeek, daysInWeek,
-                  days_in_week, CONVERT_FALLIBLE_INTEGER_AS_NULLABLE)
+                  days_in_week, CONVERT_MAYBE_RESULT)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, DaysInMonth, daysInMonth,
                   days_in_month, CONVERT_SMI)
 TEMPORAL_GET_RUST(PlainDateTime, date_time, DaysInYear, daysInYear,
@@ -375,7 +391,7 @@ TEMPORAL_GET_RUST(PlainYearMonth, year_month, CalendarId, calendarId,
 TEMPORAL_GET_RUST(PlainYearMonth, year_month, Year, year, year,
                   CONVERT_INTEGER64)
 TEMPORAL_GET_RUST(PlainYearMonth, year_month, Era, era, era,
-                  CONVERT_ASCII_STRING)
+                  CONVERT_NULLABLE_ASCII_STRING)
 TEMPORAL_GET_RUST(PlainYearMonth, year_month, EraYear, eraYear, era_year,
                   CONVERT_NULLABLE_INTEGER)
 TEMPORAL_GET_RUST(PlainYearMonth, year_month, Month, month, month, CONVERT_SMI)
@@ -451,7 +467,7 @@ TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, TimeZoneId, time_zone)
 TEMPORAL_GET_RUST(ZonedDateTime, zoned_date_time, Year, year, year,
                   CONVERT_INTEGER64)
 TEMPORAL_GET_RUST(ZonedDateTime, zoned_date_time, Era, era, era,
-                  CONVERT_ASCII_STRING)
+                  CONVERT_NULLABLE_ASCII_STRING)
 TEMPORAL_GET_RUST(ZonedDateTime, zoned_date_time, EraYear, eraYear, era_year,
                   CONVERT_NULLABLE_INTEGER)
 TEMPORAL_GET_RUST(ZonedDateTime, zoned_date_time, Month, month, month,

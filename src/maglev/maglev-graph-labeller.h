@@ -35,6 +35,10 @@ class MaglevGraphLabeller {
       next_node_label_++;
     }
   }
+  void RegisterNode(const NodeBase* node, const Provenance* provenance) {
+    RegisterNode(node, provenance->unit, provenance->bytecode_offset,
+                 provenance->position);
+  }
   void RegisterNode(const NodeBase* node) {
     RegisterNode(node, nullptr, BytecodeOffset::None(),
                  SourcePosition::Unknown());
@@ -47,7 +51,8 @@ class MaglevGraphLabeller {
 
   int max_node_id() const { return next_node_label_ - 1; }
 
-  void PrintNodeLabel(std::ostream& os, const NodeBase* node) {
+  void PrintNodeLabel(std::ostream& os, const NodeBase* node,
+                      bool has_regalloc_data) {
     if (node != nullptr && node->Is<VirtualObject>()) {
       // VirtualObjects are unregisted nodes, since they are not attached to
       // the graph, but its inlined allocation is.
@@ -62,14 +67,15 @@ class MaglevGraphLabeller {
       return;
     }
 
-    if (node->has_id()) {
+    if (has_regalloc_data) {
       os << "v" << node->id() << "/";
     }
     os << "n" << node_id_it->second.label;
   }
 
-  void PrintInput(std::ostream& os, const Input& input) {
-    PrintNodeLabel(os, input.node());
+  void PrintInput(std::ostream& os, const Input& input,
+                  bool has_regalloc_data) {
+    PrintNodeLabel(os, input.node(), has_regalloc_data);
     os << ":" << input.operand();
   }
 
@@ -78,21 +84,31 @@ class MaglevGraphLabeller {
   int next_node_label_ = 1;
 };
 
+class MaglevGraphLabellerScope {
+ public:
+  explicit MaglevGraphLabellerScope(MaglevGraphLabeller* graph_labeller);
+  ~MaglevGraphLabellerScope();
+};
+
+extern thread_local MaglevGraphLabeller* thread_graph_labeller;
+
+MaglevGraphLabeller* GetCurrentGraphLabeller();
+
 #ifdef V8_ENABLE_MAGLEV_GRAPH_PRINTER
 
 class PrintNode {
  public:
-  PrintNode(MaglevGraphLabeller* graph_labeller, const NodeBase* node,
-            bool skip_targets = false)
-      : graph_labeller_(graph_labeller),
-        node_(node),
+  explicit PrintNode(const NodeBase* node, bool has_regalloc_data = false,
+                     bool skip_targets = false)
+      : node_(node),
+        has_regalloc_data_(has_regalloc_data),
         skip_targets_(skip_targets) {}
 
   void Print(std::ostream& os) const;
 
  private:
-  MaglevGraphLabeller* graph_labeller_;
   const NodeBase* node_;
+  bool has_regalloc_data_;
   // This is used when tracing graph building, since targets might not exist
   // yet.
   const bool skip_targets_;
@@ -100,13 +116,11 @@ class PrintNode {
 
 class PrintNodeLabel {
  public:
-  PrintNodeLabel(MaglevGraphLabeller* graph_labeller, const NodeBase* node)
-      : graph_labeller_(graph_labeller), node_(node) {}
+  explicit PrintNodeLabel(const NodeBase* node) : node_(node) {}
 
   void Print(std::ostream& os) const;
 
  private:
-  MaglevGraphLabeller* graph_labeller_;
   const NodeBase* node_;
 };
 
@@ -114,14 +128,13 @@ class PrintNodeLabel {
 
 class PrintNode {
  public:
-  PrintNode(MaglevGraphLabeller* graph_labeller, const NodeBase* node,
-            bool skip_targets = false) {}
+  explicit PrintNode(const NodeBase* node, bool skip_targets = false) {}
   void Print(std::ostream& os) const {}
 };
 
 class PrintNodeLabel {
  public:
-  PrintNodeLabel(MaglevGraphLabeller* graph_labeller, const NodeBase* node) {}
+  explicit PrintNodeLabel(const NodeBase* node) {}
   void Print(std::ostream& os) const {}
 };
 

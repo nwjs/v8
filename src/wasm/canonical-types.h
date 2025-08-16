@@ -50,7 +50,9 @@ class TypeCanonicalizer {
  public:
   static constexpr CanonicalTypeIndex kPredefinedArrayI8Index{0};
   static constexpr CanonicalTypeIndex kPredefinedArrayI16Index{1};
-  static constexpr uint32_t kNumberOfPredefinedTypes = 2;
+  static constexpr CanonicalTypeIndex kPredefinedArrayExternRefIndex{2};
+  static constexpr CanonicalTypeIndex kPredefinedArrayFuncRefIndex{3};
+  static constexpr uint32_t kNumberOfPredefinedTypes = 4;
 
   TypeCanonicalizer();
 
@@ -252,14 +254,13 @@ class TypeCanonicalizer {
 
     void Add(CanonicalValueType value_type) {
       if (value_type.has_index() && recgroup.Contains(value_type.ref_index())) {
-        // For relative indexed types, add their nullability, exactness, and
-        // the relative index to the hash.
+        // For relative indexed types, add the relative index and the other bits
+        // separately.
         // Shift the relative index by {kMaxCanonicalTypes} to map it to a
         // different index space (note that collisions in hashing are OK
         // though).
         static_assert(kMaxCanonicalTypes <= kMaxUInt32 / 2);
-        // TODO(403372470): Add the 'exact' bit.
-        hasher.Add((value_type.is_exact() << 1) | value_type.is_nullable());
+        hasher.Add(value_type.all_bits_without_index());
         hasher.Add((value_type.ref_index().index - recgroup.first.index) +
                    kMaxCanonicalTypes);
       } else {

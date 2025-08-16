@@ -1148,6 +1148,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchNop:
       // don't emit code for nops.
       break;
+    case kArchPause:
+      __ Isb();
+      break;
     case kArchDeoptimize: {
       DeoptimizationExit* exit =
           BuildTranslation(instr, -1, 0, 0, OutputFrameStateCombine::Ignore());
@@ -1933,6 +1936,70 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Rev32:
       __ Rev(i.OutputRegister32(), i.InputRegister32(0));
       break;
+    case kArm64Smax32: {
+      DCHECK(CpuFeatures::IsSupported(CSSC));
+
+      CpuFeatureScope scope(masm(), CSSC);
+
+      __ Smax(i.OutputRegister32(), i.InputRegister32(0), i.InputOperand32(1));
+      break;
+    }
+    case kArm64Smax64: {
+      DCHECK(CpuFeatures::IsSupported(CSSC));
+
+      CpuFeatureScope scope(masm(), CSSC);
+
+      __ Smax(i.OutputRegister64(), i.InputRegister64(0), i.InputOperand64(1));
+      break;
+    }
+    case kArm64Smin32: {
+      DCHECK(CpuFeatures::IsSupported(CSSC));
+
+      CpuFeatureScope scope(masm(), CSSC);
+
+      __ Smin(i.OutputRegister32(), i.InputRegister32(0), i.InputOperand32(1));
+      break;
+    }
+    case kArm64Smin64: {
+      DCHECK(CpuFeatures::IsSupported(CSSC));
+
+      CpuFeatureScope scope(masm(), CSSC);
+
+      __ Smin(i.OutputRegister64(), i.InputRegister64(0), i.InputOperand64(1));
+      break;
+    }
+    case kArm64Umax32: {
+      DCHECK(CpuFeatures::IsSupported(CSSC));
+
+      CpuFeatureScope scope(masm(), CSSC);
+
+      __ Umax(i.OutputRegister32(), i.InputRegister32(0), i.InputOperand32(1));
+      break;
+    }
+    case kArm64Umax64: {
+      DCHECK(CpuFeatures::IsSupported(CSSC));
+
+      CpuFeatureScope scope(masm(), CSSC);
+
+      __ Umax(i.OutputRegister64(), i.InputRegister64(0), i.InputOperand64(1));
+      break;
+    }
+    case kArm64Umin32: {
+      DCHECK(CpuFeatures::IsSupported(CSSC));
+
+      CpuFeatureScope scope(masm(), CSSC);
+
+      __ Umin(i.OutputRegister32(), i.InputRegister32(0), i.InputOperand32(1));
+      break;
+    }
+    case kArm64Umin64: {
+      DCHECK(CpuFeatures::IsSupported(CSSC));
+
+      CpuFeatureScope scope(masm(), CSSC);
+
+      __ Umin(i.OutputRegister64(), i.InputRegister64(0), i.InputOperand64(1));
+      break;
+    }
     case kArm64Cmp:
       __ Cmp(i.InputOrZeroRegister64(0), i.InputOperand2_64(1));
       break;
@@ -2483,6 +2550,31 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Word64AtomicCompareExchangeUint64:
       ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER(, UXTX, Register);
       break;
+    case kAtomicCompareExchangeWithWriteBarrier: {
+      if constexpr (COMPRESS_POINTERS_BOOL) {
+        ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER(, UXTW, Register32);
+        // Contrary to x64, the instruction sequence we emit on arm64 always
+        // writes an uncompressed value into the output register, so we can
+        // unconditionally decompress it.
+        __ Add(i.OutputRegister(), i.OutputRegister(),
+               kPtrComprCageBaseRegister);
+      } else {
+        ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER(, UXTX, Register);
+      }
+      if (v8_flags.disable_write_barriers) break;
+      // Emit the write barrier.
+      Register object = i.InputRegister(0);
+      Register offset = i.InputRegister(1);
+      Register new_value = i.InputRegister(3);
+      auto ool = zone()->New<OutOfLineRecordWrite>(
+          this, object, offset, new_value, RecordWriteMode::kValueIsAny,
+          DetermineStubCallMode(), &unwinding_info_writer_);
+      __ JumpIfSmi(new_value, ool->exit());
+      __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
+                       ne, ool->entry());
+      __ Bind(ool->exit());
+      break;
+    }
     case kAtomicSubInt8:
       ASSEMBLE_ATOMIC_SUB(b, Register32);
       __ Sxtb(i.OutputRegister(0), i.OutputRegister(0));
@@ -2583,6 +2675,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
              i.InputSimd128Register(0).Format(f),                      \
              i.InputSimd128Register(1).Format(f));                     \
     break;                                                             \
+  }
+#define SIMD_LOW_BINOP_LANE_SIZE_CASE(Op, Instr)       \
+  case Op: {                                           \
+    int lane_size = LaneSizeField::decode(opcode);     \
+    VectorFormat f = VectorFormatFillHalfQ(lane_size); \
+    __ Instr(i.OutputSimd128Register().Format(f),      \
+             i.InputSimd128Register(0).Format(f),      \
+             i.InputSimd128Register(1).Format(f));     \
+    break;                                             \
   }
 #define SIMD_FCM_L_CASE(Op, ImmOp, RegOp)                              \
   case Op: {                                                           \
@@ -3214,26 +3315,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_BINOP_CASE(kArm64S128Xor, Eor, 16B);
       SIMD_UNOP_CASE(kArm64S128Not, Mvn, 16B);
     case kArm64S128Dup: {
-      VRegister dst = i.OutputSimd128Register(),
-                src = i.InputSimd128Register(0);
-      int lanes = i.InputInt32(1);
-      int index = i.InputInt32(2);
-      switch (lanes) {
-        case 2:
-          __ Dup(dst.V2D(), src.V2D(), index);
-          break;
-        case 4:
-          __ Dup(dst.V4S(), src.V4S(), index);
-          break;
-        case 8:
-          __ Dup(dst.V8H(), src.V8H(), index);
-          break;
-        case 16:
-          __ Dup(dst.V16B(), src.V16B(), index);
-          break;
-        default:
-          UNREACHABLE();
-      }
+      VectorFormat f = VectorFormatFillQ(LaneSizeField::decode(opcode));
+      VRegister dst = i.OutputSimd128Register().Format(f),
+                src = i.InputSimd128Register(0).Format(f);
+      int lane_count = LaneCountFromFormat(f);
+      int lane_idx = i.InputInt32(1);
+      DCHECK_GT(lane_count, static_cast<unsigned>(lane_idx));
+      __ Dup(dst, src, lane_idx % lane_count);
       break;
     }
       SIMD_DESTRUCTIVE_BINOP_CASE(kArm64S128Select, Bsl, 16B);
@@ -3305,26 +3393,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Ext(dst, src, src, 8);
       break;
     }
-      SIMD_BINOP_CASE(kArm64S64x2UnzipLeft, Uzp1, 2D);
-      SIMD_BINOP_CASE(kArm64S64x2UnzipRight, Uzp2, 2D);
-      SIMD_BINOP_CASE(kArm64S32x4ZipLeft, Zip1, 4S);
-      SIMD_BINOP_CASE(kArm64S32x4ZipRight, Zip2, 4S);
-      SIMD_BINOP_CASE(kArm64S32x4UnzipLeft, Uzp1, 4S);
-      SIMD_BINOP_CASE(kArm64S32x4UnzipRight, Uzp2, 4S);
-      SIMD_BINOP_CASE(kArm64S32x4TransposeLeft, Trn1, 4S);
-      SIMD_BINOP_CASE(kArm64S32x4TransposeRight, Trn2, 4S);
-      SIMD_BINOP_CASE(kArm64S16x8ZipLeft, Zip1, 8H);
-      SIMD_BINOP_CASE(kArm64S16x8ZipRight, Zip2, 8H);
-      SIMD_BINOP_CASE(kArm64S16x8UnzipLeft, Uzp1, 8H);
-      SIMD_BINOP_CASE(kArm64S16x8UnzipRight, Uzp2, 8H);
-      SIMD_BINOP_CASE(kArm64S16x8TransposeLeft, Trn1, 8H);
-      SIMD_BINOP_CASE(kArm64S16x8TransposeRight, Trn2, 8H);
-      SIMD_BINOP_CASE(kArm64S8x16ZipLeft, Zip1, 16B);
-      SIMD_BINOP_CASE(kArm64S8x16ZipRight, Zip2, 16B);
-      SIMD_BINOP_CASE(kArm64S8x16UnzipLeft, Uzp1, 16B);
-      SIMD_BINOP_CASE(kArm64S8x16UnzipRight, Uzp2, 16B);
-      SIMD_BINOP_CASE(kArm64S8x16TransposeLeft, Trn1, 16B);
-      SIMD_BINOP_CASE(kArm64S8x16TransposeRight, Trn2, 16B);
+      SIMD_BINOP_LANE_SIZE_CASE(kArm64S128UnzipLeft, Uzp1);
+      SIMD_BINOP_LANE_SIZE_CASE(kArm64S128UnzipRight, Uzp2);
+      SIMD_BINOP_LANE_SIZE_CASE(kArm64S128ZipLeft, Zip1);
+      SIMD_BINOP_LANE_SIZE_CASE(kArm64S128ZipRight, Zip2);
+      SIMD_BINOP_LANE_SIZE_CASE(kArm64S128TransposeLeft, Trn1);
+      SIMD_BINOP_LANE_SIZE_CASE(kArm64S128TransposeRight, Trn2);
+      SIMD_LOW_BINOP_LANE_SIZE_CASE(kArm64S128LowZipRight, Zip2);
+      SIMD_LOW_BINOP_LANE_SIZE_CASE(kArm64S128LowUnzipLeft, Uzp1);
+      SIMD_LOW_BINOP_LANE_SIZE_CASE(kArm64S128LowUnzipRight, Uzp2);
     case kArm64S8x16Concat: {
       __ Ext(i.OutputSimd128Register().V16B(), i.InputSimd128Register(0).V16B(),
              i.InputSimd128Register(1).V16B(), i.InputInt4(2));
@@ -3368,12 +3445,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Ext(dst.V16B(), dst.V16B(), dst.V16B(), 8);
       break;
     }
-      SIMD_UNOP_CASE(kArm64S32x2Reverse, Rev64, 4S);
-      SIMD_UNOP_CASE(kArm64S16x4Reverse, Rev64, 8H);
-      SIMD_UNOP_CASE(kArm64S16x2Reverse, Rev32, 8H);
-      SIMD_UNOP_CASE(kArm64S8x8Reverse, Rev64, 16B);
-      SIMD_UNOP_CASE(kArm64S8x4Reverse, Rev32, 16B);
-      SIMD_UNOP_CASE(kArm64S8x2Reverse, Rev16, 16B);
+      SIMD_UNOP_LANE_SIZE_CASE(kArm64S128Rev16, Rev16);
+      SIMD_UNOP_LANE_SIZE_CASE(kArm64S128Rev32, Rev32);
+      SIMD_UNOP_LANE_SIZE_CASE(kArm64S128Rev64, Rev64);
     case kArm64LoadSplat: {
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       VectorFormat f = VectorFormatFillQ(LaneSizeField::decode(opcode));
@@ -3387,6 +3461,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Register src = i.InputRegister64(1);
       Register num_bytes = i.InputRegister64(2);
       __ Cpy(dst, src, num_bytes);
+      break;
+    }
+    case kArm64Set: {
+      DCHECK(CpuFeatures::IsSupported(MOPS));
+      CpuFeatureScope feature_scope(masm(), MOPS);
+      Register dst = i.InputRegister64(0);
+      Register value = i.InputRegister64(1);
+      Register num_bytes = i.InputRegister64(2);
+      // The set instructions take the 'num_bytes' and 'value' operands in
+      // reverse order.
+      __ Set(dst, num_bytes, value);
       break;
     }
     case kArm64LoadLane: {
@@ -3496,6 +3581,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 #undef SIMD_UNOP_LANE_SIZE_CASE
 #undef SIMD_BINOP_CASE
 #undef SIMD_BINOP_LANE_SIZE_CASE
+#undef SIMD_LOW_BINOP_LANE_SIZE_CASE
 #undef SIMD_DESTRUCTIVE_BINOP_CASE
 #undef SIMD_DESTRUCTIVE_BINOP_LANE_SIZE_CASE
 #undef SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE
@@ -3720,31 +3806,35 @@ void AssembleConditionalCompareChain(Instruction* instr, int64_t num_ccmps,
   }
 }
 
-// Assemble a conditional compare and boolean materializations after this
-// instruction.
-void CodeGenerator::AssembleArchConditionalBoolean(Instruction* instr) {
-  // Materialize a full 64-bit 1 or 0 value. The result register is always the
-  // last output of the instruction.
-  DCHECK_NE(0u, instr->OutputCount());
-  Arm64OperandConverter i(this, instr);
-  Register reg = i.OutputRegister(instr->OutputCount() - 1);
+#if V8_ENABLE_WEBASSEMBLY
+void CodeGenerator::AssembleArchConditionalTrap(Instruction* instr,
+                                                FlagsCondition condition) {
   DCHECK_GE(instr->InputCount(), 6);
-
+  Arm64OperandConverter i(this, instr);
   // Input ordering:
-  // > InputCount - 1: number of ccmps.
-  // > InputCount - 2: branch condition.
+  // > InputCount - 1: trap id.
+  // > InputCount - 2: number of ccmps.
+  // > InputCount - 3: branch condition.
   size_t num_ccmps_index =
-      instr->InputCount() - kConditionalSetEndOffsetOfNumCcmps;
-  size_t set_condition_index =
-      instr->InputCount() - kConditionalSetEndOffsetOfCondition;
+      instr->InputCount() - kConditionalTrapEndOffsetOfNumCcmps;
   int64_t num_ccmps = i.ToConstant(instr->InputAt(num_ccmps_index)).ToInt64();
-  size_t ccmp_base_index = set_condition_index - kNumCcmpOperands * num_ccmps;
+  size_t ccmp_base_index = instr->InputCount() -
+                           kConditionalTrapEndOffsetOfCondition -
+                           kNumCcmpOperands * num_ccmps;
   AssembleConditionalCompareChain(instr, num_ccmps, ccmp_base_index, this);
-
-  FlagsCondition set_condition = static_cast<FlagsCondition>(
-      i.ToConstant(instr->InputAt(set_condition_index)).ToInt64());
-  __ Cset(reg, FlagsConditionToCondition(set_condition));
+  Condition cc = FlagsConditionToCondition(condition);
+  auto ool = zone()->New<WasmOutOfLineTrap>(this, instr);
+  Label* tlabel = ool->entry();
+  // Assume traps aren't taken, so they're consistent.
+  if (CpuFeatures::IsSupported(HBC)) {
+    CpuFeatureScope scope(masm(), HBC);
+    __ Bc(cc, tlabel);
+  } else {
+    __ B(cc, tlabel);
+  }
 }
+
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 void CodeGenerator::AssembleArchConditionalBranch(Instruction* instr,
                                                   BranchInfo* branch) {
@@ -4006,7 +4096,17 @@ void CodeGenerator::AssembleConstructFrame() {
             WasmHandleStackOverflowDescriptor::FrameBaseRegister(), fp,
             Operand(call_descriptor->ParameterSlotCount() * kSystemPointerSize +
                     CommonFrameConstants::kFixedFrameSizeAboveFp));
-        __ CallBuiltin(Builtin::kWasmHandleStackOverflow);
+        __ Call(static_cast<Address>(Builtin::kWasmHandleStackOverflow),
+                RelocInfo::WASM_STUB_CALL);
+        // If the call succesfully grew the stack, we don't expect it to have
+        // allocated any heap objects or otherwise triggered any GC.
+        // If it was not able to grow the stack, it may have triggered a GC when
+        // allocating the stack overflow exception object, but the call did not
+        // return in this case.
+        // So either way, we can just ignore any references and record an empty
+        // safepoint here.
+        ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+        RecordSafepoint(reference_map);
         __ PopCPURegList(fp_regs_to_save);
         __ PopCPURegList(regs_to_save);
       } else {

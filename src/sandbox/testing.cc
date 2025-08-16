@@ -18,12 +18,24 @@
 #ifdef V8_OS_LINUX
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/ucontext.h>
 #include <unistd.h>
 #endif  // V8_OS_LINUX
 
 #ifdef V8_USE_ADDRESS_SANITIZER
 #include <sanitizer/asan_interface.h>
 #endif  // V8_USE_ADDRESS_SANITIZER
+#ifdef V8_USE_MEMORY_SANITIZER
+#include <sanitizer/msan_interface.h>
+#endif  // V8_USE_MEMORY_SANITIZER
+#ifdef V8_USE_UNDEFINED_BEHAVIOR_SANITIZER
+#include <sanitizer/ubsan_interface.h>
+#endif  // V8_USE_UNDEFINED_BEHAVIOR_SANITIZER
+
+#if defined(V8_USE_ADDRESS_SANITIZER) || defined(V8_USE_MEMORY_SANITIZER) || \
+    defined(V8_USE_UNDEFINED_BEHAVIOR_SANITIZER)
+#define V8_USE_ANY_SANITIZER 1
+#endif
 
 namespace v8 {
 namespace internal {
@@ -564,14 +576,14 @@ void UninstallCrashFilter() {
   sigaction(SIGSEGV, &g_old_sigsegv_handler, nullptr);
 
   // We should also uninstall the sanitizer death callback as our crash filter
-  // may hand a crash over to ASan, which should then not enter our crash
+  // may hand a crash over to sanitizers, which should then not enter our crash
   // filtering logic a second time.
-#ifdef V8_USE_ADDRESS_SANITIZER
+#ifdef V8_USE_ANY_SANITIZER
   __sanitizer_set_death_callback(nullptr);
-#endif
+#endif  // V8_USE_ANY_SANITIZER
 }
 
-void CrashFilter(int signal, siginfo_t* info, void* void_context) {
+void CrashFilter(int signal, siginfo_t* info, void* context) {
   // NOTE: This code MUST be async-signal safe.
   // NO malloc or stdio is allowed here.
 
@@ -703,31 +715,50 @@ void CrashFilter(int signal, siginfo_t* info, void* void_context) {
   UninstallCrashFilter();
 
   PrintToStderr("\n## V8 sandbox violation detected!\n\n");
+
+#ifdef V8_HOST_ARCH_X64
+  ucontext_t* ctx = reinterpret_cast<ucontext_t*>(context);
+  // Matches X86_PF_WRITE in x86_pf_error_code.
+  static constexpr greg_t kWriteAccessBit = 1;
+  const bool write_access =
+      ctx->uc_mcontext.gregs[REG_ERR] & (1 << kWriteAccessBit);
+  if (!write_access) {
+    PrintToStderr(
+        "Access type was read though which is technically not a sandbox "
+        "violation. This requires manual investigation.\n");
+  }
+#endif  // V8_HOST_ARCH_X64
 }
 
+#ifdef V8_USE_ANY_SANITIZER
+void SanitizerFaultHandler() {
 #ifdef V8_USE_ADDRESS_SANITIZER
-void AsanFaultHandler() {
-  Address faultaddr = reinterpret_cast<Address>(__asan_get_report_address());
+  if (__asan_report_present()) {
+    Address faultaddr = reinterpret_cast<Address>(__asan_get_report_address());
 
-  if (faultaddr == kNullAddress) {
-    FilterCrash(
-        "Caught ASan fault without a fault address. Ignoring it as we cannot "
-        "check if it is a sandbox violation. Exiting process...\n");
+    if (faultaddr == kNullAddress) {
+      FilterCrash(
+          "Caught ASan fault without a fault address. Ignoring it as we cannot "
+          "check if it is a sandbox violation. Exiting process...\n");
+    }
+
+    if (Sandbox::current()->Contains(faultaddr)) {
+      FilterCrash(
+          "Caught harmless ASan fault (inside sandbox address space). Exiting "
+          "process...\n");
+    }
   }
+#endif  // V8_USE_ADDRESS_SANITIZER
 
-  if (Sandbox::current()->Contains(faultaddr)) {
-    FilterCrash(
-        "Caught harmless ASan fault (inside sandbox address space). Exiting "
-        "process...\n");
-  }
-
-  // Asan may report the failure via abort(), so we should also restore the
-  // original signal handlers here.
+  // Sanitizers may report the failure via abort(), so we should also restore
+  // the original signal handlers here.
   UninstallCrashFilter();
 
+  // In case of a sanitizer issue we opt for conservatively reporting a sandbox
+  // violation that needs to be investigated.
   PrintToStderr("\n## V8 sandbox violation detected!\n\n");
 }
-#endif  // V8_USE_ADDRESS_SANITIZER
+#endif  // V8_USE_ANY_SANITIZER
 
 void InstallCrashFilter() {
   // Register an alternate stack for signal delivery so that signal handlers
@@ -751,13 +782,14 @@ void InstallCrashFilter() {
   success &= (sigaction(SIGSEGV, &action, &g_old_sigsegv_handler) == 0);
   CHECK(success);
 
-#if defined(V8_USE_ADDRESS_SANITIZER)
-  __sanitizer_set_death_callback(&AsanFaultHandler);
-#elif defined(V8_USE_MEMORY_SANITIZER) || \
-    defined(V8_USE_UNDEFINED_BEHAVIOR_SANITIZER)
-  // TODO(saelo): can we also test for the other sanitizers here somehow?
-  FATAL("The sandbox crash filter currently only supports AddressSanitizer");
-#endif
+#ifdef V8_USE_ANY_SANITIZER
+  // We install sanitizer specific crash handlers. These can only check for
+  // in-sandbox crashes on certain configurations.
+  //
+  // The crash handler also resets the signal handler as sanitizer may use
+  // `abort()` via `abort_on_error=1` option to signal problems.
+  __sanitizer_set_death_callback(&SanitizerFaultHandler);
+#endif  // V8_USE_ANY_SANITIZER
 }
 
 #endif  // V8_OS_LINUX

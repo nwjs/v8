@@ -3276,6 +3276,21 @@ IGNITION_HANDLER(ForInStep, InterpreterAssembler) {
   Dispatch();
 }
 
+// ForOfNext <object> <next> <value>
+//
+// Get the next value of the iterable and returns done in the accumulator.
+IGNITION_HANDLER(ForOfNext, InterpreterAssembler) {
+  TNode<Object> object = LoadRegisterAtOperandIndex(0);
+  TNode<Object> next = LoadRegisterAtOperandIndex(1);
+  TNode<Context> context = GetContext();
+
+  auto [done_value, value] = ForOfNextHelper(context, object, next);
+  SetAccumulator(done_value);
+  StoreRegisterAtOperandIndex(value, 2);
+
+  Dispatch();
+}
+
 // GetIterator <object>
 //
 // Retrieves the object[Symbol.iterator] method, calls it and stores
@@ -3421,6 +3436,29 @@ void BitwiseNotAssemblerTS_Generate(compiler::turboshaft::PipelineData* data,
                                     compiler::turboshaft::Graph& graph,
                                     Zone* zone);
 
+#define UNEXPECTED_BYTECODE(Name, ...) \
+  case Bytecode::k##Name:              \
+    UNREACHABLE();  // This is not expected in this configuration.
+
+void GenerateBytecodeHandlerTSA(compiler::turboshaft::PipelineData* data,
+                                Isolate* isolate,
+                                compiler::turboshaft::Graph& graph, Zone* zone,
+                                Bytecode bytecode, OperandScale operand_scale) {
+  switch (bytecode) {
+#define CALL_GENERATOR_TSA(Name, ...)                       \
+  case Bytecode::k##Name:                                   \
+    Name##AssemblerTS_Generate(data, isolate, graph, zone); \
+    break;
+    BYTECODE_LIST_WITH_UNIQUE_HANDLERS(UNEXPECTED_BYTECODE, CALL_GENERATOR_TSA)
+#undef CALL_GENERATOR_TS
+    default:
+      // Others (the rest of the short stars, and the rest of the illegal range)
+      // must not get their own handler generated. Rather, multiple entries in
+      // the jump table point to those handlers.
+      UNREACHABLE();
+  }
+}
+
 void GenerateBytecodeHandler(compiler::CodeAssemblerState* state,
                              Bytecode bytecode, OperandScale operand_scale) {
   switch (bytecode) {
@@ -3428,18 +3466,8 @@ void GenerateBytecodeHandler(compiler::CodeAssemblerState* state,
   case Bytecode::k##Name:                            \
     Name##Assembler::Generate(state, operand_scale); \
     break;
-#define CALL_GENERATOR_TS(Name, ...)                                       \
-  /* FIXME(348031042): This doesn't compile since the                      \
-   * CodeAssemblerCompilationJob refactor. */                              \
-  case Bytecode::k##Name:                                                  \
-    code = compiler::turboshaft::BuildWithTurboshaftAssemblerImpl(         \
-        isolate, builtin, &Name##AssemblerTS_Generate, descriptor_builder, \
-        debug_name, options, CodeKind::BYTECODE_HANDLER,                   \
-        BytecodeHandlerData(bytecode, operand_scale));                     \
-    break;
-    BYTECODE_LIST_WITH_UNIQUE_HANDLERS(CALL_GENERATOR, CALL_GENERATOR_TS);
+    BYTECODE_LIST_WITH_UNIQUE_HANDLERS(CALL_GENERATOR, UNEXPECTED_BYTECODE);
 #undef CALL_GENERATOR
-#undef CALL_GENERATOR_TS
     case Bytecode::kIllegal:
       IllegalAssembler::Generate(state, operand_scale);
       break;
@@ -3453,6 +3481,8 @@ void GenerateBytecodeHandler(compiler::CodeAssemblerState* state,
       UNREACHABLE();
   }
 }
+
+#undef UNEXPECTED_BYTECODE
 
 #include "src/codegen/undef-code-stub-assembler-macros.inc"
 

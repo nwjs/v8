@@ -307,7 +307,7 @@ class V8_NODISCARD HandleScope {
     requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
   HandleType<T> CloseAndEscape(HandleType<T> handle_value);
 
-  Isolate* isolate() { return isolate_; }
+  Isolate* isolate() const { return isolate_; }
 
   // Limit for number of handles with --check-handle-count. This is
   // large enough to compile natives and pass unit tests with some
@@ -368,23 +368,6 @@ class V8_NODISCARD SealHandleScope final {
   int prev_sealed_level_;
 #endif
 };
-
-struct HandleScopeData final {
-  static constexpr uint32_t kSizeInBytes =
-      2 * kSystemPointerSize + 2 * kInt32Size;
-
-  Address* next;
-  Address* limit;
-  int level;
-  int sealed_level;
-
-  void Initialize() {
-    next = limit = nullptr;
-    sealed_level = level = 0;
-  }
-};
-
-static_assert(HandleScopeData::kSizeInBytes == sizeof(HandleScopeData));
 
 template <typename T>
 struct is_direct_handle : public std::false_type {};
