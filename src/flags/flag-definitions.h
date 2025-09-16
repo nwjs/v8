@@ -273,7 +273,6 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
 //
 // TODO(v8:14214): Remove --harmony flags once transition is complete.
 #define HARMONY_INPROGRESS_BASE(V)                                             \
-  V(harmony_temporal, "Temporal")                                              \
   V(harmony_shadow_realm, "harmony ShadowRealm")                               \
   V(harmony_struct, "harmony structs, shared structs, and shared arrays")
 
@@ -292,7 +291,8 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
 #endif
 
 // Features that are complete (but still behind the --harmony flag).
-#define HARMONY_STAGED_BASE(V)
+#define HARMONY_STAGED_BASE(V) V(harmony_temporal, "Temporal")
+
 #define JAVASCRIPT_STAGED_FEATURES_BASE(V)
 
 #ifdef V8_INTL_SUPPORT
@@ -925,6 +925,10 @@ DEFINE_BOOL(trace_compilation_dependencies, false, "trace code dependencies")
 // Depend on --trace-deopt-verbose for reporting dependency invalidations.
 DEFINE_IMPLICATION(trace_compilation_dependencies, trace_deopt_verbose)
 
+DEFINE_EXPERIMENTAL_FEATURE(assert_hole_checked_by_value,
+                            "assert that we always check for holes by value, "
+                            "never dereferencing their map.")
+
 #ifdef V8_ALLOCATION_SITE_TRACKING
 #define V8_ALLOCATION_SITE_TRACKING_BOOL true
 #else
@@ -1539,7 +1543,8 @@ DEFINE_BOOL_READONLY(turbo_rewrite_far_jumps, false,
 DEFINE_BOOL(
     stress_gc_during_compilation, false,
     "simulate GC/compiler thread race related to https://crbug.com/v8/8520")
-DEFINE_BOOL(turbo_fast_api_calls, true, "enable fast API calls from TurboFan")
+DEFINE_BOOL(turbo_fast_api_calls, V8_ENABLE_TURBOFAN_BOOL,
+            "enable fast API calls from TurboFan")
 
 DEFINE_BOOL(fast_api_allow_float_in_sim, false,
             "allow float parameters to be passed in simulator mode")
@@ -1622,6 +1627,9 @@ DEFINE_EXPERIMENTAL_FEATURE(experimental_wasm_simd_opt,
 DEFINE_BOOL(turbolev, false,
             "use Turbolev (≈ Maglev + Turboshaft combined) as the 4th tier "
             "compiler instead of Turbofan")
+
+DEFINE_BOOL(print_turbolev_frontend, false,
+            "print Turbolev frontend (Maglev graphs)")
 
 DEFINE_EXPERIMENTAL_FEATURE(
     turbolev_future,
@@ -1741,10 +1749,10 @@ DEFINE_UINT(wasm_max_committed_code_mb, kMaxCommittedWasmCodeMB,
             "maximum committed code space for wasm (in MB)")
 DEFINE_UINT(wasm_max_code_space_size_mb, kDefaultMaxWasmCodeSpaceSizeMb,
             "maximum size of a single wasm code space")
-DEFINE_BOOL(wasm_tier_up, true,
+DEFINE_BOOL(wasm_tier_up, V8_ENABLE_TURBOFAN_BOOL,
             "enable tier up to the optimizing compiler (requires --liftoff to "
             "have an effect)")
-DEFINE_BOOL(wasm_dynamic_tiering, true,
+DEFINE_BOOL(wasm_dynamic_tiering, V8_ENABLE_TURBOFAN_BOOL,
             "enable dynamic tier up to the optimizing compiler")
 DEFINE_NEG_NEG_IMPLICATION(liftoff, wasm_dynamic_tiering)
 DEFINE_BOOL(wasm_sync_tier_up, false,
@@ -1806,6 +1814,8 @@ DEFINE_DEBUG_BOOL(trace_liftoff, false,
                   "trace Liftoff, the baseline compiler for WebAssembly")
 DEFINE_BOOL(trace_wasm_memory, false,
             "print all memory updates performed in wasm code")
+DEFINE_BOOL(trace_wasm_globals, false,
+            "print all global variable updates performed in wasm code")
 // Fuzzers use {wasm_tier_mask_for_testing} and {wasm_debug_mask_for_testing}
 // together with {liftoff} and {no_wasm_tier_up} to force some functions to be
 // compiled with TurboFan or for debug.
@@ -1918,6 +1928,11 @@ DEFINE_BOOL(wasm_explicit_prototypes, true,
 DEFINE_BOOL(wasm_implicit_prototypes, true,
             "enable support for engine-created 'invisible' JS Prototypes "
             "(only with --experimental-wasm-custom-descriptors)")
+DEFINE_EXPERIMENTAL_FEATURE(
+    experimental_wasm_js_interop,
+    "enable JS Interop part of Custom Descriptors proposal")
+DEFINE_IMPLICATION(experimental_wasm_js_interop,
+                   experimental_wasm_custom_descriptors)
 
 #define WASM_PRE_STAGING_IMPLICATION(feat, desc, val) \
   DEFINE_IMPLICATION(experimental_fuzzing, experimental_wasm_##feat)
@@ -2066,6 +2081,10 @@ DEFINE_BOOL_READONLY(wasm_memory64_trap_handling, false,
 // DrumBrake flags.
 DEFINE_EXPERIMENTAL_FEATURE(wasm_jitless,
                             "Execute all wasm code in the Wasm interpreter")
+#ifdef V8_OS_TVOS
+// Enable wasm_jitless on tvOS where jit is not available.
+DEFINE_IMPLICATION(jitless, wasm_jitless)
+#endif
 DEFINE_BOOL(wasm_jitless_if_available_for_testing, false,
             "Enables the Wasm interpreter, for testing, but only if "
             "the 'v8_enable_drumbrake' flag is set.")
@@ -2194,8 +2213,6 @@ DEFINE_SIZE_T(preconfigured_old_space_size, 0,
               "preconfigured old space size (in Mbytes)")
 DEFINE_WEAK_VALUE_IMPLICATION(future, preconfigured_old_space_size, size_t{32})
 DEFINE_BOOL(gc_global, false, "always perform global GCs")
-DEFINE_BOOL(gc_on_background_notification, false,
-            "Perform a GC after being backgrounded.")
 
 // TODO(12950): The next three flags only have an effect if
 // V8_ENABLE_ALLOCATION_TIMEOUT is set, so we should only define them in that
@@ -2361,6 +2378,16 @@ DEFINE_BOOL(verify_heap_skip_remembered_set, false,
 DEFINE_BOOL_READONLY(verify_heap, false,
                      "verify heap pointers before and after GC")
 #endif
+#if V8_VERIFY_WRITE_BARRIERS
+#ifdef ENABLE_SLOW_DCHECKS
+DEFINE_BOOL(verify_write_barriers, true, "verify skipped write barriers")
+#else
+DEFINE_BOOL(verify_write_barriers, false, "verify skipped write barriers")
+#endif  // ENABLE_SLOW_DCHECKS
+#else   // V8_VERIFY_WRITE_BARRIERS
+DEFINE_BOOL_READONLY(verify_write_barriers, false,
+                     "verify skipped write barriers")
+#endif  // V8_VERIFY_WRITE_BARRIERS
 #if V8_OS_DARWIN
 DEFINE_BOOL(safepoint_bump_qos_class, true,
             "Bump QOS class for running threads to reach safepoint")
@@ -2438,6 +2465,8 @@ DEFINE_BOOL(
 DEFINE_BOOL(memory_pool_release_before_memory_pressure_gcs, true,
             "discard the memory pool before invoking the GC on memory pressure "
             "or last resort GCs")
+DEFINE_BOOL(memory_pool_release_on_malloc_failures, false,
+            "discard the memory pool on malloc retries")
 DEFINE_BOOL(large_page_pool, false, "Add large pages to the page pool")
 DEFINE_WEAK_IMPLICATION(future, large_page_pool)
 DEFINE_SIZE_T(max_large_page_pool_size, 32,
@@ -3017,6 +3046,9 @@ DEFINE_INT(regexp_tier_up_ticks, 1,
 DEFINE_BOOL(regexp_peephole_optimization, REGEXP_PEEPHOLE_OPTIMIZATION_BOOL,
             "enable peephole optimization for regexp bytecode")
 DEFINE_BOOL(regexp_results_cache, true, "enable the regexp results cache")
+DEFINE_BOOL(regexp_assemble_from_bytecode, false,
+            "assemble regexp JIT-code from bytecode")
+DEFINE_IMPLICATION(regexp_assemble_from_bytecode, experimental)
 DEFINE_BOOL(trace_regexp_peephole_optimization, false,
             "trace regexp bytecode peephole optimization")
 DEFINE_BOOL(trace_regexp_bytecodes, false, "trace regexp bytecode execution")
@@ -3671,6 +3703,12 @@ DEFINE_EXPERIMENTAL_FEATURE(shared_heap,
 DEFINE_BOOL_READONLY(shared_heap, false,
                      "Enables a shared heap between isolates.")
 #endif
+
+DEFINE_EXPERIMENTAL_FEATURE(
+    proto_assign_seq_opt,
+    "Enable optimizing a sequence of `Class_X.prototype.[key] = ...`"
+    "by replacing it by a runtime code somewhat equivalent to "
+    "`Object.assign(Class_X.prototype, [boilerplate_obj])`")
 
 #if defined(V8_USE_LIBM_TRIG_FUNCTIONS)
 DEFINE_BOOL(use_libm_trig_functions, true, "use libm trig functions")

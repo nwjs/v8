@@ -2106,7 +2106,7 @@ void CopyOrMoveRangeImpl(Heap* heap, Tagged<HeapObject> dst_object,
   MemoryChunk* dst_chunk = MemoryChunk::FromHeapObject(dst_object);
   // Young generation object with marking being off, we can use plain memcopy
   // without write barriers.
-  if (!dst_chunk->IsFlagSet(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING)) {
+  if (!dst_chunk->PointersFromHereAreInteresting()) {
     non_atomic_op(dst_slot, src_slot, len);
     return;
   }
@@ -2632,15 +2632,6 @@ Heap::LimitsComputationResult Heap::ComputeNewAllocationLimits(Heap* heap) {
           new_space_capacity, mode);
 
   return {new_old_generation_allocation_limit, new_global_allocation_limit};
-}
-
-void Heap::ComputeAndSetNewAllocationLimits() {
-  if (using_initial_limit()) return;
-
-  const auto new_limits = ComputeNewAllocationLimits(this);
-  SetOldGenerationAndGlobalAllocationLimit(
-      new_limits.old_generation_allocation_limit,
-      new_limits.global_allocation_limit);
 }
 
 void Heap::RecomputeLimits(GarbageCollector collector, base::TimeTicks time) {
@@ -3379,21 +3370,27 @@ void Heap::CreateFillerObjectAtBackground(const WritableFreeSpace& free_space) {
 }
 
 void Heap::CreateFillerObjectAt(Address addr, int size,
-                                ClearFreedMemoryMode clear_memory_mode) {
-  if (size == 0) return;
-  if (MemoryChunk::FromAddress(addr)->executable()) {
-    WritableJitPage jit_page(addr, size);
-    WritableFreeSpace free_space = jit_page.FreeRange(addr, size);
-    CreateFillerObjectAtRaw(free_space, clear_memory_mode,
-                            ClearRecordedSlots::kNo,
-                            VerifyNoSlotsRecorded::kYes);
-  } else {
+                                ClearFreedMemoryMode clear_memory_mode,
+                                std::optional<AllocationType> allocation_type) {
+  if (size == 0) {
+    return;
+  }
+  const bool non_code_space =
+      (allocation_type.has_value() &&
+       allocation_type.value() != AllocationType::kCode) ||
+      !MemoryChunk::FromAddress(addr)->Metadata(isolate())->is_executable();
+  if (V8_LIKELY(non_code_space)) {
     WritableFreeSpace free_space =
         WritableFreeSpace::ForNonExecutableMemory(addr, size);
     CreateFillerObjectAtRaw(free_space, clear_memory_mode,
                             ClearRecordedSlots::kNo,
                             VerifyNoSlotsRecorded::kYes);
+    return;
   }
+  WritableJitPage jit_page(addr, size);
+  WritableFreeSpace free_space = jit_page.FreeRange(addr, size);
+  CreateFillerObjectAtRaw(free_space, clear_memory_mode,
+                          ClearRecordedSlots::kNo, VerifyNoSlotsRecorded::kYes);
 }
 
 void Heap::CreateFillerObjectAtRaw(
@@ -3424,7 +3421,7 @@ bool Heap::CanMoveObjectStart(Tagged<HeapObject> object) {
     return false;
   }
 
-  if (IsLargeObject(object)) {
+  if (HeapLayout::InAnyLargeSpace(object)) {
     return false;
   }
 
@@ -3456,10 +3453,6 @@ bool Heap::IsImmovable(Tagged<HeapObject> object) {
   const MemoryChunkMetadata* metadata =
       MemoryChunk::FromHeapObject(object)->Metadata(isolate());
   return metadata->never_evacuate() || metadata->is_large();
-}
-
-bool Heap::IsLargeObject(Tagged<HeapObject> object) {
-  return MemoryChunk::FromHeapObject(object)->IsLargePage();
 }
 
 #ifdef ENABLE_SLOW_DCHECKS
@@ -3557,7 +3550,7 @@ Tagged<FixedArrayBase> Heap::LeftTrimFixedArray(Tagged<FixedArrayBase> object,
   // For now this trick is only applied to fixed arrays which may be in new
   // space or old space. In a large object space the object's start must
   // coincide with chunk and thus the trick is just not applicable.
-  DCHECK(!IsLargeObject(object));
+  DCHECK(!HeapLayout::InAnyLargeSpace(object));
   DCHECK(object->map() != ReadOnlyRoots(this).fixed_cow_array_map());
 
   static_assert(offsetof(FixedArrayBase, map_) == 0);
@@ -3649,7 +3642,7 @@ void Heap::RightTrimArray(Tagged<Array> object, int new_capacity,
   // Technically in new space this write might be omitted (except for debug
   // mode which iterates through the heap), but to play safer we still do it.
   // We do not create a filler for objects in a large object space.
-  if (!IsLargeObject(object)) {
+  if (!HeapLayout::InAnyLargeSpace(object)) {
     NotifyObjectSizeChange(
         object, old_size, old_size - bytes_to_trim,
         clear_slots ? ClearRecordedSlots::kYes : ClearRecordedSlots::kNo);
@@ -4168,7 +4161,7 @@ void Heap::NotifyObjectLayoutChange(
     int new_size) {
   if (invalidate_recorded_slots == InvalidateRecordedSlots::kYes) {
     const bool may_contain_recorded_slots = MayContainRecordedSlots(object);
-    MutablePageMetadata* const chunk =
+    MutablePageMetadata* const page =
         MutablePageMetadata::FromHeapObject(object);
     // Do not remove the recorded slot in the map word as this one can never be
     // invalidated.
@@ -4185,24 +4178,24 @@ void Heap::NotifyObjectLayoutChange(
       pending_layout_change_object_address = object.address();
       if (may_contain_recorded_slots && incremental_marking()->IsCompacting()) {
         RememberedSet<OLD_TO_OLD>::RemoveRange(
-            chunk, clear_range_start, clear_range_end,
+            page, clear_range_start, clear_range_end,
             SlotSet::EmptyBucketMode::KEEP_EMPTY_BUCKETS);
       }
     }
 
     if (may_contain_recorded_slots) {
       RememberedSet<OLD_TO_NEW>::RemoveRange(
-          chunk, clear_range_start, clear_range_end,
+          page, clear_range_start, clear_range_end,
           SlotSet::EmptyBucketMode::KEEP_EMPTY_BUCKETS);
       RememberedSet<OLD_TO_NEW_BACKGROUND>::RemoveRange(
-          chunk, clear_range_start, clear_range_end,
+          page, clear_range_start, clear_range_end,
           SlotSet::EmptyBucketMode::KEEP_EMPTY_BUCKETS);
       RememberedSet<OLD_TO_SHARED>::RemoveRange(
-          chunk, clear_range_start, clear_range_end,
+          page, clear_range_start, clear_range_end,
           SlotSet::EmptyBucketMode::KEEP_EMPTY_BUCKETS);
     }
 
-    DCHECK(!chunk->InTrustedSpace());
+    DCHECK(!page->is_trusted());
   }
 
   // During external pointer table compaction, the external pointer table
@@ -4255,10 +4248,10 @@ void Heap::NotifyObjectSizeChange(Tagged<HeapObject> object, int old_size,
   old_size = ALIGN_TO_ALLOCATION_ALIGNMENT(old_size);
   new_size = ALIGN_TO_ALLOCATION_ALIGNMENT(new_size);
   DCHECK_LE(new_size, old_size);
-  DCHECK(!IsLargeObject(object));
+  DCHECK(!HeapLayout::InAnyLargeSpace(object));
   if (new_size == old_size) return;
 
-  const bool is_main_thread = LocalHeap::Current() == nullptr;
+  const bool is_main_thread = LocalHeap::Current()->is_main_thread();
 
   DCHECK_IMPLIES(!is_main_thread,
                  clear_recorded_slots == ClearRecordedSlots::kNo);
@@ -4778,8 +4771,14 @@ void ClearStaleLeftTrimmedPointerVisitor::ClearLeftTrimmedOrForward(
 }
 
 bool ClearStaleLeftTrimmedPointerVisitor::IsLeftTrimmed(FullObjectSlot p) {
-  if (!IsHeapObject(*p)) return false;
-  Tagged<HeapObject> current = Cast<HeapObject>(*p);
+  Tagged<HeapObject> current;
+  if (!TryCast<HeapObject>(*p, &current)) return false;
+#if V8_STATIC_ROOTS_BOOL
+  // Check for holes before trying to read the map word, but only for static
+  // root builds where this is a value check (since an instance type check may
+  // see a forwarding address instead of a map).
+  if (SafeIsAnyHole(current)) return false;
+#endif
   if (!current->map_word(cage_base(), kRelaxedLoad).IsForwardingAddress() &&
       IsFreeSpaceOrFiller(current, cage_base())) {
 #ifdef DEBUG
@@ -5026,9 +5025,9 @@ void Heap::IterateConservativeStackRoots(RootVisitor* root_visitor,
                                          IterateRootsMode roots_mode) {
   const StackScanMode stack_scan_mode =
       ConservativeStackScanningModeForMajorGC();
-  DCHECK_IMPLIES(stack_scan_mode == Heap::StackScanMode::kSelective,
-                 IsGCWithStack());
-  if ((stack_scan_mode == StackScanMode::kNone) || !IsGCWithStack()) return;
+  if (stack_scan_mode == StackScanMode::kNone || !IsGCWithStack()) {
+    return;
+  }
 
   // In case of a shared GC, we're interested in the main isolate for CSS.
   Isolate* main_isolate = roots_mode == IterateRootsMode::kClientIsolate
@@ -5880,7 +5879,7 @@ void Heap::SetUp(LocalHeap* main_thread_local_heap) {
   v8::PageAllocator* trusted_page_allocator;
 #ifdef V8_ENABLE_SANDBOX
   trusted_page_allocator =
-      TrustedRange::GetProcessWideTrustedRange()->page_allocator();
+      isolate_->isolate_group()->GetTrustedPtrComprCage()->page_allocator();
 #else
   trusted_page_allocator = isolate_->page_allocator();
 #endif
@@ -6043,8 +6042,7 @@ size_t ReturnNull() { return 0; }
 
 }  // namespace
 
-void Heap::SetUpSpaces(LinearAllocationArea& new_allocation_info,
-                       LinearAllocationArea& old_allocation_info) {
+void Heap::SetUpSpaces() {
   // Ensure SetUpFromReadOnlySpace has been ran.
   DCHECK_NOT_NULL(read_only_space_);
 
@@ -6122,8 +6120,7 @@ void Heap::SetUpSpaces(LinearAllocationArea& new_allocation_info,
     shared_trusted_lo_allocation_space_ = heap->shared_trusted_lo_space_;
   }
 
-  main_thread_local_heap()->SetUpMainThread(new_allocation_info,
-                                            old_allocation_info);
+  main_thread_local_heap()->SetUpMainThread();
 
   base::TimeTicks startup_time = base::TimeTicks::Now();
 
@@ -6731,7 +6728,7 @@ int Heap::InsertIntoRememberedSetFromCode(MutablePageMetadata* chunk,
                                           size_t slot_offset) {
   // This is called during runtime by a builtin, therefore it is run in the main
   // thread.
-  DCHECK_NULL(LocalHeap::Current());
+  DCHECK(LocalHeap::Current()->is_main_thread());
   RememberedSet<OLD_TO_NEW>::Insert<AccessMode::NON_ATOMIC>(chunk, slot_offset);
   return 0;
 }
@@ -6875,6 +6872,7 @@ class UnreachableObjectsFilter : public HeapObjectsFilter {
       while (!marking_stack_.empty()) {
         Tagged<HeapObject> obj = marking_stack_.back();
         marking_stack_.pop_back();
+        if (SafeIsAnyHole(obj)) continue;
         VisitObject(filter_->heap_->isolate(), obj, this);
       }
     }
@@ -7079,7 +7077,7 @@ StrongRootsEntry* Heap::RegisterStrongRoots(const char* label,
                                             FullObjectSlot end) {
   // We're either on the main thread, or in a background thread with an active
   // local heap.
-  DCHECK(isolate()->CurrentLocalHeap()->IsRunning());
+  DCHECK(LocalHeap::Current()->IsRunning());
 
   base::MutexGuard guard(&strong_roots_mutex_);
 
@@ -7107,7 +7105,7 @@ void Heap::UpdateStrongRoots(StrongRootsEntry* entry, FullObjectSlot start,
 void Heap::UnregisterStrongRoots(StrongRootsEntry* entry) {
   // We're either on the main thread, or in a background thread with an active
   // local heap.
-  DCHECK(isolate()->CurrentLocalHeap()->IsRunning());
+  DCHECK(LocalHeap::Current()->IsRunning());
 
   base::MutexGuard guard(&strong_roots_mutex_);
 
@@ -7637,7 +7635,12 @@ void Heap::EnsureSweepingCompleted(SweepingForcedFinalizationMode mode) {
       !tracer()->IsSweepingInProgress());
 
   if (v8_flags.external_memory_accounted_in_global_limit) {
-    ComputeAndSetNewAllocationLimits();
+    if (!using_initial_limit()) {
+      auto new_limits = ComputeNewAllocationLimits(this);
+      SetOldGenerationAndGlobalAllocationLimit(
+          new_limits.old_generation_allocation_limit,
+          new_limits.global_allocation_limit);
+    }
   }
 }
 
@@ -7666,18 +7669,6 @@ void Heap::EnsureYoungSweepingCompleted() {
   paged_new_space()->paged_space()->RefillFreeList();
 
   tracer()->NotifyYoungSweepingCompletedAndStopCycleIfFinished();
-}
-
-void Heap::NotifyBackgrounded() {
-  // TODO(b/430536195): Integrate this properly with MemoryReducer if we decide
-  // to launch.
-  ActivateMemoryReducerIfNeeded();
-  if (v8_flags.gc_on_background_notification) {
-    ComputeAndSetNewAllocationLimits();
-    StartIncrementalMarkingIfAllocationLimitIsReached(
-        main_thread_local_heap(), GCFlagsForIncrementalMarking(),
-        kGCCallbackScheduleIdleGarbageCollection);
-  }
 }
 
 void Heap::NotifyLoadingStarted() {

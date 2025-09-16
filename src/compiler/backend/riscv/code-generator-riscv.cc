@@ -660,7 +660,6 @@ void CodeGenerator::AssembleArchSelect(Instruction* instr,
 }
 
 namespace {
-
 void AdjustStackPointerForTailCall(MacroAssembler* masm,
                                    FrameAccessState* state,
                                    int new_slot_above_sp,
@@ -782,7 +781,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kArchCallWasmFunction:
-    case kArchCallWasmFunctionIndirect: {
+    case kArchCallWasmFunctionIndirect:
+    case kArchResumeWasmContinuation: {
       if (instr->InputAt(0)->IsImmediate()) {
         DCHECK_EQ(arch_opcode, kArchCallWasmFunction);
         Constant constant = i.ToConstant(instr->InputAt(0));
@@ -793,6 +793,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
             i.InputRegister(0),
             i.InputInt64(instr->WasmSignatureHashInputIndex()));
       } else {
+        // TODO(thibaudm): Use a WasmCodePointer for
+        // kArchResumeWasmContinuation. Can this be merged with
+        // kArchCallWasmFunctionIndirect?
         __ Call(i.InputRegister(0));
       }
       RecordCallPosition(instr);
@@ -849,17 +852,37 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kArchCallJSFunction: {
-      Register func = i.InputOrZeroRegister(0);
-      if (v8_flags.debug_code) {
-        // Check the function's context matches the context argument.
-        __ LoadTaggedField(kScratchReg,
-                           FieldMemOperand(func, JSFunction::kContextOffset));
-        __ Assert(eq, AbortReason::kWrongFunctionContext, cp,
-                  Operand(kScratchReg));
-      }
       uint32_t num_arguments =
           i.InputUint32(instr->JSCallArgumentCountInputIndex());
-      __ CallJSFunction(func, num_arguments);
+      if (instr->InputAt(0)->IsImmediate()) {
+        Constant constant = i.ToConstant(instr->InputAt(0));
+        Handle<JSFunction> function = Cast<JSFunction>(constant.ToHeapObject());
+        __ li(kJavaScriptCallTargetRegister, function);
+        if (function->shared()->HasBuiltinId()) {
+          Builtin builtin = function->shared()->builtin_id();
+          SBXCHECK_EQ(num_arguments,
+                      Builtins::GetFormalParameterCount(builtin));
+          __ CallBuiltin(builtin);
+        } else {
+          JSDispatchHandle dispatch_handle = function->dispatch_handle();
+          size_t expected =
+              IsolateGroup::current()->js_dispatch_table()->GetParameterCount(
+                  dispatch_handle);
+          SBXCHECK_GE(num_arguments, expected);
+          __ CallJSDispatchEntry(dispatch_handle, expected);
+        }
+      } else {
+        Register func = i.InputRegister(0);
+        if (v8_flags.debug_code) {
+          // Check the function's context matches the context argument.
+          UseScratchRegisterScope scope(masm());
+          Register temp = scope.Acquire();
+          __ LoadTaggedField(temp,
+                             FieldMemOperand(func, JSFunction::kContextOffset));
+          __ Assert(eq, AbortReason::kWrongFunctionContext, cp, Operand(temp));
+        }
+        __ CallJSFunction(func, num_arguments);
+      }
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;
@@ -1212,16 +1235,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ AddWord(i.OutputRegister(), i.InputOrZeroRegister(0),
                  i.InputOperand(1));
       break;
-    case kRiscvAddOvf32:
-      __ AddOverflow32(i.OutputRegister(), i.InputOrZeroRegister(0),
-                       i.InputOperand(1), kScratchReg);
-      break;
     case kRiscvSub64:
       __ Sub64(i.OutputRegister(), i.InputOrZeroRegister(0), i.InputOperand(1));
-      break;
-    case kRiscvSubOvf32:
-      __ SubOverflow32(i.OutputRegister(), i.InputOrZeroRegister(0),
-                       i.InputOperand(1), kScratchReg);
       break;
     case kRiscvMulHigh32:
       __ Mulh32(i.OutputRegister(), i.InputOrZeroRegister(0),
@@ -1697,8 +1712,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ fcvt_d_s(i.OutputDoubleRegister(), i.InputSingleRegister(0));
       __ Branch(&done, ne, kScratchReg, Operand(zero_reg));
 #if V8_TARGET_ARCH_RISCV64
-      __ And(kScratchReg2, kScratchReg2, Operand(0x80000000));
-      __ slli(kScratchReg2, kScratchReg2, 32);
+      if (CpuFeatures::IsSupported(ZBS)) {
+        __ bexti(kScratchReg2, kScratchReg2, 31);
+        __ slli(kScratchReg2, kScratchReg2, 63);
+      } else {
+        __ And(kScratchReg2, kScratchReg2, Operand(0x80000000));
+        __ slli(kScratchReg2, kScratchReg2, 32);
+      }
       __ fmv_d_x(kScratchDoubleReg, kScratchReg2);
 #elif V8_TARGET_ARCH_RISCV32
       __ Lw(kScratchReg2, MemOperand(sp, -kFloatSize));
@@ -2017,11 +2037,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         LocationOperand* op = LocationOperand::cast(instr->OutputAt(0));
         if (op->representation() == MachineRepresentation::kFloat64) {
           __ LoadDouble(i.OutputDoubleRegister(), MemOperand(fp, offset));
-        } else {
-          DCHECK_EQ(op->representation(), MachineRepresentation::kFloat32);
+        } else if (op->representation() == MachineRepresentation::kFloat32) {
           __ LoadFloat(
               i.OutputSingleRegister(0),
               MemOperand(fp, offset + kLessSignificantWordInDoublewordOffset));
+        } else {
+          DCHECK_EQ(MachineRepresentation::kSimd128, op->representation());
+          __ VU.set(kScratchReg, E8, m1);
+          Register src = fp;
+          if (offset != 0) {
+            src = kScratchReg;
+            __ AddWord(src, fp, offset);
+          }
+          __ vl(i.OutputSimd128Register(), src, 0, E8);
         }
       } else {
         __ LoadWord(i.OutputRegister(0), MemOperand(fp, offset));
@@ -2514,7 +2542,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
 #endif
     case kRiscvRvvSt: {
-      (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+      __ VU.set(kScratchReg, VSew::E8, Vlmul::m1);
       auto memOperand = i.MemoryOperand(1);
       Register dst = memOperand.offset() == 0 ? memOperand.rm() : kScratchReg;
       if (memOperand.offset() != 0) {
@@ -2525,7 +2553,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kRiscvRvvLd: {
-      (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+      __ VU.set(kScratchReg, VSew::E8, Vlmul::m1);
       Register src = i.MemoryOperand().offset() == 0 ? i.MemoryOperand().rm()
                                                      : kScratchReg;
       if (i.MemoryOperand().offset() != 0) {
@@ -2650,7 +2678,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kRiscvVnot: {
-      (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+      __ VU.set(kScratchReg, VSew::E8, Vlmul::m1);
       __ vnot_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
       break;
     }
@@ -2924,7 +2952,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Simd128Register src = i.InputSimd128Register(0);
       Simd128Register dst = i.OutputSimd128Register();
       __ VU.set(kScratchReg, E64, m1);
-      __ li(kScratchReg, 0x1 << i.InputInt8(1));
+      __ li(kScratchReg, 1 << i.InputInt8(1));
       __ vmv_sx(v0, kScratchReg);
       __ VU.set(kScratchReg, E8, m1);
       __ vmerge_vx(dst, i.InputRegister(2), src);
@@ -3003,6 +3031,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kRiscvI8x16Shuffle: {
+      CheckRegisterConstraints(
+          opcode, i, RiscvRegisterConstraint::kNoDestinationSourceOverlap);
       VRegister dst = i.OutputSimd128Register(),
                 src0 = i.InputSimd128Register(0),
                 src1 = i.InputSimd128Register(1);
@@ -3029,14 +3059,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vslideup_vi(kSimd128ScratchReg, kSimd128ScratchReg2, 2);
 #endif
 
+      DCHECK_NE(dst, src0);
+      DCHECK_NE(dst, src1);
       __ VU.set(kScratchReg, E8, m1);
-      if (dst == src0) {
-        __ vmv_vv(kSimd128ScratchReg2, src0);
-        src0 = kSimd128ScratchReg2;
-      } else if (dst == src1) {
-        __ vmv_vv(kSimd128ScratchReg2, src1);
-        src1 = kSimd128ScratchReg2;
-      }
       __ vrgather_vv(dst, src0, kSimd128ScratchReg);
       __ vadd_vi(kSimd128ScratchReg, kSimd128ScratchReg, -16);
       __ vrgather_vv(kSimd128ScratchReg3, src1, kSimd128ScratchReg);
@@ -3049,11 +3074,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Label t;
 
       __ VU.set(kScratchReg, E8, m1);
+      // The output and input register might be the same.
+      // We could add a register constraint to avoid this, but in this
+      // case it's simpler to just copy the source into a scratch register.
       __ vmv_vv(kSimd128ScratchReg, src);
-      __ vmv_vv(dst, kSimd128RegZero);
+      auto zero_reg = kSimd128ScratchReg4;
+      __ vmv_vi(zero_reg, 0);
+      __ vmv_vv(dst, zero_reg);
 
       __ bind(&t);
-      __ vmsne_vv(v0, kSimd128ScratchReg, kSimd128RegZero);
+      __ vmsne_vv(v0, kSimd128ScratchReg, zero_reg);
       __ vadd_vi(dst, dst, 1, Mask);
       __ vadd_vi(kSimd128ScratchReg2, kSimd128ScratchReg, -1, Mask);
       __ vand_vv(kSimd128ScratchReg, kSimd128ScratchReg, kSimd128ScratchReg2);
@@ -3389,14 +3419,28 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kRiscvI32x4SConvertI16x8Low: {
       __ VU.set(kScratchReg, E32, m1);
-      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
-      __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
+      auto src = i.InputSimd128Register(0);
+      if (i.OutputSimd128Register() == src) {
+        // We could also add a register constraint to avoid this, but
+        // in this case it's simpler to just copy the source into a scratch
+        // register.
+        __ vmv_vv(kSimd128ScratchReg, src);
+        src = kSimd128ScratchReg;
+      }
+      __ vsext_vf2(i.OutputSimd128Register(), src);
       break;
     }
     case kRiscvI32x4UConvertI16x8Low: {
       __ VU.set(kScratchReg, E32, m1);
-      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
-      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
+      auto src = i.InputSimd128Register(0);
+      if (i.OutputSimd128Register() == src) {
+        // We could also add a register constraint to avoid this, but
+        // in this case it's simpler to just copy the source into a scratch
+        // register.
+        __ vmv_vv(kSimd128ScratchReg, src);
+        src = kSimd128ScratchReg;
+      }
+      __ vzext_vf2(i.OutputSimd128Register(), src);
       break;
     }
     case kRiscvI16x8SConvertI8x16High: {
@@ -3620,8 +3664,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kRiscvI64x2SConvertI32x4Low: {
       __ VU.set(kScratchReg, E64, m1);
-      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
-      __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
+      auto src = i.InputSimd128Register(0);
+      if (i.OutputSimd128Register() == src) {
+        // We could also add a register constraint to avoid this, but
+        // in this case it's simpler to just copy the source into a scratch
+        // register.
+        __ vmv_vv(kSimd128ScratchReg, src);
+        src = kSimd128ScratchReg;
+      }
+      __ vsext_vf2(i.OutputSimd128Register(), src);
       break;
     }
     case kRiscvI64x2SConvertI32x4High: {
@@ -3633,8 +3684,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kRiscvI64x2UConvertI32x4Low: {
       __ VU.set(kScratchReg, E64, m1);
-      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
-      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
+      auto src = i.InputSimd128Register(0);
+      if (i.OutputSimd128Register() == src) {
+        // We could also add a register constraint to avoid this, but
+        // in this case it's simpler to just copy the source into a scratch
+        // register.
+        __ vmv_vv(kSimd128ScratchReg, src);
+        src = kSimd128ScratchReg;
+      }
+      __ vzext_vf2(i.OutputSimd128Register(), src);
       break;
     }
     case kRiscvI64x2UConvertI32x4High: {
@@ -3692,9 +3750,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kRiscvI16x8SConvertI8x16Low: {
       __ VU.set(kScratchReg, E16, m1);
-      Simd128Register temp = kSimd128ScratchReg;
-      __ vmv_vv(temp, i.InputSimd128Register(0));
-      __ vsext_vf2(i.OutputSimd128Register(), temp);
+      auto src = i.InputSimd128Register(0);
+      if (i.OutputSimd128Register() == src) {
+        // We could also add a register constraint to avoid this, but
+        // in this case it's simpler to just copy the source into a scratch
+        // register.
+        __ vmv_vv(kSimd128ScratchReg, src);
+        src = kSimd128ScratchReg;
+      }
+      __ vsext_vf2(i.OutputSimd128Register(), src);
       break;
     }
     case kRiscvI16x8UConvertI8x16High: {
@@ -3707,21 +3771,24 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kRiscvI16x8UConvertI8x16Low: {
       __ VU.set(kScratchReg, E16, m1);
-      Simd128Register temp = kSimd128ScratchReg;
-      __ vmv_vv(temp, i.InputSimd128Register(0));
-      __ vzext_vf2(i.OutputSimd128Register(), temp);
+      auto src = i.InputSimd128Register(0);
+      if (i.OutputSimd128Register() == src) {
+        // We could also add a register constraint to avoid this, but
+        // in this case it's simpler to just copy the source into a scratch
+        // register.
+        __ vmv_vv(kSimd128ScratchReg, src);
+        src = kSimd128ScratchReg;
+      }
+      __ vzext_vf2(i.OutputSimd128Register(), src);
       break;
     }
     case kRiscvExtAddPairwiseS: {
       auto sew = DecodeElementWidth(opcode);
-      Simd128Register src1 = i.TempSimd128Register(0);
-      Simd128Register src2 = i.TempSimd128Register(1);
-      Simd128Register src = i.InputSimd128Register(0);
       DCHECK(sew == E8 || sew == E16);
       uint64_t index1 = (sew == E8) ? 0x0E0C0A0806040200 : 0x0006000400020000;
       uint64_t index2 = (sew == E8) ? 0x0F0D0B0907050301 : 0x0007000500030001;
       Simd128Register index_reg1 = kSimd128ScratchReg;
-      Simd128Register index_reg2 = kSimd128ScratchReg3;
+      Simd128Register index_reg2 = kSimd128ScratchReg2;
 #if V8_TARGET_ARCH_RISCV64
       __ VU.set(kScratchReg, E64, m1);
       __ li(kScratchReg, index1);
@@ -3739,23 +3806,22 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ li(kScratchReg, static_cast<uint32_t>(index2 & 0xFFFFFFFF));
       __ vmv_sx(index_reg2, kScratchReg);
 #endif
+      Simd128Register src1 = kSimd128ScratchReg3;
+      Simd128Register src2 = kSimd128ScratchReg4;
       __ VU.set(kScratchReg, sew, m1);
-      __ vrgather_vv(src1, src, index_reg1);
-      __ vrgather_vv(src2, src, index_reg2);
+      __ vrgather_vv(src1, i.InputSimd128Register(0), index_reg1);
+      __ vrgather_vv(src2, i.InputSimd128Register(0), index_reg2);
       __ VU.set(kScratchReg, sew, mf2);
       __ vwadd_vv(i.OutputSimd128Register(), src1, src2);
       break;
     }
     case kRiscvExtAddPairwiseU: {
       auto sew = DecodeElementWidth(opcode);
-      Simd128Register src1 = i.TempSimd128Register(0);
-      Simd128Register src2 = i.TempSimd128Register(1);
-      Simd128Register src = i.InputSimd128Register(0);
       DCHECK(sew == E8 || sew == E16);
       uint64_t index1 = (sew == E8) ? 0x0E0C0A0806040200 : 0x0006000400020000;
       uint64_t index2 = (sew == E8) ? 0x0F0D0B0907050301 : 0x0007000500030001;
       Simd128Register index_reg1 = kSimd128ScratchReg;
-      Simd128Register index_reg2 = kSimd128ScratchReg3;
+      Simd128Register index_reg2 = kSimd128ScratchReg2;
 #if V8_TARGET_ARCH_RISCV64
       __ VU.set(kScratchReg, E64, m1);
       __ li(kScratchReg, index1);
@@ -3778,9 +3844,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ li(kScratchReg, static_cast<uint32_t>(index2 & 0xFFFFFFFF));
       __ vmv_sx(index_reg2, kScratchReg);
 #endif
+      Simd128Register src1 = kSimd128ScratchReg3;
+      Simd128Register src2 = kSimd128ScratchReg4;
       __ VU.set(kScratchReg, sew, m1);
-      __ vrgather_vv(src1, src, index_reg1);
-      __ vrgather_vv(src2, src, index_reg2);
+      __ vrgather_vv(src1, i.InputSimd128Register(0), index_reg1);
+      __ vrgather_vv(src2, i.InputSimd128Register(0), index_reg2);
       __ VU.set(kScratchReg, sew, mf2);
       __ vwaddu_vv(i.OutputSimd128Register(), src1, src2);
       break;
@@ -4147,20 +4215,43 @@ void AssembleBranchToLabels(CodeGenerator* gen, MacroAssembler* masm,
     Condition cc = FlagsConditionToConditionTst(condition);
     __ Branch(tlabel, cc, kScratchReg, Operand(zero_reg));
 #if V8_TARGET_ARCH_RISCV64
+  } else if (instr->arch_opcode() == kRiscvAdd32 ||
+             instr->arch_opcode() == kRiscvSub32) {
+    if (instr->InputAt(1)->IsImmediate()) {
+      DCHECK_NE(i.OutputRegister(), i.InputRegister(0));
+      int64_t imm = i.ToConstant(instr->InputAt(1)).ToInt64();
+      bool is_add = (instr->arch_opcode() == kRiscvAdd32);
+      // Define mapping from {is_add, imm < 0, is_overflow} to branch condition.
+      static const Condition cond_map[2][2][2] = {
+          {
+              /* kRiscvAdd64 */
+              {lt, ge},  // imm>=0: [kOverflow, !kOverflow]
+              {gt, le}   // imm<0:  [kOverflow, !kOverflow]
+          },
+          {
+              /* kRiscvSub64 */
+              {gt, le},  // imm>=0: [kOverflow, !kOverflow]
+              {lt, ge}   // imm<0:  [kOverflow, !kOverflow]
+          }};
+      bool is_overflow = (condition == kOverflow);
+      if (imm != 0) {
+        Condition cc = cond_map[is_add][imm < 0][is_overflow];
+        __ Branch(tlabel, cc, i.OutputRegister(), Operand(i.InputRegister(0)));
+      } else if (!is_overflow) {
+        __ Branch(tlabel);
+      }
+      return;
+    }
+    UNREACHABLE();
   } else if (instr->arch_opcode() == kRiscvAdd64 ||
              instr->arch_opcode() == kRiscvSub64) {
     Condition cc = FlagsConditionToConditionOvf(condition);
     __ Sra64(kScratchReg, i.OutputRegister(), 32);
     __ Sra32(kScratchReg2, i.OutputRegister(), 31);
     __ Branch(tlabel, cc, kScratchReg2, Operand(kScratchReg));
-  } else if (instr->arch_opcode() == kRiscvAddOvf32 ||
-             instr->arch_opcode() == kRiscvSubOvf32 ||
-             instr->arch_opcode() == kRiscvAddOvfWord ||
-             instr->arch_opcode() == kRiscvSubOvfWord) {
-#elif V8_TARGET_ARCH_RISCV32
+#endif
   } else if (instr->arch_opcode() == kRiscvAddOvfWord ||
              instr->arch_opcode() == kRiscvSubOvfWord) {
-#endif
     switch (condition) {
       // Overflow occurs if overflow register is negative
       case kOverflow:
@@ -4345,24 +4436,66 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
     }
     return;
 #if V8_TARGET_ARCH_RISCV64
+  } else if (instr->arch_opcode() == kRiscvAdd32 ||
+             instr->arch_opcode() == kRiscvSub32) {
+    if (instr->InputAt(1)->IsImmediate()) {
+      DCHECK_NE(i.OutputRegister(), i.InputRegister(0));
+      int64_t imm = i.ToConstant(instr->InputAt(1)).ToInt64();
+      bool is_add = (instr->arch_opcode() == kRiscvAdd32);
+      if (imm != 0) {
+        if (is_add) {
+          if (imm > 0) {
+            if (condition != kNotOverflow) {
+              __ Slt(result, i.OutputRegister(), Operand(i.InputRegister(0)));
+            } else {
+              __ Sge(result, i.OutputRegister(), Operand(i.InputRegister(0)));
+            }
+          } else {
+            if (condition != kNotOverflow) {
+              __ Sgt(result, i.OutputRegister(), Operand(i.InputRegister(0)));
+            } else {
+              __ Sle(result, i.OutputRegister(), Operand(i.InputRegister(0)));
+            }
+          }
+        } else {
+          if (imm > 0) {
+            if (condition != kNotOverflow) {
+              __ Sgt(result, i.OutputRegister(), Operand(i.InputRegister(0)));
+            } else {
+              __ Sle(result, i.OutputRegister(), Operand(i.InputRegister(0)));
+            }
+          } else {
+            if (condition != kNotOverflow) {
+              __ Slt(result, i.OutputRegister(), Operand(i.InputRegister(0)));
+            } else {
+              __ Sge(result, i.OutputRegister(), Operand(i.InputRegister(0)));
+            }
+          }
+        }
+      } else {
+        if (condition == kNotOverflow) {
+          __ li(result, 1);
+        } else {
+          __ mv(result, zero_reg);
+        }
+      }
+      return;
+    }
+    UNREACHABLE();
   } else if (instr->arch_opcode() == kRiscvAdd64 ||
              instr->arch_opcode() == kRiscvSub64) {
-    Condition cc = FlagsConditionToConditionOvf(condition);
     // Check for overflow creates 1 or 0 for result.
     __ Srl64(kScratchReg, i.OutputRegister(), 63);
     __ Srl32(kScratchReg2, i.OutputRegister(), 31);
     __ Xor(result, kScratchReg, kScratchReg2);
-    if (cc == eq)  // Toggle result for not overflow.
+    // Toggle result for not overflow.
+    if (condition == kNotOverflow) {
       __ Xor(result, result, 1);
+    }
     return;
-  } else if (instr->arch_opcode() == kRiscvAddOvf32 ||
-             instr->arch_opcode() == kRiscvSubOvf32 ||
-             instr->arch_opcode() == kRiscvAddOvfWord ||
-             instr->arch_opcode() == kRiscvSubOvfWord) {
-#elif V8_TARGET_ARCH_RISCV32
+#endif
   } else if (instr->arch_opcode() == kRiscvAddOvfWord ||
              instr->arch_opcode() == kRiscvSubOvfWord) {
-#endif
     // Overflow occurs if overflow register is negative
     __ Slt(result, kScratchReg, zero_reg);
 #if V8_TARGET_ARCH_RISCV64
@@ -4634,6 +4767,27 @@ void CodeGenerator::AssembleArchConditionalBranch(Instruction* instr,
   UNREACHABLE();
 }
 
+#ifdef V8_TARGET_ARCH_RISCV64
+void CodeGenerator::AssembleArchBinarySearchSwitchRange(
+    Register input, RpoNumber def_block, std::pair<int32_t, Label*>* begin,
+    std::pair<int32_t, Label*>* end) {
+  if (end - begin < kBinarySearchSwitchMinimalCases) {
+    while (begin != end) {
+      masm()->JumpIfEqual(input, begin->first, begin->second, false);
+      ++begin;
+    }
+    AssembleArchJumpRegardlessOfAssemblyOrder(def_block);
+    return;
+  }
+  auto middle = begin + (end - begin) / 2;
+  Label less_label;
+  masm()->JumpIfLessThan(input, middle->first, &less_label, false);
+  AssembleArchBinarySearchSwitchRange(input, def_block, middle, end);
+  masm()->bind(&less_label);
+  AssembleArchBinarySearchSwitchRange(input, def_block, begin, middle);
+}
+#endif
+
 void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
   RiscvOperandConverter i(this, instr);
   Register input = i.InputRegister(0);
@@ -4641,6 +4795,17 @@ void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
   for (size_t index = 2; index < instr->InputCount(); index += 2) {
     cases.push_back({i.InputInt32(index + 0), GetLabel(i.InputRpo(index + 1))});
   }
+#ifdef V8_COMPRESS_POINTERS
+  // AssembleArchBinarySearchSwitchRange use JumpIfEqual and JumpIfLessThan to
+  // compare the input value with the case values.
+  // In V8_COMPRESS_POINTERS, the compare is done with the lower 32 bits of the
+  // input, requiring a sign extension.
+  // Since the input value remains unchanged throughout
+  // AssembleArchBinarySearchSwitch, we perform the sign extension once here,
+  // rather than repeatedly in JumpIfEqual and JumpIfLessThan. This reduces the
+  // total number of sign extension operations and improves efficiency.
+  __ SignExtendWord(input, input);
+#endif
   AssembleArchBinarySearchSwitchRange(input, i.InputRpo(1), cases.data(),
                                       cases.data() + cases.size());
 }
@@ -4928,24 +5093,28 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
     // We must pop all arguments from the stack (including the receiver). This
     // number of arguments is given by max(1 + argc_reg, parameter_slots).
     if (parameter_slots > 1) {
-      Label done;
       __ li(kScratchReg, parameter_slots);
-      __ BranchShort(&done, ge, t0, Operand(kScratchReg));
-      __ Move(t0, kScratchReg);
-      __ bind(&done);
+      if (CpuFeatures::IsSupported(ZBB)) {
+        __ max(t0, t0, kScratchReg);
+      } else {
+        Label done;
+        __ BranchShort(&done, ge, t0, Operand(kScratchReg));
+        __ Move(t0, kScratchReg);
+        __ bind(&done);
+      }
     }
-    __ SllWord(t0, t0, kSystemPointerSizeLog2);
-    __ AddWord(sp, sp, t0);
+    __ CalcScaledAddress(sp, sp, t0, kSystemPointerSizeLog2);
   } else if (additional_pop_count->IsImmediate()) {
     // it should be a kInt32 or a kInt64
     DCHECK_LE(g.ToConstant(additional_pop_count).type(), Constant::kInt64);
     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
     __ Drop(parameter_slots + additional_count);
   } else {
+    // TODO(kasperl): Maybe {additional_pop_count} is guaranteed to be zero if
+    // {parameter_slots != 0}. Need to verify that.
     Register pop_reg = g.ToRegister(additional_pop_count);
     __ Drop(parameter_slots);
-    __ SllWord(pop_reg, pop_reg, kSystemPointerSizeLog2);
-    __ AddWord(sp, sp, pop_reg);
+    __ CalcScaledAddress(sp, sp, pop_reg, kSystemPointerSizeLog2);
   }
   __ Ret();
 }

@@ -238,6 +238,10 @@ void HeapObject::PrintHeader(std::ostream& os, const char* id) {
 
 void HeapObject::HeapObjectPrint(std::ostream& os) {
   PtrComprCageBase cage_base = GetPtrComprCageBase();
+  if (IsAnyHole(Tagged(*this))) {
+    Cast<Hole>(*this)->HolePrint(os);
+    return;
+  }
 
   InstanceType instance_type = map(cage_base)->instance_type();
 
@@ -334,10 +338,11 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
       break;
 #if V8_ENABLE_WEBASSEMBLY
     case WASM_TRUSTED_INSTANCE_DATA_TYPE:
-      Cast<WasmTrustedInstanceData>(*this)->WasmTrustedInstanceDataPrint(os);
+      TrustedCast<WasmTrustedInstanceData>(*this)->WasmTrustedInstanceDataPrint(
+          os);
       break;
     case WASM_DISPATCH_TABLE_TYPE:
-      Cast<WasmDispatchTable>(*this)->WasmDispatchTablePrint(os);
+      TrustedCast<WasmDispatchTable>(*this)->WasmDispatchTablePrint(os);
       break;
     case WASM_VALUE_OBJECT_TYPE:
       Cast<WasmValueObject>(*this)->WasmValueObjectPrint(os);
@@ -347,10 +352,10 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
     case INSTRUCTION_STREAM_TYPE:
-      Cast<InstructionStream>(*this)->InstructionStreamPrint(os);
+      TrustedCast<InstructionStream>(*this)->InstructionStreamPrint(os);
       break;
     case CODE_TYPE:
-      Cast<Code>(*this)->CodePrint(os);
+      TrustedCast<Code>(*this)->CodePrint(os);
       break;
     case CODE_WRAPPER_TYPE:
       Cast<CodeWrapper>(*this)->CodeWrapperPrint(os);
@@ -364,9 +369,9 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
     case JS_MAP_VALUE_ITERATOR_TYPE:
       Cast<JSMapIterator>(*this)->JSMapIteratorPrint(os);
       break;
-#define MAKE_TORQUE_CASE(Name, TYPE)    \
-  case TYPE:                            \
-    Cast<Name>(*this)->Name##Print(os); \
+#define MAKE_TORQUE_CASE(Name, TYPE)           \
+  case TYPE:                                   \
+    TrustedCast<Name>(*this)->Name##Print(os); \
     break;
       // Every class that has its fields defined in a .tq file and corresponds
       // to exactly one InstanceType value is included in the following list.
@@ -374,6 +379,9 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
       TORQUE_INSTANCE_CHECKERS_MULTIPLE_FULLY_DEFINED(MAKE_TORQUE_CASE)
 #undef MAKE_TORQUE_CASE
 
+    case HOLE_TYPE:
+      Cast<Hole>(*this)->HolePrint(os);
+      break;
     case TUPLE2_TYPE:
       Cast<Tuple2>(*this)->Tuple2Print(os);
       break;
@@ -733,7 +741,7 @@ void PrintEmbedderData(IsolateForSandbox isolate, std::ostream& os,
   Tagged<Object> value = slot.load_tagged();
   os << Brief(value);
   void* raw_pointer;
-  if (slot.ToAlignedPointer(isolate, &raw_pointer)) {
+  if (slot.ToGenericAlignedPointer(isolate, &raw_pointer)) {
     os << ", aligned pointer: " << raw_pointer;
   }
 }
@@ -1017,9 +1025,11 @@ void IrRegExpData::IrRegExpDataPrint(std::ostream& os) {
   }
   os << "\n - capture_name_map: " << Brief(capture_name_map());
   os << "\n - max_register_count: " << max_register_count();
-  os << "\n - capture_count: " << max_register_count();
-  os << "\n - ticks_until_tier_up: " << max_register_count();
-  os << "\n - backtrack_limit: " << max_register_count();
+  os << "\n - capture_count: " << capture_count();
+  os << "\n - ticks_until_tier_up: " << ticks_until_tier_up();
+  os << "\n - backtrack_limit: " << backtrack_limit();
+  if (can_be_zero_length()) os << "\n - can_be_zero_length";
+  if (is_linear_executable()) os << "\n - linear_executable";
   os << "\n";
 }
 
@@ -1427,7 +1437,7 @@ void PrintTableContentsGeneric(std::ostream& os, T* dict,
     Tagged<Object> k;
     if (!dict->ToKey(roots, i, &k)) continue;
     os << "\n   " << std::setw(12) << i.as_int() << ": ";
-    if (IsString(k)) {
+    if (!IsAnyHole(k) && IsString(k)) {
       Cast<String>(k)->PrintUC16(os);
     } else {
       os << Brief(k);
@@ -1812,23 +1822,27 @@ void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
   os << "\n - closure feedback cell array: ";
   closure_feedback_cell_array()->ClosureFeedbackCellArrayPrint(os);
 
-  DisallowGarbageCollection no_gc;
-  FeedbackMetadataIterator iter(metadata(), no_gc);
-  while (iter.HasNext()) {
-    FeedbackSlot slot = iter.Next();
-    FeedbackSlotKind kind = iter.kind();
+  if (has_metadata()) {
+    DisallowGarbageCollection no_gc;
+    FeedbackMetadataIterator iter(metadata(), no_gc);
+    while (iter.HasNext()) {
+      FeedbackSlot slot = iter.Next();
+      FeedbackSlotKind kind = iter.kind();
 
-    os << "\n - slot " << slot << " " << kind << " ";
-    FeedbackSlotPrint(os, slot);
+      os << "\n - slot " << slot << " " << kind << " ";
+      FeedbackSlotPrint(os, slot);
 
-    int entry_size = iter.entry_size();
-    if (entry_size > 0) os << " {";
-    for (int i = 0; i < entry_size; i++) {
-      FeedbackSlot slot_with_offset = slot.WithOffset(i);
-      os << "\n     [" << slot_with_offset.ToInt()
-         << "]: " << Brief(Get(slot_with_offset));
+      int entry_size = iter.entry_size();
+      if (entry_size > 0) os << " {";
+      for (int i = 0; i < entry_size; i++) {
+        FeedbackSlot slot_with_offset = slot.WithOffset(i);
+        os << "\n     [" << slot_with_offset.ToInt()
+           << "]: " << Brief(Get(slot_with_offset));
+      }
+      if (entry_size > 0) os << "\n  }";
     }
-    if (entry_size > 0) os << "\n  }";
+  } else {
+    os << " - metadata: not available in SFI";
   }
   os << "\n";
 }
@@ -2007,10 +2021,10 @@ void Oddball::OddballPrint(std::ostream& os) {
 }
 
 void Hole::HolePrint(std::ostream& os) {
-  PrintHeapObjectHeaderWithoutMap(*this, os, "Hole");
+  PrintHeapObjectHeaderWithoutMap(this, os, "Hole");
   ReadOnlyRoots roots = GetReadOnlyRoots();
 #define PRINT_SPECIFIC_HOLE(type, name, CamelName) \
-  if (*this == roots.name()) {                     \
+  if (this == roots.name()) {                      \
     os << "\n  <" #name ">";                       \
   }
   HOLE_LIST(PRINT_SPECIFIC_HOLE);
@@ -3614,6 +3628,17 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
   PtrComprCageBase cage_base = GetPtrComprCageBase();
   os << AsHex::Address(this->ptr()) << " ";
 
+  if (SafeIsAnyHole(Tagged(*this))) {
+#define PRINT_HOLE(Type, Value, _) \
+  if (Is##Type(*this)) {           \
+    os << "<" #Value ">";          \
+    return;                        \
+  }
+    HOLE_LIST(PRINT_HOLE)
+#undef PRINT_HOLE
+    UNREACHABLE();
+  }
+
   if (IsString(*this, cage_base)) {
     HeapStringAllocator allocator;
     StringStream accumulator(&allocator);
@@ -3745,7 +3770,8 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       os << "<ByteArray[" << Cast<ByteArray>(*this)->length() << "]>";
       break;
     case BYTECODE_ARRAY_TYPE:
-      os << "<BytecodeArray[" << Cast<BytecodeArray>(*this)->length() << "]>";
+      os << "<BytecodeArray[" << TrustedCast<BytecodeArray>(*this)->length()
+         << "]>";
       break;
     case DESCRIPTOR_ARRAY_TYPE:
       os << "<DescriptorArray["
@@ -3755,20 +3781,20 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       os << "<WeakFixedArray[" << Cast<WeakFixedArray>(*this)->length() << "]>";
       break;
     case TRUSTED_FIXED_ARRAY_TYPE:
-      os << "<TrustedFixedArray[" << Cast<TrustedFixedArray>(*this)->length()
-         << "]>";
+      os << "<TrustedFixedArray["
+         << TrustedCast<TrustedFixedArray>(*this)->length() << "]>";
       break;
     case TRUSTED_WEAK_FIXED_ARRAY_TYPE:
       os << "<TrustedWeakFixedArray["
-         << Cast<TrustedWeakFixedArray>(*this)->length() << "]>";
+         << TrustedCast<TrustedWeakFixedArray>(*this)->length() << "]>";
       break;
     case PROTECTED_FIXED_ARRAY_TYPE:
       os << "<ProtectedFixedArray["
-         << Cast<ProtectedFixedArray>(*this)->length() << "]>";
+         << TrustedCast<ProtectedFixedArray>(*this)->length() << "]>";
       break;
     case PROTECTED_WEAK_FIXED_ARRAY_TYPE:
       os << "<ProtectedWeakFixedArray["
-         << Cast<ProtectedWeakFixedArray>(*this)->length() << "]>";
+         << TrustedCast<ProtectedWeakFixedArray>(*this)->length() << "]>";
       break;
     case TRANSITION_ARRAY_TYPE:
       os << "<TransitionArray[" << Cast<TransitionArray>(*this)->length()
@@ -3834,7 +3860,7 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
 
     case UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_TYPE: {
       Tagged<UncompiledDataWithoutPreparseData> data =
-          Cast<UncompiledDataWithoutPreparseData>(*this);
+          TrustedCast<UncompiledDataWithoutPreparseData>(*this);
       os << "<UncompiledDataWithoutPreparseData (" << data->start_position()
          << ", " << data->end_position() << ")]>";
       break;
@@ -3842,7 +3868,7 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
 
     case UNCOMPILED_DATA_WITH_PREPARSE_DATA_TYPE: {
       Tagged<UncompiledDataWithPreparseData> data =
-          Cast<UncompiledDataWithPreparseData>(*this);
+          TrustedCast<UncompiledDataWithPreparseData>(*this);
       os << "<UncompiledDataWithPreparseData (" << data->start_position()
          << ", " << data->end_position()
          << ") preparsed=" << Brief(data->preparse_data()) << ">";
@@ -3882,7 +3908,7 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       break;
     }
     case CODE_TYPE: {
-      Tagged<Code> code = Cast<Code>(*this);
+      Tagged<Code> code = TrustedCast<Code>(*this);
       os << "<Code " << CodeKindToString(code->kind());
       if (code->is_builtin()) {
         os << " " << Builtins::name(code->builtin_id());
@@ -3891,17 +3917,10 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       break;
     }
     case HOLE_TYPE: {
-#define PRINT_HOLE(Type, Value, _) \
-  if (Is##Type(*this)) {           \
-    os << "<" #Value ">";          \
-    break;                         \
-  }
-      HOLE_LIST(PRINT_HOLE)
-#undef PRINT_HOLE
       UNREACHABLE();
     }
     case INSTRUCTION_STREAM_TYPE: {
-      Tagged<InstructionStream> istream = Cast<InstructionStream>(*this);
+      Tagged<InstructionStream> istream = TrustedCast<InstructionStream>(*this);
       Tagged<Code> code = istream->code(kAcquireLoad);
       os << "<InstructionStream " << CodeKindToString(code->kind());
       if (code->is_builtin()) {
@@ -3998,8 +4017,8 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
     }
 #if V8_ENABLE_WEBASSEMBLY
     case WASM_DISPATCH_TABLE_TYPE:
-      os << "<WasmDispatchTable[" << Cast<WasmDispatchTable>(*this)->length()
-         << "]>";
+      os << "<WasmDispatchTable["
+         << TrustedCast<WasmDispatchTable>(*this)->length() << "]>";
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
     default:

@@ -69,6 +69,7 @@
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-verifier.h"
 #include "src/heap/local-heap-inl.h"
+#include "src/heap/local-heap.h"
 #include "src/heap/parked-scope.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/safepoint.h"
@@ -90,6 +91,7 @@
 #include "src/objects/call-site-info.h"
 #include "src/objects/elements.h"
 #include "src/objects/feedback-vector.h"
+#include "src/objects/field-type.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
@@ -843,7 +845,9 @@ MaybeDirectHandle<WasmSuspenderObject> TryGetWasmSuspender(
     Tagged<SharedFunctionInfo> shared = Cast<JSFunction>(handler)->shared();
     if (shared->HasWasmResumeData()) {
       return direct_handle(
-          shared->wasm_resume_data()->trusted_suspender(isolate), isolate);
+          TrustedCast<WasmSuspenderObject>(
+              shared->wasm_resume_data()->trusted_suspender(isolate)),
+          isolate);
     }
   }
   return MaybeDirectHandle<WasmSuspenderObject>();
@@ -1328,6 +1332,12 @@ MaybeDirectHandle<JSPromise> TryGetCurrentTaskPromise(Isolate* isolate) {
         return promise;
       }
     }
+  } else if (IsPromiseResolveThenableJobTask(*current_microtask)) {
+    auto promise_resolve_thenable_job_task =
+        Cast<PromiseResolveThenableJobTask>(current_microtask);
+    DirectHandle<JSPromise> promise(
+        promise_resolve_thenable_job_task->promise_to_resolve(), isolate);
+    return promise;
   }
   return MaybeDirectHandle<JSPromise>();
 }
@@ -1805,7 +1815,7 @@ void Isolate::PrintStack(StringStream* accumulator, PrintStackMode mode) {
   DCHECK(accumulator->IsMentionedObjectCacheClear(this));
 
   // Avoid printing anything if there are no frames.
-  if (c_entry_fp(thread_local_top()) == 0) return;
+  if (c_entry_fp(thread_local_top()) == 0 && !InFastCCall()) return;
 
   accumulator->Add(
       "\n==== JS stack trace =========================================\n\n");
@@ -2311,7 +2321,7 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
         // Otherwise the exception should have been caught by the JSPI builtin.
         // TODO(388533754): Revisit this for core stack-switching when the
         // suspender can encapsulate multiple stacks.
-        auto suspender = Tagged<WasmSuspenderObject>::cast(maybe_suspender);
+        auto suspender = TrustedCast<WasmSuspenderObject>(maybe_suspender);
         if (suspender->has_parent()) {
           maybe_suspender = suspender->parent();
         } else {
@@ -2377,7 +2387,7 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
       continue;
     }
 #if V8_ENABLE_WEBASSEMBLY
-    if (iter.frame()->type() == StackFrame::STACK_SWITCH) {
+    if (iter.frame()->type() == StackFrame::WASM_JSPI) {
       if (catchable_by_js && iter.frame()->LookupCode()->builtin_id() !=
                                  Builtin::kJSToWasmStressSwitchStacksAsm) {
         Tagged<Code> code =
@@ -3009,6 +3019,7 @@ bool Isolate::ComputeLocation(MessageLocation* target) {
 
 bool Isolate::ComputeLocationFromException(MessageLocation* target,
                                            DirectHandle<Object> exception) {
+  if (IsAnyHole(*exception)) return false;
   if (!IsJSObject(*exception)) return false;
 
   DirectHandle<Name> start_pos_symbol = factory()->error_start_pos_symbol();
@@ -3035,6 +3046,7 @@ bool Isolate::ComputeLocationFromException(MessageLocation* target,
 
 bool Isolate::ComputeLocationFromSimpleStackTrace(
     MessageLocation* target, DirectHandle<Object> exception) {
+  if (IsAnyHole(*exception)) return false;
   if (!IsJSReceiver(*exception)) {
     return false;
   }
@@ -3052,6 +3064,7 @@ bool Isolate::ComputeLocationFromSimpleStackTrace(
 
 bool Isolate::ComputeLocationFromDetailedStackTrace(
     MessageLocation* target, DirectHandle<Object> exception) {
+  if (IsAnyHole(*exception)) return false;
   if (!IsJSReceiver(*exception)) return false;
 
   DirectHandle<StackTraceInfo> stack_trace =
@@ -3070,7 +3083,7 @@ Handle<JSMessageObject> Isolate::CreateMessage(DirectHandle<Object> exception,
                                                MessageLocation* location) {
   DirectHandle<StackTraceInfo> stack_trace;
   if (capture_stack_trace_for_uncaught_exceptions_) {
-    if (IsJSObject(*exception)) {
+    if (!IsAnyHole(*exception) && IsJSObject(*exception)) {
       // First, check whether a stack trace is already present on this object.
       // It maybe an Error, or the embedder may have stored a stack trace using
       // Exception::CaptureStackTrace().
@@ -3101,7 +3114,7 @@ Handle<JSMessageObject> Isolate::CreateMessage(DirectHandle<Object> exception,
 Handle<JSMessageObject> Isolate::CreateMessageFromException(
     DirectHandle<Object> exception) {
   DirectHandle<StackTraceInfo> stack_trace;
-  if (IsJSError(*exception)) {
+  if (!IsAnyHole(*exception) && IsJSError(*exception)) {
     stack_trace = GetDetailedStackTrace(Cast<JSObject>(exception));
   }
 
@@ -3557,9 +3570,9 @@ bool CallsCatchMethod(const StackFrameSummaryIterator& iterator) {
   }
   if (iterator.frame_summary().IsJavaScript()) {
     auto& js_summary = iterator.frame_summary().AsJavaScript();
-    if (IsBytecodeArray(*js_summary.abstract_code())) {
-      if (CallsCatchMethod(iterator.isolate(),
-                           Cast<BytecodeArray>(js_summary.abstract_code()),
+    if (Handle<BytecodeArray> bytecode_array;
+        TryCast(js_summary.abstract_code(), &bytecode_array)) {
+      if (CallsCatchMethod(iterator.isolate(), bytecode_array,
                            js_summary.code_offset())) {
         return true;
       }
@@ -3791,6 +3804,21 @@ bool Isolate::IsWasmImportedStringsEnabled(
     if (callback(api_context)) return true;
   }
   return v8_flags.experimental_wasm_imported_strings;
+#else
+  return false;
+#endif
+}
+
+bool Isolate::IsWasmCustomDescriptorsEnabled(
+    DirectHandle<NativeContext> context) {
+#ifdef V8_ENABLE_WEBASSEMBLY
+  v8::WasmCustomDescriptorsEnabledCallback callback =
+      wasm_custom_descriptors_enabled_callback();
+  if (callback) {
+    v8::Local<v8::Context> api_context = v8::Utils::ToLocal(context);
+    if (callback(api_context)) return true;
+  }
+  return v8_flags.experimental_wasm_custom_descriptors;
 #else
   return false;
 #endif
@@ -4334,7 +4362,7 @@ Isolate::Isolate(IsolateGroup* isolate_group)
   // TODO(ahaas): The code of the landing pad does not have to be a builtin,
   // we could also just move it to the trap handler, and implement it e.g. with
   // inline assembly. It's not clear if that's worth it.
-  if (Isolate::CurrentEmbeddedBlobCodeSize()) {
+  if (Isolate::CurrentEmbeddedBlobCodeSize() && !v8_flags.wasm_jitless) {
     Address landing_pad =
         Builtins::EmbeddedEntryOf(Builtin::kWasmTrapHandlerLandingPad);
     i::trap_handler::SetLandingPad(landing_pad);
@@ -4773,11 +4801,17 @@ void Isolate::Deinit() {
 void Isolate::SetIsolateThreadLocals(Isolate* isolate,
                                      PerIsolateThreadData* data) {
   Isolate::SetCurrent(isolate);
+  LocalHeap::SetCurrent(isolate && isolate->main_thread_local_isolate()
+                            ? isolate->main_thread_local_heap()
+                            : nullptr);
   g_current_per_isolate_thread_data_ = data;
 
 #ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
   V8HeapCompressionScheme::InitBase(isolate ? isolate->cage_base()
                                             : kNullAddress);
+  TrustedSpaceCompressionScheme::InitBase(
+      isolate ? isolate->isolate_group()->GetTrustedPtrComprCageBase()
+              : kNullAddress);
   IsolateGroup::set_current(isolate ? isolate->isolate_group() : nullptr);
 #ifdef V8_EXTERNAL_CODE_SPACE
   ExternalCodeCompressionScheme::InitBase(isolate ? isolate->code_cage_base()
@@ -4915,8 +4949,8 @@ bool Isolate::PropagateExceptionToExternalTryCatch(
     SetTerminationOnExternalTryCatch();
   } else {
     v8::TryCatch* handler = try_catch_handler();
-    DCHECK(IsJSMessageObject(pending_message()) ||
-           IsTheHole(pending_message(), this));
+    DCHECK(IsAnyHole(pending_message()) ||
+           IsJSMessageObject(pending_message()));
     handler->can_continue_ = true;
     handler->exception_ = reinterpret_cast<void*>(exception.ptr());
     // Propagate to the external try-catch only if we got an actual message.
@@ -5098,8 +5132,10 @@ void Isolate::ReportExceptionFunctionCallback(
   DCHECK_NOT_NULL(exception_propagation_callback_);
 
   // Ignore exceptions that we can't extend.
-  if (!IsJSReceiver(this->exception())) return;
-  DirectHandle<JSReceiver> exception(Cast<JSReceiver>(this->exception()), this);
+  if (IsAnyHole(this->exception())) return;
+  Tagged<JSReceiver> raw_exception;
+  if (!TryCast<JSReceiver>(this->exception(), &raw_exception)) return;
+  DirectHandle<JSReceiver> exception(raw_exception, this);
 
   DirectHandle<Object> maybe_message(pending_message(), this);
 
@@ -5496,6 +5532,7 @@ void Isolate::VerifyStaticRoots() {
   // sorted list of addresses) or remove the offending entry from the list.
   for (idx = RootIndex::kFirstRoot; idx <= RootIndex::kLastRoot; ++idx) {
     Tagged<Object> obj = roots_table().slot(idx).load(this);
+    if (RootsTable::IsReadOnly(idx) && IsAnyHole(obj)) continue;
     if (obj.ptr() == kNullAddress || !IsMap(obj)) continue;
     Tagged<Map> map = Cast<Map>(obj);
 
@@ -5731,9 +5768,16 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
     trusted_pointer_table().InitializeSpace(heap()->trusted_pointer_space());
 #endif  // V8_ENABLE_SANDBOX
   }
-  isolate_group()->SetupReadOnlyHeap(this, read_only_snapshot_data, can_rehash);
-  heap_.SetUpSpaces(isolate_data_.new_allocation_info_,
-                    isolate_data_.old_allocation_info_);
+
+  {
+    // LocalHeap initialization requires the TLS variable to be set already.
+    // However, we can't move SetIsolateThreadLocals here because the marking
+    // barrier isn't setup yet.
+    SetCurrentLocalHeapScope local_heap_scope(this);
+    isolate_group()->SetupReadOnlyHeap(this, read_only_snapshot_data,
+                                       can_rehash);
+    heap_.SetUpSpaces();
+  }
 
   DCHECK_EQ(this, Isolate::Current());
   PerIsolateThreadData* const current_data = CurrentPerIsolateThreadData();
@@ -7322,7 +7366,7 @@ void Isolate::SetPriority(v8::Isolate::Priority priority) {
   priority_ = priority;
   heap()->tracer()->UpdateCurrentEventPriority(priority_);
   if (priority_ == v8::Isolate::Priority::kBestEffort) {
-    heap()->NotifyBackgrounded();
+    heap()->ActivateMemoryReducerIfNeeded();
   }
 }
 
@@ -7661,13 +7705,6 @@ LocalHeap* Isolate::main_thread_local_heap() {
   return main_thread_local_isolate()->heap();
 }
 
-LocalHeap* Isolate::CurrentLocalHeap() {
-  LocalHeap* local_heap = LocalHeap::Current();
-  if (local_heap) return local_heap;
-  DCHECK_EQ(ThreadId::Current(), thread_id());
-  return main_thread_local_heap();
-}
-
 // |chunk| is either a Page or an executable LargePage.
 void Isolate::RemoveCodeMemoryChunk(MutablePageMetadata* chunk) {
   // We only keep track of individual code pages/allocations if we are on arm32,
@@ -7771,7 +7808,7 @@ void Isolate::LocalsBlockListCacheSet(
   heap()->set_locals_block_list_cache(*cache);
 }
 
-Tagged<Object> Isolate::LocalsBlockListCacheGet(
+Tagged<UnionOf<TheHole, StringSet>> Isolate::LocalsBlockListCacheGet(
     DirectHandle<ScopeInfo> scope_info) {
   DisallowGarbageCollection no_gc;
 
@@ -7782,10 +7819,13 @@ Tagged<Object> Isolate::LocalsBlockListCacheGet(
   Tagged<Object> maybe_value =
       Cast<EphemeronHashTable>(heap()->locals_block_list_cache())
           ->Lookup(scope_info);
-  if (IsTuple2(maybe_value)) return Cast<Tuple2>(maybe_value)->value2();
+  if (IsTheHole(maybe_value)) return Cast<TheHole>(maybe_value);
+  if (Tagged<Tuple2> tuple; TryCast<Tuple2>(maybe_value, &tuple)) {
+    return Cast<StringSet>(tuple->value2());
+  }
 
-  CHECK(IsStringSet(maybe_value) || IsTheHole(maybe_value));
-  return maybe_value;
+  CHECK(IsStringSet(maybe_value));
+  return Cast<StringSet>(maybe_value);
 }
 
 std::list<std::unique_ptr<detail::WaiterQueueNode>>&

@@ -146,7 +146,10 @@ Reduction JSNativeContextSpecialization::Reduce(Node* node) {
 std::optional<size_t> JSNativeContextSpecialization::GetMaxStringLength(
     JSHeapBroker* broker, Node* node) {
   HeapObjectMatcher matcher(node);
-  if (matcher.HasResolvedValue() && matcher.Ref(broker).IsString()) {
+  if (matcher.HasResolvedValue() &&
+      !matcher.Is(
+          broker->local_isolate_or_isolate()->factory()->the_hole_value()) &&
+      matcher.Ref(broker).IsString()) {
     StringRef input = matcher.Ref(broker).AsString();
     return input.length();
   }
@@ -3344,7 +3347,7 @@ JSNativeContextSpecialization::BuildPrototypeProxyElementAccess(
   Node* feedback = jsgraph()->UndefinedConstant();
   // We can use a dummy receiver so long as we only support Wasm functions
   // that disregard the call's receiver anyway.
-  DCHECK(!Cast<WasmExportedFunctionData>(
+  DCHECK(!TrustedCast<WasmExportedFunctionData>(
               Cast<JSFunction>(access_info.accessor().value().object())
                   ->shared()
                   ->GetTrustedData(isolate()))

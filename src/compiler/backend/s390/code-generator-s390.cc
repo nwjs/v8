@@ -1149,7 +1149,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
 #if V8_ENABLE_WEBASSEMBLY
     case kArchCallWasmFunction:
-    case kArchCallWasmFunctionIndirect: {
+    case kArchCallWasmFunctionIndirect:
+    case kArchResumeWasmContinuation: {
       // We must not share code targets for calls to builtins for wasm code, as
       // they might need to be patched individually.
       if (instr->InputAt(0)->IsImmediate()) {
@@ -1160,6 +1161,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       } else if (opcode == kArchCallWasmFunctionIndirect) {
         __ CallWasmCodePointer(i.InputRegister(0));
       } else {
+        // TODO(thibaudm): Use a WasmCodePointer for
+        // kArchResumeWasmContinuation. Can this be merged with
+        // kArchCallWasmFunctionIndirect?
         __ Call(i.InputRegister(0));
       }
       RecordCallPosition(instr);
@@ -1214,17 +1218,36 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kArchCallJSFunction: {
-      Register func = i.InputRegister(0);
-      if (v8_flags.debug_code) {
-        // Check the function's context matches the context argument.
-        __ LoadTaggedField(kScratchReg,
-                           FieldMemOperand(func, JSFunction::kContextOffset));
-        __ CmpS64(cp, kScratchReg);
-        __ Assert(eq, AbortReason::kWrongFunctionContext);
-      }
       uint32_t num_arguments =
           i.InputUint32(instr->JSCallArgumentCountInputIndex());
-      __ CallJSFunction(func, num_arguments);
+      if (HasImmediateInput(instr, 0)) {
+        Constant constant = i.ToConstant(instr->InputAt(0));
+        Handle<JSFunction> function = Cast<JSFunction>(constant.ToHeapObject());
+        __ Move(kJavaScriptCallTargetRegister, function);
+        if (function->shared()->HasBuiltinId()) {
+          Builtin builtin = function->shared()->builtin_id();
+          SBXCHECK_EQ(num_arguments,
+                      Builtins::GetFormalParameterCount(builtin));
+          __ CallBuiltin(builtin);
+        } else {
+          JSDispatchHandle dispatch_handle = function->dispatch_handle();
+          size_t expected =
+              IsolateGroup::current()->js_dispatch_table()->GetParameterCount(
+                  dispatch_handle);
+          SBXCHECK_GE(num_arguments, expected);
+          __ CallJSDispatchEntry(dispatch_handle, expected);
+        }
+      } else {
+        Register func = i.InputRegister(0);
+        if (v8_flags.debug_code) {
+          // Check the function's context matches the context argument.
+          __ LoadTaggedField(kScratchReg,
+                             FieldMemOperand(func, JSFunction::kContextOffset));
+          __ CmpS64(cp, kScratchReg);
+          __ Assert(eq, AbortReason::kWrongFunctionContext);
+        }
+        __ CallJSFunction(func, num_arguments);
+      }
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;

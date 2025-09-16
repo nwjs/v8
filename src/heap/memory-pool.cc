@@ -350,6 +350,14 @@ void MemoryPool::ReleaseImmediately(Isolate* isolate) {
 
 void MemoryPool::ReleaseLargeImmediately() { large_pool_.ReleaseAll(); }
 
+void MemoryPool::ReleaseAllImmediately() {
+  page_pool_.ReleaseLocal();
+  page_pool_.ReleaseShared();
+  zone_pool_.ReleaseLocal();
+  zone_pool_.ReleaseShared();
+  large_pool_.ReleaseAll();
+}
+
 void MemoryPool::TearDown() {
   page_pool_.TearDown();
   zone_pool_.TearDown();
@@ -375,23 +383,23 @@ size_t MemoryPool::GetSharedCount() const { return page_pool_.SharedSize(); }
 
 size_t MemoryPool::GetTotalCount() const { return page_pool_.Size(); }
 
-void MemoryPool::Add(Isolate* isolate, MutablePageMetadata* chunk) {
+void MemoryPool::Add(Isolate* isolate, MutablePageMetadata* page) {
   DCHECK_NOT_NULL(isolate);
   // This method is called only on the main thread and only during the
   // atomic pause so a lock is not needed.
-  DCHECK_NOT_NULL(chunk);
-  DCHECK_EQ(chunk->size(), PageMetadata::kPageSize);
-  DCHECK(!chunk->is_large());
-  DCHECK(!chunk->Chunk()->IsTrusted());
-  DCHECK(!chunk->Chunk()->InReadOnlySpace());
-  DCHECK(!chunk->is_executable());
+  DCHECK_NOT_NULL(page);
+  DCHECK_EQ(page->size(), PageMetadata::kPageSize);
+  DCHECK(!page->is_large());
+  DCHECK(!page->is_trusted());
+  DCHECK(!page->Chunk()->InReadOnlySpace());
+  DCHECK(!page->is_executable());
   // Ensure that ReleaseAllAllocatedMemory() was called on the page.
-  DCHECK(!chunk->ContainsAnySlots());
+  DCHECK(!page->ContainsAnySlots());
 #ifdef V8_ENABLE_SANDBOX
-  MemoryChunk::ClearMetadataPointer(chunk);
+  MemoryChunk::ClearMetadataPointer(page);
 #endif  // V8_ENABLE_SANDBOX
   page_pool_.PutLocal(isolate,
-                      PageMemory(chunk, [](MutablePageMetadata* metadata) {
+                      PageMemory(page, [](MutablePageMetadata* metadata) {
                         MemoryAllocator::DeleteMemoryChunk(metadata);
                       }));
 }

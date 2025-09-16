@@ -489,7 +489,6 @@ class MaglevGraphBuilder {
 
   bool ContextMayAlias(ValueNode* context,
                        compiler::OptionalScopeInfoRef scope_info);
-  enum ContextSlotMutability { kImmutable, kMutable };
   bool TrySpecializeLoadContextSlotToFunctionContext(
       ValueNode* context, int slot_index,
       ContextSlotMutability slot_mutability);
@@ -657,15 +656,13 @@ class MaglevGraphBuilder {
   // oddballs.
   //
   // Deopts if the ToNumber is non-trivial.
-  ValueNode* GetTruncatedInt32ForToNumber(
-      ValueNode* value, NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
+  ValueNode* GetTruncatedInt32ForToNumber(ValueNode* value,
+                                          NodeType allowed_input_type);
 
-  ValueNode* GetTruncatedInt32ForToNumber(
-      interpreter::Register reg, NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type) {
+  ValueNode* GetTruncatedInt32ForToNumber(interpreter::Register reg,
+                                          NodeType allowed_input_type) {
     return GetTruncatedInt32ForToNumber(current_interpreter_frame_.get(reg),
-                                        allowed_input_type, conversion_type);
+                                        allowed_input_type);
   }
 
   // Get an Int32 representation node whose value is equivalent to the ToUint8
@@ -718,22 +715,17 @@ class MaglevGraphBuilder {
   //
   // Deopts if the ToNumber value is not exactly representable as a Float64, or
   // the ToNumber is non-trivial.
-  ValueNode* GetFloat64ForToNumber(
-      ValueNode* value, NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
-  ValueNode* GetFloat64ForToNumber(
-      interpreter::Register reg, NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
+  ValueNode* GetFloat64ForToNumber(ValueNode* value,
+                                   NodeType allowed_input_type);
+  ValueNode* GetFloat64ForToNumber(interpreter::Register reg,
+                                   NodeType allowed_input_type);
 
-  ValueNode* GetHoleyFloat64ForToNumber(
-      ValueNode* value, NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
-
-  ValueNode* GetHoleyFloat64ForToNumber(
-      interpreter::Register reg, NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type) {
+  ValueNode* GetHoleyFloat64ForToNumber(ValueNode* value,
+                                        NodeType allowed_input_type);
+  ValueNode* GetHoleyFloat64ForToNumber(interpreter::Register reg,
+                                        NodeType allowed_input_type) {
     return GetHoleyFloat64ForToNumber(current_interpreter_frame_.get(reg),
-                                      allowed_input_type, conversion_type);
+                                      allowed_input_type);
   }
 
   ValueNode* GetAccumulator() {
@@ -749,11 +741,9 @@ class MaglevGraphBuilder {
   }
 
   ValueNode* GetAccumulatorTruncatedInt32ForToNumber(
-      NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type) {
+      NodeType allowed_input_type) {
     return GetTruncatedInt32ForToNumber(
-        interpreter::Register::virtual_accumulator(), allowed_input_type,
-        conversion_type);
+        interpreter::Register::virtual_accumulator(), allowed_input_type);
   }
 
   ValueNode* GetAccumulatorUint8ClampedForToNumber() {
@@ -762,11 +752,9 @@ class MaglevGraphBuilder {
   }
 
   ValueNode* GetAccumulatorHoleyFloat64ForToNumber(
-      NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type) {
+      NodeType allowed_input_type) {
     return GetHoleyFloat64ForToNumber(
-        interpreter::Register::virtual_accumulator(), allowed_input_type,
-        conversion_type);
+        interpreter::Register::virtual_accumulator(), allowed_input_type);
   }
 
   ValueNode* GetSilencedNaN(ValueNode* value);
@@ -782,12 +770,10 @@ class MaglevGraphBuilder {
         iterator_.GetRegisterOperand(operand_index));
   }
 
-  ValueNode* LoadRegisterHoleyFloat64ForToNumber(
-      int operand_index, NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type) {
+  ValueNode* LoadRegisterHoleyFloat64ForToNumber(int operand_index,
+                                                 NodeType allowed_input_type) {
     return GetHoleyFloat64ForToNumber(
-        iterator_.GetRegisterOperand(operand_index), allowed_input_type,
-        conversion_type);
+        iterator_.GetRegisterOperand(operand_index), allowed_input_type);
   }
 
   template <typename NodeT>
@@ -954,6 +940,7 @@ class MaglevGraphBuilder {
   V(StringPrototypeCharAt)                     \
   V(StringPrototypeCharCodeAt)                 \
   V(StringPrototypeCodePointAt)                \
+  V(StringPrototypeStartsWith)                 \
   V(StringPrototypeIterator)                   \
   IF_INTL(V, StringPrototypeLocaleCompareIntl) \
   CONTINUATION_PRESERVED_EMBEDDER_DATA_LIST(V) \
@@ -1175,6 +1162,7 @@ class MaglevGraphBuilder {
       std::pair<interpreter::Register, interpreter::Register> result);
 
   ValueNode* BuildSmiUntag(ValueNode* node);
+  ValueNode* BuildGetCharCodeAt(ValueNode* string, ValueNode* index);
 
   ReduceResult BuildCheckSmi(ValueNode* object, bool elidable = true);
   ReduceResult BuildCheckNumber(ValueNode* object);
@@ -1232,6 +1220,8 @@ class MaglevGraphBuilder {
   enum class TrackObjectMode { kLoad, kStore };
   bool CanTrackObjectChanges(ValueNode* object, TrackObjectMode mode);
   bool CanElideWriteBarrier(ValueNode* object, ValueNode* value);
+
+  ValueNode* BuildLoadMap(ValueNode* object);
 
   void BuildInitializeStore(InlinedAllocation* alloc, ValueNode* value,
                             int offset);
@@ -1361,7 +1351,7 @@ class MaglevGraphBuilder {
                                          ElementsKind elements_kind);
   ReduceResult BuildLoadTypedArrayElement(ValueNode* object, ValueNode* index,
                                           ElementsKind elements_kind);
-  ValueNode* BuildLoadConstantTypedArrayElement(
+  ReduceResult BuildLoadConstantTypedArrayElement(
       compiler::JSTypedArrayRef typed_array, ValueNode* index,
       ElementsKind elements_kind);
   ReduceResult BuildStoreTypedArrayElement(ValueNode* object, ValueNode* index,
@@ -1430,7 +1420,7 @@ class MaglevGraphBuilder {
                            compiler::AccessMode access_mode);
   MaybeReduceResult TryReuseKnownPropertyLoad(ValueNode* lookup_start_object,
                                               compiler::NameRef name);
-  ValueNode* BuildLoadStringLength(ValueNode* string);
+  ReduceResult BuildLoadStringLength(ValueNode* string);
 
   // Converts the input node to a representation that's valid to store into an
   // array with elements kind |kind|.
@@ -1557,33 +1547,27 @@ class MaglevGraphBuilder {
   template <Operation kOperation>
   ReduceResult BuildInt32UnaryOperationNode();
   ReduceResult BuildTruncatingInt32BitwiseNotForToNumber(
-      NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
+      NodeType allowed_input_type);
   template <Operation kOperation>
   ReduceResult BuildInt32BinaryOperationNode();
   template <Operation kOperation>
   ReduceResult BuildInt32BinarySmiOperationNode();
   template <Operation kOperation>
   ReduceResult BuildTruncatingInt32BinaryOperationNodeForToNumber(
-      NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
+      NodeType allowed_input_type);
   template <Operation kOperation>
   ReduceResult BuildTruncatingInt32BinarySmiOperationNodeForToNumber(
-      NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
+      NodeType allowed_input_type);
 
   template <Operation kOperation>
   ReduceResult BuildFloat64UnaryOperationNodeForToNumber(
-      NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
+      NodeType allowed_input_type);
   template <Operation kOperation>
   ReduceResult BuildFloat64BinaryOperationNodeForToNumber(
-      NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
+      NodeType allowed_input_type);
   template <Operation kOperation>
   ReduceResult BuildFloat64BinarySmiOperationNodeForToNumber(
-      NodeType allowed_input_type,
-      TaggedToFloat64ConversionType conversion_type);
+      NodeType allowed_input_type);
 
   template <Operation kOperation>
   ReduceResult VisitUnaryOperation();
@@ -1593,6 +1577,11 @@ class MaglevGraphBuilder {
   ReduceResult VisitBinarySmiOperation();
 
   ReduceResult BuildUnwrapStringWrapper(ValueNode* input);
+  // Given two arbitrary inputs, this builds a string-concat operation if
+  // at least one operand is a String. If so, it appropriately converts the
+  // other operand if needed, and then emits the most specialized concat
+  // operation possible.
+  MaybeReduceResult TryBuildStringConcat(ValueNode* left, ValueNode* right);
   ReduceResult BuildStringConcat(ValueNode* left, ValueNode* right);
   ReduceResult BuildNewConsStringMap(ValueNode* left, ValueNode* right);
   size_t StringLengthStaticLowerBound(ValueNode* string, int max_depth = 2);
@@ -1803,6 +1792,9 @@ class MaglevGraphBuilder {
 
   template <typename FCond, typename FTrue, typename FFalse>
   ValueNode* Select(FCond cond, FTrue if_true, FFalse if_false);
+
+  ValueNode* BuildInt32Max(ValueNode* a, ValueNode* b);
+  ValueNode* BuildInt32Min(ValueNode* a, ValueNode* b);
 
   ReduceResult SelectReduction(
       base::FunctionRef<BranchResult(BranchBuilder&)> cond,

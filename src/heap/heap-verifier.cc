@@ -146,6 +146,13 @@ void VerifyPointersVisitor::VisitMapPointer(Tagged<HeapObject> host) {
 void VerifyPointersVisitor::VerifyHeapObjectImpl(
     Tagged<HeapObject> heap_object) {
   CHECK(IsValidHeapObject(heap_, heap_object));
+#if V8_STATIC_ROOTS_BOOL
+  // In static roots builds, holes are unmapped in RO space -- skip verifying
+  // them.
+  if (HeapLayout::InReadOnlySpace(heap_object) && IsAnyHole(heap_object)) {
+    return;
+  }
+#endif
   CHECK(IsMap(heap_object->map(cage_base())));
   // Heap::InToPage() is not available with sticky mark-bits.
   CHECK_IMPLIES(
@@ -407,7 +414,9 @@ void HeapVerification::VerifyPage(const MemoryChunkMetadata* chunk_metadata) {
   const MemoryChunk* chunk = chunk_metadata->Chunk();
 
   CHECK(!current_chunk_.has_value());
-  CHECK(!chunk->IsFlagSet(MemoryChunk::FROM_PAGE));
+#ifndef V8_ENABLE_STICKY_MARK_BITS_BOOL
+  CHECK(!chunk->IsFromPage());
+#endif
   CHECK(!chunk_metadata->will_be_promoted());
   CHECK(!chunk_metadata->is_quarantined());
   CHECK_EQ(chunk_metadata->is_evacuation_candidate(),
@@ -491,7 +500,7 @@ void HeapVerification::VerifyObjectMap(Tagged<HeapObject> object) {
     // The object should not be code or a map.
     CHECK(!IsMap(object, cage_base_));
     CHECK(!IsAbstractCode(object, cage_base_));
-  } else if (current_space_identity() == RO_SPACE) {
+  } else if (current_space_identity() == RO_SPACE && !IsAnyHole(object)) {
     CHECK(!IsExternalString(object));
     CHECK(!IsJSArrayBuffer(object));
   }
@@ -774,7 +783,7 @@ void HeapVerification::VerifyRememberedSetFor(Tagged<HeapObject> object) {
       &trusted_to_shared_trusted);
   old_to_shared_visitor.Visit(object);
 
-  if (!MemoryChunk::FromHeapObject(object)->IsTrusted()) {
+  if (!MemoryChunk::FromHeapObject(object)->Metadata()->is_trusted()) {
     CHECK_NULL(chunk->slot_set<TRUSTED_TO_TRUSTED>());
     CHECK_NULL(chunk->slot_set<TRUSTED_TO_SHARED_TRUSTED>());
   }
@@ -856,7 +865,7 @@ void HeapVerifier::VerifyObjectLayoutChange(Heap* heap,
                                             Tagged<HeapObject> object,
                                             Tagged<Map> new_map) {
   // Object layout changes are currently not supported on background threads.
-  CHECK_NULL(LocalHeap::Current());
+  CHECK(LocalHeap::Current()->is_main_thread());
 
   if (!v8_flags.verify_heap) return;
 

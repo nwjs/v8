@@ -69,6 +69,24 @@ static inline size_t gvn_hash_value(const v8::internal::ZoneVector<T>& vector) {
   }
   return hash;
 }
+
+template <typename... Args>
+static inline size_t fast_hash_combine(size_t seed, Args&&... args) {
+  size_t hash = seed;
+  ([&] { hash = cse::fast_hash_combine(hash, cse::gvn_hash_value(args)); }(),
+   ...);
+  return hash;
+}
+
+template <size_t kInputCount, typename... Args>
+static inline size_t fast_hash_combine(
+    size_t seed, std::array<ValueNode*, kInputCount>& inputs) {
+  size_t hash = seed;
+  for (const auto& inp : inputs) {
+    hash = cse::fast_hash_combine(hash, base::hash_value(inp));
+  }
+  return hash;
+}
 }  // namespace cse
 
 template <typename BaseT>
@@ -150,9 +168,12 @@ void MaglevReducer<BaseT>::AddNewControlNode(
     RegisterNode(control_node);
     if (V8_UNLIKELY(v8_flags.trace_maglev_graph_building &&
                     is_tracing_enabled())) {
+      bool kHasRegallocData = false;
       bool kSkipTargets = true;
       std::cout << "  " << control_node << "  " << PrintNodeLabel(control_node)
-                << ": " << PrintNode(control_node, kSkipTargets) << std::endl;
+                << ": "
+                << PrintNode(control_node, kHasRegallocData, kSkipTargets)
+                << std::endl;
     }
   }
 }
@@ -200,63 +221,18 @@ NodeT* MaglevReducer<BaseT>::AddNewNodeOrGetEquivalent(
     }
   }
 
-  uint32_t value_number;
-  {
-    size_t tmp_value_number = base::hash_value(op);
-    (
-        [&] {
-          tmp_value_number = cse::fast_hash_combine(tmp_value_number,
-                                                    cse::gvn_hash_value(args));
-        }(),
-        ...);
-    for (const auto& inp : inputs) {
-      tmp_value_number =
-          cse::fast_hash_combine(tmp_value_number, base::hash_value(inp));
-    }
-    value_number = static_cast<uint32_t>(tmp_value_number);
-  }
+  uint32_t hash = static_cast<uint32_t>(cse::fast_hash_combine(
+      cse::fast_hash_combine(base::hash_value(op), std::forward<Args>(args)...),
+      inputs));
+  NodeT* node = known_node_aspects().template FindExpression<NodeT>(
+      hash, inputs, std::forward<Args>(args)...);
+  if (node) return node;
 
-  auto exists = known_node_aspects().available_expressions.find(value_number);
-  if (exists != known_node_aspects().available_expressions.end()) {
-    auto candidate = exists->second.node;
-    const bool sanity_check =
-        candidate->template Is<NodeT>() &&
-        static_cast<size_t>(candidate->input_count()) == inputs.size();
-    DCHECK_IMPLIES(sanity_check,
-                   (StaticPropertiesForOpcode(op) & candidate->properties()) ==
-                       candidate->properties());
-    const bool epoch_check =
-        !Node::needs_epoch_check(op) ||
-        known_node_aspects().effect_epoch() <= exists->second.effect_epoch;
-    if (sanity_check && epoch_check) {
-      if (static_cast<NodeT*>(candidate)->options() ==
-          std::tuple{std::forward<Args>(args)...}) {
-        int i = 0;
-        for (const auto& inp : inputs) {
-          if (inp != candidate->input(i).node()) {
-            break;
-          }
-          i++;
-        }
-        if (static_cast<size_t>(i) == inputs.size()) {
-          return static_cast<NodeT*>(candidate);
-        }
-      }
-    }
-    if (!epoch_check) {
-      known_node_aspects().available_expressions.erase(exists);
-    }
-  }
-  NodeT* node =
+  node =
       NodeBase::New<NodeT>(zone(), inputs.size(), std::forward<Args>(args)...);
   SetNodeInputsNoConversion(node, inputs);
   DCHECK_EQ(node->options(), std::tuple{std::forward<Args>(args)...});
-  uint32_t epoch = Node::needs_epoch_check(op)
-                       ? known_node_aspects().effect_epoch()
-                       : KnownNodeAspects::kEffectEpochForPureInstructions;
-  if (epoch != KnownNodeAspects::kEffectEpochOverflow) {
-    known_node_aspects().available_expressions[value_number] = {node, epoch};
-  }
+  known_node_aspects().AddExpression(hash, node);
   return AttachExtraInfoAndAddToGraph(node);
 }
 
@@ -503,9 +479,20 @@ ValueNode* MaglevReducer<BaseT>::GetTaggedValue(
       value->properties().value_representation();
   if (representation == ValueRepresentation::kTagged) return value;
 
-  if (Int32Constant* as_int32_constant = value->TryCast<Int32Constant>();
-      as_int32_constant && Smi::IsValid(as_int32_constant->value())) {
-    return graph()->GetSmiConstant(as_int32_constant->value());
+  if (auto as_int32_constant = TryGetInt32Constant(value)) {
+    if (Smi::IsValid(*as_int32_constant)) {
+      return graph()->GetSmiConstant(*as_int32_constant);
+    }
+  }
+  if (auto as_float64_constant = TryGetFloat64Constant(
+          value, TaggedToFloat64ConversionType::kOnlyNumber)) {
+    if (std::isnan(*as_float64_constant)) {
+      return graph()->GetRootConstant(RootIndex::kNanValue);
+    }
+    if (*as_float64_constant == kMaxUInt32) {
+      return graph()->GetRootConstant(RootIndex::kMaxUInt32);
+    }
+    return graph()->GetHeapNumberConstant(*as_float64_constant);
   }
 
   NodeInfo* node_info =
@@ -545,6 +532,7 @@ ValueNode* MaglevReducer<BaseT>::GetTaggedValue(
         return alternative.set_tagged(
             AddNewNodeNoInputConversion<CheckedSmiTagFloat64>({value}));
       }
+      // TODO(victorgomes): Do not tag Float64Constant on runtime.
       return alternative.set_tagged(
           AddNewNodeNoInputConversion<Float64ToTagged>(
               {value}, Float64ToTagged::ConversionMode::kCanonicalizeSmi));
@@ -622,7 +610,7 @@ ValueNode* MaglevReducer<BaseT>::GetInt32(ValueNode* value,
     // HoleyFloat64 as Float64.
     case ValueRepresentation::kHoleyFloat64: {
       return alternative.set_int32(
-          AddNewNode<CheckedTruncateFloat64ToInt32>({value}));
+          AddNewNode<CheckedHoleyFloat64ToInt32>({value}));
     }
 
     case ValueRepresentation::kIntPtr:
@@ -667,22 +655,129 @@ std::optional<int32_t> MaglevReducer<BaseT>::TryGetInt32Constant(
 }
 
 template <typename BaseT>
+ValueNode* MaglevReducer<BaseT>::GetTruncatedInt32ForToNumber(
+    ValueNode* value, NodeType allowed_input_type) {
+  value->MaybeRecordUseReprHint(UseRepresentation::kTruncatedInt32);
+
+  ValueRepresentation representation =
+      value->properties().value_representation();
+  if (representation == ValueRepresentation::kInt32) return value;
+  if (representation == ValueRepresentation::kUint32) {
+    // This node is cheap (no code gen, just a bitcast), so don't cache it.
+    return AddNewNodeNoInputConversion<TruncateUint32ToInt32>({value});
+  }
+
+  // Process constants first to avoid allocating NodeInfo for them.
+  switch (value->opcode()) {
+    case Opcode::kConstant: {
+      compiler::ObjectRef object = value->Cast<Constant>()->object();
+      if (!object.IsHeapNumber()) break;
+      int32_t truncated_value = DoubleToInt32(object.AsHeapNumber().value());
+      if (!Smi::IsValid(truncated_value)) break;
+      return GetInt32Constant(truncated_value);
+    }
+    case Opcode::kSmiConstant:
+      return GetInt32Constant(value->Cast<SmiConstant>()->value().value());
+    case Opcode::kRootConstant: {
+      Tagged<Object> root_object =
+          local_isolate()->root(value->Cast<RootConstant>()->index());
+      if (!IsOddball(root_object, local_isolate())) break;
+      int32_t truncated_value =
+          DoubleToInt32(Cast<Oddball>(root_object)->to_number_raw());
+      // All oddball ToNumber truncations are valid Smis.
+      DCHECK(Smi::IsValid(truncated_value));
+      return GetInt32Constant(truncated_value);
+    }
+    case Opcode::kFloat64Constant: {
+      int32_t truncated_value =
+          DoubleToInt32(value->Cast<Float64Constant>()->value().get_scalar());
+      if (!Smi::IsValid(truncated_value)) break;
+      return GetInt32Constant(truncated_value);
+    }
+
+    // We could emit unconditional eager deopts for other kinds of constant, but
+    // it's not necessary, the appropriate checking conversion nodes will deopt.
+    default:
+      break;
+  }
+
+  NodeInfo* node_info = GetOrCreateInfoFor(value);
+  auto& alternative = node_info->alternative();
+
+  // If there is an int32_alternative, then that works as a truncated value
+  // too.
+  if (ValueNode* alt = alternative.int32()) {
+    return alt;
+  }
+  if (ValueNode* alt = alternative.truncated_int32_to_number()) {
+    return alt;
+  }
+
+  switch (representation) {
+    case ValueRepresentation::kTagged: {
+      NodeType old_type;
+      EnsureType(value, allowed_input_type, &old_type);
+      if (NodeTypeIsSmi(old_type)) {
+        // Smi untagging can be cached as an int32 alternative, not just a
+        // truncated alternative.
+        return alternative.set_int32(BuildSmiUntag(value));
+      }
+      if (allowed_input_type == NodeType::kSmi) {
+        return alternative.set_int32(
+            AddNewNodeNoInputConversion<CheckedSmiUntag>({value}));
+      }
+      if (NodeTypeIs(old_type, allowed_input_type)) {
+        return alternative.set_truncated_int32_to_number(
+            AddNewNodeNoInputConversion<TruncateUnsafeNumberOrOddballToInt32>(
+                {value}, GetTaggedToFloat64ConversionType(allowed_input_type)));
+      }
+      return alternative.set_truncated_int32_to_number(
+          AddNewNodeNoInputConversion<TruncateCheckedNumberOrOddballToInt32>(
+              {value}, GetTaggedToFloat64ConversionType(allowed_input_type)));
+    }
+    case ValueRepresentation::kFloat64:
+    // Ignore conversion_type for HoleyFloat64, and treat them like Float64.
+    // ToNumber of undefined is anyway a NaN, so we'll simply truncate away
+    // the NaN-ness of the hole, and don't need to do extra oddball checks so
+    // we can ignore the hint (though we'll miss updating the feedback).
+    case ValueRepresentation::kHoleyFloat64: {
+      return alternative.set_truncated_int32_to_number(
+          AddNewNodeNoInputConversion<TruncateHoleyFloat64ToInt32>({value}));
+    }
+
+    case ValueRepresentation::kIntPtr: {
+      // This is not an efficient implementation, but this only happens in
+      // corner cases.
+      ValueNode* value_to_number =
+          AddNewNodeNoInputConversion<IntPtrToNumber>({value});
+      return alternative.set_truncated_int32_to_number(
+          AddNewNodeNoInputConversion<TruncateUnsafeNumberOrOddballToInt32>(
+              {value_to_number}, TaggedToFloat64ConversionType::kOnlyNumber));
+    }
+    case ValueRepresentation::kInt32:
+    case ValueRepresentation::kUint32:
+    case ValueRepresentation::kNone:
+      UNREACHABLE();
+  }
+  UNREACHABLE();
+}
+
+template <typename BaseT>
 ValueNode* MaglevReducer<BaseT>::GetFloat64(ValueNode* value) {
   value->MaybeRecordUseReprHint(UseRepresentation::kFloat64);
-  return GetFloat64ForToNumber(value, NodeType::kNumber,
-                               TaggedToFloat64ConversionType::kOnlyNumber);
+  return GetFloat64ForToNumber(value, NodeType::kNumber);
 }
 
 template <typename BaseT>
 ValueNode* MaglevReducer<BaseT>::GetFloat64ForToNumber(
-    ValueNode* value, NodeType allowed_input_type,
-    TaggedToFloat64ConversionType conversion_type) {
+    ValueNode* value, NodeType allowed_input_type) {
   ValueRepresentation representation =
       value->properties().value_representation();
   if (representation == ValueRepresentation::kFloat64) return value;
 
   // Process constants first to avoid allocating NodeInfo for them.
-  if (auto cst = TryGetFloat64Constant(value, conversion_type)) {
+  if (auto cst = TryGetFloat64Constant(
+          value, GetTaggedToFloat64ConversionType(allowed_input_type))) {
     return graph()->GetFloat64Constant(cst.value());
   }
   // We could emit unconditional eager deopts for other kinds of constant, but
@@ -713,9 +808,8 @@ ValueNode* MaglevReducer<BaseT>::GetFloat64ForToNumber(
           NodeTypeIs(combined_type, NodeType::kNumber)) {
         // Number->Float64 conversions are exact alternatives, so they can
         // also become the canonical float64_alternative.
-        return alternative.set_float64(BuildNumberOrOddballToFloat64(
-            value, NodeType::kNumber,
-            TaggedToFloat64ConversionType::kOnlyNumber));
+        return alternative.set_float64(
+            BuildNumberOrOddballToFloat64(value, NodeType::kNumber));
       }
       if (!IsEmptyNodeType(node_info->type()) &&
           NodeTypeIs(combined_type, NodeType::kNumberOrOddball)) {
@@ -723,14 +817,12 @@ ValueNode* MaglevReducer<BaseT>::GetFloat64ForToNumber(
         // since they lose the information that this is an oddball, so they
         // can only become the canonical float64_alternative if they are a
         // known number (and therefore not oddball).
-        return BuildNumberOrOddballToFloat64(value, combined_type,
-                                             conversion_type);
+        return BuildNumberOrOddballToFloat64(value, combined_type);
       }
       // The type is impossible. We could generate an unconditional deopt here,
       // but it's too invasive. So we just generate a check which will always
       // deopt.
-      return BuildNumberOrOddballToFloat64(value, allowed_input_type,
-                                           conversion_type);
+      return BuildNumberOrOddballToFloat64(value, allowed_input_type);
     }
     case ValueRepresentation::kInt32:
       return alternative.set_float64(AddNewNode<ChangeInt32ToFloat64>({value}));
@@ -766,6 +858,14 @@ ValueNode* MaglevReducer<BaseT>::GetFloat64ForToNumber(
       UNREACHABLE();
   }
   UNREACHABLE();
+}
+
+template <typename BaseT>
+ValueNode* MaglevReducer<BaseT>::GetHoleyFloat64ForToNumber(
+    ValueNode* value, NodeType allowed_input_type) {
+  value->MaybeRecordUseReprHint(UseRepresentation::kHoleyFloat64);
+  if (value->is_holey_float64()) return value;
+  return GetFloat64ForToNumber(value, allowed_input_type);
 }
 
 template <typename BaseT>
@@ -897,9 +997,9 @@ ValueNode* MaglevReducer<BaseT>::BuildSmiUntag(ValueNode* node) {
 
 template <typename BaseT>
 ValueNode* MaglevReducer<BaseT>::BuildNumberOrOddballToFloat64(
-    ValueNode* node, NodeType allowed_input_type,
-    TaggedToFloat64ConversionType conversion_type) {
+    ValueNode* node, NodeType allowed_input_type) {
   NodeType old_type;
+  auto conversion_type = GetTaggedToFloat64ConversionType(allowed_input_type);
   if (EnsureType(node, allowed_input_type, &old_type)) {
     if (old_type == NodeType::kSmi) {
       ValueNode* untagged_smi = BuildSmiUntag(node);

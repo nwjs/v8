@@ -16,9 +16,9 @@
 namespace v8::internal::maglev {
 
 // We assume that we have visited all the deopt infos at this point.
-// SweepIdentities would do that. That means that we don't have any uses of
-// ReturnedValue in deopt infos. If the node has an use > 0, we
-// must create a conversion to tagged.
+// ClearReturnedValueUsesFromDeoptFrames would do that.
+// That means that we don't have any uses of ReturnedValue in deopt infos.
+// If the node has an use > 0, we must create a conversion to tagged.
 class ReturnedValueRepresentationSelector {
  public:
   void PreProcessGraph(Graph* graph) {}
@@ -67,6 +67,13 @@ class MaglevInliner {
     if (builder.has_graph_labeller()) {
       builder.graph_labeller()->RegisterNode(node);
     }
+  }
+
+  bool ShouldPrintMaglevGraph() const {
+    if (graph_->compilation_info()->is_turbolev()) {
+      return v8_flags.trace_turbo_graph || v8_flags.print_turbolev_frontend;
+    }
+    return v8_flags.print_maglev_graphs && is_tracing_enabled();
   }
 
   static void UpdatePredecessorsOf(BasicBlock* block, BasicBlock* prev_pred,

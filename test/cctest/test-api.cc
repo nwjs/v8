@@ -95,6 +95,9 @@
 #include "test/common/wasm/wasm-macro-gen.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
+static const v8::EmbedderDataTypeTag kTestTypeTagA = 1;
+static const v8::EmbedderDataTypeTag kTestTypeTagB = 2;
+
 static const bool kLogThreading = false;
 
 using ::v8::Array;
@@ -3306,7 +3309,7 @@ THREADED_TEST(GlobalObjectHasRealIndexedProperty) {
 static void CheckAlignedPointerInInternalField(Local<v8::Object> obj,
                                                void* value) {
   CHECK(HAS_SMI_TAG(reinterpret_cast<i::Address>(value)));
-  obj->SetAlignedPointerInInternalField(0, value);
+  obj->SetAlignedPointerInInternalField(0, value, kTestTypeTagA);
   i::heap::InvokeMajorGC(CcTest::heap());
   CHECK_EQ(value, obj->GetAlignedPointerFromInternalField(0));
   CHECK_EQ(value,
@@ -3346,6 +3349,7 @@ THREADED_TEST(InternalFieldsAlignedPointers) {
   CHECK_EQ(huge, Object::GetAlignedPointerFromInternalField(persistent, 0));
 }
 
+START_ALLOW_USE_DEPRECATED()
 THREADED_TEST(SetAlignedPointerInInternalFields) {
   LocalContext env;
   v8::Isolate* isolate = env.isolate();
@@ -3393,12 +3397,13 @@ THREADED_TEST(SetAlignedPointerInInternalFields) {
   delete[] heap_allocated_1;
   delete[] heap_allocated_2;
 }
+END_ALLOW_USE_DEPRECATED()
 
 static void CheckAlignedPointerInEmbedderData(LocalContext* env,
                                               v8::Local<v8::Object> some_obj,
                                               int index, void* value) {
   CHECK_EQ(0, static_cast<int>(reinterpret_cast<uintptr_t>(value) & 0x1));
-  (*env)->SetAlignedPointerInEmbedderData(index, value);
+  (*env)->SetAlignedPointerInEmbedderData(index, value, kTestTypeTagA);
   i::heap::InvokeMajorGC(CcTest::heap());
   CHECK_EQ(value, (*env)->GetAlignedPointerFromEmbedderData(index));
   CHECK_EQ(value,
@@ -3439,13 +3444,42 @@ THREADED_TEST(EmbedderDataAlignedPointers) {
 
   // Test growing of the embedder data's backing store.
   for (int i = 0; i < 100; i++) {
-    env->SetAlignedPointerInEmbedderData(i, AlignedTestPointer(i));
+    env->SetAlignedPointerInEmbedderData(i, AlignedTestPointer(i),
+                                         i % V8_EMBEDDER_DATA_TAG_COUNT);
   }
   i::heap::InvokeMajorGC(CcTest::heap());
   for (int i = 0; i < 100; i++) {
     v8::SealHandleScope no_handle_leak(env.isolate());
     CHECK_EQ(AlignedTestPointer(i), env->GetAlignedPointerFromEmbedderData(i));
   }
+}
+
+THREADED_TEST(EmbedderDataAlignedPointersViaDetachedGlobal) {
+  LocalContext env;
+  v8::Isolate* isolate = env.isolate();
+  v8::HandleScope scope(isolate);
+
+  v8::Local<v8::Object> obj = env->Global();
+
+  CheckAlignedPointerInEmbedderData(&env, obj, 0, nullptr);
+  CHECK_EQ(1, (*env)->GetNumberOfEmbedderDataFields());
+
+  int stack_allocated[100];
+  CheckAlignedPointerInEmbedderData(&env, obj, 1, stack_allocated);
+  CHECK_EQ(2, (*env)->GetNumberOfEmbedderDataFields());
+
+  i::heap::InvokeMajorGC(CcTest::heap());
+
+  CHECK_EQ(stack_allocated,
+           obj->GetAlignedPointerFromEmbedderDataInCreationContext(isolate, 1));
+
+  env->DetachGlobal();
+
+  // In case the global object is detached the embedder data can be read
+  // directly from current native context as long as its global object IS the
+  // detached global object.
+  CHECK_EQ(stack_allocated,
+           obj->GetAlignedPointerFromEmbedderDataInCreationContext(isolate, 1));
 }
 
 static void CheckEmbedderData(LocalContext* env, int index,
@@ -4584,7 +4618,8 @@ Local<v8::Object> NewObjectForIntKey(
     int key) {
   auto local = Local<v8::ObjectTemplate>::New(isolate, templ);
   auto obj = local->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
-  obj->SetAlignedPointerInInternalField(0, IntKeyToVoidPointer(key));
+  obj->SetAlignedPointerInInternalField(0, IntKeyToVoidPointer(key),
+                                        kTestTypeTagA);
   return obj;
 }
 
@@ -7883,21 +7918,28 @@ static const char* kNativeCallInExtensionSource =
     "  return %StringLastIndexOf(x, 'bob');"
     "}";
 
-static const char* kNativeCallTest =
-    "call_runtime_last_index_of('bobbobboellebobboellebobbob');";
-
-// Test that a native runtime calls are supported in extensions.
+// Test that natives syntax is not allowed in extensions.
 TEST(NativeCallInExtensions) {
+  i::v8_flags.allow_natives_syntax = false;
   v8::HandleScope handle_scope(CcTest::isolate());
   v8::RegisterExtension(
       std::make_unique<Extension>("nativecall", kNativeCallInExtensionSource));
   const char* extension_names[] = {"nativecall"};
   v8::ExtensionConfiguration extensions(1, extension_names);
-  v8::Local<Context> context = Context::New(CcTest::isolate(), &extensions);
-  Context::Scope lock(context);
-  v8::Local<Value> result = CompileRun(kNativeCallTest);
-  CHECK(result->Equals(context, v8::Integer::New(CcTest::isolate(), 24))
-            .FromJust());
+  v8::Local<Context> context = Context::New(CcTest::isolate());
+  v8::Context::Scope context_scope(context);
+  {
+    TryCatch try_catch(CcTest::isolate());
+
+    v8::Local<Context> ext_context =
+        Context::New(CcTest::isolate(), &extensions);
+    CHECK(ext_context.IsEmpty());
+    CHECK(try_catch.HasCaught());
+
+    v8::String::Utf8Value str(CcTest::isolate(), try_catch.Exception());
+    CHECK_NOT_NULL(*str);
+    CHECK_EQ(0, strcmp(*str, "SyntaxError: Unexpected token '%'"));
+  }
 }
 
 
@@ -8331,11 +8373,11 @@ void InternalFieldCallback(bool global_gc) {
     t1 = new Trivial(42);
     t2 = new Trivial2(103, 9);
 
-    obj->SetAlignedPointerInInternalField(0, t1);
+    obj->SetAlignedPointerInInternalField(0, t1, kTestTypeTagA);
     t1 = reinterpret_cast<Trivial*>(obj->GetAlignedPointerFromInternalField(0));
     CHECK_EQ(42, t1->x());
 
-    obj->SetAlignedPointerInInternalField(1, t2);
+    obj->SetAlignedPointerInInternalField(1, t2, kTestTypeTagB);
     t2 =
         reinterpret_cast<Trivial2*>(obj->GetAlignedPointerFromInternalField(1));
     CHECK_EQ(103, t2->x());
@@ -28506,8 +28548,8 @@ bool SetupTest(v8::Local<v8::Value> initial_value, LocalContext* env,
 
   v8::Local<v8::Object> object =
       object_template->NewInstance(env->local()).ToLocalChecked();
-  object->SetAlignedPointerInInternalField(kV8WrapperObjectIndex,
-                                           reinterpret_cast<void*>(checker));
+  object->SetAlignedPointerInInternalField(
+      kV8WrapperObjectIndex, reinterpret_cast<void*>(checker), kTestTypeTagA);
 
   CHECK((*env)
             ->Global()
@@ -28698,7 +28740,8 @@ void CheckApiObjectArg() {
   v8::Local<v8::Object> api_obj =
       api_obj_template->NewInstance(env.local()).ToLocalChecked();
   api_obj->SetAlignedPointerInInternalField(
-      kV8WrapperObjectIndex, reinterpret_cast<void*>(&embedder_obj));
+      kV8WrapperObjectIndex, reinterpret_cast<void*>(&embedder_obj),
+      kTestTypeTagA);
   CHECK(env->Global()
             ->Set(env.local(), v8_str("api_object"), api_obj)
             .FromJust());
@@ -29752,7 +29795,8 @@ struct SeqOneByteStringChecker {
     v8::Local<v8::Object> object =
         object_template->NewInstance(env.local()).ToLocalChecked();
     object->SetAlignedPointerInInternalField(kV8WrapperObjectIndex,
-                                             reinterpret_cast<void*>(&checker));
+                                             reinterpret_cast<void*>(&checker),
+                                             kTestTypeTagA);
     CHECK((*env)
               ->Global()
               ->Set(env.local(), v8_str("receiver"), object)

@@ -58,7 +58,7 @@ static unsigned CpuFeaturesImpliedByCompiler() {
 
 #if (defined __riscv_vector) && (__riscv_v >= 1000000)
   answer |= 1u << RISCV_SIMD;
-#endif  // def CAN_USE_RVV_INSTRUCTIONS
+#endif  // def __riscv_vector && __riscv_v >= 1000000
 
 #if (defined __riscv_zba)
   answer |= 1u << ZBA;
@@ -1428,7 +1428,11 @@ void Assembler::dq(uint64_t data) {
   EmitHelper(data);
 }
 
+#if defined(V8_TARGET_ARCH_RISCV64)
+void Assembler::dq(Label* label) {
+#elif defined(V8_TARGET_ARCH_RISCV32)
 void Assembler::dd(Label* label) {
+#endif
   uintptr_t data;
   if (!is_buffer_growth_blocked()) CheckBuffer();
   if (label->is_bound()) {

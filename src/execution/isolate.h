@@ -256,7 +256,7 @@ class WaiterQueueNode;
  */
 #define RETURN_RESULT_OR_FAILURE(isolate, call)      \
   do {                                               \
-    DirectHandle<Object> __result__;                 \
+    decltype((call).ToHandleChecked()) __result__;   \
     Isolate* __isolate__ = (isolate);                \
     if (!(call).To(&__result__)) {                   \
       DCHECK(__isolate__->has_exception());          \
@@ -505,6 +505,8 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(WasmLoadSourceMapCallback, wasm_load_source_map_callback, nullptr)      \
   V(WasmImportedStringsEnabledCallback,                                     \
     wasm_imported_strings_enabled_callback, nullptr)                        \
+  V(WasmCustomDescriptorsEnabledCallback,                                   \
+    wasm_custom_descriptors_enabled_callback, nullptr)                      \
   V(WasmJSPIEnabledCallback, wasm_jspi_enabled_callback, nullptr)           \
   V(IsJSApiWrapperNativeErrorCallback,                                      \
     is_js_api_wrapper_native_error_callback, nullptr)                       \
@@ -817,6 +819,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool IsWasmJSPIRequested(DirectHandle<NativeContext> context);
   // Has JSPI been enabled successfully?
   bool IsWasmJSPIEnabled(DirectHandle<NativeContext> context);
+  bool IsWasmCustomDescriptorsEnabled(DirectHandle<NativeContext> context);
   bool IsCompileHintsMagicEnabled(Handle<NativeContext> context);
 
   THREAD_LOCAL_TOP_ADDRESS(Tagged<Context>, pending_handler_context)
@@ -1208,6 +1211,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return cage_base();
 #endif  // V8_EXTERNAL_CODE_SPACE
   }
+
+#ifdef V8_ENABLE_SANDBOX
+  Address trusted_cage_base() const {
+    return isolate_data()->trusted_cage_base_;
+  }
+#endif  // V8_ENABLE_SANDBOX
 
   IsolateGroup* isolate_group() const { return isolate_group_; }
 
@@ -2175,7 +2184,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   Isolate* GetMainThreadIsolateUnsafe() { return this; }
 
   LocalHeap* main_thread_local_heap();
-  LocalHeap* CurrentLocalHeap();
 
 #ifdef V8_COMPRESS_POINTERS
   ExternalPointerTable& external_pointer_table() {
@@ -2346,7 +2354,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
                                DirectHandle<ScopeInfo> outer_scope_info,
                                DirectHandle<StringSet> locals_blocklist);
   // Returns either `TheHole` or `StringSet`.
-  Tagged<Object> LocalsBlockListCacheGet(DirectHandle<ScopeInfo> scope_info);
+  Tagged<UnionOf<TheHole, StringSet>> LocalsBlockListCacheGet(
+      DirectHandle<ScopeInfo> scope_info);
 
   void VerifyStaticRoots();
 

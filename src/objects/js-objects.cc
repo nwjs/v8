@@ -23,6 +23,7 @@
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/mutable-page-metadata.h"
 #include "src/heap/pretenuring-handler-inl.h"
+#include "src/heap/read-only-heap.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
 #include "src/logging/log.h"
@@ -1700,8 +1701,11 @@ Maybe<bool> JSReceiver::ValidateAndApplyPropertyDescriptor(
           : current->has_value()
               ? current->value()
               : Cast<Object>(isolate->factory()->undefined_value()));
-      return JSObject::DefineOwnPropertyIgnoreAttributes(it, value, attrs,
-                                                         should_throw);
+      return JSObject::DefineOwnPropertyIgnoreAttributes(
+          it, value, attrs, should_throw, JSObject::DONT_FORCE_FIELD,
+          EnforceDefineSemantics::kSet, StoreOrigin::kNamed,
+          current->has_value() ? current->value()
+                               : MaybeDirectHandle<Object>());
     } else {
       DCHECK(desc_is_accessor_descriptor ||
              (desc_is_generic_descriptor &&
@@ -3229,7 +3233,7 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
       value = handle(object->RawFastPropertyAt(isolate, index), isolate);
       if (!old_representation.IsDouble() && representation.IsDouble()) {
         DCHECK_IMPLIES(old_representation.IsNone(),
-                       IsUninitialized(*value, isolate));
+                       IsUninitializedHole(*value, isolate));
         value = Object::NewStorageFor(isolate, value, representation);
       } else if (old_representation.IsDouble() && !representation.IsDouble()) {
         value = Object::WrapForRead(isolate, Cast<JSAny>(value),
@@ -3661,8 +3665,8 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
     LookupIterator* it, DirectHandle<Object> value,
     PropertyAttributes attributes, Maybe<ShouldThrow> should_throw,
     AccessorInfoHandling handling, EnforceDefineSemantics semantics,
-    StoreOrigin store_origin) {
-  it->UpdateProtector();
+    StoreOrigin store_origin, MaybeDirectHandle<Object> old_value) {
+  it->UpdateProtector(value, old_value);
 
   for (;; it->Next()) {
     switch (it->state()) {
@@ -5418,7 +5422,8 @@ static ElementsKind BestFittingFastElementsKind(Tagged<JSObject> object) {
   Tagged<NumberDictionary> dictionary = object->element_dictionary();
   ElementsKind kind = HOLEY_SMI_ELEMENTS;
   for (InternalIndex i : dictionary->IterateEntries()) {
-    Tagged<Object> key = dictionary->KeyAt(i);
+    Tagged<Object> key;
+    if (!dictionary->ToKey(GetReadOnlyRoots(), i, &key)) continue;
     if (IsNumber(key)) {
       Tagged<Object> value = dictionary->ValueAt(i);
       if (!IsNumber(value)) return HOLEY_ELEMENTS;
@@ -5493,10 +5498,8 @@ bool JSObject::UpdateAllocationSite(Isolate* isolate,
                                     DirectHandle<JSObject> object,
                                     ElementsKind to_kind) {
   if (!IsJSArray(*object)) return false;
-
   if (!HeapLayout::InYoungGeneration(*object)) return false;
-
-  if (Heap::IsLargeObject(*object)) return false;
+  if (HeapLayout::InAnyLargeSpace(*object)) return false;
 
   DirectHandle<AllocationSite> site;
   {

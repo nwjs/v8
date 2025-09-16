@@ -387,6 +387,7 @@ class Heap final {
       return StackScanMode::kFull;
     }
     if (selective_stack_scan_start_address_.has_value()) {
+      DCHECK(IsGCWithStack());
       return StackScanMode::kSelective;
     }
     return StackScanMode::kNone;
@@ -396,6 +397,7 @@ class Heap final {
       return StackScanMode::kFull;
     }
     if (selective_stack_scan_start_address_.has_value()) {
+      DCHECK(IsGCWithStack());
       return StackScanMode::kSelective;
     }
     return StackScanMode::kNone;
@@ -467,7 +469,8 @@ class Heap final {
   V8_EXPORT_PRIVATE void CreateFillerObjectAt(
       Address addr, int size,
       ClearFreedMemoryMode clear_memory_mode =
-          ClearFreedMemoryMode::kDontClearFreedMemory);
+          ClearFreedMemoryMode::kDontClearFreedMemory,
+      std::optional<AllocationType> allocation_type = {});
 
   // Initialize a filler object at a specific address. Unlike
   // `CreateFillerObjectAt` this method will not perform slot verification since
@@ -477,8 +480,6 @@ class Heap final {
   bool CanMoveObjectStart(Tagged<HeapObject> object);
 
   bool IsImmovable(Tagged<HeapObject> object);
-
-  V8_EXPORT_PRIVATE static bool IsLargeObject(Tagged<HeapObject> object);
 
   // Trim the given array from the left. Note that this relocates the object
   // start and hence is only valid if there is only a single reference to it.
@@ -735,8 +736,7 @@ class Heap final {
   void ReplaceReadOnlySpace(SharedReadOnlySpace* shared_ro_space);
 
   // Sets up the heap memory without creating any objects.
-  void SetUpSpaces(LinearAllocationArea& new_allocation_info,
-                   LinearAllocationArea& old_allocation_info);
+  void SetUpSpaces();
 
   // Prepares the heap, setting up for deserialization.
   void InitializeMainThreadLocalHeap(LocalHeap* main_thread_local_heap);
@@ -1991,8 +1991,6 @@ class Heap final {
   // v8 browsing benchmarks.
   static const int kMaxLoadTimeMs = 7000;
 
-  void NotifyBackgrounded();
-
   V8_EXPORT_PRIVATE bool ShouldOptimizeForLoadTime() const;
   V8_EXPORT_PRIVATE bool IsLoading() const;
   void NotifyLoadingStarted();
@@ -2017,6 +2015,8 @@ class Heap final {
   size_t max_old_generation_size() const {
     return max_old_generation_size_.load(std::memory_order_relaxed);
   }
+
+  size_t max_global_memory_size() const { return max_global_memory_size_; }
 
   size_t min_old_generation_size() const { return min_old_generation_size_; }
 
@@ -2061,7 +2061,6 @@ class Heap final {
     size_t global_allocation_limit;
   };
   static LimitsComputationResult ComputeNewAllocationLimits(Heap* heap);
-  V8_EXPORT_PRIVATE void ComputeAndSetNewAllocationLimits();
 
   // ===========================================================================
   // GC Tasks. =================================================================

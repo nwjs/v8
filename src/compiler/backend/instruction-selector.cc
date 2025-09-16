@@ -354,8 +354,8 @@ bool is_exclusive_user_of(const Graph* graph, OpIndex user, OpIndex value) {
   if (value_op.Is<ProjectionOp>()) {
     // Projections always have a Tuple use, but it shouldn't count as a use as
     // far as is_exclusive_user_of is concerned, since no instructions are
-    // emitted for the TupleOp, which is just a Turboshaft "meta operation".
-    // We thus increase the use_count by 1, to attribute the TupleOp use to
+    // emitted for the MakeTupleOp, which is just a Turboshaft "meta operation".
+    // We thus increase the use_count by 1, to attribute the MakeTupleOp use to
     // the current operation.
     use_count++;
   }
@@ -430,7 +430,7 @@ OptionalOpIndex InstructionSelector::FindProjection(OpIndex node,
       // If the projection has a single use, it is the following tuple, so we
       // don't return it, since there is no point in emitting it.
       DCHECK(turboshaft_uses(next).size() == 1 &&
-             graph->Get(turboshaft_uses(next)[0]).Is<TupleOp>());
+             graph->Get(turboshaft_uses(next)[0]).Is<MakeTupleOp>());
       continue;
     }
     if (projection->index == projection_index) return next;
@@ -449,7 +449,7 @@ OptionalOpIndex InstructionSelector::FindProjection(OpIndex node,
         // (which doesn't count as a regular use since it is just an artifact of
         // the Turboshaft graph).
         DCHECK(turboshaft_uses(use).size() == 1 &&
-               graph->Get(turboshaft_uses(use)[0]).Is<TupleOp>());
+               graph->Get(turboshaft_uses(use)[0]).Is<MakeTupleOp>());
       }
     }
   }
@@ -1224,6 +1224,10 @@ void InstructionSelector::InitializeCallBuffer(
               ? g.UseFixed(callee, kJavaScriptCallCodeStartRegister)
               : g.UseRegister(callee));
       break;
+    case CallDescriptor::kResumeWasmContinuation:
+      DCHECK(!call_use_fixed_target_reg);
+      buffer->instruction_args.push_back(g.UseRegister(callee));
+      break;
 #endif  // V8_ENABLE_WEBASSEMBLY
     case CallDescriptor::kCallBuiltinPointer: {
       // The common case for builtin pointers is to have the target in a
@@ -1246,6 +1250,23 @@ void InstructionSelector::InitializeCallBuffer(
       break;
     }
     case CallDescriptor::kCallJSFunction:
+      // TODO(olivf): Implement the required kArchCallJSFunction with
+      // immediate argument on all architectures.
+#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM) ||     \
+    defined(V8_TARGET_ARCH_ARM64) || defined(V8_TARGET_ARCH_PPC64) || \
+    defined(V8_TARGET_ARCH_S390X)
+      if (this->IsHeapConstant(callee)) {
+        const turboshaft::ConstantOp* constant =
+            TryCast<turboshaft::ConstantOp>(callee);
+        HeapObjectRef ref = MakeRef(broker_, constant->handle());
+        // TODO(olivf): We really should be able to dead-code eliminate this
+        // case, however currently we are not for `CheckClosure(const)`.
+        if (ref.IsJSFunction()) {
+          buffer->instruction_args.push_back(g.UseImmediate(callee));
+          break;
+        }
+      }
+#endif
       buffer->instruction_args.push_back(
           g.UseLocation(callee, buffer->descriptor->GetInputLocation(0)));
       break;
@@ -2070,7 +2091,7 @@ bool InstructionSelector::CanDoBranchIfOverflowFusion(OpIndex binop) {
     // If the projection has a single use, it is the following tuple, so we
     // don't care about the value, and can do branch-if-overflow fusion.
     DCHECK(turboshaft_uses(projection0_index).size() == 1 &&
-           graph->Get(turboshaft_uses(projection0_index)[0]).Is<TupleOp>());
+           graph->Get(turboshaft_uses(projection0_index)[0]).Is<MakeTupleOp>());
     return true;
   }
 
@@ -2085,7 +2106,7 @@ bool InstructionSelector::CanDoBranchIfOverflowFusion(OpIndex binop) {
   // defined, which will imply that it's fine to define {projection0} and
   // {binop} now.
   for (OpIndex use : turboshaft_uses(projection0_index)) {
-    if (this->Get(use).template Is<TupleOp>()) {
+    if (this->Get(use).template Is<MakeTupleOp>()) {
       // The Tuple won't have any uses since it would have to be accessed
       // through Projections, and Projections on Tuples return the original
       // Projection instead (see Assembler::ReduceProjection in
@@ -2258,6 +2279,9 @@ void InstructionSelector::VisitCall(OpIndex node, Block* handler) {
     case CallDescriptor::kCallWasmFunctionIndirect:
       DCHECK(!this->IsRelocatableWasmConstant(call_op.callee()));
       opcode = EncodeCallDescriptorFlags(kArchCallWasmFunctionIndirect, flags);
+      break;
+    case CallDescriptor::kResumeWasmContinuation:
+      opcode = EncodeCallDescriptorFlags(kArchResumeWasmContinuation, flags);
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
     case CallDescriptor::kCallBuiltinPointer:
@@ -2493,9 +2517,9 @@ void InstructionSelector::TryPrepareScheduleFirstProjection(
   // {result} back into it through the back edge. In this case, it's
   // normal to schedule {result} before the Phi that uses it.
   for (OpIndex use : turboshaft_uses(result.value())) {
-    // We ignore TupleOp uses, since TupleOp don't lead to emitted machine
-    // instructions and are just Turboshaft "meta operations".
-    if (!Is<TupleOp>(use) && !IsDefined(use) &&
+    // We ignore MakeTupleOp uses, since MakeTupleOp don't lead to emitted
+    // machine instructions and are just Turboshaft "meta operations".
+    if (!Is<MakeTupleOp>(use) && !IsDefined(use) &&
         block(schedule_, use) == current_block_ && !Is<PhiOp>(use)) {
       return;
     }
@@ -3869,7 +3893,7 @@ void InstructionSelector::VisitNode(OpIndex node) {
       TURBOSHAFT_WASM_OPERATION_LIST(UNREACHABLE_CASE)
       TURBOSHAFT_OTHER_OPERATION_LIST(UNREACHABLE_CASE)
       UNREACHABLE_CASE(PendingLoopPhi)
-      UNREACHABLE_CASE(Tuple)
+      UNREACHABLE_CASE(MakeTuple)
       UNREACHABLE_CASE(Dead)
       UNREACHABLE();
 #undef UNREACHABLE_CASE

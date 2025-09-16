@@ -4,6 +4,15 @@
 
 #include "test/fuzzer/wasm/fuzzer-common.h"
 
+#include <cstdint>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <unordered_map>
+#include <utility>
+#include <variant>
+#include <vector>
+
 #include "include/v8-context.h"
 #include "include/v8-exception.h"
 #include "include/v8-isolate.h"
@@ -40,7 +49,8 @@ namespace v8::internal::wasm::fuzzing {
 
 namespace {
 
-void CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
+V8_WARN_UNUSED_RESULT
+bool CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
                                               int32_t* max_steps) {
   const WasmModule* module = native_module->module();
   WasmCodeRefScope code_ref_scope;
@@ -64,15 +74,279 @@ void CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
                                       // nondeterminism detection.
                                       .set_detect_nondeterminism(false));
     if (!result.succeeded()) {
+#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32
+      // Liftoff compilation can bailout on x64 / ia32 if SSE4.1 is unavailable.
+      if (!CpuFeatures::IsSupported(SSE4_1)) return false;
+#endif
       FATAL(
           "Liftoff compilation failed on a valid module. Run with "
           "--trace-wasm-decoder (in a debug build) to see why.");
     }
     native_module->PublishCode(native_module->AddCompiledCode(result));
   }
+  return true;
 }
 
 }  // namespace
+
+bool ValuesEquivalent(const WasmValue& init_lhs, const WasmValue& init_rhs,
+                      Isolate* isolate) {
+  DisallowGarbageCollection no_gc;
+  // Stack of elements to be checked.
+  std::vector<std::pair<WasmValue, WasmValue>> cmp = {{init_lhs, init_rhs}};
+  using TaggedT = decltype(Tagged<Object>().ptr());
+  // Map of lhs objects we have already seen to their rhs object on the first
+  // visit. This is needed to ensure a reasonable runtime for the check.
+  // Example:
+  //   (array.new $myArray 10 (array.new_default $myArray 10))
+  // This creates a nested array where each outer array element is the same
+  // inner array. Without memorizing the inner array, we'd end up performing
+  // 100+ comparisons.
+  std::unordered_map<TaggedT, TaggedT> lhs_map;
+
+  auto CheckArray = [&cmp, &lhs_map](Tagged<Object> lhs,
+                                     Tagged<Object> rhs) -> bool {
+    auto [iter, inserted] = lhs_map.insert({lhs.ptr(), rhs.ptr()});
+    if (!inserted) {
+      return iter->second == rhs.ptr();
+    }
+    Tagged<WasmArray> lhs_array = Cast<WasmArray>(lhs);
+    Tagged<WasmArray> rhs_array = Cast<WasmArray>(rhs);
+    if (lhs_array->map()->wasm_type_info()->type() !=
+        rhs_array->map()->wasm_type_info()->type()) {
+      return false;
+    }
+    if (lhs_array->length() != rhs_array->length()) {
+      return false;
+    }
+    cmp.reserve(cmp.size() + lhs_array->length());
+    for (uint32_t i = 0; i < lhs_array->length(); ++i) {
+      cmp.emplace_back(lhs_array->GetElement(i), rhs_array->GetElement(i));
+    }
+    return true;
+  };
+
+  auto CheckStruct = [&cmp, &lhs_map](Tagged<Object> lhs,
+                                      Tagged<Object> rhs) -> bool {
+    auto [iter, inserted] = lhs_map.insert({lhs.ptr(), rhs.ptr()});
+    if (!inserted) {
+      return iter->second == rhs.ptr();
+    }
+    Tagged<WasmStruct> lhs_struct = Cast<WasmStruct>(lhs);
+    Tagged<WasmStruct> rhs_struct = Cast<WasmStruct>(rhs);
+    if (lhs_struct->map()->wasm_type_info()->type() !=
+        rhs_struct->map()->wasm_type_info()->type()) {
+      return false;
+    }
+    const CanonicalStructType* type = GetTypeCanonicalizer()->LookupStruct(
+        lhs_struct->map()->wasm_type_info()->type_index());
+    uint32_t field_count = type->field_count();
+    for (uint32_t i = 0; i < field_count; ++i) {
+      cmp.emplace_back(lhs_struct->GetFieldValue(i),
+                       rhs_struct->GetFieldValue(i));
+    }
+    return true;
+  };
+
+  while (!cmp.empty()) {
+    const auto [lhs, rhs] = cmp.back();
+    cmp.pop_back();
+
+    if (lhs.type() != rhs.type()) {
+      return false;
+    }
+
+    switch (lhs.type().kind()) {
+      case ValueKind::kF32:
+      case ValueKind::kF64:
+      case ValueKind::kI8:
+      case ValueKind::kI16:
+      case ValueKind::kI32:
+      case ValueKind::kI64:
+      case ValueKind::kS128:
+        if (lhs != rhs) {
+          return false;
+        }
+        break;
+      case ValueKind::kRef:
+      case ValueKind::kRefNull: {
+        Tagged<Object> lhs_ref = *lhs.to_ref();
+        Tagged<Object> rhs_ref = *rhs.to_ref();
+
+        if (IsNull(lhs_ref) != IsNull(rhs_ref)) return false;
+        if (IsWasmNull(lhs_ref) != IsWasmNull(rhs_ref)) return false;
+
+        switch (lhs.type().heap_representation_non_shared()) {
+          case HeapType::kFunc: {
+            if (IsWasmNull(lhs_ref) || IsWasmNull(rhs_ref)) {
+              break;
+            }
+
+            auto lhs_func = Cast<WasmFuncRef>(lhs_ref);
+            auto rhs_func = Cast<WasmFuncRef>(rhs_ref);
+            if (lhs_func->internal(isolate)->function_index() !=
+                rhs_func->internal(isolate)->function_index()) {
+              return false;
+            }
+            break;
+          }
+          case HeapType::kI31:
+            if (lhs_ref != rhs_ref) {
+              return false;
+            }
+            break;
+          case HeapType::kNoFunc:
+          case HeapType::kNone:
+          case HeapType::kNoExn:
+            CHECK(IsWasmNull(lhs_ref));
+            CHECK(IsWasmNull(rhs_ref));
+            break;
+          case HeapType::kNoExtern:
+            CHECK(IsNull(lhs_ref));
+            CHECK(IsNull(rhs_ref));
+            break;
+          case HeapType::kExtern:
+          case HeapType::kAny:
+          case HeapType::kEq:
+          case HeapType::kArray:
+          case HeapType::kStruct:
+            if (IsNull(lhs_ref) || IsWasmNull(lhs_ref)) break;
+            if (IsWasmStruct(lhs_ref)) {
+              if (!CheckStruct(lhs_ref, rhs_ref)) return false;
+            } else if (IsWasmArray(lhs_ref)) {
+              if (!CheckArray(lhs_ref, rhs_ref)) return false;
+            } else if (IsSmi(lhs_ref)) {
+              if (lhs_ref != rhs_ref) return false;
+            }
+            break;
+          default:
+            CHECK(lhs.type().has_index());
+            if (IsWasmNull(lhs_ref)) break;
+            CanonicalTypeIndex type_index = lhs.type().ref_index();
+            TypeCanonicalizer* types = GetTypeCanonicalizer();
+            if (types->IsFunctionSignature(type_index)) {
+              auto lhs_func = Cast<WasmFuncRef>(lhs_ref);
+              auto rhs_func = Cast<WasmFuncRef>(rhs_ref);
+              if (lhs_func->internal(isolate)->function_index() !=
+                  rhs_func->internal(isolate)->function_index()) {
+                return false;
+              }
+            } else if (types->IsStruct(type_index)) {
+              if (!CheckStruct(lhs_ref, rhs_ref)) return false;
+            } else if (types->IsArray(type_index)) {
+              if (!CheckArray(lhs_ref, rhs_ref)) return false;
+            } else {
+              UNIMPLEMENTED();
+            }
+        }
+        break;
+      }
+      default:
+        UNIMPLEMENTED();
+    }
+  }
+
+  return true;
+}
+
+void PrintValue(std::ostream& os, const WasmValue& value) {
+  enum class PrintSymbol {
+    kStructClose,
+    kArrayClose,
+    kComma,
+  };
+
+  using PrintTask = std::variant<WasmValue, PrintSymbol>;
+  using ObjectPtr = decltype(Tagged<Object>().ptr());
+
+  std::vector<PrintTask> print_stack = {value};
+  std::unordered_set<ObjectPtr> seen_objects;
+
+  while (!print_stack.empty()) {
+    PrintTask task = print_stack.back();
+    print_stack.pop_back();
+
+    if (PrintSymbol* symbol = std::get_if<PrintSymbol>(&task)) {
+      switch (*symbol) {
+        case PrintSymbol::kStructClose:
+          os << "}";
+          break;
+        case PrintSymbol::kArrayClose:
+          os << "]";
+          break;
+        case PrintSymbol::kComma:
+          os << ", ";
+          break;
+      }
+    } else {
+      WasmValue current_val = std::get<WasmValue>(task);
+      switch (current_val.type().kind()) {
+        case ValueKind::kI8:
+        case ValueKind::kI16:
+        case ValueKind::kI32:
+        case ValueKind::kI64:
+        case ValueKind::kF32:
+        case ValueKind::kF64:
+        case ValueKind::kS128:
+          os << current_val.to_string();
+          break;
+        case ValueKind::kRef:
+        case ValueKind::kRefNull: {
+          Tagged<Object> ref = *current_val.to_ref();
+          if (IsNull(ref) || IsWasmNull(ref)) {
+            os << "null";
+            break;
+          }
+
+          if (IsSmi(ref) || IsWasmFuncRef(ref)) {
+            os << "<" << current_val.to_string() << ">";
+            break;
+          }
+
+          if (seen_objects.count(ref.ptr())) {
+            os << "<repeat>";
+            break;
+          }
+          seen_objects.insert(ref.ptr());
+
+          if (IsWasmStruct(ref)) {
+            Tagged<WasmStruct> struct_ref = Cast<WasmStruct>(ref);
+            const auto* type = GetTypeCanonicalizer()->LookupStruct(
+                struct_ref->map()->wasm_type_info()->type_index());
+            uint32_t count = type->field_count();
+
+            print_stack.push_back(PrintSymbol::kStructClose);
+            for (uint32_t i = count; i-- > 0;) {
+              print_stack.push_back(struct_ref->GetFieldValue(i));
+              if (i > 0) {
+                print_stack.push_back(PrintSymbol::kComma);
+              }
+            }
+            os << '{';
+          } else if (IsWasmArray(ref)) {
+            Tagged<WasmArray> array_ref = Cast<WasmArray>(ref);
+            uint32_t len = array_ref->length();
+
+            print_stack.push_back(PrintSymbol::kArrayClose);
+            for (uint32_t i = len; i-- > 0;) {
+              print_stack.push_back(array_ref->GetElement(i));
+              if (i > 0) {
+                print_stack.push_back(PrintSymbol::kComma);
+              }
+            }
+            os << '[';
+          } else {
+            os << "<" << current_val.to_string() << ">";
+          }
+          break;
+        }
+        default:
+          os << "?";
+          break;
+      }
+    }
+  }
+}
 
 CompileTimeImports CompileTimeImportsForFuzzing() {
   CompileTimeImports result;
@@ -84,7 +358,7 @@ CompileTimeImports CompileTimeImportsForFuzzing() {
 
 // Compile a baseline module. We pass a pointer to a max step counter and a
 // nondeterminsm flag that are updated during execution by Liftoff.
-DirectHandle<WasmModuleObject> CompileReferenceModule(
+MaybeDirectHandle<WasmModuleObject> CompileReferenceModule(
     Isolate* isolate, base::Vector<const uint8_t> wire_bytes,
     int32_t* max_steps) {
   // Create the native module.
@@ -121,7 +395,11 @@ DirectHandle<WasmModuleObject> CompileReferenceModule(
   InitializeCompilationForTesting(native_module.get());
 
   // Compile all functions with Liftoff.
-  CompileAllFunctionsForReferenceExecution(native_module.get(), max_steps);
+  // This can fail on missing CPU features.
+  if (!CompileAllFunctionsForReferenceExecution(native_module.get(),
+                                                max_steps)) {
+    return {};
+  }
 
   // Create the module object.
   constexpr base::Vector<const char> kNoSourceUrl;
@@ -139,15 +417,17 @@ void ClearJsToWasmWrappersForTesting(Isolate* isolate) {
 }
 #endif  // V8_ENABLE_DRUMBRAKE
 
-struct ReferenceExecutionResult {
-  int result = -1;
+struct ExecutionResult {
+  DirectHandle<WasmInstanceObject> instance;
   std::unique_ptr<const char[]> exception;
+  int32_t result = -1;
   bool should_execute_non_reference = false;
 };
 
-ReferenceExecutionResult ExecuteReferenceRun(
-    Isolate* isolate, base::Vector<const uint8_t> wire_bytes,
-    int exported_main_function_index, int32_t max_executed_instructions) {
+ExecutionResult ExecuteReferenceRun(Isolate* isolate,
+                                    base::Vector<const uint8_t> wire_bytes,
+                                    int exported_main_function_index,
+                                    int32_t max_executed_instructions) {
   // The reference module uses a special compilation mode of Liftoff for
   // termination and nondeterminism detected, and that would be undone by
   // flushing that code.
@@ -155,10 +435,12 @@ ReferenceExecutionResult ExecuteReferenceRun(
 
   int32_t max_steps = max_executed_instructions;
 
-  HandleScope handle_scope(isolate);  // Avoid leaking handles.
   Zone reference_module_zone(isolate->allocator(), "wasm reference module");
-  DirectHandle<WasmModuleObject> module_ref =
-      CompileReferenceModule(isolate, wire_bytes, &max_steps);
+  DirectHandle<WasmModuleObject> module_ref;
+  if (!CompileReferenceModule(isolate, wire_bytes, &max_steps)
+           .ToHandle(&module_ref)) {
+    return {};
+  }
   DirectHandle<WasmInstanceObject> instance_ref;
 
   // Before execution, there should be no dangling nondeterminism registered on
@@ -251,7 +533,43 @@ ReferenceExecutionResult ExecuteReferenceRun(
     return {};
   }
 
-  return {result_ref, std::move(exception), true};
+  return {instance_ref, std::move(exception), result_ref, true};
+}
+
+// This function instantiates and runs the module for the actual, non-reference
+// run.
+static std::optional<ExecutionResult> ExecuteNonReferenceRun(
+    Isolate* isolate, const WasmModule* module,
+    DirectHandle<WasmModuleObject> module_object, int exported_main) {
+  DirectHandle<WasmInstanceObject> instance;
+  {
+    ErrorThrower thrower(isolate, "ExecuteNonReferenceRun");
+    if (!GetWasmEngine()
+             ->SyncInstantiate(isolate, &thrower, module_object, {},
+                               {})  // no imports & memory
+             .ToHandle(&instance)) {
+      CHECK(thrower.error());
+      // The only reason to fail this instantiation should be OOM, because
+      // there is a previous instantiation in the reference run.
+      if (strstr(thrower.error_msg(), "Out of memory")) {
+        // The initial memory size might be too large for instantiation
+        // (especially on 32 bit systems), therefore do not treat it as a fuzzer
+        // failure.
+        return {};
+      }
+      FATAL("Instantiation failed unexpectedly: %s", thrower.error_msg());
+    }
+    CHECK(!thrower.error());
+  }
+
+  std::unique_ptr<const char[]> exception;
+  const FunctionSig* sig = module->functions[exported_main].sig;
+  DirectHandleVector<Object> compiled_args =
+      testing::MakeDefaultArguments(isolate, sig);
+  int32_t result = testing::CallWasmFunctionForTesting(
+      isolate, instance, "main", base::VectorOf(compiled_args), &exception);
+
+  return {{instance, std::move(exception), result, false}};
 }
 
 int FindExportedMainFunction(const WasmModule* module,
@@ -267,6 +585,119 @@ int FindExportedMainFunction(const WasmModule* module,
   return -1;
 }
 
+bool GlobalsMatch(Isolate* isolate, const WasmModule* module,
+                  Tagged<WasmTrustedInstanceData> instance_data,
+                  Tagged<WasmTrustedInstanceData> ref_instance_data) {
+  size_t globals_count = module->globals.size();
+
+  int global_mismatches = 0;
+  for (size_t i = 0; i < globals_count; ++i) {
+    const WasmGlobal& global = module->globals[i];
+    WasmValue value = instance_data->GetGlobalValue(isolate, global);
+    WasmValue ref_value = ref_instance_data->GetGlobalValue(isolate, global);
+
+    if (!ValuesEquivalent(value, ref_value, isolate)) {
+      std::ostringstream ss;
+      ss << "Error: Global variables at index " << i
+         << " have different values!\n";
+      ss << "  - Reference: ";
+      PrintValue(ss, ref_value);
+      ss << "\n  - Actual: ";
+      PrintValue(ss, value);
+      base::OS::PrintError("%s\n", ss.str().c_str());
+
+      global_mismatches++;
+    }
+  }
+
+  return global_mismatches == 0;
+}
+
+bool MemoriesMatch(Isolate* isolate, const WasmModule* module,
+                   Tagged<WasmTrustedInstanceData> instance_data,
+                   Tagged<WasmTrustedInstanceData> ref_instance_data) {
+  int memory_mismatches = 0;
+  size_t memories_count = module->memories.size();
+  for (size_t i = 0; i < memories_count; ++i) {
+    int memory_index = module->memories[i].index;
+    Tagged<WasmMemoryObject> memory =
+        instance_data->memory_object(memory_index);
+    Tagged<WasmMemoryObject> ref_memory =
+        ref_instance_data->memory_object(memory_index);
+
+    auto buffer = memory->array_buffer();
+    auto ref_buffer = ref_memory->array_buffer();
+
+    size_t memory_size = buffer->byte_length();
+    size_t ref_memory_size = ref_buffer->byte_length();
+
+    if (ref_memory_size != memory_size) {
+      std::ostringstream ss;
+      ss << "Error: Memories at index " << i << " have different sizes!\n";
+      ss << "  - Reference: " << ref_memory_size << " bytes\n;";
+      ss << "  - Actual:    " << memory_size << " bytes" << std::endl;
+      base::OS::PrintError("%s", ss.str().c_str());
+      continue;
+    }
+
+    uint8_t* data = static_cast<uint8_t*>(buffer->backing_store());
+    uint8_t* ref_data = static_cast<uint8_t*>(ref_buffer->backing_store());
+
+    if (memcmp(ref_data, data, memory_size) == 0) {
+      continue;
+    }
+
+    memory_mismatches++;
+
+    constexpr int block_size = 16;
+
+    auto print_mem_block = [](std::ostream& os, const uint8_t* buffer) {
+      for (size_t k = 0; k < block_size; ++k) {
+        os << std::setw(2) << std::setfill('0')
+           << static_cast<uint32_t>(buffer[k]) << " ";
+        if ((k + 1) % 4 == 0) {
+          os << " ";
+        }
+      }
+    };
+
+    if (memory_size != 0) {
+      CHECK_NOT_NULL(data);
+      CHECK_NOT_NULL(ref_data);
+
+      for (size_t j = 0; j < memory_size; j += block_size) {
+        if (memcmp(ref_data + j, data + j, block_size) != 0) {
+          std::ostringstream ss;
+          ss << "Error: Memory difference found in range " << j << "-"
+             << (j + block_size) << "!\n"
+             << std::hex;
+
+          ss << "  - Reference: ";
+          print_mem_block(ss, ref_data + j);
+
+          ss << "\n  - Actual:    ";
+          print_mem_block(ss, data + j);
+
+          ss << "\n               ";
+          for (size_t k = 0; k < block_size; ++k) {
+            if (ref_data[j + k] != data[j + k]) {
+              ss << "^^ ";
+            } else {
+              ss << "   ";
+            }
+            if ((k + 1) % 4 == 0) {
+              ss << " ";
+            }
+          }
+          base::OS::PrintError("%s\n", ss.str().c_str());
+        }
+      }
+    }
+  }
+
+  return memory_mismatches == 0;
+}
+
 int ExecuteAgainstReference(Isolate* isolate,
                             DirectHandle<WasmModuleObject> module_object,
                             int32_t max_executed_instructions
@@ -275,6 +706,8 @@ int ExecuteAgainstReference(Isolate* isolate,
                             bool is_wasm_jitless
 #endif  // V8_ENABLE_DRUMBRAKE
 ) {
+  HandleScope handle_scope(isolate);
+
   NativeModule* native_module = module_object->native_module();
   const WasmModule* module = native_module->module();
   const base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();
@@ -285,7 +718,7 @@ int ExecuteAgainstReference(Isolate* isolate,
   // start function can contain an infinite loop which we cannot handle.
   if (module->start_function_index >= 0) return -1;
 
-  ReferenceExecutionResult ref_result = ExecuteReferenceRun(
+  ExecutionResult ref_result = ExecuteReferenceRun(
       isolate, wire_bytes, exported_main, max_executed_instructions);
   if (!ref_result.should_execute_non_reference) return -1;
 
@@ -314,35 +747,14 @@ int ExecuteAgainstReference(Isolate* isolate,
   }
 #endif  // V8_ENABLE_DRUMBRAKE
 
-  // Instantiate a fresh instance for the actual (non-ref) execution.
-  DirectHandle<WasmInstanceObject> instance;
-  {
-    ErrorThrower thrower(isolate, "ExecuteAgainstReference (second)");
-    // We instantiated before, so the second instantiation must also succeed.
-    if (!GetWasmEngine()
-             ->SyncInstantiate(isolate, &thrower, module_object, {},
-                               {})  // no imports & memory
-             .ToHandle(&instance)) {
-      DCHECK(thrower.error());
-      // The only reason to fail the second instantiation should be OOM.
-      if (strstr(thrower.error_msg(), "Out of memory")) {
-        // The initial memory size might be too large for instantiation
-        // (especially on 32 bit systems), therefore do not treat it as a fuzzer
-        // failure.
-        return -1;
-      }
-      FATAL("Second instantiation failed unexpectedly: %s",
-            thrower.error_msg());
-    }
-    DCHECK(!thrower.error());
+  std::optional<ExecutionResult> result_opt =
+      ExecuteNonReferenceRun(isolate, module, module_object, exported_main);
+  if (!result_opt) {
+    // The execution of non-reference run can fail if it runs OOM during
+    // instantiation.
+    return -1;
   }
-
-  std::unique_ptr<const char[]> exception;
-  const FunctionSig* sig = module->functions[exported_main].sig;
-  DirectHandleVector<Object> compiled_args =
-      testing::MakeDefaultArguments(isolate, sig);
-  int32_t result = testing::CallWasmFunctionForTesting(
-      isolate, instance, "main", base::VectorOf(compiled_args), &exception);
+  const ExecutionResult& result = *result_opt;
 
   // Also the second run can hit nondeterminism which was not hit before (when
   // growing memory). In that case, do not compare results.
@@ -350,17 +762,90 @@ int ExecuteAgainstReference(Isolate* isolate,
   // terminate. If this happens often enough we should do something about this.
   if (WasmEngine::clear_nondeterminism()) return -1;
 
-  if ((ref_result.exception != nullptr) != (exception != nullptr)) {
+  if ((ref_result.exception != nullptr) != (result.exception != nullptr) ||
+      (ref_result.exception &&
+       strcmp(ref_result.exception.get(), result.exception.get()) != 0)) {
     FATAL("Exception mismatch! Expected: <%s>; got: <%s>",
           ref_result.exception ? ref_result.exception.get() : "<no exception>",
-          exception ? exception.get() : "<no exception>");
+          result.exception ? result.exception.get() : "<no exception>");
   }
 
-  if (!exception) {
-    CHECK_EQ(ref_result.result, result);
+  if (!result.exception) {
+    CHECK_EQ(ref_result.result, result.result);
   }
 
-  return 0;
+  Tagged<WasmTrustedInstanceData> instance_data =
+      result.instance->trusted_data(isolate);
+  Tagged<WasmTrustedInstanceData> ref_instance_data =
+      ref_result.instance->trusted_data(isolate);
+
+  bool globals_match =
+      GlobalsMatch(isolate, module, instance_data, ref_instance_data);
+  bool memories_match =
+      MemoriesMatch(isolate, module, instance_data, ref_instance_data);
+  if (globals_match && memories_match) {
+    return 0;
+  }
+
+  base::OS::PrintError(
+      "Mismatch detected in global variables or memory - rerunning with "
+      "tracing enabled.\n");
+
+  bool should_trace_globals = !globals_match;
+  bool should_trace_memory = !memories_match;
+
+  // Disable module cache so that the module is actually recompiled and the
+  // runtime calls for tracing are generated.
+  FlagScope<bool> no_native_module_cache(&v8_flags.wasm_native_module_cache,
+                                         false);
+  FlagScope<bool> trace_globals_scope(&v8_flags.trace_wasm_globals,
+                                      should_trace_globals);
+  FlagScope<bool> trace_memory_scope(&v8_flags.trace_wasm_memory,
+                                     should_trace_memory);
+
+  if (isolate->has_exception()) isolate->clear_exception();
+  if (WasmEngine::clear_nondeterminism()) return -1;
+
+  base::OS::PrintError("\nReference run trace\n");
+  ExecutionResult ref_result_traced = ExecuteReferenceRun(
+      isolate, wire_bytes, exported_main, max_executed_instructions);
+  CHECK(ref_result_traced.should_execute_non_reference);
+
+  DirectHandle<WasmModuleObject> module_object_traced;
+
+  {
+    ErrorThrower thrower(isolate, "ExecuteAgainstReference (traced compile)");
+    auto enabled_features = WasmEnabledFeatures::FromIsolate(isolate);
+    MaybeDirectHandle<WasmModuleObject> maybe_module =
+        GetWasmEngine()->SyncCompile(isolate, enabled_features,
+                                     CompileTimeImportsForFuzzing(), &thrower,
+                                     base::OwnedCopyOf(wire_bytes));
+    module_object_traced = maybe_module.ToHandleChecked();
+    CHECK(!thrower.error());
+  }
+
+  std::optional<ExecutionResult> result_traced_opt = ExecuteNonReferenceRun(
+      isolate, module, module_object_traced, exported_main);
+  CHECK(result_traced_opt);
+  const ExecutionResult& result_traced = *result_traced_opt;
+
+  base::OS::PrintError("\n");
+
+  Tagged<WasmTrustedInstanceData> instance_data_traced =
+      result_traced.instance->trusted_data(isolate);
+  Tagged<WasmTrustedInstanceData> ref_instance_data_traced =
+      ref_result_traced.instance->trusted_data(isolate);
+
+  bool globals_match_traced = GlobalsMatch(
+      isolate, module, instance_data_traced, ref_instance_data_traced);
+  bool memories_match_traced = MemoriesMatch(
+      isolate, module, instance_data_traced, ref_instance_data_traced);
+
+  if (globals_match_traced && memories_match_traced) {
+    FATAL("Mismatch disappeared when re-running with tracing enabled.");
+  }
+
+  FATAL("Execution mismatch. Tracing has been printed.");
 }
 
 void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,

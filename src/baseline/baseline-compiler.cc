@@ -634,6 +634,7 @@ constexpr static bool BuiltinMayDeopt(Builtin id) {
     case Builtin::kStoreCurrentContextElementBaseline:
     // This one explicitly skips the construct if the debugger is enabled.
     case Builtin::kFindNonDefaultConstructorOrConstruct:
+    case Builtin::kForOfNextBaseline:
       return false;
     default:
       return true;
@@ -781,6 +782,8 @@ void BaselineCompiler::VisitLdaContextSlot() {
       context, index, depth,
       BaselineAssembler::CompressionMode::kForceDecompression);
   __ JumpIfSmi(kInterpreterAccumulatorRegister, &done);
+  __ JumpIfRoot(kInterpreterAccumulatorRegister, RootIndex::kTheHoleValue,
+                &done);
   __ JumpIfObjectTypeFast(kNotEqual, kInterpreterAccumulatorRegister,
                           CONTEXT_CELL_TYPE, &done, Label::kNear);
   // TODO(victorgomes): inline trivial constant value read from context cell.
@@ -812,6 +815,8 @@ void BaselineCompiler::VisitLdaCurrentContextSlot() {
   __ LoadTaggedField(kInterpreterAccumulatorRegister, context,
                      Context::OffsetOfElementAt(index));
   __ JumpIfSmi(kInterpreterAccumulatorRegister, &done);
+  __ JumpIfRoot(kInterpreterAccumulatorRegister, RootIndex::kTheHoleValue,
+                &done);
   __ JumpIfObjectTypeFast(kNotEqual, kInterpreterAccumulatorRegister,
                           CONTEXT_CELL_TYPE, &done, Label::kNear);
   // TODO(victorgomes): inline trivial constant value read from context cell.
@@ -1008,6 +1013,11 @@ void BaselineCompiler::VisitStaModuleVariable() {
   __ LoadContext(scratch);
   int depth = Uint(1);
   __ StaModuleVariable(scratch, value, cell_index, depth);
+}
+
+void BaselineCompiler::VisitSetPrototypeProperties() {
+  CallRuntime(Runtime::kSetPrototypeProperties, kInterpreterAccumulatorRegister,
+              Constant<ObjectBoilerplateDescription>(0));
 }
 
 void BaselineCompiler::VisitSetNamedProperty() {
@@ -2444,10 +2454,10 @@ void BaselineCompiler::VisitResumeGenerator() {
 }
 
 void BaselineCompiler::VisitForOfNext() {
+  SaveAccumulatorScope accumulator_scope(this, &basm_);
   CallBuiltin<Builtin::kForOfNextBaseline>(RegisterOperand(0),   // object
                                            RegisterOperand(1));  // next
-
-  __ Move(__ RegisterFrameOperand(RegisterOperand(2)), kReturnRegister1);
+  StoreRegisterPair(2, kReturnRegister0, kReturnRegister1);
 }
 
 void BaselineCompiler::VisitGetIterator() {

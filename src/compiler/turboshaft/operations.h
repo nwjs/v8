@@ -329,7 +329,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(Call)                                    \
   V(CatchBlockBegin)                         \
   V(DidntThrow)                              \
-  V(Tuple)                                   \
+  V(MakeTuple)                               \
   V(Projection)                              \
   V(DebugBreak)                              \
   V(AssumeMap)                               \
@@ -4601,8 +4601,8 @@ V8_EXPORT_PRIVATE base::SmallVector<Block*, 4> SuccessorBlocks(
     const Block& block, const Graph& graph);
 
 // Tuples are only used to lower operations with multiple outputs.
-// `TupleOp` should be folded away by subsequent `ProjectionOp`s.
-struct TupleOp : OperationT<TupleOp> {
+// `MakeTupleOp` should be folded away by subsequent `ProjectionOp`s.
+struct MakeTupleOp : OperationT<MakeTupleOp> {
   static constexpr OpEffects effects = OpEffects();
   base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
 
@@ -4611,7 +4611,7 @@ struct TupleOp : OperationT<TupleOp> {
     return {};
   }
 
-  explicit TupleOp(base::Vector<const V<Any>> inputs) : Base(inputs) {}
+  explicit MakeTupleOp(base::Vector<const V<Any>> inputs) : Base(inputs) {}
 
   template <typename Fn, typename Mapper>
   V8_INLINE auto Explode(Fn fn, Mapper& mapper) const {
@@ -5008,6 +5008,7 @@ struct ConvertJSPrimitiveToUntaggedOp
     kBoolean,
     kSmi,
     kNumberOrOddball,
+    kNumberOrHole,
     kPlainPrimitive,
   };
   UntaggedKind kind;
@@ -5144,6 +5145,7 @@ struct TruncateJSPrimitiveToUntaggedOp
   enum class InputAssumptions : uint8_t {
     kBigInt,
     kNumberOrOddball,
+    kNumberOrOddballOrHole,
     kHeapObject,
     kObject,
   };
@@ -6549,43 +6551,34 @@ struct FastApiCallOp : OperationT<FastApiCallOp> {
     const CTypeInfo& arg_type =
         parameters->c_signature()->ArgumentInfo(argument_index);
     uint8_t flags = static_cast<uint8_t>(arg_type.GetFlags());
-    START_ALLOW_USE_DEPRECATED()
-    switch (arg_type.GetSequenceType()) {
-      case CTypeInfo::SequenceType::kScalar:
-        if (flags & (static_cast<uint8_t>(CTypeInfo::Flags::kEnforceRangeBit) |
-                     static_cast<uint8_t>(CTypeInfo::Flags::kClampBit))) {
-          return MaybeRegisterRepresentation::Float64();
-        }
-        switch (arg_type.GetType()) {
-          case CTypeInfo::Type::kVoid:
-            UNREACHABLE();
-          case CTypeInfo::Type::kBool:
-          case CTypeInfo::Type::kUint8:
-          case CTypeInfo::Type::kInt32:
-          case CTypeInfo::Type::kUint32:
-            return MaybeRegisterRepresentation::Word32();
-          case CTypeInfo::Type::kInt64:
-          case CTypeInfo::Type::kUint64:
-            return MaybeRegisterRepresentation::Word64();
-          case CTypeInfo::Type::kV8Value:
-          case CTypeInfo::Type::kApiObject:
-          case CTypeInfo::Type::kPointer:
-          case CTypeInfo::Type::kSeqOneByteString:
-            return MaybeRegisterRepresentation::Tagged();
-          case CTypeInfo::Type::kFloat32:
-          case CTypeInfo::Type::kFloat64:
-            return MaybeRegisterRepresentation::Float64();
-          case CTypeInfo::Type::kAny:
-            // As the register representation is unknown, just treat it as None
-            // to prevent any validation.
-            return MaybeRegisterRepresentation::None();
-        }
-      case CTypeInfo::SequenceType::kIsSequence:
-        return MaybeRegisterRepresentation::Tagged();
-      case CTypeInfo::SequenceType::kIsArrayBuffer:
-        UNREACHABLE();
+    if (flags & (static_cast<uint8_t>(CTypeInfo::Flags::kEnforceRangeBit) |
+                 static_cast<uint8_t>(CTypeInfo::Flags::kClampBit))) {
+      return MaybeRegisterRepresentation::Float64();
     }
-    END_ALLOW_USE_DEPRECATED()
+    switch (arg_type.GetType()) {
+      case CTypeInfo::Type::kVoid:
+        UNREACHABLE();
+      case CTypeInfo::Type::kBool:
+      case CTypeInfo::Type::kUint8:
+      case CTypeInfo::Type::kInt32:
+      case CTypeInfo::Type::kUint32:
+        return MaybeRegisterRepresentation::Word32();
+      case CTypeInfo::Type::kInt64:
+      case CTypeInfo::Type::kUint64:
+        return MaybeRegisterRepresentation::Word64();
+      case CTypeInfo::Type::kV8Value:
+      case CTypeInfo::Type::kApiObject:
+      case CTypeInfo::Type::kPointer:
+      case CTypeInfo::Type::kSeqOneByteString:
+        return MaybeRegisterRepresentation::Tagged();
+      case CTypeInfo::Type::kFloat32:
+      case CTypeInfo::Type::kFloat64:
+        return MaybeRegisterRepresentation::Float64();
+      case CTypeInfo::Type::kAny:
+        // As the register representation is unknown, just treat it as None
+        // to prevent any validation.
+        return MaybeRegisterRepresentation::None();
+    }
   }
 
   V<FrameState> frame_state() const { return input<FrameState>(0); }
@@ -7212,6 +7205,10 @@ struct ExternConvertAnyOp : FixedArityOperationT<1, ExternConvertAnyOp> {
 };
 
 struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
+  // We represent `ref.get_desc` as a special form of StructGetOp, because
+  // the concept is so similar: have an object, load a value from it.
+  static constexpr int kDescFieldIndex = -1;
+
   bool is_signed;  // `false` only for unsigned packed type accesses.
   CheckForNull null_check;
   const wasm::StructType* type;
@@ -7251,8 +7248,12 @@ struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
   V<WasmStructNullable> object() const { return input<WasmStructNullable>(0); }
 
   bool is_atomic() const { return memory_order.has_value(); }
+  bool is_get_desc() const { return field_index == kDescFieldIndex; }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
+    if (is_get_desc()) {
+      return base::VectorOf({RegisterRepresentation::Tagged()});
+    }
     return base::VectorOf(&RepresentationFor(type->field(field_index)), 1);
   }
 
@@ -7262,6 +7263,11 @@ struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
   }
 
   void Validate(const Graph& graph) const {
+    if (is_get_desc()) {
+      DCHECK(is_signed);
+      return;
+    }
+    DCHECK_LE(0, field_index);
     DCHECK_LT(field_index, type->field_count());
     DCHECK_IMPLIES(!is_signed, type->field(field_index).is_packed());
   }

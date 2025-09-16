@@ -540,7 +540,12 @@ struct WasmEngine::NativeModuleInfo {
   std::unordered_set<Isolate*> isolates;
 };
 
-WasmEngine::WasmEngine() : call_descriptors_(&allocator_) {}
+WasmEngine::WasmEngine()
+#ifdef V8_ENABLE_TURBOFAN
+    : call_descriptors_(&allocator_)
+#endif
+{
+}
 
 WasmEngine::~WasmEngine() {
 #ifdef V8_ENABLE_WASM_GDB_REMOTE_DEBUGGING
@@ -2017,7 +2022,11 @@ void WasmEngine::DecodeAllNameSections(CanonicalTypeNamesProvider* target) {
 }
 
 size_t WasmEngine::EstimateCurrentMemoryConsumption() const {
+#ifdef V8_ENABLE_TURBOFAN
   UPDATE_WHEN_CLASS_CHANGES(WasmEngine, 8392);
+#else
+  UPDATE_WHEN_CLASS_CHANGES(WasmEngine, 8368);
+#endif
   UPDATE_WHEN_CLASS_CHANGES(IsolateInfo, 168);
   UPDATE_WHEN_CLASS_CHANGES(NativeModuleInfo, 56);
   UPDATE_WHEN_CLASS_CHANGES(CurrentGCInfo, 96);

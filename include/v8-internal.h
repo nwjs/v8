@@ -264,12 +264,11 @@ constexpr uint64_t kSandboxedPointerShift = 64 - kSandboxSizeLog2;
 
 // Size of the guard regions surrounding the sandbox. This assumes a worst-case
 // scenario of a 32-bit unsigned index used to access an array of 64-bit values
-// with an additional offset of up to 32GB.
-// In particular, accesses to TypedArrays are effectively computed as
+// with an additional 4GB (compressed pointer) offset. In particular, accesses
+// to TypedArrays are effectively computed as
 // `entry_pointer = array->base + array->offset + index * array->element_size`.
-// (although in that case, the offset can only be up to 4GB large).
 // See also https://crbug.com/40070746 for more details.
-constexpr size_t kSandboxGuardRegionSize = 64ULL * GB;
+constexpr size_t kSandboxGuardRegionSize = 32ULL * GB + 4ULL * GB;
 
 static_assert((kSandboxGuardRegionSize % kSandboxAlignment) == 0,
               "The size of the guard regions around the sandbox must be a "
@@ -422,6 +421,11 @@ constexpr size_t kMaxCppHeapPointers = 0;
 
 #endif  // V8_COMPRESS_POINTERS
 
+// The number of tags reserved for embedder data. The value is picked
+// arbitrarily. In Chrome there are 4 embedders, so at least 4 tags are needed.
+// A generic tag was used for embedder data before, so one tag is used for that.
+#define V8_EMBEDDER_DATA_TAG_COUNT 5
+
 // Generic tag range struct to represent ranges of type tags.
 //
 // When referencing external objects via pointer tables, type tags are
@@ -571,7 +575,11 @@ enum ExternalPointerTag : uint16_t {
   // External pointers using these tags are kept in a per-Isolate external
   // pointer table and can only be accessed when this Isolate is active.
   kNativeContextMicrotaskQueueTag,
-  kEmbedderDataSlotPayloadTag,
+
+  // Placeholders for embedder data.
+  kFirstEmbedderDataTag,
+  kLastEmbedderDataTag = kFirstEmbedderDataTag + V8_EMBEDDER_DATA_TAG_COUNT - 1,
+  kEmbedderDataSlotPayloadTag = kLastEmbedderDataTag,
   // This tag essentially stands for a `void*` pointer in the V8 API, and it is
   // the Embedder's responsibility to ensure type safety (against substitution)
   // and lifetime validity of these objects.
@@ -714,7 +722,8 @@ V8_INLINE static constexpr bool IsManagedExternalPointerType(
 V8_INLINE static constexpr bool ExternalPointerCanBeEmpty(
     ExternalPointerTagRange tag_range) {
   return tag_range.Contains(kArrayBufferExtensionTag) ||
-         tag_range.Contains(kEmbedderDataSlotPayloadTag) ||
+         (tag_range.first <= kLastEmbedderDataTag &&
+          kFirstEmbedderDataTag <= tag_range.last) ||
          kAnyInterceptorInfoExternalPointerTagRange.Contains(tag_range);
 }
 
@@ -951,12 +960,14 @@ class Internals {
       kBuiltinTier0TableOffset + kBuiltinTier0TableSize;
   static const int kOldAllocationInfoOffset =
       kNewAllocationInfoOffset + kLinearAllocationAreaSize;
+  static const int kLastYoungAllocationOffset =
+      kOldAllocationInfoOffset + kApiSystemPointerSize;
 
   static const int kFastCCallAlignmentPaddingSize =
       kApiSystemPointerSize == 8 ? 5 * kApiSystemPointerSize
                                  : 1 * kApiSystemPointerSize;
   static const int kIsolateFastCCallCallerPcOffset =
-      kOldAllocationInfoOffset + kLinearAllocationAreaSize +
+      kLastYoungAllocationOffset + kLinearAllocationAreaSize +
       kFastCCallAlignmentPaddingSize;
   static const int kIsolateFastCCallCallerFpOffset =
       kIsolateFastCCallCallerPcOffset + kApiSystemPointerSize;
@@ -1014,16 +1025,32 @@ class Internals {
 #if V8_STATIC_ROOTS_BOOL
 
 // These constants are copied from static-roots.h and guarded by static asserts.
-#define EXPORTED_STATIC_ROOTS_PTR_LIST(V) \
-  V(UndefinedValue, 0x11)                 \
-  V(NullValue, 0x2d)                      \
-  V(TrueValue, 0x71)                      \
-  V(FalseValue, 0x55)                     \
-  V(EmptyString, 0x49)                    \
-  V(TheHoleValue, 0x7d9)
+#define EXPORTED_STATIC_ROOTS_PTR_LIST(V)                            \
+  V(UndefinedValue, 0x11)                                            \
+  V(NullValue, 0x2d)                                                 \
+  V(TrueValue, 0x71)                                                 \
+  V(FalseValue, 0x55)                                                \
+  V(EmptyString, 0x49)                                               \
+  /* The Hole moves around depending on build flags, so define it */ \
+  /* separately inside StaticReadOnlyRoot using build macros */      \
+  V(TheHoleValue, kBuildDependentTheHoleValue)
 
   using Tagged_t = uint32_t;
   struct StaticReadOnlyRoot {
+#ifdef V8_ENABLE_WEBASSEMBLY
+#ifdef V8_INTL_SUPPORT
+    static constexpr Tagged_t kBuildDependentTheHoleValue = 0x67b9;
+#else
+    static constexpr Tagged_t kBuildDependentTheHoleValue = 0x5b1d;
+#endif
+#else
+#ifdef V8_INTL_SUPPORT
+    static constexpr Tagged_t kBuildDependentTheHoleValue = 0x6511;
+#else
+    static constexpr Tagged_t kBuildDependentTheHoleValue = 0x5875;
+#endif
+#endif
+
 #define DEF_ROOT(name, value) static constexpr Tagged_t k##name = value;
     EXPORTED_STATIC_ROOTS_PTR_LIST(DEF_ROOT)
 #undef DEF_ROOT
@@ -1314,7 +1341,7 @@ class Internals {
 #endif
   }
 
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "Use GetCurrentIsolateForSandbox() instead, which is guaranteed to "
       "return the same isolate since https://crrev.com/c/6458560.")
   V8_INLINE static v8::Isolate* GetIsolateForSandbox(Address obj) {

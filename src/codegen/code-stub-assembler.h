@@ -8,6 +8,7 @@
 #include <functional>
 #include <optional>
 
+#include "src/base/functional/function-ref.h"
 #include "src/base/macros.h"
 #include "src/codegen/bailout-reason.h"
 #include "src/codegen/heap-object-list.h"
@@ -636,6 +637,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Number> BitwiseSmiOp(TNode<Smi> left32, TNode<Smi> right32,
                              Operation bitwise_op);
 
+  TNode<BoolT> LogicalOr(TNode<BoolT> lhs,
+                         base::FunctionRef<TNode<BoolT>()> rhs);
+
   // Align the value to kObjectAlignment8GbHeap if V8_COMPRESS_POINTERS_8GB is
   // defined.
   TNode<IntPtrT> AlignToAllocationAlignment(TNode<IntPtrT> value);
@@ -660,22 +664,22 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   void Dcheck(const BranchGenerator& branch, const char* message,
               std::initializer_list<ExtraNode> extra_nodes = {},
-              const SourceLocation& loc = SourceLocation::Current());
+              SourceLocation loc = SourceLocation::Current());
   void Dcheck(const NodeGenerator<BoolT>& condition_body, const char* message,
               std::initializer_list<ExtraNode> extra_nodes = {},
-              const SourceLocation& loc = SourceLocation::Current());
+              SourceLocation loc = SourceLocation::Current());
   void Dcheck(TNode<Word32T> condition_node, const char* message,
               std::initializer_list<ExtraNode> extra_nodes = {},
-              const SourceLocation& loc = SourceLocation::Current());
+              SourceLocation loc = SourceLocation::Current());
   void Check(const BranchGenerator& branch, const char* message,
              std::initializer_list<ExtraNode> extra_nodes = {},
-             const SourceLocation& loc = SourceLocation::Current());
+             SourceLocation loc = SourceLocation::Current());
   void Check(const NodeGenerator<BoolT>& condition_body, const char* message,
              std::initializer_list<ExtraNode> extra_nodes = {},
-             const SourceLocation& loc = SourceLocation::Current());
+             SourceLocation loc = SourceLocation::Current());
   void Check(TNode<Word32T> condition_node, const char* message,
              std::initializer_list<ExtraNode> extra_nodes = {},
-             const SourceLocation& loc = SourceLocation::Current());
+             SourceLocation loc = SourceLocation::Current());
   void FailAssert(const char* message,
                   const std::vector<FileAndLine>& files_and_lines,
                   std::initializer_list<ExtraNode> extra_nodes = {});
@@ -991,10 +995,19 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                                     int offset,
                                                     IndirectPointerTag tag);
 
+  void LoadTrustedUnknownPointerFromObject(
+      TNode<HeapObject> object, int offset, TVariable<Object>* value_out,
+      Label* if_empty, Label* if_default,
+      const std::initializer_list<std::pair<InstanceType, Label*>>& cases);
+
   // Load a code pointer field.
   // These are special versions of trusted pointers that, when the sandbox is
   // enabled, reference code objects through the code pointer table.
   TNode<Code> LoadCodePointerFromObject(TNode<HeapObject> object, int offset);
+
+  void DispatchOnInstanceType(
+      TNode<Object> value, TVariable<Uint16T>* type_out, Label* if_default,
+      const std::initializer_list<std::pair<InstanceType, Label*>>& cases);
 
 #ifdef V8_ENABLE_SANDBOX
   // Load an indirect pointer field.
@@ -1010,6 +1023,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // which can either be a trusted pointer handle or a code pointer handle.
   TNode<TrustedObject> ResolveIndirectPointerHandle(
       TNode<IndirectPointerHandleT> handle, IndirectPointerTag tag);
+
+  void ResolveIndirectUnknownPointerHandle(
+      TNode<IndirectPointerHandleT> handle, TVariable<Object>* value_out,
+      TVariable<Uint16T>* type_out, Label* if_default,
+      const std::initializer_list<std::pair<InstanceType, Label*>>& cases);
 
   // Retrieve the Code object referenced by the given trusted pointer handle.
   TNode<Code> ResolveCodePointerHandle(TNode<IndirectPointerHandleT> handle);
@@ -1139,6 +1157,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   // Dynamically allocates a buffer of size `size` in C++ on the cppgc heap.
   TNode<RawPtrT> AllocateBuffer(TNode<IntPtrT> size);
+  TNode<Symbol> ArrayBufferWasmMemorySymbol();
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   TNode<RawPtrT> LoadJSTypedArrayExternalPointerPtr(
@@ -1714,12 +1733,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<HeapObject> LoadJSFunctionPrototype(TNode<JSFunction> function,
                                             Label* if_bailout);
 
-  TNode<Object> LoadSharedFunctionInfoTrustedData(
-      TNode<SharedFunctionInfo> sfi);
   TNode<Object> LoadSharedFunctionInfoUntrustedData(
       TNode<SharedFunctionInfo> sfi);
 
-  TNode<BoolT> SharedFunctionInfoHasBaselineCode(TNode<SharedFunctionInfo> sfi);
+  void GotoIfSharedFunctionInfoHasBaselineCode(TNode<SharedFunctionInfo> sfi,
+                                               Label* if_baseline);
 
   TNode<Smi> LoadSharedFunctionInfoBuiltinId(TNode<SharedFunctionInfo> sfi);
 
@@ -1739,6 +1757,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<InterpreterData> data);
   TNode<Code> LoadInterpreterDataInterpreterTrampoline(
       TNode<InterpreterData> data);
+
+  TNode<Int32T> LoadCodeParameterCount(TNode<Code> code);
 
   TNode<Int32T> LoadBytecodeArrayParameterCount(
       TNode<BytecodeArray> bytecode_array);
@@ -2784,8 +2804,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   void TerminateExecution(TNode<Context> context);
 
-  TNode<Union<Hole, JSMessageObject>> GetPendingMessage();
-  void SetPendingMessage(TNode<Union<Hole, JSMessageObject>> message);
+  TNode<Union<TheHole, JSMessageObject>> GetPendingMessage();
+  void SetPendingMessage(TNode<Union<TheHole, JSMessageObject>> message);
   TNode<BoolT> IsExecutionTerminating();
 
   TNode<Object> GetContinuationPreservedEmbedderData();
@@ -3894,10 +3914,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Helpers to look up Page metadata for a given address.
   // Equivalent to MemoryChunk::FromAddress().
   TNode<IntPtrT> MemoryChunkFromAddress(TNode<IntPtrT> address);
-  // Equivalent to MemoryChunk::MutablePageMetadata().
-  TNode<IntPtrT> PageMetadataFromMemoryChunk(TNode<IntPtrT> address);
+  // Equivalent to MemoryChunk::Metadata().
+  TNode<IntPtrT> MemoryChunkMetadataFromMemoryChunk(TNode<IntPtrT> address);
   // Equivalent to MemoryChunkMetadata::FromAddress().
-  TNode<IntPtrT> PageMetadataFromAddress(TNode<IntPtrT> address);
+  TNode<IntPtrT> MemoryChunkMetadataFromAddress(TNode<IntPtrT> address);
 
   // Store a weak in-place reference into the FeedbackVector.
   TNode<MaybeObject> StoreWeakReferenceInFeedbackVector(
@@ -4263,7 +4283,27 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<UintPtrT> ComputeJSDispatchTableEntryOffset(
       TNode<JSDispatchHandleT> handle);
-#endif
+#endif  // V8_ENABLE_LEAPTIERING
+
+  // Tailcalls to the given code object with JSCall linkage. The JS arguments
+  // (including receiver) are supposed to be already on the stack.
+  // This is a building block for implementing trampoline stubs that are
+  // installed instead of code objects with JSCall linkage.
+  // Note that no arguments adaption is going on here - all the JavaScript
+  // arguments are left on the stack unmodified. Therefore, this tail call can
+  // only be used after arguments adaptation has been performed already.
+  // When Sandbox is enabled it also checks that the code's parameter count
+  // and dispatch handle's parameter counts match.
+  void TailCallJSCode(TNode<Code> code, TNode<Context> context,
+                      TNode<JSFunction> function, TNode<Object> new_target,
+                      TNode<Int32T> arg_count,
+                      TNode<JSDispatchHandleT> dispatch_handle);
+  // Same as above, but the code object is loaded from the dispatch table
+  // entry or from the function according to V8_ENABLE_LEAPTIERING state and
+  // thus the parameter count check is not necessary.
+  void TailCallJSCode(TNode<Context> context, TNode<JSFunction> function,
+                      TNode<Object> new_target, TNode<Int32T> arg_count,
+                      TNode<JSDispatchHandleT> dispatch_handle);
 
   // Indicate that this code must support a dynamic parameter count.
   //
@@ -4294,6 +4334,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<SharedFunctionInfo> shared_info,
       TVariable<Uint16T>* data_type_out = nullptr,
       Label* if_compile_lazy = nullptr);
+
+  void LoadSharedFunctionInfoTrustedDataAndDispatch(
+      TNode<SharedFunctionInfo> shared_info, TVariable<Object>* sfi_data_out,
+      TVariable<Uint16T>* data_type_out, Label* if_empty, Label* if_default,
+      const std::initializer_list<std::pair<InstanceType, Label*>>& cases);
 
   TNode<JSFunction> AllocateRootFunctionWithContext(
       RootIndex function, TNode<Context> context,

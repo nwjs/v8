@@ -114,6 +114,7 @@ void CreateMapForType(Isolate* isolate, const WasmModule* module,
 
 namespace {
 
+#ifdef V8_ENABLE_TURBOFAN
 bool CompareWithNormalizedCType(const CTypeInfo& info,
                                 CanonicalValueType expected,
                                 CFunctionInfo::Int64Representation int64_rep) {
@@ -137,6 +138,7 @@ bool CompareWithNormalizedCType(const CTypeInfo& info,
   }
   return t.representation() == expected.machine_representation();
 }
+#endif
 
 enum class ReceiverKind { kFirstParamIsReceiver, kAnyReceiver };
 
@@ -145,6 +147,7 @@ bool IsSupportedWasmFastApiFunction(Isolate* isolate,
                                     Tagged<SharedFunctionInfo> shared,
                                     ReceiverKind receiver_kind,
                                     int* out_index) {
+#ifdef V8_ENABLE_TURBOFAN
   if (!shared->IsApiFunction()) {
     return false;
   }
@@ -251,14 +254,6 @@ bool IsSupportedWasmFastApiFunction(Isolate* isolate,
         param_mismatch = true;
         break;
       }
-      START_ALLOW_USE_DEPRECATED()
-      if (arg.GetSequenceType() == CTypeInfo::SequenceType::kIsSequence) {
-        log_imported_function_mismatch(c_func_id,
-                                       "sequence types are not allowed");
-        param_mismatch = true;
-        break;
-      }
-      END_ALLOW_USE_DEPRECATED()
     }
     if (param_mismatch) {
       continue;
@@ -266,6 +261,7 @@ bool IsSupportedWasmFastApiFunction(Isolate* isolate,
     *out_index = c_func_id;
     return true;
   }
+#endif
   return false;
 }
 
@@ -668,11 +664,23 @@ ResolvedWasmImport::ResolvedWasmImport(
     DirectHandle<WasmTrustedInstanceData> trusted_instance_data, int func_index,
     DirectHandle<JSReceiver> callable, const wasm::CanonicalSig* expected_sig,
     CanonicalTypeIndex expected_sig_id, WellKnownImport preknown_import) {
+  // TODO(clemensb): Remove expected_sig_id.
+  DCHECK_EQ(expected_sig_id, expected_sig->index());
   DCHECK_EQ(expected_sig, wasm::GetTypeCanonicalizer()->LookupFunctionSignature(
                               expected_sig_id));
   SetCallable(Isolate::Current(), callable);
   kind_ = ComputeKind(trusted_instance_data, func_index, expected_sig,
                       expected_sig_id, preknown_import);
+  // When the import is a WasmSuspendingObject, the inner callable should be a
+  // JS callable, which is checked by the constructor. But it can be corrupted
+  // later and replaced with a wasm function. This leads to an invalid state
+  // where we 1) have an import of kind kWasmToWasm but 2) we did not cache the
+  // original WasmFuncRef in the instance. This breaks the logic of
+  // {GetOrCreateFuncRef} and we end up with a function signature confusion if
+  // we try to re-export that function.
+  // This should also be caught by an SBXCHECK in {GetOrCreateFuncRef} which
+  // protects against a more general version of this issue.
+  CHECK(!(suspend_ == kSuspend && kind_ == ImportCallKind::kWasmToWasm));
 }
 
 void ResolvedWasmImport::SetCallable(Isolate* isolate,
@@ -718,48 +726,46 @@ ImportCallKind ResolvedWasmImport::ComputeKind(
     suspend_ = kSuspend;
     callable_ =
         handle(Cast<WasmSuspendingObject>(*callable_)->callable(), isolate);
-    return IsJSFunction(*callable_) ? ImportCallKind::kJSFunction
-                                    : ImportCallKind::kUseCallBuiltin;
   }
-  if (!trusted_function_data_.is_null() &&
-      IsWasmExportedFunctionData(*trusted_function_data_)) {
-    Tagged<WasmExportedFunctionData> data =
-        Cast<WasmExportedFunctionData>(*trusted_function_data_);
-    if (!data->MatchesSignature(expected_sig_id)) {
-      return ImportCallKind::kLinkError;
-    }
-    uint32_t function_index = static_cast<uint32_t>(data->function_index());
-    if (function_index >=
-        data->instance_data()->module()->num_imported_functions) {
-      return ImportCallKind::kWasmToWasm;
-    }
-    // Resolve the shortcut to the underlying callable and continue.
-    ImportedFunctionEntry entry(direct_handle(data->instance_data(), isolate),
-                                function_index);
-    suspend_ = Cast<WasmImportData>(entry.implicit_arg())->suspend();
-    SetCallable(isolate, entry.callable());
-  }
-  if (!trusted_function_data_.is_null() &&
-      IsWasmJSFunctionData(*trusted_function_data_)) {
-    Tagged<WasmJSFunctionData> js_function_data =
-        Cast<WasmJSFunctionData>(*trusted_function_data_);
-    suspend_ = js_function_data->GetSuspend();
-    if (!js_function_data->MatchesSignature(expected_sig_id)) {
-      return ImportCallKind::kLinkError;
-    }
-    if (IsJSFunction(js_function_data->GetCallable())) {
-      Tagged<SharedFunctionInfo> sfi =
-          Cast<JSFunction>(js_function_data->GetCallable())->shared();
-      if (sfi->HasWasmFunctionData(isolate)) {
-        // Special case if the underlying callable is a WasmJSFunction or
-        // WasmExportedFunction: link the outer WasmJSFunction itself and not
-        // the inner callable. Otherwise when the wrapper tiers up, we will try
-        // to link the inner WasmJSFunction/WamsExportedFunction which is
-        // incorrect.
-        return ImportCallKind::kUseCallBuiltin;
+  if (!trusted_function_data_.is_null()) {
+    if (Tagged<WasmExportedFunctionData> data;
+        TryCast(*trusted_function_data_, &data)) {
+      if (!data->MatchesSignature(expected_sig_id)) {
+        return ImportCallKind::kLinkError;
       }
+      uint32_t function_index = static_cast<uint32_t>(data->function_index());
+      if (function_index >=
+          data->instance_data()->module()->num_imported_functions) {
+        return ImportCallKind::kWasmToWasm;
+      }
+      // Resolve the shortcut to the underlying callable and continue.
+      ImportedFunctionEntry entry(direct_handle(data->instance_data(), isolate),
+                                  function_index);
+      suspend_ = TrustedCast<WasmImportData>(entry.implicit_arg())->suspend();
+      SetCallable(isolate, entry.callable());
     }
-    SetCallable(isolate, js_function_data->GetCallable());
+  }
+  if (!trusted_function_data_.is_null()) {
+    if (Tagged<WasmJSFunctionData> js_function_data;
+        TryCast(*trusted_function_data_, &js_function_data)) {
+      suspend_ = js_function_data->GetSuspend();
+      if (!js_function_data->MatchesSignature(expected_sig_id)) {
+        return ImportCallKind::kLinkError;
+      }
+      if (IsJSFunction(js_function_data->GetCallable())) {
+        Tagged<SharedFunctionInfo> sfi =
+            Cast<JSFunction>(js_function_data->GetCallable())->shared();
+        if (sfi->HasWasmFunctionData(isolate)) {
+          // Special case if the underlying callable is a WasmJSFunction or
+          // WasmExportedFunction: link the outer WasmJSFunction itself and not
+          // the inner callable. Otherwise when the wrapper tiers up, we will
+          // try to link the inner WasmJSFunction/WamsExportedFunction which is
+          // incorrect.
+          return ImportCallKind::kUseCallBuiltin;
+        }
+      }
+      SetCallable(isolate, js_function_data->GetCallable());
+    }
   }
   if (WasmCapiFunction::IsWasmCapiFunction(*callable_)) {
     // TODO(jkummerow): Update this to follow the style of the other kinds of
@@ -1919,10 +1925,13 @@ void InstanceBuilder::Build_Phase1_Infallible() {
     DirectHandle<WasmTrustedInstanceData> data_part =
         trusted_data(table.shared);
     Tagged<Object> maybe_dispatch_table = data_part->dispatch_tables()->get(i);
-    if (maybe_dispatch_table == Smi::zero()) continue;  // Not a function table.
-    DirectHandle<WasmDispatchTable> dispatch_table{
-        Cast<WasmDispatchTable>(maybe_dispatch_table), isolate_};
-    WasmDispatchTable::AddUse(isolate_, dispatch_table, data_part, i);
+    Tagged<WasmDispatchTable> dispatch_table;
+    if (!TryCast(maybe_dispatch_table, &dispatch_table)) {
+      continue;  // Not a function table.
+    }
+    DirectHandle<WasmDispatchTable> dispatch_table_handle{dispatch_table,
+                                                          isolate_};
+    WasmDispatchTable::AddUse(isolate_, dispatch_table_handle, data_part, i);
   }
 }
 
@@ -2246,7 +2255,7 @@ void InstanceBuilder::SanitizeImports() {
   const std::vector<WasmImport>& import_table = module_->import_table;
   sanitized_imports_.resize(import_table.size());
 
-  if (v8_flags.experimental_wasm_custom_descriptors &&
+  if (v8_flags.experimental_wasm_js_interop &&
       !module_->descriptors_section.is_empty()) {
     js_prototypes_setup_.emplace(isolate_, wire_bytes_, module_, thrower_,
                                  sanitized_imports_);
@@ -2354,7 +2363,7 @@ bool InstanceBuilder::ProcessImportedFunction(
     case ImportCallKind::kWasmToWasm: {
       // The imported function is a Wasm function from another instance.
       auto function_data =
-          Cast<WasmExportedFunctionData>(trusted_function_data);
+          TrustedCast<WasmExportedFunctionData>(trusted_function_data);
       // The import reference is the trusted instance data itself.
       Tagged<WasmTrustedInstanceData> instance_data =
           function_data->instance_data();
@@ -2372,6 +2381,7 @@ bool InstanceBuilder::ProcessImportedFunction(
     }
 
     case ImportCallKind::kWasmToJSFastApi: {
+#ifdef V8_ENABLE_TURBOFAN
       DCHECK(IsJSFunction(*callable) || IsJSBoundFunction(*callable));
 
       std::shared_ptr<wasm::WasmImportWrapperHandle> wrapper_handle =
@@ -2380,8 +2390,11 @@ bool InstanceBuilder::ProcessImportedFunction(
 
       imported_entry.SetWasmToWrapper(isolate_, callable,
                                       std::move(wrapper_handle), kNoSuspend,
-                                      expected_sig, sig_index);
+                                      expected_sig);
       return true;
+#else
+      UNREACHABLE();
+#endif
     }
     case ImportCallKind::kRuntimeTypeError:
     case ImportCallKind::kJSFunction:
@@ -2393,7 +2406,7 @@ bool InstanceBuilder::ProcessImportedFunction(
 
   if (v8_flags.wasm_jitless) {
     imported_entry.SetWasmToWrapper(isolate_, callable, {}, kNoSuspend,
-                                    expected_sig, sig_index);
+                                    expected_sig);
     return true;
   }
 
@@ -2405,12 +2418,11 @@ bool InstanceBuilder::ProcessImportedFunction(
   }
 
   WasmImportWrapperCache* cache = GetWasmImportWrapperCache();
-  std::shared_ptr<wasm::WasmImportWrapperHandle> wrapper_handle =
-      cache->Get(isolate_, kind, sig_index, expected_arity, resolved.suspend(),
-                 expected_sig);
+  std::shared_ptr<wasm::WasmImportWrapperHandle> wrapper_handle = cache->Get(
+      isolate_, kind, expected_arity, resolved.suspend(), expected_sig);
 
   imported_entry.SetWasmToWrapper(isolate_, callable, std::move(wrapper_handle),
-                                  resolved.suspend(), expected_sig, sig_index);
+                                  resolved.suspend(), expected_sig);
 
   return true;
 }

@@ -316,6 +316,9 @@ std::optional<Tagged<Object>> SwissNameDictionary::TryValueAt(
   Isolate* isolate;
   GetIsolateFromHeapObject(*this, &isolate);
   DCHECK_NE(isolate, nullptr);
+  // TODO(431584880): Replace `GetIsolateFromHeapObject` by
+  // `Isolate::Current()`.
+  DCHECK_EQ(isolate, Isolate::TryGetCurrent());
   SLOW_DCHECK(!isolate->heap()->IsPendingAllocation(Tagged(*this)));
 #endif  // DEBUG
   // We can read Capacity() in a non-atomic way since we are reading an
@@ -576,8 +579,10 @@ void SwissNameDictionary::Initialize(IsolateT* isolate,
 
   memset(CtrlTable(), Ctrl::kEmpty, CtrlTableSize(capacity));
 
-  MemsetTagged(RawField(DataTableStartOffset()), roots.the_hole_value(),
-               capacity * kDataTableEntryCount);
+  if (capacity > 0) {
+    MemsetTagged(RawField(DataTableStartOffset()), roots.the_hole_value(),
+                 capacity * kDataTableEntryCount);
+  }
 
   set_meta_table(meta_table);
 
@@ -658,6 +663,9 @@ SwissNameDictionary::IterateEntriesOrdered() {
   Isolate* isolate;
   GetIsolateFromHeapObject(*this, &isolate);
   DCHECK_NE(isolate, nullptr);
+  // TODO(431584880): Replace `GetIsolateFromHeapObject` by
+  // `Isolate::Current()`.
+  DCHECK_EQ(isolate, Isolate::TryGetCurrent());
   return IndexIterable(direct_handle(*this, isolate));
 }
 

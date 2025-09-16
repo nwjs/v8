@@ -54,7 +54,7 @@ int ExecuteAgainstReference(Isolate* isolate,
 void ClearJsToWasmWrappersForTesting(Isolate* isolate);
 #endif  // V8_ENABLE_DRUMBRAKE
 
-DirectHandle<WasmModuleObject> CompileReferenceModule(
+MaybeDirectHandle<WasmModuleObject> CompileReferenceModule(
     Isolate* isolate, base::Vector<const uint8_t> wire_bytes,
     int32_t* max_steps);
 
@@ -101,6 +101,10 @@ class WasmExecutionFuzzer {
                               base::Vector<const uint8_t> data,
                               ZoneBuffer* buffer) = 0;
 };
+
+bool ValuesEquivalent(const WasmValue& init_lhs, const WasmValue& init_rhs,
+                      Isolate* isolate);
+void PrintValue(std::ostream& os, const WasmValue& value);
 
 int SyncCompileAndExecuteAgainstReference(
     v8::Isolate* isolate, base::Vector<const uint8_t> wire_bytes,

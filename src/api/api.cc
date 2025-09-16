@@ -185,6 +185,26 @@
 
 namespace v8 {
 
+namespace {
+
+i::ExternalPointerTag ToExternalPointerTag(v8::EmbedderDataTypeTag api_tag) {
+  uint16_t tag_value = static_cast<uint16_t>(i::kFirstEmbedderDataTag) +
+                       static_cast<uint16_t>(api_tag);
+  Utils::ApiCheck(tag_value <= i::kLastEmbedderDataTag, "ToExternalPointerTag",
+                  "The provided tag is outside the allowed range");
+  return static_cast<i::ExternalPointerTag>(tag_value);
+}
+
+v8::EmbedderDataTypeTag ToApiEmbedderDataTypeTag(i::ExternalPointerTag tag) {
+  DCHECK_GE(tag, i::kFirstEmbedderDataTag);
+  DCHECK_LE(tag, i::kLastEmbedderDataTag);
+  uint16_t tag_value = static_cast<uint16_t>(tag) -
+                       static_cast<uint16_t>(i::kFirstEmbedderDataTag);
+  return static_cast<v8::EmbedderDataTypeTag>(tag_value);
+}
+
+}  // namespace
+
 static OOMErrorCallback g_oom_error_callback = nullptr;
 namespace {
 
@@ -994,19 +1014,26 @@ void* Context::SlowGetAlignedPointerFromEmbedderData(int index) {
       EmbedderDataFor(this, index, false, location);
   if (data.is_null()) return nullptr;
   void* result;
-  Utils::ApiCheck(
-      i::EmbedderDataSlot(*data, index).ToAlignedPointer(i_isolate, &result),
-      location, "Pointer is not aligned");
+  Utils::ApiCheck(i::EmbedderDataSlot(*data, index)
+                      .DeprecatedToAlignedPointer(i_isolate, &result),
+                  location, "Pointer is not aligned");
   return result;
 }
 
 void Context::SetAlignedPointerInEmbedderData(int index, void* value) {
+  SetAlignedPointerInEmbedderData(
+      index, value, ToApiEmbedderDataTypeTag(i::kEmbedderDataSlotPayloadTag));
+}
+
+void Context::SetAlignedPointerInEmbedderData(int index, void* value,
+                                              EmbedderDataTypeTag tag) {
   const char* location = "v8::Context::SetAlignedPointerInEmbedderData()";
   i::Isolate* i_isolate = i::Isolate::Current();
   i::DirectHandle<i::EmbedderDataArray> data =
       EmbedderDataFor(this, index, true, location);
   bool ok = i::EmbedderDataSlot(*data, index)
-                .store_aligned_pointer(i_isolate, *data, value);
+                .store_aligned_pointer(i_isolate, *data, value,
+                                       ToExternalPointerTag(tag));
   Utils::ApiCheck(ok, location, "Pointer is not aligned");
   DCHECK_EQ(value, GetAlignedPointerFromEmbedderData(index));
 }
@@ -2891,7 +2918,7 @@ MaybeLocal<Value> v8::TryCatch::StackTrace(Local<Context> context) const {
 
 v8::Local<v8::Message> v8::TryCatch::Message() const {
   i::Tagged<i::Object> message = ToObject(message_obj_);
-  DCHECK(IsJSMessageObject(message) || IsTheHole(message, i_isolate_));
+  DCHECK(IsAnyHole(message) || IsJSMessageObject(message));
   if (HasCaught() && !IsTheHole(message, i_isolate_)) {
     return v8::Utils::MessageToLocal(i::direct_handle(message, i_isolate_));
   } else {
@@ -2973,7 +3000,7 @@ v8::Local<v8::StackTrace> Message::GetStackTrace() const {
   EnterV8NoScriptNoExceptionScope api_scope(i_isolate);
   InternalEscapableScope scope(i_isolate);
   i::DirectHandle<i::Object> stack_trace(self->stack_trace(), i_isolate);
-  if (!IsStackTraceInfo(*stack_trace)) return {};
+  if (IsAnyHole(*stack_trace) || !IsStackTraceInfo(*stack_trace)) return {};
   return scope.Escape(
       Utils::StackTraceToLocal(i::Cast<i::StackTraceInfo>(stack_trace)));
 }
@@ -3788,14 +3815,8 @@ MaybeLocal<String> Value::ToString(Local<Context> context) const {
 
 MaybeLocal<String> Value::ToDetailString(Local<Context> context) const {
   i::DirectHandle<i::Object> obj = Utils::OpenDirectHandle(this);
-  i::Isolate* i_isolate;
-  if (!context.IsEmpty()) {
-    i_isolate = i::Isolate::Current();
-  } else if (IsSmi(*obj) || !i::GetIsolateFromHeapObject(
-                                i::Cast<i::HeapObject>(*obj), &i_isolate)) {
-    i_isolate = i::Isolate::Current();
-  }
   if (i::IsString(*obj)) return ToApiHandle<String>(obj);
+  i::Isolate* i_isolate = i::Isolate::Current();
   EnterV8NoScriptNoExceptionScope api_scope(i_isolate);
   return Utils::ToLocal(i::Object::NoSideEffectsToString(i_isolate, obj));
 }
@@ -5322,9 +5343,10 @@ V8_INLINE void* GetAlignedPointerFromEmbedderDataInCreationContextImpl(
   if (V8_LIKELY(static_cast<unsigned>(index) <
                 static_cast<unsigned>(data->length()))) {
     void* result;
-    Utils::ApiCheck(i::EmbedderDataSlot(data, index)
-                        .ToAlignedPointer(i_isolate_for_sandbox, &result),
-                    location, "Pointer is not aligned");
+    Utils::ApiCheck(
+        i::EmbedderDataSlot(data, index)
+            .DeprecatedToAlignedPointer(i_isolate_for_sandbox, &result),
+        location, "Pointer is not aligned");
     return result;
   }
   // Bad index, report an API error.
@@ -6404,10 +6426,10 @@ void* v8::Object::SlowGetAlignedPointerFromInternalField(v8::Isolate* isolate,
   const char* location = "v8::Object::GetAlignedPointerFromInternalField()";
   if (!InternalFieldOK(obj, index, location)) return nullptr;
   void* result;
-  Utils::ApiCheck(
-      i::EmbedderDataSlot(i::Cast<i::JSObject>(*obj), index)
-          .ToAlignedPointer(reinterpret_cast<i::Isolate*>(isolate), &result),
-      location, "Unaligned pointer");
+  Utils::ApiCheck(i::EmbedderDataSlot(i::Cast<i::JSObject>(*obj), index)
+                      .DeprecatedToAlignedPointer(
+                          reinterpret_cast<i::Isolate*>(isolate), &result),
+                  location, "Unaligned pointer");
   return result;
 }
 
@@ -6416,27 +6438,37 @@ void* v8::Object::SlowGetAlignedPointerFromInternalField(int index) {
   const char* location = "v8::Object::GetAlignedPointerFromInternalField()";
   if (!InternalFieldOK(obj, index, location)) return nullptr;
   void* result;
-  Utils::ApiCheck(i::EmbedderDataSlot(i::Cast<i::JSObject>(*obj), index)
-                      .ToAlignedPointer(i::Isolate::Current(), &result),
-                  location, "Unaligned pointer");
+  Utils::ApiCheck(
+      i::EmbedderDataSlot(i::Cast<i::JSObject>(*obj), index)
+          .DeprecatedToAlignedPointer(i::Isolate::Current(), &result),
+      location, "Unaligned pointer");
   return result;
 }
 
 void v8::Object::SetAlignedPointerInInternalField(int index, void* value) {
+  SetAlignedPointerInInternalField(
+      index, value, ToApiEmbedderDataTypeTag(i::kEmbedderDataSlotPayloadTag));
+}
+
+void v8::Object::SetAlignedPointerInInternalField(int index, void* value,
+                                                  EmbedderDataTypeTag tag) {
   auto obj = Utils::OpenDirectHandle(this);
   const char* location = "v8::Object::SetAlignedPointerInInternalField()";
   if (!InternalFieldOK(obj, index, location)) return;
 
   i::DisallowGarbageCollection no_gc;
-  Utils::ApiCheck(
-      i::EmbedderDataSlot(i::Cast<i::JSObject>(*obj), index)
-          .store_aligned_pointer(i::Isolate::Current(), *obj, value),
-      location, "Unaligned pointer");
+  Utils::ApiCheck(i::EmbedderDataSlot(i::Cast<i::JSObject>(*obj), index)
+                      .store_aligned_pointer(i::Isolate::Current(), *obj, value,
+                                             ToExternalPointerTag(tag)),
+                  location, "Unaligned pointer");
   DCHECK_EQ(value, GetAlignedPointerFromInternalField(index));
 }
 
 void v8::Object::SetAlignedPointerInInternalFields(int argc, int indices[],
                                                    void* values[]) {
+  EmbedderDataTypeTag tag =
+      ToApiEmbedderDataTypeTag(i::kEmbedderDataSlotPayloadTag);
+
   auto obj = Utils::OpenDirectHandle(this);
   if (!IsJSObject(*obj)) return;
   i::DisallowGarbageCollection no_gc;
@@ -6452,7 +6484,8 @@ void v8::Object::SetAlignedPointerInInternalFields(int argc, int indices[],
     void* value = values[i];
     Utils::ApiCheck(
         i::EmbedderDataSlot(js_obj, index)
-            .store_aligned_pointer(i::Isolate::Current(), *obj, value),
+            .store_aligned_pointer(i::Isolate::Current(), *obj, value,
+                                   ToExternalPointerTag(tag)),
         location, "Unaligned pointer");
     DCHECK_EQ(value, GetAlignedPointerFromInternalField(index));
   }
@@ -7198,6 +7231,8 @@ class ObjectVisitorDeepFreezer : i::ObjectVisitor {
     if (error_.has_value()) {
       return false;
     }
+
+    if (IsAnyHole(obj)) return true;
 
     i::DisallowGarbageCollection no_gc;
     i::InstanceType obj_type = obj->map()->instance_type();
@@ -7996,7 +8031,7 @@ void AddPropertiesAndElementsToObject(
       // dictionary elements backing store for {elements}.
       if (!IsNumberDictionary(*elements)) {
         elements =
-            i::NumberDictionary::New(i_isolate, static_cast<int>(length));
+            i::NumberDictionary::New(i_isolate, static_cast<uint32_t>(length));
       }
       elements = i::NumberDictionary::Set(
           i_isolate, i::Cast<i::NumberDictionary>(elements), index, value);
@@ -11071,6 +11106,10 @@ CALLBACK_SETTER(WasmLoadSourceMapCallback, WasmLoadSourceMapCallback,
 CALLBACK_SETTER(WasmImportedStringsEnabledCallback,
                 WasmImportedStringsEnabledCallback,
                 wasm_imported_strings_enabled_callback)
+
+CALLBACK_SETTER(WasmCustomDescriptorsEnabledCallback,
+                WasmCustomDescriptorsEnabledCallback,
+                wasm_custom_descriptors_enabled_callback)
 
 CALLBACK_SETTER(WasmJSPIEnabledCallback, WasmJSPIEnabledCallback,
                 wasm_jspi_enabled_callback)

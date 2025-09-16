@@ -132,8 +132,10 @@ MaglevPhiRepresentationSelector::ProcessPhi(Phi* node) {
       DCHECK(input->is_tagged());
       // If we want to untag {node}, then we'll drop the conversion and use its
       // input instead.
+      ValueNode* unwrapped_conv_input =
+          input->input(0).node()->UnwrapIdentities();
       input_reprs.Add(
-          input->input(0).node()->properties().value_representation());
+          unwrapped_conv_input->properties().value_representation());
     } else if (Phi* input_phi = input->TryCast<Phi>()) {
       if (!input_phi->is_tagged()) {
         input_reprs.Add(input_phi->value_representation());
@@ -405,9 +407,9 @@ Opcode GetOpcodeForConversion(ValueRepresentation from, ValueRepresentation to,
       switch (to) {
         case ValueRepresentation::kInt32:
           if (truncating) {
-            return Opcode::kTruncateFloat64ToInt32;
+            return Opcode::kTruncateHoleyFloat64ToInt32;
           }
-          return Opcode::kCheckedTruncateFloat64ToInt32;
+          return Opcode::kCheckedHoleyFloat64ToInt32;
         case ValueRepresentation::kUint32:
           // The graph builder never inserts Tagged->Uint32 conversions, so we
           // don't have to handle this case.
@@ -434,9 +436,9 @@ Opcode GetOpcodeForConversion(ValueRepresentation from, ValueRepresentation to,
         case ValueRepresentation::kInt32:
           // Holes are NaNs, so we can truncate them to int32 same as real NaNs.
           if (truncating) {
-            return Opcode::kTruncateFloat64ToInt32;
+            return Opcode::kTruncateHoleyFloat64ToInt32;
           }
-          return Opcode::kCheckedTruncateFloat64ToInt32;
+          return Opcode::kCheckedHoleyFloat64ToInt32;
         case ValueRepresentation::kUint32:
           // The graph builder never inserts Tagged->Uint32 conversions, so we
           // don't have to handle this case.
@@ -508,7 +510,7 @@ void MaglevPhiRepresentationSelector::ConvertTaggedPhiTo(
       // Unwrapping the conversion.
       DCHECK_EQ(input->value_representation(), ValueRepresentation::kTagged);
       // Needs to insert a new conversion.
-      ValueNode* bypassed_input = input->input(0).node();
+      ValueNode* bypassed_input = input->input(0).node()->UnwrapIdentities();
       ValueRepresentation from_repr = bypassed_input->value_representation();
       ValueNode* new_input;
       if (from_repr == repr) {
@@ -662,7 +664,7 @@ void MaglevPhiRepresentationSelector::ConvertTaggedPhiTo(
                 CheckedNumberOrOddballToFloat64>(
                 block, {input}, TaggedToFloat64ConversionType::kOnlyNumber);
             untagged = AddNewNodeNoInputConversionAtBlockEnd<
-                CheckedTruncateFloat64ToInt32>(block, {untagged});
+                CheckedHoleyFloat64ToInt32>(block, {untagged});
           }
           break;
         case ValueRepresentation::kFloat64:
@@ -711,24 +713,7 @@ ValueNode* MaglevPhiRepresentationSelector::GetReplacementForPhiInputConversion(
       phi->predecessor_at(input_index), {input->input(0).node()});
 }
 
-bool MaglevPhiRepresentationSelector::IsUntagging(Opcode op) {
-  switch (op) {
-    case Opcode::kCheckedSmiUntag:
-    case Opcode::kUnsafeSmiUntag:
-    case Opcode::kCheckedNumberToInt32:
-    case Opcode::kCheckedObjectToIndex:
-    case Opcode::kCheckedTruncateNumberOrOddballToInt32:
-    case Opcode::kTruncateNumberOrOddballToInt32:
-    case Opcode::kCheckedNumberOrOddballToFloat64:
-    case Opcode::kUncheckedNumberOrOddballToFloat64:
-    case Opcode::kCheckedNumberOrOddballToHoleyFloat64:
-      return true;
-    default:
-      return false;
-  }
-}
-
-void MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
+ProcessResult MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
     Phi* phi, ValueNode* old_untagging) {
   DCHECK_EQ(old_untagging->input_count(), 1);
   DCHECK(old_untagging->input(0).node()->Is<Phi>());
@@ -746,7 +731,7 @@ void MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
 
   if (from_repr == ValueRepresentation::kTagged) {
     // The Phi hasn't been untagged, so we leave the conversion as it is.
-    return;
+    return ProcessResult::kContinue;
   }
 
   if (from_repr == to_repr) {
@@ -754,11 +739,14 @@ void MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
       if (phi->uses_require_31_bit_value() &&
           old_untagging->Is<CheckedSmiUntag>()) {
         old_untagging->OverwriteWith<CheckedSmiSizedInt32>();
-        return;
+        return ProcessResult::kContinue;
       }
     }
     old_untagging->OverwriteWith<Identity>();
-    return;
+    // All uses (except deopt frame ones) of this identity node will by bypassed
+    // in UpdateNonUntaggingNodeInputs. The node does not need to be in the
+    // graph.
+    return ProcessResult::kRemove;
   }
 
   if (old_untagging->Is<UnsafeSmiUntag>()) {
@@ -768,14 +756,18 @@ void MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
     // Smi, and therefore in an Int32.
     if (from_repr == ValueRepresentation::kFloat64 ||
         from_repr == ValueRepresentation::kHoleyFloat64) {
-      old_untagging->OverwriteWith<UnsafeTruncateFloat64ToInt32>();
+      old_untagging->OverwriteWith<UnsafeHoleyFloat64ToInt32>();
     } else if (from_repr == ValueRepresentation::kUint32) {
-      old_untagging->OverwriteWith<UnsafeTruncateUint32ToInt32>();
+      old_untagging->OverwriteWith<UnsafeUint32ToInt32>();
     } else {
       DCHECK_EQ(from_repr, ValueRepresentation::kInt32);
       old_untagging->OverwriteWith<Identity>();
+      // All uses (except deopt frame ones) of this identity node will by
+      // bypassed in UpdateNonUntaggingNodeInputs. The node does not need to be
+      // in the graph.
+      return ProcessResult::kRemove;
     }
-    return;
+    return ProcessResult::kContinue;
   }
 
   // The graph builder inserts 3 kind of Tagged->Int32 conversions that can have
@@ -786,8 +778,8 @@ void MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
   // we have Float64 phi and will happily truncate it, but the 3rd one should
   // deopt if it cannot be converted without loss of precision.
   bool conversion_is_truncating_float64 =
-      old_untagging->Is<CheckedTruncateNumberOrOddballToInt32>() ||
-      old_untagging->Is<TruncateNumberOrOddballToInt32>();
+      old_untagging->Is<TruncateCheckedNumberOrOddballToInt32>() ||
+      old_untagging->Is<TruncateUnsafeNumberOrOddballToInt32>();
 
   Opcode needed_conversion = GetOpcodeForConversion(
       from_repr, to_repr, conversion_is_truncating_float64);
@@ -806,6 +798,7 @@ void MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
   if (needed_conversion != old_untagging->opcode()) {
     old_untagging->OverwriteWith(needed_conversion);
   }
+  return ProcessResult::kContinue;
 }
 
 ProcessResult MaglevPhiRepresentationSelector::UpdateNodePhiInput(

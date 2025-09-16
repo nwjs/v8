@@ -43,6 +43,8 @@
                                                                                \
   /* Custom Descriptors proposal. */                                           \
   /* https://github.com/WebAssembly/custom-descriptors */                      \
+  /* Note: the JS Interop part of the proposal is enabled by */                \
+  /* --experimental-wasm-js-interop for now. */                                \
   /* V8 side owner: jkummerow */                                               \
   V(custom_descriptors, "custom descriptors", false)                           \
                                                                                \
@@ -68,7 +70,7 @@
                                                                                \
   /* Resizable buffer integration */                                           \
   /* https://github.com/WebAssembly/spec/issues/1292 */                        \
-  /* V8 side owner: syg */                                                     \
+  /* V8 side owner: gdeepti */                                                 \
   V(rab_integration, "resizable buffers integration", false)                   \
                                                                                \
   /* Compilation hints */                                                      \

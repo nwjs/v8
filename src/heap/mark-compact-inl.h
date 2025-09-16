@@ -45,8 +45,7 @@ void MarkCompactCollector::MarkRootObject(
     auto* metadata = MutablePageMetadata::cast(chunk->Metadata());
     if (chunk->IsEvacuationCandidate()) {
       DCHECK(!chunk->InYoungGeneration());
-      ReportAbortedEvacuationCandidateDueToFlags(PageMetadata::cast(metadata),
-                                                 chunk);
+      ReportAbortedEvacuationCandidateDueToFlags(PageMetadata::cast(metadata));
     } else if (chunk->InYoungGeneration() && !chunk->IsLargePage()) {
       DCHECK(chunk->IsToPage());
       if (!metadata->is_quarantined()) {
@@ -58,50 +57,53 @@ void MarkCompactCollector::MarkRootObject(
 
 // static
 template <typename THeapObjectSlot>
-void MarkCompactCollector::RecordSlot(Tagged<HeapObject> object,
+void MarkCompactCollector::RecordSlot(Tagged<HeapObject> host,
                                       THeapObjectSlot slot,
-                                      Tagged<HeapObject> target) {
-  MemoryChunk* source_page = MemoryChunk::FromHeapObject(object);
-  if (!source_page->ShouldSkipEvacuationSlotRecording()) {
-    RecordSlot(source_page, slot, target);
+                                      Tagged<HeapObject> value) {
+  MemoryChunk* host_chunk = MemoryChunk::FromHeapObject(host);
+  if (host_chunk->ShouldSkipEvacuationSlotRecording()) {
+    return;
   }
+  RecordSlot(host_chunk, slot, value);
 }
 
 // static
 template <typename THeapObjectSlot>
-void MarkCompactCollector::RecordSlot(MemoryChunk* source_chunk,
+void MarkCompactCollector::RecordSlot(MemoryChunk* host_chunk,
                                       THeapObjectSlot slot,
-                                      Tagged<HeapObject> target) {
-  MemoryChunk* target_chunk = MemoryChunk::FromHeapObject(target);
-  if (target_chunk->IsEvacuationCandidate()) {
-    MutablePageMetadata* source_page =
-        MutablePageMetadata::cast(source_chunk->Metadata());
-    if (target_chunk->IsFlagSet(MemoryChunk::IS_EXECUTABLE)) {
-      // TODO(377724745): currently needed because flags are untrusted.
-      SBXCHECK(!InsideSandbox(target_chunk->address()));
-      RememberedSet<TRUSTED_TO_CODE>::Insert<AccessMode::ATOMIC>(
-          source_page, source_chunk->Offset(slot.address()));
-    } else if (source_chunk->IsFlagSet(MemoryChunk::IS_TRUSTED) &&
-               target_chunk->IsFlagSet(MemoryChunk::IS_TRUSTED)) {
-      // TODO(377724745): currently needed because flags are untrusted.
-      SBXCHECK(!InsideSandbox(target_chunk->address()));
-      RememberedSet<TRUSTED_TO_TRUSTED>::Insert<AccessMode::ATOMIC>(
-          source_page, source_chunk->Offset(slot.address()));
-    } else if (V8_LIKELY(!target_chunk->InWritableSharedSpace()) ||
-               source_page->heap()->isolate()->is_shared_space_isolate()) {
-      DCHECK_EQ(source_page->heap(), target_chunk->Metadata()->heap());
-      RememberedSet<OLD_TO_OLD>::Insert<AccessMode::ATOMIC>(
-          source_page, source_chunk->Offset(slot.address()));
-    } else {
-      // DCHECK here that we only don't record in case of local->shared
-      // references in a client GC.
-      DCHECK(!source_page->heap()->isolate()->is_shared_space_isolate());
-      DCHECK(target_chunk->Metadata()
-                 ->heap()
-                 ->isolate()
-                 ->is_shared_space_isolate());
-      DCHECK(target_chunk->InWritableSharedSpace());
-    }
+                                      Tagged<HeapObject> value) {
+  const MemoryChunk* value_chunk = MemoryChunk::FromHeapObject(value);
+  if (!value_chunk->IsEvacuationCandidate()) {
+    return;
+  }
+
+  const auto* isolate = Isolate::Current();
+  MutablePageMetadata* host_page =
+      MutablePageMetadata::cast(host_chunk->Metadata(isolate));
+  const MutablePageMetadata* value_page =
+      MutablePageMetadata::cast(value_chunk->Metadata(isolate));
+
+  if (value_page->is_executable()) {
+    DCHECK(!InsideSandbox(value_chunk->address()));
+    RememberedSet<TRUSTED_TO_CODE>::Insert<AccessMode::ATOMIC>(
+        host_page, host_chunk->Offset(slot.address()));
+  } else if (host_page->is_trusted() && value_page->is_trusted()) {
+    DCHECK(!InsideSandbox(value_chunk->address()));
+    RememberedSet<TRUSTED_TO_TRUSTED>::Insert<AccessMode::ATOMIC>(
+        host_page, host_chunk->Offset(slot.address()));
+  } else if (V8_LIKELY(!value_page->is_writable_shared()) ||
+             host_page->heap()->isolate()->is_shared_space_isolate()) {
+    DCHECK_EQ(host_page->heap(), value_page->heap());
+    RememberedSet<OLD_TO_OLD>::Insert<AccessMode::ATOMIC>(
+        host_page, host_chunk->Offset(slot.address()));
+  } else {
+    // The only case that we do not record are local->shared references from
+    // client heaps, see the following DCHECKs.
+    DCHECK(!host_page->heap()->isolate()->is_shared_space_isolate());
+    DCHECK(value_page->heap()->isolate()->is_shared_space_isolate());
+    DCHECK(value_page->is_writable_shared());
+    DCHECK_EQ(value_page->is_writable_shared(),
+              value_chunk->InWritableSharedSpace());
   }
 }
 

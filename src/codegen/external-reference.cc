@@ -845,6 +845,12 @@ ExternalReference ExternalReference::old_space_allocation_limit_address(
   return ExternalReference(isolate->heap()->OldSpaceAllocationLimitAddress());
 }
 
+ExternalReference ExternalReference::last_young_allocation_address(
+    Isolate* isolate) {
+  return ExternalReference(
+      isolate->isolate_data()->last_young_allocation_address());
+}
+
 ExternalReference ExternalReference::array_buffer_max_allocation_address(
     Isolate* isolate) {
   return ExternalReference(isolate->array_buffer_max_size_address());
@@ -1053,11 +1059,9 @@ namespace {
 static uintptr_t BaselinePCForNextExecutedBytecode(Address raw_code_obj,
                                                    int bytecode_offset,
                                                    Address raw_bytecode_array) {
-  Tagged<Code> code_obj = Cast<Code>(Tagged<Object>(raw_code_obj));
-  SBXCHECK(IsCode(code_obj));
+  Tagged<Code> code_obj = SbxCast<Code>(Tagged<Object>(raw_code_obj));
   Tagged<BytecodeArray> bytecode_array =
-      Cast<BytecodeArray>(Tagged<Object>(raw_bytecode_array));
-  SBXCHECK(IsBytecodeArray(bytecode_array));
+      SbxCast<BytecodeArray>(Tagged<Object>(raw_bytecode_array));
   return code_obj->GetBaselinePCForNextExecutedBytecode(bytecode_offset,
                                                         bytecode_array);
 }

@@ -232,6 +232,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
   // Unused on this architecture.
   void MaybeEmitOutOfLineConstantPool() {}
 
+  // Clear any internal state to avoid check failures if we drop
+  // the assembly code.
+  void ClearInternalState() { constpool_.Clear(); }
+
   // Label operations & relative jumps (PPUM Appendix D).
   //
   // Takes a branch opcode (cc) and a label (L) and generates
@@ -418,6 +422,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
   void DataAlign(int m);
   // Aligns code to something that's optimal for a jump target for the platform.
   void CodeTargetAlign();
+  void SwitchTargetAlign() { CodeTargetAlign(); }
+  void BranchTargetAlign() {}
   void LoopHeaderAlign() { CodeTargetAlign(); }
 
   // Different nop operations are used by the code generator to detect certain
@@ -564,8 +570,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
   void db(uint8_t data);
   void dd(uint32_t data);
   void dq(uint64_t data);
+
+#if defined(V8_TARGET_ARCH_RISCV64)
   void dp(uintptr_t data) { dq(data); }
+  void dq(Label* label);
+#elif defined(V8_TARGET_ARCH_RISCV32)
+  void dp(uintptr_t data) { dd(data); }
   void dd(Label* label);
+#endif
 
   Instruction* pc() const { return reinterpret_cast<Instruction*>(pc_); }
 
