@@ -1358,7 +1358,8 @@ void Heap::CollectAllAvailableGarbage(GarbageCollectionReason gc_reason) {
   GCCallbackFlags gc_callback_flags =
       GCCallbackFlags::kGCCallbackFlagCollectAllAvailableGarbage;
 
-  if (gc_reason == GarbageCollectionReason::kLastResort) {
+  if (gc_reason == GarbageCollectionReason::kLastResort ||
+      gc_reason == GarbageCollectionReason::kExternalMemoryPressure) {
     gc_flags |= GCFlag::kLastResort;
     gc_callback_flags = static_cast<GCCallbackFlags>(
         gc_callback_flags | GCCallbackFlags::kGCCallbackFlagLastResort);
@@ -1371,12 +1372,15 @@ void Heap::CollectAllAvailableGarbage(GarbageCollectionReason gc_reason) {
   const auto perform_heap_limit_check = v8_flags.late_heap_limit_check
                                             ? PerformHeapLimitCheck::kNo
                                             : PerformHeapLimitCheck::kYes;
-
+  const auto perform_ineffective_mc_check =
+      v8_flags.ineffective_gcs_forces_last_resort
+          ? PerformIneffectiveMarkCompactCheck::kNo
+          : PerformIneffectiveMarkCompactCheck::kYes;
   for (int attempt = 0; attempt < kMaxNumberOfAttempts; attempt++) {
     const size_t roots_before = num_roots();
     current_gc_flags_ = gc_flags;
     CollectGarbage(OLD_SPACE, gc_reason, gc_callback_flags,
-                   perform_heap_limit_check);
+                   perform_heap_limit_check, perform_ineffective_mc_check);
     DCHECK_EQ(GCFlags(GCFlag::kNoFlags), current_gc_flags_);
 
     // As long as we are at or above the heap limit, we need another GC to
@@ -1392,6 +1396,11 @@ void Heap::CollectAllAvailableGarbage(GarbageCollectionReason gc_reason) {
   }
 
   CheckHeapLimitReached();
+  if (v8_flags.ineffective_gcs_forces_last_resort) {
+    CheckIneffectiveMarkCompact(
+        OldGenerationConsumedBytes(), GlobalConsumedBytes(),
+        tracer()->AverageMarkCompactMutatorUtilization());
+  }
 
   EagerlyFreeExternalMemoryAndWasmCode();
 
@@ -1562,10 +1571,11 @@ void Heap::ResetOldGenerationAndGlobalAllocationLimit() {
   set_using_initial_limit(true);
 }
 
-void Heap::CollectGarbage(AllocationSpace space,
-                          GarbageCollectionReason gc_reason,
-                          const v8::GCCallbackFlags gc_callback_flags,
-                          PerformHeapLimitCheck perform_heap_limit_check) {
+void Heap::CollectGarbage(
+    AllocationSpace space, GarbageCollectionReason gc_reason,
+    const v8::GCCallbackFlags gc_callback_flags,
+    PerformHeapLimitCheck perform_heap_limit_check,
+    PerformIneffectiveMarkCompactCheck check_ineffective_mark_compact) {
   CHECK(isolate_->IsOnCentralStack());
   // Any handles that are created during GC (eg during API callbacks)
   // should be in a fresh handle scope that is torn down before the GC
@@ -1775,11 +1785,22 @@ void Heap::CollectGarbage(AllocationSpace space,
   }
 
   if (collector == GarbageCollector::MARK_COMPACTOR) {
+    if (check_ineffective_mark_compact ==
+        PerformIneffectiveMarkCompactCheck::kYes) {
+      CheckIneffectiveMarkCompact(
+          OldGenerationConsumedBytes(), GlobalConsumedBytes(),
+          tracer()->AverageMarkCompactMutatorUtilization());
+    }
     current_gc_flags_ = GCFlag::kNoFlags;
   }
 }
 
 bool Heap::ReachedHeapLimit() { return !CanExpandOldGeneration(0); }
+
+bool Heap::HasConsecutiveIneffectiveMarkCompact() const {
+  return consecutive_ineffective_mark_compacts_.load(
+             std::memory_order_relaxed) > 0;
+}
 
 void Heap::CheckHeapLimitReached() {
   if (ReachedHeapLimit()) {
@@ -2189,6 +2210,10 @@ void Heap::CollectGarbageWithRetry(AllocationSpace space, GCFlags gc_flags,
   }
 
   for (int i = 0; i < 2; i++) {
+    if (v8_flags.ineffective_gcs_forces_last_resort &&
+        HasConsecutiveIneffectiveMarkCompact()) {
+      break;
+    }
     current_gc_flags_ = gc_flags;
     CollectGarbage(OLD_SPACE, gc_reason, gc_callback_flags,
                    perform_heap_limit_check);
@@ -2625,10 +2650,6 @@ void Heap::RecomputeLimits(GarbageCollector collector, base::TimeTicks time) {
           new_limits.old_generation_allocation_limit,
           new_limits.global_allocation_limit);
     }
-
-    CheckIneffectiveMarkCompact(
-        OldGenerationConsumedBytes(), GlobalConsumedBytes(),
-        tracer()->AverageMarkCompactMutatorUtilization());
   } else {
     DCHECK(HasLowYoungGenerationAllocationRate());
     new_old_generation_allocation_limit = std::min(
@@ -3195,6 +3216,10 @@ void* Heap::AllocateExternalBackingStore(
   if (result) return result;
   if (!always_allocate()) {
     for (int i = 0; i < 2; i++) {
+      if (v8_flags.ineffective_gcs_forces_last_resort &&
+          HasConsecutiveIneffectiveMarkCompact()) {
+        break;
+      }
       CollectGarbage(OLD_SPACE,
                      GarbageCollectionReason::kExternalMemoryPressure);
       result = allocate(byte_length);
@@ -3864,8 +3889,7 @@ void Heap::CheckIneffectiveMarkCompact(size_t old_generation_size,
     consecutive_ineffective_mark_compacts_ = 0;
     return;
   }
-  ++consecutive_ineffective_mark_compacts_;
-  if (consecutive_ineffective_mark_compacts_ ==
+  if (++consecutive_ineffective_mark_compacts_ ==
       kMaxConsecutiveIneffectiveMarkCompacts) {
     if (InvokeNearHeapLimitCallback()) {
       // The callback increased the heap limit.
