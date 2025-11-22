@@ -436,10 +436,6 @@ class V8_EXPORT Value : public Data {
    */
   Local<Boolean> ToBoolean(Isolate* isolate) const;
 
-  V8_DEPRECATED("Use maybe version") Local<Boolean> ToBoolean() const;
-  V8_DEPRECATED("Use maybe version") Local<String> ToString() const;
-  V8_DEPRECATED("Use maybe version") Local<Object> ToObject() const;
-  V8_DEPRECATED("Use maybe version") Local<Integer> ToInteger() const;
   /**
    * Attempts to convert a string to an array index.
    * Returns an empty handle if the conversion fails.
@@ -461,14 +457,7 @@ class V8_EXPORT Value : public Data {
   /** Returns the equivalent of `ToInt32()->Value()`. */
   V8_WARN_UNUSED_RESULT Maybe<int32_t> Int32Value(Local<Context> context) const;
 
-  V8_DEPRECATED("Use maybe version") bool BooleanValue() const;
-  V8_DEPRECATED("Use maybe version") double NumberValue() const;
-  V8_DEPRECATED("Use maybe version") int64_t IntegerValue() const;
-  V8_DEPRECATED("Use maybe version") uint32_t Uint32Value() const;
-  V8_DEPRECATED("Use maybe version") int32_t Int32Value() const;
-
   /** JS == */
-  V8_DEPRECATED("Use maybe version") bool Equals(Local<Value> that) const;
   V8_WARN_UNUSED_RESULT Maybe<bool> Equals(Local<Context> context,
                                            Local<Value> that) const;
   bool StrictEquals(Local<Value> that) const;

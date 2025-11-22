@@ -136,8 +136,6 @@ class V8_EXPORT StackTrace {
     kDetailed = kOverview | kIsEval | kIsConstructor | kScriptNameOrSourceURL
   };
 
-  V8_DEPRECATED("Use Isolate version")
-                Local<StackFrame> GetFrame(uint32_t index) const;
   /**
    * Returns the (unique) ID of this stack trace.
    */

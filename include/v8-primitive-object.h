@@ -78,8 +78,6 @@ class V8_EXPORT BooleanObject : public Object {
  */
 class V8_EXPORT StringObject : public Object {
  public:
-  V8_DEPRECATED("Use Isolate* version") static
-                       Local<Value> New(Local<String> value);
   static Local<Value> New(Isolate* isolate, Local<String> value);
 
   Local<String> ValueOf() const;

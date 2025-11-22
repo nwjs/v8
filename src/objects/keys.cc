@@ -463,12 +463,42 @@ MaybeHandle<FixedArray> FastKeyAccumulator::GetKeys(
       return keys;
     }
     if (isolate_->has_exception()) return MaybeHandle<FixedArray>();
+  } else if (filter_ == SKIP_STRINGS && !MayHaveSymbols()) {
+    return isolate_->factory()->empty_fixed_array();
   }
 
   if (try_prototype_info_cache_) {
     return GetKeysWithPrototypeInfoCache(keys_conversion);
   }
   return GetKeysSlow(keys_conversion);
+}
+
+bool FastKeyAccumulator::MayHaveSymbols() {
+  bool own_only = has_empty_prototype_ || mode_ == KeyCollectionMode::kOwnOnly;
+  Tagged<Map> map = receiver_->map();
+  if (!own_only || IsCustomElementsReceiverMap(map)) {
+    return true;
+  }
+
+  // From this point on we are certain to only collect own keys.
+  DCHECK(IsJSObject(*receiver_));
+
+  if (map->is_dictionary_map()) {
+    // TODO(olivf): Keep a bit in the dictionary to remember if we have any
+    // symbols.
+    return true;
+  }
+  int num = map->NumberOfOwnDescriptors();
+  if (num == 0) {
+    return false;
+  }
+  int enum_length = receiver_->map()->EnumLength();
+  if (enum_length != kInvalidEnumCacheSentinel) {
+    return enum_length != num;
+  }
+  // TODO(olivf): Keep a bit in the descriptor to remember if we have any
+  // symbols.
+  return true;
 }
 
 MaybeHandle<FixedArray> FastKeyAccumulator::GetKeysFast(
@@ -658,7 +688,12 @@ MaybeHandle<FixedArray> FastKeyAccumulator::GetKeysWithPrototypeInfoCache(
 }
 
 bool FastKeyAccumulator::MayHaveElements(Tagged<JSReceiver> receiver) {
-  if (!IsJSObject(receiver)) return true;
+  if (!IsJSObject(receiver)) {
+#if V8_ENABLE_WEBASSEMBLY
+    if (IsWasmObject(*receiver)) return false;
+#endif  // V8_ENABLE_WEBASSEMBLY
+    return true;
+  }
   Tagged<JSObject> object = Cast<JSObject>(receiver);
   if (object->HasEnumerableElements()) return true;
   if (object->HasIndexedInterceptor()) return true;
@@ -668,6 +703,9 @@ bool FastKeyAccumulator::MayHaveElements(Tagged<JSReceiver> receiver) {
 bool FastKeyAccumulator::TryPrototypeInfoCache(
     DirectHandle<JSReceiver> receiver) {
   if (may_have_elements_ && !only_own_has_simple_elements_) return false;
+#if V8_ENABLE_WEBASSEMBLY
+  if (IsWasmObject(*receiver)) return false;
+#endif  // V8_ENABLE_WEBASSEMBLY
   DirectHandle<JSObject> object = Cast<JSObject>(receiver);
   if (!object->HasFastProperties()) return false;
   if (object->HasNamedInterceptor()) return false;

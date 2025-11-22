@@ -494,7 +494,7 @@ bool MarkingVisitorBase<ConcreteVisitor>::HasBytecodeArrayForFlushing(
 
   Tagged<Object> script_obj = sfi->script();
   if (!i::IsUndefined(script_obj)) {
-    Tagged<Script> script = i::Cast<Script>(script_obj);
+    Tagged<Script> script = Cast<Script>(script_obj);
     if (i::IsUndefined(script->source()))
       return false;
   }
