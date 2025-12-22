@@ -811,6 +811,12 @@ class MaglevCodeGeneratingNodeProcessor {
 
   template <typename NodeT>
   ProcessResult Process(NodeT* node, const ProcessingState& state) {
+#ifdef DEBUG
+    if constexpr (std::is_base_of_v<ValueNode, NodeT>) {
+      // Regalloc must clear its temp allocations.
+      DCHECK(!node->regalloc_info()->has_register());
+    }
+#endif
     if (v8_flags.code_comments) {
       std::stringstream ss;
       ss << "--   " << graph_labeller()->NodeId(node) << ": "
@@ -1194,6 +1200,7 @@ class MaglevFrameTranslationBuilder {
         deopt_info->top_frame().GetVirtualObjects();
     RecursiveBuildDeoptFrame(deopt_info->top_frame(), current_input_location,
                              virtual_objects);
+    CHECK_EQ(current_input_location, deopt_info->input_locations_end());
   }
 
   void BuildLazyDeopt(LazyDeoptInfo* deopt_info) {
@@ -1226,6 +1233,7 @@ class MaglevFrameTranslationBuilder {
         return BuildSingleDeoptFrame(top_frame.as_builtin_continuation(),
                                      current_input_location, virtual_objects);
     }
+    CHECK_EQ(current_input_location, deopt_info->input_locations_end());
   }
 
  private:
@@ -1506,6 +1514,9 @@ class MaglevFrameTranslationBuilder {
                         const InputLocation*& input_location,
                         const VirtualObjectList& virtual_objects) {
     const Opcode opcode = value->opcode();
+    // Identity nodes must have been unwrapped earlier using
+    // VirtualObject::UnwrapIdentities.
+    DCHECK_NE(opcode, Opcode::kIdentity);
     if (IsConstantNode(opcode)) {
       if (opcode == Opcode::kFloat64Constant) {
         Float64 value_as_float = value->Cast<Float64Constant>()->value();

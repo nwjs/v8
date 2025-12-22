@@ -76,10 +76,7 @@ class SimplifiedOptimizationReducer : public Next {
     Handle<HeapObject> cst;
     if (kind == TruncateJSPrimitiveToUntaggedOp::UntaggedKind::kInt32 &&
         matcher_.MatchHeapConstant(input, &cst)) {
-      if (Tagged<OptimizedOut> optimized_out; TryCast(*cst, &optimized_out)) {
-        // OptimizedOut happens in dead code, so this truncation doesn't matter.
-        return __ Word32Constant(0);
-      } else if (Tagged<TheHole> hole; TryCast(*cst, &hole)) {
+      if (Tagged<TheHole> hole; TryCast(*cst, &hole)) {
         // Holes are allowed for InputAssumptions::kNumberOrOddballOrHole.
         // Hole->Undefined->NaN->0.
         return __ Word32Constant(0);
