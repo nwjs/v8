@@ -139,7 +139,7 @@ DirectHandle<String> WasmModuleObject::ExtractUtf8StringFromModuleBytes(
   base::Vector<const uint8_t> name_vec =
       wire_bytes.SubVector(ref.offset(), ref.end_offset());
   // UTF8 validation happens at decode time.
-  DCHECK(unibrow::Utf8::ValidateEncoding(name_vec.begin(), name_vec.length()));
+  DCHECK(unibrow::Utf8::ValidateEncoding(name_vec.begin(), name_vec.size()));
   auto* factory = isolate->factory();
   return internalize
              ? factory->InternalizeUtf8String(
@@ -1207,6 +1207,9 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
     if (!old_buffer->is_resizable_by_js()) {
       // Broadcasting the update should update this memory object too.
       CHECK(memory_object->needs_new_buffer());
+      // For the current isolate, immediately update the buffer.
+      RefreshSharedBuffer(isolate, memory_object, old_buffer,
+                          ResizableFlag::kNotResizable);
     }
     // As {old_pages} was read racefully, we return here the synchronized
     // value provided by {GrowWasmMemoryInPlace}, to provide the atomic
@@ -1866,8 +1869,9 @@ void WasmTrustedInstanceData::InitDataSegmentArrays(
     // Set the active segments to being already dropped, since memory.init on
     // a dropped passive segment and an active segment have the same
     // behavior.
-    data_segment_sizes()->set(static_cast<int>(i),
-                              segment.active ? 0 : source_bytes.length());
+    data_segment_sizes()->set(
+        static_cast<int>(i),
+        segment.active ? 0 : static_cast<uint32_t>(source_bytes.size()));
   }
 }
 
@@ -2517,12 +2521,12 @@ void WasmDispatchTable::SetForNonWrapper(
     uint32_t function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
     WasmDispatchTable::NewOrExistingEntry new_or_existing) {
-  return SetForNonWrapper<WasmDispatchTable>(*this, index, implicit_arg,
-                                             call_target, sig_id,
+  return ::v8::internal::SetForNonWrapper<WasmDispatchTable>(
+      *this, index, implicit_arg, call_target, sig_id,
 #if V8_ENABLE_DRUMBRAKE
-                                             function_index,
+      function_index,
 #endif
-                                             new_or_existing);
+      new_or_existing);
 }
 
 void WasmDispatchTableForImports::SetForNonWrapper(
@@ -2532,7 +2536,7 @@ void WasmDispatchTableForImports::SetForNonWrapper(
     uint32_t function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
     WasmDispatchTable::NewOrExistingEntry new_or_existing) {
-  return SetForNonWrapper<WasmDispatchTableForImports>(
+  return ::v8::internal::SetForNonWrapper<WasmDispatchTableForImports>(
       *this, index, implicit_arg, call_target, sig_id,
 #if V8_ENABLE_DRUMBRAKE
       function_index,
@@ -2594,12 +2598,12 @@ void WasmDispatchTable::SetForWrapper(
     uint32_t function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
     WasmDispatchTable::NewOrExistingEntry new_or_existing) {
-  return SetForWrapper<WasmDispatchTable>(*this, index, implicit_arg,
-                                          wrapper_handle, sig_id,
+  return ::v8::internal::SetForWrapper<WasmDispatchTable>(
+      *this, index, implicit_arg, wrapper_handle, sig_id,
 #if V8_ENABLE_DRUMBRAKE
-                                          function_index,
+      function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
-                                          new_or_existing);
+      new_or_existing);
 }
 
 void WasmDispatchTableForImports::SetForWrapper(
@@ -2610,12 +2614,12 @@ void WasmDispatchTableForImports::SetForWrapper(
     uint32_t function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
     WasmDispatchTable::NewOrExistingEntry new_or_existing) {
-  return SetForWrapper<WasmDispatchTableForImports>(*this, index, implicit_arg,
-                                                    wrapper_handle, sig_id,
+  return ::v8::internal::SetForWrapper<WasmDispatchTableForImports>(
+      *this, index, implicit_arg, wrapper_handle, sig_id,
 #if V8_ENABLE_DRUMBRAKE
-                                                    function_index,
+      function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
-                                                    new_or_existing);
+      new_or_existing);
 }
 
 template <AnyWasmDispatchTable DispatchTable>
