@@ -61,7 +61,7 @@ V8_INLINE uint64_t GetRapidHash(const uint16_t* chars, uint32_t length,
   // For 2-byte strings we need to preserve the same hash for strings in just
   // the latin-1 range.
   if (V8_UNLIKELY(IsOnly8Bit(chars, length))) {
-    return detail::HashConvertingTo8Bit(chars, length, seed, secret);
+    return v8::internal::detail::HashConvertingTo8Bit(chars, length, seed, secret);
   }
   return rapidhash(reinterpret_cast<const uint8_t*>(chars), 2 * length, seed,
                    secret);
@@ -85,7 +85,7 @@ uint32_t RunningStringHasher::Finalize() {
   running_hash_ += (running_hash_ << 3);
   running_hash_ ^= (running_hash_ >> 11);
   running_hash_ += (running_hash_ << 15);
-  return detail::ConvertRawHashToUsableHash(running_hash_);
+  return v8::internal::detail::ConvertRawHashToUsableHash(running_hash_);
 }
 
 uint32_t StringHasher::GetTrivialHash(uint32_t length) {
@@ -234,26 +234,26 @@ uint32_t StringHasher::HashSequentialString(const char_t* chars_raw,
       // Possible array or integer index; try to compute the array index hash.
       static_assert(String::kMaxArrayIndexSize <= String::kMaxIntegerIndexSize);
 
-      detail::ArrayIndexT index;
+      v8::internal::detail::ArrayIndexT index;
       uint32_t i;
-      switch (detail::TryParseArrayIndex(chars, length, i, index)) {
-        case detail::kSuccess:
+      switch (v8::internal::detail::TryParseArrayIndex(chars, length, i, index)) {
+	      case v8::internal::detail::kSuccess:
           DCHECK_LE(index, String::kMaxArrayIndex);
           return MakeArrayIndexHash(static_cast<uint32_t>(index), length);
-        case detail::kNonIndex:
+	      case v8::internal::detail::kNonIndex:
           // A non-index result from TryParseArrayIndex means we don't need to
           // check for integer indices.
           break;
-        case detail::kOverflow: {
+	      case v8::internal::detail::kOverflow: {
 #if V8_HOST_ARCH_64_BIT
           // On 64-bit, we might have a valid integer index even if the value
           // overflowed an array index.
           static_assert(String::kMaxArrayIndexSize <
                         String::kMaxIntegerIndexSize);
-          switch (detail::TryParseIntegerIndex(chars, length, i, index)) {
-            case detail::kSuccess: {
+          switch (v8::internal::detail::TryParseIntegerIndex(chars, length, i, index)) {
+		  case v8::internal::detail::kSuccess: {
               uint32_t hash = String::CreateHashFieldValue(
-                  detail::GetUsableRapidHash(chars, length, seed.seed(),
+                  v8::internal::detail::GetUsableRapidHash(chars, length, seed.seed(),
                                              seed.secret()),
                   String::HashFieldType::kIntegerIndex);
               if (Name::ContainsCachedArrayIndex(hash)) {
@@ -266,8 +266,8 @@ uint32_t StringHasher::HashSequentialString(const char_t* chars_raw,
               DCHECK(!Name::ContainsCachedArrayIndex(hash));
               return hash;
             }
-            case detail::kNonIndex:
-            case detail::kOverflow:
+	    case v8::internal::detail::kNonIndex:
+	    case v8::internal::detail::kOverflow:
               break;
           }
 #else
@@ -289,7 +289,7 @@ uint32_t StringHasher::HashSequentialString(const char_t* chars_raw,
 
   // Non-index hash.
   return String::CreateHashFieldValue(
-      detail::GetUsableRapidHash(chars, length, seed.seed(), seed.secret()),
+      v8::internal::detail::GetUsableRapidHash(chars, length, seed.seed(), seed.secret()),
       String::HashFieldType::kHash);
 }
 
