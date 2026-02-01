@@ -509,6 +509,11 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void LoadRootRelative(Register destination, int32_t offset) final;
   void StoreRootRelative(int32_t offset, Register value) final;
 
+  MemOperand AsMemOperand(IsolateFieldId id) {
+    DCHECK(root_array_available());
+    return MemOperand(kRootRegister, IsolateData::GetOffset(id));
+  }
+
   // Operand pointing to an external reference.
   // May emit code to set up the scratch register. The operand is
   // only guaranteed to be correct as long as the scratch register
@@ -931,7 +936,7 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void Store(ExternalReference destination, Register source);
 
   // Pushes the address of the external reference onto the stack.
-  void PushAddress(ExternalReference source);
+  void PushAddress(ExternalReference source, Register scratch);
 
   // Operations on roots in the root-array.
   // Load a root value where the index (or part of it) is variable.

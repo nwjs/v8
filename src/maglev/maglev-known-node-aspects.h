@@ -9,6 +9,7 @@
 
 #include "src/base/logging.h"
 #include "src/maglev/maglev-ir.h"
+#include "src/objects/contexts.h"
 
 namespace v8 {
 namespace internal {
@@ -87,7 +88,11 @@ class NodeInfo {
   ValueNode* get_or_set_##name(Function create) {                           \
     ValueNode* existing_alt = name();                                       \
     if (existing_alt != nullptr) return existing_alt;                       \
-    return set_##name(create());                                            \
+    ValueNode* new_alt = create();                                          \
+    if (new_alt) {                                                          \
+      return set_##name(new_alt);                                           \
+    }                                                                       \
+    return nullptr;                                                         \
   }
     ALTERNATIVES(API)
 #undef API
@@ -638,13 +643,19 @@ class KnownNodeAspects {
   // Returns true if value was added to the cache, or false if the value updated
   // the cache.
   bool SetContextCachedValue(ValueNode* context, int offset, ValueNode* value) {
-    auto it = loaded_context_slots_.find({context, offset});
-    if (it == loaded_context_slots_.end()) {
-      loaded_context_slots_.insert({{context, offset}, value});
-      return true;
+    auto& target_map =
+        (offset == Context::OffsetOfElementAt(Context::PREVIOUS_INDEX))
+            ? loaded_context_constants_
+            : loaded_context_slots_;
+
+    auto [it, inserted] = target_map.insert({{context, offset}, value});
+
+    if (!inserted) {
+      it->second = value;
+      return false;
     }
-    it->second = value;
-    return false;
+
+    return true;
   }
   bool HasContextCacheValue(ValueNode* context, int offset,
                             ContextSlotMutability slot_mutability) {
@@ -696,6 +707,8 @@ class KnownNodeAspects {
       ClearUnstableNodeAspects(is_tracing_enabled);
     }
   }
+
+  void PrintLoadedProperties();
 
   explicit KnownNodeAspects(Zone* zone)
       : loaded_constant_properties_(zone),

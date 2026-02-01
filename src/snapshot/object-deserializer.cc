@@ -43,7 +43,7 @@ MaybeDirectHandle<HeapObject> ObjectDeserializer::Deserialize() {
   {
     result = ReadObject();
     DeserializeDeferredObjects();
-    CHECK(new_code_objects().empty());
+    CHECK(new_instruction_stream_objects().empty());
     LinkAllocationSites();
     CHECK(new_maps().empty());
     WeakenDescriptorArrays();
@@ -119,7 +119,7 @@ MaybeDirectHandle<HeapObject> OffThreadObjectDeserializer::Deserialize(
   {
     result = ReadObject();
     DeserializeDeferredObjects();
-    CHECK(new_code_objects().empty());
+    CHECK(new_instruction_stream_objects().empty());
     CHECK(new_allocation_sites().empty());
     CHECK(new_maps().empty());
     WeakenDescriptorArrays();

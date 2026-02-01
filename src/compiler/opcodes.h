@@ -1045,6 +1045,7 @@
   IF_WASM(V, I32x4Abs)                    \
   IF_WASM(V, I32x4BitMask)                \
   IF_WASM(V, I32x4DotI16x8S)              \
+  IF_WASM(V, I32x4AddPairwise)            \
   IF_WASM(V, I32x4ExtMulLowI16x8S)        \
   IF_WASM(V, I32x4ExtMulHighI16x8S)       \
   IF_WASM(V, I32x4ExtMulLowI16x8U)        \
@@ -1166,6 +1167,7 @@
   IF_WASM(V, I8x8Shuffle)                 \
   IF_WASM(V, I8x4Shuffle)                 \
   IF_WASM(V, I8x2Shuffle)                 \
+  IF_WASM(V, I8x1Shuffle)                 \
   IF_WASM(V, V128AnyTrue)                 \
   IF_WASM(V, I64x2AllTrue)                \
   IF_WASM(V, I32x4AllTrue)                \

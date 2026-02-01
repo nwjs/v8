@@ -29,7 +29,7 @@
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames-inl.h"
-#include "src/heap/mutable-page-metadata.h"
+#include "src/heap/mutable-page.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
 #include "src/objects/instance-type-inl.h"
@@ -189,9 +189,9 @@ Operand MacroAssembler::ExternalReferenceAsOperand(ExternalReference reference,
   return Operand(scratch, 0);
 }
 
-void MacroAssembler::PushAddress(ExternalReference source) {
-  LoadAddress(kScratchRegister, source);
-  Push(kScratchRegister);
+void MacroAssembler::PushAddress(ExternalReference source, Register scratch) {
+  LoadAddress(scratch, source);
+  Push(scratch);
 }
 
 Operand MacroAssembler::RootAsOperand(RootIndex index) {
@@ -1218,14 +1218,16 @@ void MacroAssembler::CallTSANRelaxedLoadStub(Register address,
 
 void MacroAssembler::MaybeJumpIfReadOnlyOrSmallSmi(Register value,
                                                    Label* dest) {
-#if V8_STATIC_ROOTS_BOOL
+#if V8_STATIC_ROOTS_BOOL && CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
   // Quick check for Read-only and small Smi values.
+  // This optimization requires contiguous compressed RO space to ensure RO
+  // space is at the beginning of the cage; otherwise, objects from other spaces
+  // could alias with low addresses.
   constexpr int kLastStaticRootPage =
       RoundUp<kRegularPageSize>(StaticReadOnlyRoot::kLastAllocatedRoot);
-  static_assert(kLastStaticRootPage <=
-                V8_CONTIGUOUS_COMPRESSED_RO_SPACE_SIZE_MB * MB);
-  JumpIfUnsignedLessThan(value, kLastStaticRootPage, dest);
-#endif  // V8_STATIC_ROOTS_BOOL
+  static_assert(kLastStaticRootPage <= kContiguousReadOnlyReservationSize);
+  JumpIfUnsignedLessThan(value, kContiguousReadOnlyReservationSize, dest);
+#endif  // V8_STATIC_ROOTS_BOOL && CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
 }
 
 void MacroAssembler::RecordWrite(Register object, Register slot_address,
@@ -1291,8 +1293,12 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
     movq(kScratchDoubleReg, slot_address);
     Register scratch0 = slot_address;
     CheckMarkBit(object, kScratchRegister, scratch0, carry, &done);
+#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
+    JumpIfUnsignedLessThan(value, kContiguousReadOnlyReservationSize, &done);
+#else   // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
     CheckPageFlag(value, kScratchRegister, MemoryChunk::kIsInReadOnlyHeapMask,
                   not_zero, &done, Label::kFar);
+#endif  // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
     CheckMarkBit(value, kScratchRegister, scratch0, carry, &done);
     movq(slot_address, kScratchDoubleReg);
     bind(&stub_call);
@@ -3864,19 +3870,15 @@ void MacroAssembler::PushStackHandler() {
   Push(Immediate(0));  // Padding.
 
   // Link the current handler as the next handler.
-  ExternalReference handler_address =
-      ExternalReference::Create(IsolateAddressId::kHandlerAddress, isolate());
-  Push(ExternalReferenceAsOperand(handler_address));
+  Push(AsMemOperand(IsolateFieldId::kHandler));
 
   // Set this new handler as the current one.
-  movq(ExternalReferenceAsOperand(handler_address), rsp);
+  movq(AsMemOperand(IsolateFieldId::kHandler), rsp);
 }
 
 void MacroAssembler::PopStackHandler() {
   static_assert(StackHandlerConstants::kNextOffset == 0);
-  ExternalReference handler_address =
-      ExternalReference::Create(IsolateAddressId::kHandlerAddress, isolate());
-  Pop(ExternalReferenceAsOperand(handler_address));
+  Pop(AsMemOperand(IsolateFieldId::kHandler));
   addq(rsp, Immediate(StackHandlerConstants::kSize - kSystemPointerSize));
 }
 
@@ -4598,7 +4600,7 @@ void MacroAssembler::EnterExitFrame(int extra_slots,
   ASM_CODE_COMMENT(this);
   DCHECK(frame_type == StackFrame::EXIT ||
          frame_type == StackFrame::BUILTIN_EXIT ||
-         frame_type == StackFrame::API_ACCESSOR_EXIT ||
+         frame_type == StackFrame::API_NAMED_ACCESSOR_EXIT ||
          frame_type == StackFrame::API_CALLBACK_EXIT);
 
   // Set up the frame structure on the stack.
@@ -4615,11 +4617,10 @@ void MacroAssembler::EnterExitFrame(int extra_slots,
   Push(Immediate(0));  // Saved entry sp, patched below.
 
   DCHECK(!AreAliased(rbp, kContextRegister, c_function));
-  using ER = ExternalReference;
-  Store(ER::Create(IsolateAddressId::kCEntryFPAddress, isolate()), rbp);
-  Store(ER::Create(IsolateAddressId::kContextAddress, isolate()),
-        kContextRegister);
-  Store(ER::Create(IsolateAddressId::kCFunctionAddress, isolate()), c_function);
+
+  movq(AsMemOperand(IsolateFieldId::kCEntryFP), rbp);
+  movq(AsMemOperand(IsolateFieldId::kContext), kContextRegister);
+  movq(AsMemOperand(IsolateFieldId::kCFunction), c_function);
 
 #ifdef V8_TARGET_OS_WIN
   // Note this is only correct under the assumption that the caller hasn't
@@ -4643,19 +4644,13 @@ void MacroAssembler::LeaveExitFrame() {
   leave();
 
   // Restore the current context from top and clear it in debug mode.
-  ExternalReference context_address =
-      ExternalReference::Create(IsolateAddressId::kContextAddress, isolate());
-  Operand context_operand = ExternalReferenceAsOperand(context_address);
-  movq(rsi, context_operand);
+  movq(rsi, AsMemOperand(IsolateFieldId::kContext));
 #ifdef DEBUG
-  Move(context_operand, Context::kNoContext);
+  Move(AsMemOperand(IsolateFieldId::kContext), Context::kNoContext);
 #endif
 
   // Clear the top frame.
-  ExternalReference c_entry_fp_address =
-      ExternalReference::Create(IsolateAddressId::kCEntryFPAddress, isolate());
-  Operand c_entry_fp_operand = ExternalReferenceAsOperand(c_entry_fp_address);
-  Move(c_entry_fp_operand, 0);
+  Move(AsMemOperand(IsolateFieldId::kCEntryFP), 0);
 }
 
 void MacroAssembler::LoadNativeContextSlot(Register dst, int index) {
@@ -4859,9 +4854,13 @@ void MacroAssembler::PreCheckSkippedWriteBarrier(Register object,
        Operand(kRootRegister, IsolateData::last_young_allocation_offset()));
   j(Condition::equal, ok);
 
+#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
+  JumpIfUnsignedLessThan(value, kContiguousReadOnlyReservationSize, ok);
+#else   // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
   // Write barier can also be removed if value is in read-only space.
   CheckPageFlag(value, scratch, MemoryChunk::kIsInReadOnlyHeapMask, not_zero,
                 ok);
+#endif  // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
 
   Label not_ok;
 
@@ -4912,14 +4911,14 @@ void MacroAssembler::CheckMarkBit(Register object, Register scratch0,
 #endif  // !V8_ENABLE_SANDBOX
   if (v8_flags.slow_debug_code) {
     Push(object);
-    movq(scratch1, Operand(scratch0, MemoryChunkMetadata::AreaStartOffset()));
+    movq(scratch1, Operand(scratch0, BasePage::AreaStartOffset()));
     MemoryChunkHeaderFromObject(scratch1, scratch1);
     MemoryChunkHeaderFromObject(object, object);
     cmpq(object, scratch1);
     Check(equal, AbortReason::kMetadataAreaStartDoesNotMatch);
     Pop(object);
   }
-  addq(scratch0, Immediate(MutablePageMetadata::MarkingBitmapOffset()));
+  addq(scratch0, Immediate(MutablePage::MarkingBitmapOffset()));
 
   movq(scratch1, object);
   andq(scratch1, Immediate(MemoryChunk::GetAlignmentMaskForAssembler()));

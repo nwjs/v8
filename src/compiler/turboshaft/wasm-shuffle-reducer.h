@@ -47,7 +47,7 @@ class DemandedElementAnalysis {
   static constexpr uint16_t k8x4Low = 0xF;
   static constexpr uint16_t k8x2Low = 0x3;
   static constexpr uint16_t k8x1Low = 0x1;
-  static constexpr int kMaxNumOperations = 50;
+  static constexpr int kMaxNumOperations = 150;
 
   // TODO(sparker): Add floating-point conversions:
   // - PromoteLow
@@ -515,7 +515,11 @@ class WasmShuffleReducer : public Next {
                   shuffle_bytes.begin());
       }
 
-      if (lanes == DemandedElementAnalysis::k8x2Low) {
+      if (lanes == DemandedElementAnalysis::k8x1Low) {
+        return __ Simd128Shuffle(og_left, og_right,
+                                 Simd128ShuffleOp::Kind::kI8x1,
+                                 shuffle_bytes.data());
+      } else if (lanes == DemandedElementAnalysis::k8x2Low) {
         return __ Simd128Shuffle(og_left, og_right,
                                  Simd128ShuffleOp::Kind::kI8x2,
                                  shuffle_bytes.data());

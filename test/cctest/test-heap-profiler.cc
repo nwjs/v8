@@ -42,6 +42,7 @@
 #include "src/base/strings.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/debug/debug.h"
+#include "src/flags/flags.h"
 #include "src/handles/global-handles.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/pretenuring-handler.h"
@@ -2099,8 +2100,7 @@ TEST(NativeSnapshotObjectIdMoving) {
     auto local = v8::Local<v8::String>::New(isolate, wrapper);
     i::DirectHandle<i::String> internal = i::Cast<i::String>(
         v8::Utils::OpenDirectHandle(*v8::Local<v8::String>::Cast(local)));
-    i::heap::ForceEvacuationCandidate(
-        i::PageMetadata::FromHeapObject(*internal));
+    i::heap::ForceEvacuationCandidate(i::NormalPage::FromHeapObject(*internal));
   }
   i::heap::InvokeMajorGC(CcTest::heap());
 
@@ -4348,7 +4348,7 @@ TEST(SamplingHeapProfilerPretenuredInlineAllocations) {
   if (i::v8_flags.gc_global || i::v8_flags.stress_compaction ||
       i::v8_flags.stress_incremental_marking ||
       i::v8_flags.stress_concurrent_allocation ||
-      i::v8_flags.single_generation) {
+      i::v8_flags.single_generation || i::v8_flags.scavenger_chaos_mode) {
     return;
   }
 
@@ -4376,7 +4376,7 @@ TEST(SamplingHeapProfilerPretenuredInlineAllocations) {
                      "  return elements[number_elements - 1];"
                      "};"
                      "%%PrepareFunctionForOptimization(f);"
-                     "f(); gc();"
+                     "f(); gc({type: 'minor'});"
                      "f(); f();"
                      "%%OptimizeFunctionOnNextCall(f);"
                      "f();"

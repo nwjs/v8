@@ -355,6 +355,12 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_UNDEFINED_DOUBLE_BOOL false
 #endif
 
+#ifdef V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
+#define V8_EXPERIMENTAL_TSA_BUILTINS_BOOL true
+#else
+#define V8_EXPERIMENTAL_TSA_BUILTINS_BOOL false
+#endif
+
 #define V8_STACK_ALLOCATED CPPGC_STACK_ALLOCATED
 
 // Superclass for classes only using static method functions.
@@ -696,6 +702,9 @@ constexpr int kSimd128Size = 16;
 // Half of 128 bit SIMD value size.
 constexpr int kSimd128HalfSize = kSimd128Size / 2;
 
+// Quarter of 128 bit SIMD value size.
+constexpr int kSimd128QuarterSize = kSimd128Size / 4;
+
 // 256 bit SIMD value size.
 constexpr int kSimd256Size = 32;
 
@@ -872,6 +881,13 @@ enum class CallApiCallbackMode {
 // This constant is used to indicate that feedback is embedded in the bytecode
 // itself.
 constexpr int kFeedbackIsEmbedded = -1;
+
+// This constant is used as an sentinel value for embedded feedback in
+// byteocode, indicating an uninitialized state.
+constexpr int kUninitializedEmbeddedFeedback = 0;
+
+// The bytecode operand index for embedded feedback.
+constexpr int kEmbeddedFeedbackOperandIndex = 1;
 
 // This constant is used as an undefined value when passing source positions.
 constexpr int kNoSourcePosition = -1;
@@ -1147,7 +1163,7 @@ class MaybeObjectDirectHandle;
 using MaybeObjectIndirectHandle = MaybeObjectHandle;
 template <typename T>
 class MaybeWeak;
-class MutablePageMetadata;
+class MutablePage;
 class MessageLocation;
 class ModuleScope;
 class Name;
@@ -1191,6 +1207,7 @@ class RelocInfo;
 class Scope;
 class ScopeInfo;
 class Script;
+class SharedFunctionInfo;
 class SimpleNumberDictionary;
 class Smi;
 template <typename Config, class Allocator = FreeStoreAllocationPolicy>
@@ -1231,6 +1248,10 @@ using JSAnyNotNumber =
     Union<BigInt, String, Symbol, Boolean, Null, Undefined, JSReceiver>;
 using JSCallable =
     Union<JSBoundFunction, JSFunction, JSObject, JSProxy, JSWrappedFunction>;
+using JSAnyOrSharedFunctionInfo =
+    Union<Smi, HeapNumber, BigInt, String, Symbol, Boolean, Null, Undefined,
+          JSReceiver, SharedFunctionInfo>;
+
 // Object prototypes are either JSReceivers or null -- they are not allowed to
 // be any other primitive value.
 using JSPrototype = Union<JSReceiver, Null>;
@@ -1635,6 +1656,8 @@ static constexpr GCEpoch kInitialGCEpoch = GCEpoch(0);
 #define USE_ALLOCATION_ALIGNMENT_HEAP_NUMBER_BOOL false
 
 enum class AccessMode { ATOMIC, NON_ATOMIC };
+
+enum class TypedArrayAccessMode { kRead, kWrite };
 
 enum MinimumCapacity {
   USE_DEFAULT_MINIMUM_CAPACITY,
@@ -2591,6 +2614,24 @@ enum class CachedTieringDecision : int32_t {
 #define V8_ENABLE_SPARKPLUG_PLUS
 #endif
 
+#ifdef V8_ENABLE_SPARKPLUG_PLUS
+#define IF_SPARKPLUG_PLUS(V, ...) EXPAND(V(__VA_ARGS__))
+
+#define TYPED_STRICTEQUAL_STUB_LIST(V) \
+  V(None)                              \
+  V(SignedSmall)                       \
+  V(Number)                            \
+  V(InternalizedString)                \
+  V(String)                            \
+  V(Symbol)                            \
+  V(Receiver)                          \
+  V(Any)
+#else
+#define IF_SPARKPLUG_PLUS(V, ...)
+
+#define TYPED_STRICTEQUAL_STUB_LIST(V)
+#endif  // V8_ENABLE_SPARKPLUG_PLUS
+
 enum class SpeculationMode {
   kAllowSpeculation = 0,
   kDisallowBoundsCheckSpeculation = 1,
@@ -2642,29 +2683,6 @@ enum class AliasingKind {
   kCombine,
   // SIMD128 Registers are independent of every other size (e.g Riscv)
   kIndependent
-};
-
-#define FOR_EACH_ISOLATE_ADDRESS_NAME(C)                            \
-  C(Handler, handler)                                               \
-  C(CEntryFP, c_entry_fp)                                           \
-  C(CFunction, c_function)                                          \
-  C(Context, context)                                               \
-  C(Exception, exception)                                           \
-  C(TopmostScriptHavingContext, topmost_script_having_context)      \
-  C(PendingHandlerContext, pending_handler_context)                 \
-  C(PendingHandlerEntrypoint, pending_handler_entrypoint)           \
-  C(PendingHandlerConstantPool, pending_handler_constant_pool)      \
-  C(PendingHandlerFP, pending_handler_fp)                           \
-  C(PendingHandlerSP, pending_handler_sp)                           \
-  C(NumFramesAbovePendingHandler, num_frames_above_pending_handler) \
-  C(IsOnCentralStackFlag, is_on_central_stack_flag)                 \
-  C(JSEntrySP, js_entry_sp)
-
-enum IsolateAddressId {
-#define DECLARE_ENUM(CamelName, hacker_name) k##CamelName##Address,
-  FOR_EACH_ISOLATE_ADDRESS_NAME(DECLARE_ENUM)
-#undef DECLARE_ENUM
-      kIsolateAddressCount
 };
 
 // The reason for a WebAssembly trap.

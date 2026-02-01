@@ -1678,15 +1678,14 @@ class GraphBuildingNodeProcessor {
             TSCallDescriptor::Create(call_descriptor, CanThrow::kYes,
                                      lazy_deopt_on_throw, graph_zone()));
 
-    return maglev::ProcessResult::kContinue;
-  }
+    // Throw is a block terminator in Maglev but not in Turboshaft (because it's
+    // hard to make it one in Turboshaft because it's not a Machine-level
+    // operation), so we insert an Unreachable to end the current block here.
+    static_assert(std::is_base_of_v<maglev::ControlNode, maglev::Throw>,
+                  "Remove the following Unreachable if Throw isn't a block "
+                  "terminator in Maglev anymore.");
+    __ Unreachable();
 
-  maglev::ProcessResult Process(maglev::DeoptIfHole* node,
-                                const maglev::ProcessingState& state) {
-    GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
-    __ DeoptimizeIf(RootEqual(node->ValueInput(), RootIndex::kTheHoleValue),
-                    frame_state, DeoptimizeReason::kHole,
-                    node->eager_deopt_info()->feedback_to_update());
     return maglev::ProcessResult::kContinue;
   }
 
@@ -3163,9 +3162,10 @@ class GraphBuildingNodeProcessor {
 
   template <typename NodeT>
   maglev::ProcessResult ProcessAbstractLoadTaggedField(
-      NodeT* node, const maglev::ProcessingState& state) {
+      NodeT* node, MemoryRepresentation mem_repr) {
     V<Object> value =
-        __ LoadTaggedField(Map(node->ValueInput()), node->offset());
+        __ Load(Map(node->ValueInput()), LoadOp::Kind::TaggedBase(), mem_repr,
+                node->offset());
     SetMap(node, value);
 
     if (generator_analyzer_.has_header_bypasses() &&
@@ -3182,11 +3182,16 @@ class GraphBuildingNodeProcessor {
   }
   maglev::ProcessResult Process(maglev::LoadTaggedField* node,
                                 const maglev::ProcessingState& state) {
-    return ProcessAbstractLoadTaggedField(node, state);
+    MemoryRepresentation mem_repr = MemoryRepresentation::AnyTagged();
+    if (node->load_type() == maglev::LoadType::kSmi) {
+      mem_repr = MemoryRepresentation::TaggedSigned();
+    }
+    return ProcessAbstractLoadTaggedField(node, mem_repr);
   }
   maglev::ProcessResult Process(maglev::LoadContextSlotNoCells* node,
                                 const maglev::ProcessingState& state) {
-    return ProcessAbstractLoadTaggedField(node, state);
+    return ProcessAbstractLoadTaggedField(node,
+                                          MemoryRepresentation::AnyTagged());
   }
   maglev::ProcessResult Process(maglev::LoadContextSlot* node,
                                 const maglev::ProcessingState& state) {
@@ -3203,13 +3208,11 @@ class GraphBuildingNodeProcessor {
             __ LoadField<Word32>(slot, AccessBuilder::ForContextCellState());
         static_assert(ContextCell::State::kConst == 0);
         static_assert(ContextCell::State::kSmi == 1);
-        IF (__ Int32LessThanOrEqual(slot_state,
-                                    __ Word32Constant(ContextCell::kSmi))) {
+        IF (__ Int32LessThanOrEqual(slot_state, ContextCell::kSmi)) {
           result = __ LoadField<Object>(
               slot, AccessBuilder::ForContextCellTaggedValue());
         } ELSE {
-          IF (__ Word32Equal(slot_state,
-                             __ Word32Constant(ContextCell::kInt32))) {
+          IF (__ Word32Equal(slot_state, ContextCell::kInt32)) {
             result = V<Number>::Cast(__ ConvertUntaggedToJSPrimitive(
                 __ LoadField<Word32>(slot,
                                      AccessBuilder::ForContextCellInt32Value()),
@@ -3697,11 +3700,12 @@ class GraphBuildingNodeProcessor {
     return maglev::ProcessResult::kContinue;
   }
 
-  maglev::ProcessResult Process(maglev::CheckTypedArrayNotDetached* node,
+  maglev::ProcessResult Process(maglev::CheckTypedArrayValid* node,
                                 const maglev::ProcessingState& state) {
     GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
     __ DeoptimizeIf(
-        __ ArrayBufferIsDetached(Map<JSArrayBufferView>(node->ValueInput())),
+        __ ArrayBufferNotValid(Map<JSArrayBufferView>(node->ValueInput()),
+                               node->access_mode()),
         frame_state, DeoptimizeReason::kArrayBufferWasDetached,
         node->eager_deopt_info()->feedback_to_update());
 
@@ -3828,7 +3832,7 @@ class GraphBuildingNodeProcessor {
                            ConvertWord32ToJSBool(__ RootEqual(
                                input, RootIndex::kFalseValue, isolate_)),
                            RegisterRepresentation::Tagged(), BranchHint::kNone,
-                           SelectOp::Implementation::kBranch);
+                           SelectOp::Implementation::kForceBranch);
         break;
       case interpreter::TestTypeOfFlags::LiteralFlag::kUndefined:
         result = __ Select(__ RootEqual(input, RootIndex::kNullValue, isolate_),
@@ -3837,7 +3841,7 @@ class GraphBuildingNodeProcessor {
                                input, ObjectIsOp::Kind::kUndetectable,
                                ObjectIsOp::InputAssumptions::kNone)),
                            RegisterRepresentation::Tagged(), BranchHint::kNone,
-                           SelectOp::Implementation::kBranch);
+                           SelectOp::Implementation::kForceBranch);
         break;
       case interpreter::TestTypeOfFlags::LiteralFlag::kObject:
         result = __ Select(__ ObjectIs(input, ObjectIsOp::Kind::kNonCallable,
@@ -3846,7 +3850,7 @@ class GraphBuildingNodeProcessor {
                            ConvertWord32ToJSBool(__ RootEqual(
                                input, RootIndex::kNullValue, isolate_)),
                            RegisterRepresentation::Tagged(), BranchHint::kNone,
-                           SelectOp::Implementation::kBranch);
+                           SelectOp::Implementation::kForceBranch);
         break;
       case interpreter::TestTypeOfFlags::LiteralFlag::kOther:
         UNREACHABLE();  // Should never be emitted.
@@ -4422,8 +4426,7 @@ class GraphBuildingNodeProcessor {
   maglev::ProcessResult Process(maglev::Int32BitwiseNot* node,
                                 const maglev::ProcessingState& state) {
     // Turboshaft doesn't have a bitwise Not operator; we instead use "^ -1".
-    SetMap(node,
-           __ Word32BitwiseXor(Map(node->ValueInput()), __ Word32Constant(-1)));
+    SetMap(node, __ Word32BitwiseXor(Map(node->ValueInput()), -1));
     return maglev::ProcessResult::kContinue;
   }
   maglev::ProcessResult Process(maglev::Int32AbsWithOverflow* node,
@@ -4920,6 +4923,21 @@ class GraphBuildingNodeProcessor {
     return maglev::ProcessResult::kContinue;
   }
 
+  template <Either<maglev::CheckedFloat64ToSmiSizedInt32,
+                   maglev::CheckedHoleyFloat64ToSmiSizedInt32>
+                T>
+  maglev::ProcessResult Process(T* node, const maglev::ProcessingState& state) {
+    GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
+    V<Word32> as_word32 = __ ChangeFloat64ToInt32OrDeopt(
+        Map(node->ValueInput()), frame_state,
+        CheckForMinusZeroMode::kCheckForMinusZero,
+        node->eager_deopt_info()->feedback_to_update());
+    DeoptIfInt32IsNotSmi(as_word32, frame_state,
+                         node->eager_deopt_info()->feedback_to_update());
+    SetMap(node, as_word32);
+    return maglev::ProcessResult::kContinue;
+  }
+
   template <
       Either<maglev::UnsafeFloat64ToInt32, maglev::UnsafeHoleyFloat64ToInt32> T>
   maglev::ProcessResult Process(T* node, const maglev::ProcessingState& state) {
@@ -5141,7 +5159,7 @@ class GraphBuildingNodeProcessor {
     SetMap(node,
            __ Select(cond, undefined_value_, Map<Object>(node->ObjectInput()),
                      RegisterRepresentation::Tagged(), BranchHint::kNone,
-                     SelectOp::Implementation::kBranch));
+                     SelectOp::Implementation::kForceBranch));
     return maglev::ProcessResult::kContinue;
   }
   maglev::ProcessResult Process(maglev::ConvertReceiver* node,
@@ -5332,6 +5350,20 @@ class GraphBuildingNodeProcessor {
     return maglev::ProcessResult::kContinue;
   }
 
+  maglev::ProcessResult Process(maglev::AssumeMap* node,
+                                const maglev::ProcessingState&) {
+    __ AssumeMap(Map(node->ObjectInput()), node->maps().Clone(graph_zone()));
+    return maglev::ProcessResult::kContinue;
+  }
+
+  maglev::ProcessResult Process(maglev::TurbofanStaticAssert* node,
+                                const maglev::ProcessingState&) {
+    V<Word32> condition = __ TaggedEqual(
+        Map(node->CheckInput()), __ HeapConstant(local_factory_->true_value()));
+    __ StaticAssert(condition, "%TurbofanStaticAssert");
+    return maglev::ProcessResult::kContinue;
+  }
+
   maglev::ProcessResult Process(maglev::MajorGCForCompilerTesting* node,
                                 const maglev::ProcessingState&) {
     __ MajorGCForCompilerTesting();
@@ -5466,6 +5498,16 @@ class GraphBuildingNodeProcessor {
     GOTO(end);
 
     BIND(abort);
+#ifdef DEBUG
+    if (v8_flags.turboshaft_enable_debug_features) {
+      __ DebugPrint(
+          std::format(
+              "n{}: AssertRangeInt32: expected range [{}, {}], got value ",
+              maglev::GetCurrentGraphLabeller()->NodeId(node),
+              *node->range().min(), *node->range().max()),
+          value);
+    }
+#endif  // DEBUG
     __ RuntimeAbort(AbortReason::kUnexpectedValue);
 
     BIND(end);
@@ -5490,6 +5532,17 @@ class GraphBuildingNodeProcessor {
     GOTO(end);
 
     BIND(abort);
+#ifdef DEBUG
+    if (v8_flags.turboshaft_enable_debug_features) {
+      __ DebugPrint(
+          std::format(
+              "n{}: AssertRangeFloat64: expected range [{}, {}], got value ",
+              maglev::GetCurrentGraphLabeller()->NodeId(node),
+              node->range().min() ? *node->range().min() : -INFINITY,
+              node->range().max() ? *node->range().max() : +INFINITY),
+          value);
+    }
+#endif  // DEBUG
     __ RuntimeAbort(AbortReason::kUnexpectedValue);
 
     BIND(end);
@@ -6377,7 +6430,7 @@ class GraphBuildingNodeProcessor {
     V<Boolean> false_idx = __ HeapConstant(local_factory_->false_value());
     if (flip) std::swap(true_idx, false_idx);
     return __ Select(b, true_idx, false_idx, RegisterRepresentation::Tagged(),
-                     BranchHint::kNone, SelectOp::Implementation::kBranch);
+                     BranchHint::kNone, SelectOp::Implementation::kForceBranch);
   }
 
   V<Boolean> ConvertWord64ToJSBool(V<Word64> b, bool flip = false) {
@@ -6386,16 +6439,16 @@ class GraphBuildingNodeProcessor {
     if (flip) std::swap(true_idx, false_idx);
     return __ Select(__ Word64Equal(b, 0), false_idx, true_idx,
                      RegisterRepresentation::Tagged(), BranchHint::kNone,
-                     SelectOp::Implementation::kBranch);
+                     SelectOp::Implementation::kForceBranch);
   }
 
   V<Boolean> ConvertWordPtrToJSBool(V<WordPtr> b, bool flip = false) {
     V<Boolean> true_idx = __ HeapConstant(local_factory_->true_value());
     V<Boolean> false_idx = __ HeapConstant(local_factory_->false_value());
     if (flip) std::swap(true_idx, false_idx);
-    return __ Select(__ WordPtrEqual(b, __ WordPtrConstant(0)), false_idx,
-                     true_idx, RegisterRepresentation::Tagged(),
-                     BranchHint::kNone, SelectOp::Implementation::kBranch);
+    return __ Select(__ WordPtrEqual(b, 0), false_idx, true_idx,
+                     RegisterRepresentation::Tagged(), BranchHint::kNone,
+                     SelectOp::Implementation::kForceBranch);
   }
 
   // This function corresponds to MaglevAssembler::ToBoolean.

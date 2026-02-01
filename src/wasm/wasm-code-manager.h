@@ -53,7 +53,9 @@ class NamesProvider;
 class NativeModule;
 struct WasmCompilationResult;
 class WasmEngine;
-class WasmImportWrapperCache;
+template <typename CacheKey>
+class WasmWrapperCache;
+class WasmWrapperHandle;
 struct WasmModule;
 enum class WellKnownImport : uint8_t;
 
@@ -393,7 +395,8 @@ class V8_EXPORT_PRIVATE WasmCode final {
 
  private:
   friend class NativeModule;
-  friend class WasmImportWrapperCache;
+  template <typename CacheKey>
+  friend class WasmWrapperCache;
 
   WasmCode(NativeModule* native_module, int index,
            base::Vector<uint8_t> instructions, int stack_slots, int ool_spills,
@@ -958,16 +961,12 @@ class V8_EXPORT_PRIVATE NativeModule final {
     return coverage_data_;
   }
 
-  void set_continuation_wrapper(WasmCode* wrapper) {
-    continuation_wrapper_ = wrapper;
-  }
-
-  WasmCode* continuation_wrapper() {
-    DCHECK_NOT_NULL(continuation_wrapper_);
-    return continuation_wrapper_;
-  }
-
   DelayedCounterUpdates* counter_updates() { return &counter_updates_; }
+
+  void RegisterStackEntryWrapper(std::shared_ptr<WasmWrapperHandle> wrapper) {
+    base::LockGuard<base::Mutex> guard(stack_wrapper_mutex_);
+    stack_entry_wrappers_.insert(std::move(wrapper));
+  }
 
  private:
   friend class WasmCode;
@@ -1174,14 +1173,17 @@ class V8_EXPORT_PRIVATE NativeModule final {
   std::unique_ptr<std::atomic<const MachineSignature*>[]> fast_api_signatures_;
 
   std::shared_ptr<WasmModuleCoverageData> coverage_data_;
-  // TODO(thibaudm): Share the wrappers across modules, and cache them per
-  // signature once we support arguments and return values.
-  WasmCode* continuation_wrapper_{nullptr};
 
   // The native module does not belong to an isolate, so we cannot immediately
   // update counters in an isolate. Store them here instead and publish them the
   // next time we get hold of an isolate.
   DelayedCounterUpdates counter_updates_;
+
+  // The stack wrappers are compiled lazily and shared across modules, but the
+  // cache itself only holds weak pointers. Keep strong pointers in the module
+  // to keep them alive.
+  base::Mutex stack_wrapper_mutex_;
+  std::unordered_set<std::shared_ptr<WasmWrapperHandle>> stack_entry_wrappers_;
 };
 
 class V8_EXPORT_PRIVATE WasmCodeManager final {
@@ -1241,7 +1243,8 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   friend class WasmCodeAllocator;
   friend class WasmCodeLookupCache;
   friend class WasmEngine;
-  friend class WasmImportWrapperCache;
+  template <typename CacheKey>
+  friend class WasmWrapperCache;
 
   std::shared_ptr<NativeModule> NewNativeModule(
       WasmEnabledFeatures enabled_features,

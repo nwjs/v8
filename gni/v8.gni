@@ -61,8 +61,7 @@ declare_args() {
   # is still not accessible unless --harmony-temporal is enabled at runtime)
   #
   # Furthermore, some architectures don't have Rust toolchains in Chromium
-  v8_enable_temporal_support = !(defined(build_with_node) && build_with_node) &&
-                               target_cpu != "ppc64" && target_cpu != "s390x"
+  v8_enable_temporal_support = !(defined(build_with_node) && build_with_node)
 
   # Use static libraries instead of source_sets.
   v8_static_library = false
@@ -324,7 +323,8 @@ if (v8_enable_pointer_compression == "") {
 # Windows, Linux, MacOS and tvOS.
 is_drumbrake_supported =
     v8_enable_webassembly && v8_enable_pointer_compression &&
-    (v8_current_cpu == "x64" || v8_current_cpu == "arm64") &&
+    (v8_current_cpu == "x64" || v8_current_cpu == "arm64" ||
+     v8_current_cpu == "riscv64") &&
     (target_os == "win" || target_os == "linux" || target_os == "mac" ||
      target_os == "ios")
 

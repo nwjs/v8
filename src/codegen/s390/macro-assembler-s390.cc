@@ -20,7 +20,7 @@
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames-inl.h"
-#include "src/heap/mutable-page-metadata.h"
+#include "src/heap/mutable-page.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
 #include "src/objects/smi.h"
@@ -828,9 +828,9 @@ void MacroAssembler::MultiPopV128(DoubleRegList dregs, Register scratch,
 void MacroAssembler::MultiPushF64OrV128(DoubleRegList dregs, Register scratch,
                                         Register location) {
 #if V8_ENABLE_WEBASSEMBLY
-  bool generating_bultins =
+  bool generating_builtins =
       isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
-  if (generating_bultins) {
+  if (generating_builtins) {
     Label push_doubles, simd_pushed;
     Move(r1, ExternalReference::supports_wasm_simd_128_address());
     LoadU8(r1, MemOperand(r1));
@@ -862,9 +862,9 @@ void MacroAssembler::MultiPushF64OrV128(DoubleRegList dregs, Register scratch,
 void MacroAssembler::MultiPopF64OrV128(DoubleRegList dregs, Register scratch,
                                        Register location) {
 #if V8_ENABLE_WEBASSEMBLY
-  bool generating_bultins =
+  bool generating_builtins =
       isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
-  if (generating_bultins) {
+  if (generating_builtins) {
     Label pop_doubles, simd_popped;
     Move(r1, ExternalReference::supports_wasm_simd_128_address());
     LoadU8(r1, MemOperand(r1));
@@ -1610,15 +1610,13 @@ void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
                                     StackFrame::Type frame_type) {
   DCHECK(frame_type == StackFrame::EXIT ||
          frame_type == StackFrame::BUILTIN_EXIT ||
-         frame_type == StackFrame::API_ACCESSOR_EXIT ||
+         frame_type == StackFrame::API_NAMED_ACCESSOR_EXIT ||
          frame_type == StackFrame::API_CALLBACK_EXIT);
 
   // Set up the frame structure on the stack.
   DCHECK_EQ(2 * kSystemPointerSize, ExitFrameConstants::kCallerSPDisplacement);
   DCHECK_EQ(1 * kSystemPointerSize, ExitFrameConstants::kCallerPCOffset);
   DCHECK_EQ(0 * kSystemPointerSize, ExitFrameConstants::kCallerFPOffset);
-
-  using ER = ExternalReference;
 
   // This is an opportunity to build a frame to wrap
   // all of the pushes that have happened inside of V8
@@ -1634,12 +1632,8 @@ void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
   }
 
   // Save the frame pointer and the context in top.
-  ER c_entry_fp_address =
-      ER::Create(IsolateAddressId::kCEntryFPAddress, isolate());
-  StoreU64(fp, ExternalReferenceAsOperand(c_entry_fp_address, no_reg));
-
-  ER context_address = ER::Create(IsolateAddressId::kContextAddress, isolate());
-  StoreU64(cp, ExternalReferenceAsOperand(context_address, no_reg));
+  StoreU64(fp, AsMemOperand(IsolateFieldId::kCEntryFP));
+  StoreU64(cp, AsMemOperand(IsolateFieldId::kContext));
 
   lay(sp, MemOperand(sp, -(stack_space + 1) * kSystemPointerSize));
 
@@ -1676,22 +1670,17 @@ int MacroAssembler::ActivationFrameAlignment() {
 }
 
 void MacroAssembler::LeaveExitFrame(Register scratch) {
-  using ER = ExternalReference;
-
   // Restore current context from top and clear it in debug mode.
-  ER context_address = ER::Create(IsolateAddressId::kContextAddress, isolate());
-  LoadU64(cp, ExternalReferenceAsOperand(context_address, no_reg));
+  LoadU64(cp, AsMemOperand(IsolateFieldId::kContext));
 
 #ifdef DEBUG
   mov(scratch, Operand(Context::kNoContext));
-  StoreU64(scratch, ExternalReferenceAsOperand(context_address, no_reg));
+  StoreU64(scratch, AsMemOperand(IsolateFieldId::kContext));
 #endif
 
   // Clear the top frame.
-  ER c_entry_fp_address =
-      ER::Create(IsolateAddressId::kCEntryFPAddress, isolate());
   mov(scratch, Operand::Zero());
-  StoreU64(scratch, ExternalReferenceAsOperand(c_entry_fp_address, no_reg));
+  StoreU64(scratch, AsMemOperand(IsolateFieldId::kCEntryFP));
 
   // Tear down the exit frame, pop the arguments, and return.
   LeaveFrame(StackFrame::EXIT);
@@ -1922,10 +1911,6 @@ void MacroAssembler::PushStackHandler() {
   static_assert(StackHandlerConstants::kSize == 2 * kSystemPointerSize);
   static_assert(StackHandlerConstants::kNextOffset == 0 * kSystemPointerSize);
 
-  // Link the current handler as the next handler.
-  Move(r7,
-       ExternalReference::Create(IsolateAddressId::kHandlerAddress, isolate()));
-
   // Buy the full stack frame for 5 slots.
   lay(sp, MemOperand(sp, -StackHandlerConstants::kSize));
 
@@ -1934,10 +1919,10 @@ void MacroAssembler::PushStackHandler() {
   StoreU64(r0, MemOperand(sp));  // Padding.
 
   // Copy the old handler into the next handler slot.
-  MoveChar(MemOperand(sp, StackHandlerConstants::kNextOffset), MemOperand(r7),
-           Operand(kSystemPointerSize));
+  MoveChar(MemOperand(sp, StackHandlerConstants::kNextOffset),
+           AsMemOperand(IsolateFieldId::kHandler), Operand(kSystemPointerSize));
   // Set this new handler as the current one.
-  StoreU64(sp, MemOperand(r7));
+  StoreU64(sp, AsMemOperand(IsolateFieldId::kHandler));
 }
 
 void MacroAssembler::PopStackHandler() {
@@ -1946,9 +1931,7 @@ void MacroAssembler::PopStackHandler() {
 
   // Pop the Next Handler into r3 and store it into Handler Address reference.
   Pop(r3);
-  Move(ip,
-       ExternalReference::Create(IsolateAddressId::kHandlerAddress, isolate()));
-  StoreU64(r3, MemOperand(ip));
+  StoreU64(r3, AsMemOperand(IsolateFieldId::kHandler));
 
   Drop(1);  // Drop padding.
 }
@@ -2758,8 +2741,12 @@ void MacroAssembler::PreCheckSkippedWriteBarrier(Register object,
     b(to_condition(Condition::kEqual), ok);
   }
 
+#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
+  JumpIfUnsignedLessThan(value, kContiguousReadOnlyReservationSize, ok);
+#else   // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
   // Write barier can also be removed if value is in read-only space.
   CheckPageFlag(value, scratch, MemoryChunk::kIsInReadOnlyHeapMask, ne, ok);
+#endif  // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
 
   Label not_ok;
 
@@ -4959,6 +4946,12 @@ void MacroAssembler::JumpIfEqual(Register x, int32_t y, Label* dest) {
 
 void MacroAssembler::JumpIfLessThan(Register x, int32_t y, Label* dest) {
   CmpS32(x, Operand(y));
+  blt(dest);
+}
+
+void MacroAssembler::JumpIfUnsignedLessThan(Register x, int32_t y,
+                                            Label* dest) {
+  CmpU32(x, Operand(y));
   blt(dest);
 }
 

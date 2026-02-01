@@ -27,6 +27,8 @@
 #include "src/objects/module.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/property-details.h"
+#include "src/objects/shared-function-info-inl.h"
+#include "src/objects/shared-function-info.h"
 #include "src/objects/smi.h"
 
 namespace v8 {
@@ -393,7 +395,7 @@ void AccessorAssembler::HandleLoadCallbackProperty(
       CAST(LoadDescriptorValue(LoadMap(holder), descriptor));
 
   exit_point->ReturnCallBuiltin(Builtin::kCallApiGetter, p->context(),
-                                p->receiver(), holder, accessor_info);
+                                accessor_info, holder, p->receiver());
 }
 
 void AccessorAssembler::HandleLoadAccessor(
@@ -849,7 +851,7 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
       ExpectedReceiverMode expected_receiver_mode =
           p->IsLoadSuperIC() ? kExpectingAnyReceiver : kExpectingJSReceiver;
 
-      TNode<Object> value = CallGetterIfAccessor(
+      TNode<Object> value = CallGetterIfAccessorAndBailoutOnLazyClosures(
           var_value.value(), CAST(holder), var_details.value(), p->context(),
           p->receiver(), expected_receiver_mode, p->name(), miss);
       exit_point->Return(value);
@@ -938,7 +940,7 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
     ExpectedReceiverMode expected_receiver_mode =
         p->IsLoadSuperIC() ? kExpectingAnyReceiver : kExpectingJSReceiver;
 
-    exit_point->Return(CallGetterIfAccessor(
+    exit_point->Return(CallGetterIfAccessorAndBailoutOnLazyClosures(
         value, std::nullopt, details, p->context(), p->receiver(),
         expected_receiver_mode, p->name(), miss));
   }
@@ -1253,7 +1255,7 @@ void AccessorAssembler::HandleLoadICProtoHandler(
           ExpectedReceiverMode expected_receiver_mode =
               p->IsLoadSuperIC() ? kExpectingAnyReceiver : kExpectingJSReceiver;
 
-          TNode<Object> value = CallGetterIfAccessor(
+          TNode<Object> value = CallGetterIfAccessorAndBailoutOnLazyClosures(
               var_value.value(), CAST(var_holder->value()), var_details.value(),
               p->context(), p->receiver(), expected_receiver_mode, p->name(),
               miss);
@@ -1591,7 +1593,7 @@ void AccessorAssembler::HandleStoreICHandlerCase(
         // StoreGlobalIC_PropertyCellCase doesn't support definition
         // of private fields, so handle them in runtime.
         GotoIfNot(IsSymbol(CAST(p->name())), &proceed_defining);
-        Branch(IsPrivateName(CAST(p->name())), &if_slow, &proceed_defining);
+        Branch(IsAnyPrivateName(CAST(p->name())), &if_slow, &proceed_defining);
         BIND(&proceed_defining);
       }
 
@@ -2651,8 +2653,8 @@ void AccessorAssembler::EmitElementLoad(
         TNode<JSArrayBuffer> buffer = LoadJSArrayBufferViewBuffer(array);
 
         // Bounds check (incl. detachedness check).
-        TNode<UintPtrT> length =
-            LoadVariableLengthJSTypedArrayLength(array, buffer, miss);
+        TNode<UintPtrT> length = LoadVariableLengthJSTypedArrayLength(
+            array, buffer, TypedArrayAccessMode::kRead, miss);
         Branch(UintPtrLessThan(intptr_index, length), &length_check_ok,
                out_of_bounds);
         BIND(&length_check_ok);
@@ -3008,9 +3010,14 @@ void AccessorAssembler::GenericPropertyLoad(
     ExpectedReceiverMode expected_receiver_mode =
         p->IsLoadSuperIC() ? kExpectingAnyReceiver : kExpectingJSReceiver;
 
-    TNode<Object> value = CallGetterIfAccessor(
-        var_value.value(), CAST(lookup_start_object), var_details.value(),
-        p->context(), p->receiver(), expected_receiver_mode, p->name(), slow);
+    TNode<JSAnyOrSharedFunctionInfo> value =
+        CAST(CallGetterIfAccessorAndBailoutOnLazyClosures(
+            var_value.value(), CAST(lookup_start_object), var_details.value(),
+            p->context(), p->receiver(), expected_receiver_mode, p->name(),
+            slow));
+
+    GotoIfLazyClosure(value, slow);
+
     Return(value);
   }
 
@@ -3052,6 +3059,8 @@ void AccessorAssembler::GenericPropertyLoad(
       Goto(slow);
 
       BIND(&return_value);
+
+      GotoIfLazyClosure(CAST(var_value.value()), slow);
       Return(var_value.value());
     }
 
@@ -3062,7 +3071,7 @@ void AccessorAssembler::GenericPropertyLoad(
       // For private names that don't exist on the receiver, we bail
       // to the runtime to throw. For private symbols, we just return
       // undefined.
-      Branch(IsPrivateName(CAST(name)), slow, &return_undefined);
+      Branch(IsAnyPrivateName(CAST(name)), slow, &return_undefined);
     }
 
     BIND(&return_undefined);
@@ -4747,7 +4756,7 @@ void AccessorAssembler::GenerateLoadICConstantFromPrototypeBaseline() {
     }
     BIND(&is_not_smi);
     {
-      TNode<Object> result = GetHeapObjectAssumeWeak(constant);
+      TNode<Object> result = GetHeapObjectAssumeWeak(constant, &miss);
       direct_exit.Return(result);
     }
   }

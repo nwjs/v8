@@ -26,7 +26,7 @@
 #include "src/compiler/osr.h"
 #include "src/execution/frame-constants.h"
 #include "src/heap/heap-write-barrier.h"
-#include "src/heap/mutable-page-metadata.h"
+#include "src/heap/mutable-page.h"
 #include "src/objects/code-kind.h"
 #include "src/objects/smi.h"
 #include "src/roots/roots-inl.h"
@@ -412,8 +412,13 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 #if V8_ENABLE_STICKY_MARK_BITS_BOOL
       // TODO(333906585): Optimize this path.
       Label stub_call_with_decompressed_value;
+#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
+      __ JumpIfUnsignedLessThan(value_, kContiguousReadOnlyReservationSize,
+                                exit());
+#else   // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
       __ CheckPageFlag(value_, scratch0_, MemoryChunk::kIsInReadOnlyHeapMask,
                        not_zero, exit());
+#endif  // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
       __ CheckMarkBit(value_, scratch0_, scratch1_, carry, exit());
       __ jmp(&stub_call_with_decompressed_value);
 

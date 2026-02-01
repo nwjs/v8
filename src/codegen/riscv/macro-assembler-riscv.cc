@@ -19,7 +19,7 @@
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames-inl.h"
-#include "src/heap/mutable-page-metadata.h"
+#include "src/heap/mutable-page.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
 #include "src/objects/heap-number.h"
@@ -207,6 +207,9 @@ void MacroAssembler::LoadCompressedTaggedRoot(Register destination,
 }
 
 void MacroAssembler::PushCommonFrame(Register marker_reg) {
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+  sspush_ra();
+#endif
   if (marker_reg.is_valid()) {
     Push(ra, fp, marker_reg);
     AddWord(fp, sp, Operand(kSystemPointerSize));
@@ -218,6 +221,9 @@ void MacroAssembler::PushCommonFrame(Register marker_reg) {
 
 void MacroAssembler::PushStandardFrame(Register function_reg) {
   int offset = -StandardFrameConstants::kContextOffset;
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+  sspush_ra();
+#endif
   if (function_reg.is_valid()) {
     Push(ra, fp, cp, function_reg, kJavaScriptCallArgCountRegister);
     offset += 2 * kSystemPointerSize;
@@ -692,9 +698,13 @@ void MacroAssembler::PreCheckSkippedWriteBarrier(Register object,
     Branch(ok, eq, scratch, Operand(scratch1));
   }
 
-  // The write barrier can also be removed if the value is in read-only space.
+#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
+  JumpIfUnsignedLessThan(value, kContiguousReadOnlyReservationSize, ok);
+#else   // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
+  // Write barier can also be removed if value is in read-only space.
   CheckPageFlag(value, scratch, MemoryChunk::kIsInReadOnlyHeapMask, not_equal,
                 ok);
+#endif  // !CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
 
   Label not_ok;
 
@@ -748,14 +758,16 @@ void MacroAssembler::CallVerifySkippedWriteBarrierStub(Register object,
 
 void MacroAssembler::MaybeJumpIfReadOnlyOrSmallSmi(Register value,
                                                    Label* dest) {
-#if V8_STATIC_ROOTS_BOOL
+#if V8_STATIC_ROOTS_BOOL && CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
   // Quick check for Read-only and small Smi values.
+  // This optimization requires contiguous compressed RO space to ensure RO
+  // space is at the beginning of the cage; otherwise, objects from other spaces
+  // could alias with low addresses.
   constexpr int kLastStaticRootPage =
       RoundUp<kRegularPageSize>(StaticReadOnlyRoot::kLastAllocatedRoot);
-  static_assert(kLastStaticRootPage <=
-                V8_CONTIGUOUS_COMPRESSED_RO_SPACE_SIZE_MB * MB);
-  JumpIfUnsignedLessThan(value, kLastStaticRootPage, dest);
-#endif  // V8_STATIC_ROOTS_BOOL
+  static_assert(kLastStaticRootPage <= kContiguousReadOnlyReservationSize);
+  JumpIfUnsignedLessThan(value, kContiguousReadOnlyReservationSize, dest);
+#endif  // V8_STATIC_ROOTS_BOOL && CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
 }
 
 // Clobbers object, address, value, and ra, if (ra_status == kRAHasBeenSaved)
@@ -822,6 +834,9 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
 
   // Record the actual write.
   if (ra_status == kRAHasNotBeenSaved) {
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+    sspush_ra();
+#endif
     push(ra);
   }
   Register slot_address = WriteBarrierDescriptor::SlotAddressRegister();
@@ -839,6 +854,9 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
   }
   if (ra_status == kRAHasNotBeenSaved) {
     pop(ra);
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+    sspopchk_ra();
+#endif
   }
   if (v8_flags.slow_debug_code) li(slot_address, Operand(kZapValue));
 
@@ -1947,59 +1965,61 @@ void MacroAssembler::ByteSwap(Register rd, Register rs, int operand_size,
   }
   UseScratchRegisterScope temps(this);
   temps.Include(t4, t6);
-  Register x0 = temps.Acquire();
-  Register x1 = temps.Acquire();
-  DCHECK(!AreAliased(rs, rd, x0, x1, scratch));
+  Register tmp0 = temps.Acquire();
+  Register tmp1 = temps.Acquire();
+  DCHECK(!AreAliased(rs, rd, tmp0, tmp1, scratch));
   BlockPoolsScope block_pools(this);
   if (operand_size == 4) {
     DCHECK((rd != t6) && (rs != t6));
     if (scratch == no_reg) {
-      ReverseBytesHelper<8>(rd, rs, x0, x1);
+      ReverseBytesHelper<8>(rd, rs, tmp0, tmp1);
       Sra64(rd, rd, 32);
     } else {
-      // Uint32_t x1 = 0x00FF00FF;
-      // x0 = (x0 << 16 | x0 >> 16);
-      // x0 = (((x0 & x1) << 8)  | ((x0 & (x1 << 8)) >> 8));
-      Register x2 = scratch;
-      li(x1, 0x00FF00FF);
-      Sll32(x0, rs, 16);
+      // Uint32_t tmp1 = 0x00FF00FF;
+      // tmp0 = (tmp0 << 16 | tmp0 >> 16);
+      // tmp0 = (((tmp0 & tmp1) << 8)  | ((tmp0 & (tmp1 << 8)) >> 8));
+      Register tmp2 = scratch;
+      li(tmp1, 0x00FF00FF);
+      Sll32(tmp0, rs, 16);
       Srl32(rd, rs, 16);
-      Or(x0, rd, x0);    // x0 <- x0 << 16 | x0 >> 16
-      And(x2, x0, x1);   // x2 <- x0 & 0x00FF00FF
-      Sll32(x2, x2, 8);  // x2 <- (x0 & x1) << 8
-      Sll32(x1, x1, 8);  // x1 <- 0xFF00FF00
-      And(rd, x0, x1);   // x0 & 0xFF00FF00
+      Or(tmp0, rd, tmp0);     // tmp0 <- tmp0 << 16 | tmp0 >> 16
+      And(tmp2, tmp0, tmp1);  // tmp2 <- tmp0 & 0x00FF00FF
+      Sll32(tmp2, tmp2, 8);   // tmp2 <- (tmp0 & tmp1) << 8
+      Sll32(tmp1, tmp1, 8);   // tmp1 <- 0xFF00FF00
+      And(rd, tmp0, tmp1);    // tmp0 & 0xFF00FF00
       Srl32(rd, rd, 8);
-      Or(rd, rd, x2);  // (((x0 & x1) << 8)  | ((x0 & (x1 << 8)) >> 8))
+      // (((tmp0 & tmp1) << 8)  | ((tmp0 & (tmp1 << 8)) >> 8))
+      Or(rd, rd, tmp2);
     }
   } else {
     DCHECK((rd != t6) && (rs != t6));
     if (scratch == no_reg) {
-      ReverseBytesHelper<8>(rd, rs, x0, x1);
+      ReverseBytesHelper<8>(rd, rs, tmp0, tmp1);
     } else {
-      // uinx24_t x1 = 0x0000FFFF0000FFFFl;
-      // uinx24_t x1 = 0x00FF00FF00FF00FFl;
-      // x0 = (x0 << 32 | x0 >> 32);
-      // x0 = (x0 & x1) << 16 | (x0 & (x1 << 16)) >> 16;
-      // x0 = (x0 & x1) << 8  | (x0 & (x1 << 8)) >> 8;
-      Register x2 = scratch;
-      li(x1, 0x0000FFFF0000FFFFl);
-      SllWord(x0, rs, 32);
+      // uinx24_t tmp1 = 0x0000FFFF0000FFFFl;
+      // uinx24_t tmp1 = 0x00FF00FF00FF00FFl;
+      // tmp0 = (tmp0 << 32 | tmp0 >> 32);
+      // tmp0 = (tmp0 & tmp1) << 16 | (tmp0 & (tmp1 << 16)) >> 16;
+      // tmp0 = (tmp0 & tmp1) << 8  | (tmp0 & (tmp1 << 8)) >> 8;
+      Register tmp2 = scratch;
+      li(tmp1, 0x0000FFFF0000FFFFl);
+      SllWord(tmp0, rs, 32);
       SrlWord(rd, rs, 32);
-      Or(x0, rd, x0);       // x0 <- x0 << 32 | x0 >> 32
-      And(x2, x0, x1);      // x2 <- x0 & 0x0000FFFF0000FFFF
-      SllWord(x2, x2, 16);  // x2 <- (x0 & 0x0000FFFF0000FFFF) << 16
-      SllWord(x1, x1, 16);  // x1 <- 0xFFFF0000FFFF0000
-      And(rd, x0, x1);      // rd <- x0 & 0xFFFF0000FFFF0000
-      SrlWord(rd, rd, 16);  // rd <- x0 & (x1 << 16)) >> 16
-      Or(x0, rd, x2);       // (x0 & x1) << 16 | (x0 & (x1 << 16)) >> 16;
-      li(x1, 0x00FF00FF00FF00FFl);
-      And(x2, x0, x1);     // x2 <- x0 & 0x00FF00FF00FF00FF
-      SllWord(x2, x2, 8);  // x2 <- (x0 & x1) << 8
-      SllWord(x1, x1, 8);  // x1 <- 0xFF00FF00FF00FF00
-      And(rd, x0, x1);
-      SrlWord(rd, rd, 8);  // rd <- (x0 & (x1 << 8)) >> 8
-      Or(rd, rd, x2);      // (((x0 & x1) << 8)  | ((x0 & (x1 << 8)) >> 8))
+      Or(tmp0, rd, tmp0);       // tmp0 <- tmp0 << 32 | tmp0 >> 32
+      And(tmp2, tmp0, tmp1);    // tmp2 <- tmp0 & 0x0000FFFF0000FFFF
+      SllWord(tmp2, tmp2, 16);  // tmp2 <- (tmp0 & 0x0000FFFF0000FFFF) << 16
+      SllWord(tmp1, tmp1, 16);  // tmp1 <- 0xFFFF0000FFFF0000
+      And(rd, tmp0, tmp1);      // rd <- tmp0 & 0xFFFF0000FFFF0000
+      SrlWord(rd, rd, 16);      // rd <- tmp0 & (tmp1 << 16)) >> 16
+      Or(tmp0, rd, tmp2);  // (tmp0 & tmp1) << 16 | (tmp0 & (tmp1 << 16)) >> 16;
+      li(tmp1, 0x00FF00FF00FF00FFl);
+      And(tmp2, tmp0, tmp1);   // tmp2 <- tmp0 & 0x00FF00FF00FF00FF
+      SllWord(tmp2, tmp2, 8);  // tmp2 <- (tmp0 & tmp1) << 8
+      SllWord(tmp1, tmp1, 8);  // tmp1 <- 0xFF00FF00FF00FF00
+      And(rd, tmp0, tmp1);
+      SrlWord(rd, rd, 8);  // rd <- (tmp0 & (tmp1 << 8)) >> 8
+      // (((tmp0 & tmp1) << 8)  | ((tmp0 & (tmp1 << 8)) >> 8))
+      Or(rd, rd, tmp2);
     }
   }
 }
@@ -4454,6 +4474,9 @@ void MacroAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
 
   // If we fell through then inline version didn't succeed - call stub
   // instead.
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+  sspush_ra();
+#endif
   push(ra);
   SubWord(sp, sp, Operand(kDoubleSize));  // Put input on stack.
   fsd(double_input, sp, 0);
@@ -4471,7 +4494,9 @@ void MacroAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
 
   AddWord(sp, sp, Operand(kDoubleSize));
   pop(ra);
-
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+  sspopchk_ra();
+#endif
   bind(&done);
 }
 
@@ -5594,15 +5619,12 @@ void MacroAssembler::PushStackHandler() {
 
   // Link the current handler as the next handler.
   UseScratchRegisterScope temps(this);
-  Register handler_address = temps.Acquire();
-  li(handler_address,
-     ExternalReference::Create(IsolateAddressId::kHandlerAddress, isolate()));
   Register handler = temps.Acquire();
-  LoadWord(handler, MemOperand(handler_address));
+  LoadWord(handler, AsMemOperand(IsolateFieldId::kHandler));
   push(handler);
 
   // Set this new handler as the current one.
-  StoreWord(sp, MemOperand(handler_address));
+  StoreWord(sp, AsMemOperand(IsolateFieldId::kHandler));
 }
 
 void MacroAssembler::PopStackHandler() {
@@ -5611,11 +5633,7 @@ void MacroAssembler::PopStackHandler() {
   AddWord(sp, sp,
           Operand(static_cast<intptr_t>(StackHandlerConstants::kSize -
                                         kSystemPointerSize)));
-  UseScratchRegisterScope temps(this);
-  Register scratch = temps.Acquire();
-  li(scratch,
-     ExternalReference::Create(IsolateAddressId::kHandlerAddress, isolate()));
-  StoreWord(a1, MemOperand(scratch));
+  StoreWord(a1, AsMemOperand(IsolateFieldId::kHandler));
 }
 
 void MacroAssembler::FPUCanonicalizeNaN(const DoubleRegister dst,
@@ -5626,7 +5644,15 @@ void MacroAssembler::FPUCanonicalizeNaN(const DoubleRegister dst,
   if (!IsDoubleZeroRegSet()) {
     LoadFPRImmediate(kDoubleRegZero, 0.0);
   }
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+  feq_d(scratch, src, src);
+  fmv_d(kScratchDoubleReg, src);
   fsub_d(dst, src, kDoubleRegZero);
+  Label not_nan;
+  Branch(&not_nan, ne, scratch, Operand(zero_reg));
+  fsgnj_d(dst, dst, kScratchDoubleReg);
+  bind(&not_nan);
 }
 
 void MacroAssembler::MovFromFloatResult(const DoubleRegister dst) {
@@ -6728,11 +6754,16 @@ void MacroAssembler::StubPrologue(StackFrame::Type type) {
 
 void MacroAssembler::Prologue() { PushStandardFrame(a1); }
 
-void MacroAssembler::EnterFrame(StackFrame::Type type) {
+void MacroAssembler::EnterFrame(StackFrame::Type type, ShadowStackStatus ss) {
   ASM_CODE_COMMENT(this);
   UseScratchRegisterScope temps(this);
   Register scratch = temps.Acquire();
   BlockPoolsScope block_pools(this);
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+  if (ss == ShadowStackStatus::kPush) {
+    sspush_ra();
+  }
+#endif
   Push(ra, fp);
   Move(fp, sp);
   if (!StackFrame::IsJavaScript(type)) {
@@ -6751,6 +6782,9 @@ void MacroAssembler::LeaveFrame(StackFrame::Type type) {
   AddWord(sp, fp, 2 * kSystemPointerSize);
   LoadWord(ra, MemOperand(fp, 1 * kSystemPointerSize));
   LoadWord(fp, MemOperand(fp, 0 * kSystemPointerSize));
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+  sspopchk_ra();
+#endif
 }
 
 void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
@@ -6758,7 +6792,7 @@ void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
   ASM_CODE_COMMENT(this);
   DCHECK(frame_type == StackFrame::EXIT ||
          frame_type == StackFrame::BUILTIN_EXIT ||
-         frame_type == StackFrame::API_ACCESSOR_EXIT ||
+         frame_type == StackFrame::API_NAMED_ACCESSOR_EXIT ||
          frame_type == StackFrame::API_CALLBACK_EXIT);
 
   // Set up the frame structure on the stack.
@@ -6776,11 +6810,12 @@ void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
   // fp - (2 + stack_space + alignment) == sp == [fp - kSPOffset] - top of the
   //   new stack (will contain saved ra)
 
-  using ER = ExternalReference;
-
   // Save registers and reserve room for saved entry sp.
   AddWord(sp, sp,
           -2 * kSystemPointerSize - ExitFrameConstants::kFixedFrameSizeFromFp);
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+  sspush_ra();
+#endif
   StoreWord(ra, MemOperand(sp, 3 * kSystemPointerSize));
   StoreWord(fp, MemOperand(sp, 2 * kSystemPointerSize));
 
@@ -6794,11 +6829,8 @@ void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
   }
 
   // Save the frame pointer and the context in top.
-  ER c_entry_fp_address =
-      ER::Create(IsolateAddressId::kCEntryFPAddress, isolate());
-  StoreWord(fp, ExternalReferenceAsOperand(c_entry_fp_address, no_reg));
-  ER context_address = ER::Create(IsolateAddressId::kContextAddress, isolate());
-  StoreWord(cp, ExternalReferenceAsOperand(context_address, no_reg));
+  StoreWord(fp, AsMemOperand(IsolateFieldId::kCEntryFP));
+  StoreWord(cp, AsMemOperand(IsolateFieldId::kContext));
 
   const int frame_alignment = MacroAssembler::ActivationFrameAlignment();
 
@@ -6821,27 +6853,25 @@ void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
 void MacroAssembler::LeaveExitFrame(Register scratch) {
   ASM_CODE_COMMENT(this);
   BlockPoolsScope block_pools(this);
-  using ER = ExternalReference;
   // Clear top frame.
   // Restore current context from top and clear it in debug mode.
-  ER context_address = ER::Create(IsolateAddressId::kContextAddress, isolate());
-  LoadWord(cp, ExternalReferenceAsOperand(context_address, no_reg));
+  LoadWord(cp, AsMemOperand(IsolateFieldId::kContext));
 
   if (v8_flags.debug_code) {
     li(scratch, Operand(Context::kNoContext));
-    StoreWord(scratch, ExternalReferenceAsOperand(context_address, no_reg));
+    StoreWord(scratch, AsMemOperand(IsolateFieldId::kContext));
   }
 
   // Clear the top frame.
-  ER c_entry_fp_address =
-      ER::Create(IsolateAddressId::kCEntryFPAddress, isolate());
-  StoreWord(zero_reg, ExternalReferenceAsOperand(c_entry_fp_address, no_reg));
+  StoreWord(zero_reg, AsMemOperand(IsolateFieldId::kCEntryFP));
 
   // Pop the arguments, restore registers, and return.
   Mv(sp, fp);  // Respect ABI stack constraint.
   LoadWord(fp, MemOperand(sp, ExitFrameConstants::kCallerFPOffset));
   LoadWord(ra, MemOperand(sp, ExitFrameConstants::kCallerPCOffset));
-
+#ifdef V8_ENABLE_RISCV_SHADOW_STACK
+  sspopchk_ra();
+#endif
   AddWord(sp, sp, 2 * kSystemPointerSize);
 }
 
@@ -7880,11 +7910,11 @@ void MacroAssembler::DecompressTagged(const Register& destination,
                                       const Register& source) {
   ASM_CODE_COMMENT(this);
   if (CpuFeatures::IsSupported(ZBA)) {
-    ZeroExtendWord(destination, source);
+    adduw(destination, source, kPtrComprCageBaseRegister);
   } else {
-    And(destination, source, Operand(0xFFFFFFFF));
+    ZeroExtendWord(destination, source);
+    AddWord(destination, kPtrComprCageBaseRegister, Operand(destination));
   }
-  AddWord(destination, kPtrComprCageBaseRegister, Operand(destination));
 }
 
 void MacroAssembler::DecompressTagged(Register dst, Tagged_t immediate) {

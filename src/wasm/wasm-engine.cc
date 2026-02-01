@@ -38,6 +38,7 @@
 #include "src/wasm/wasm-debug.h"
 #include "src/wasm/wasm-limits.h"
 #include "src/wasm/wasm-objects-inl.h"
+#include "src/wasm/wasm-stack-wrapper-cache.h"
 
 #if V8_ENABLE_DRUMBRAKE
 #include "src/wasm/interpreter/wasm-interpreter-inl.h"
@@ -1158,7 +1159,8 @@ std::unique_ptr<AsyncCompileJob> WasmEngine::RemoveCompileJob(
     AsyncCompileJob* job) {
   base::MutexGuard guard(&mutex_);
   auto item = async_compile_jobs_.find(job);
-  DCHECK(item != async_compile_jobs_.end());
+  // TODO(https://crbug.com/466449860): Demote to DCHECK once issue is fixed.
+  CHECK_NE(async_compile_jobs_.end(), item);
   std::unique_ptr<AsyncCompileJob> result = std::move(item->second);
   async_compile_jobs_.erase(item);
   return result;
@@ -1248,6 +1250,7 @@ void WasmEngine::AddIsolate(Isolate* isolate) {
   if (log_code) {
     // Log existing wrappers (which are shared across isolates).
     GetWasmImportWrapperCache()->LogForIsolate(isolate);
+    GetWasmStackEntryWrapperCache()->LogForIsolate(isolate);
   }
 
   // Install sampling GC callback.
@@ -1769,6 +1772,9 @@ void ReportLiveCodeFromFrameForGC(
 #endif
   } else if (frame->type() == StackFrame::WASM_TO_JS) {
     live_wasm_code.insert(static_cast<WasmToJsFrame*>(frame)->wasm_code());
+  } else if (frame->type() == StackFrame::WASM_STACK_ENTRY) {
+    live_wasm_code.insert(
+        static_cast<WasmStackEntryFrame*>(frame)->wasm_code());
   }
 }
 }  // namespace
@@ -1859,13 +1865,15 @@ void WasmEngine::TriggerCodeGCForTesting() {
 }
 
 void WasmEngine::FreeDeadCode(const DeadCodeMap& dead_code,
-                              std::vector<WasmCode*>& dead_wrappers) {
+                              std::vector<WasmCode*>& dead_import_wrappers,
+                              std::vector<WasmCode*>& dead_stack_wrappers) {
   base::MutexGuard guard(&mutex_);
-  FreeDeadCodeLocked(dead_code, dead_wrappers);
+  FreeDeadCodeLocked(dead_code, dead_import_wrappers, dead_stack_wrappers);
 }
 
-void WasmEngine::FreeDeadCodeLocked(const DeadCodeMap& dead_code,
-                                    std::vector<WasmCode*>& dead_wrappers) {
+void WasmEngine::FreeDeadCodeLocked(
+    const DeadCodeMap& dead_code, std::vector<WasmCode*>& dead_import_wrappers,
+    std::vector<WasmCode*>& dead_stack_wrappers) {
   TRACE_EVENT0("v8.wasm", "wasm.FreeDeadCode");
   mutex_.AssertHeld();
   for (auto& dead_code_entry : dead_code) {
@@ -1875,10 +1883,16 @@ void WasmEngine::FreeDeadCodeLocked(const DeadCodeMap& dead_code,
                   code_vec.size() == 1 ? "" : "s", native_module);
     native_module->FreeCode(base::VectorOf(code_vec));
   }
-  if (dead_wrappers.size()) {
-    TRACE_CODE_GC("Freeing %zu wrapper%s.\n", dead_wrappers.size(),
-                  dead_wrappers.size() == 1 ? "" : "s");
-    GetWasmImportWrapperCache()->Free(dead_wrappers);
+  if (dead_import_wrappers.size()) {
+    TRACE_CODE_GC("Freeing %zu import wrapper%s.\n",
+                  dead_import_wrappers.size(),
+                  dead_import_wrappers.size() == 1 ? "" : "s");
+    GetWasmImportWrapperCache()->Free(dead_import_wrappers);
+  }
+  if (dead_stack_wrappers.size()) {
+    TRACE_CODE_GC("Freeing %zu stack wrapper%s.\n", dead_stack_wrappers.size(),
+                  dead_stack_wrappers.size() == 1 ? "" : "s");
+    GetWasmStackEntryWrapperCache()->Free(dead_stack_wrappers);
   }
 }
 
@@ -1971,7 +1985,8 @@ void WasmEngine::PotentiallyFinishCurrentGC() {
   // ref count.
   size_t num_freed = 0;
   DeadCodeMap dead_code;
-  std::vector<WasmCode*> dead_wrappers;
+  std::vector<WasmCode*> dead_import_wrappers;
+  std::vector<WasmCode*> dead_stack_wrappers;
   for (WasmCode* code : current_gc_info_->dead_code) {
     DCHECK(potentially_dead_code_.contains(code));
     DCHECK(code->is_dying());
@@ -1980,14 +1995,16 @@ void WasmEngine::PotentiallyFinishCurrentGC() {
       NativeModule* native_module = code->native_module();
       if (native_module) {
         dead_code[native_module].push_back(code);
+      } else if (code->kind() == WasmCode::kWasmStackEntryWrapper) {
+        dead_stack_wrappers.push_back(code);
       } else {
-        dead_wrappers.push_back(code);
+        dead_import_wrappers.push_back(code);
       }
       ++num_freed;
     }
   }
 
-  FreeDeadCodeLocked(dead_code, dead_wrappers);
+  FreeDeadCodeLocked(dead_code, dead_import_wrappers, dead_stack_wrappers);
 
   TRACE_CODE_GC("Found %zu dead code objects, freed %zu.\n",
                 current_gc_info_->dead_code.size(), num_freed);
@@ -2076,6 +2093,7 @@ struct GlobalWasmState {
   // finished, and that has to happen before the WasmCodeManager gets destroyed.
   WasmCodeManager code_manager;
   WasmImportWrapperCache import_wrapper_cache;
+  WasmStackEntryWrapperCache stack_wrapper_cache;
   WasmEngine engine;
   CanonicalTypeNamesProvider type_names_provider;
 };
@@ -2128,6 +2146,11 @@ WasmCodeManager* GetWasmCodeManager() {
 WasmImportWrapperCache* GetWasmImportWrapperCache() {
   DCHECK_NOT_NULL(global_wasm_state);
   return &global_wasm_state->import_wrapper_cache;
+}
+
+WasmStackEntryWrapperCache* GetWasmStackEntryWrapperCache() {
+  DCHECK_NOT_NULL(global_wasm_state);
+  return &global_wasm_state->stack_wrapper_cache;
 }
 
 CanonicalTypeNamesProvider* GetCanonicalTypeNamesProvider() {

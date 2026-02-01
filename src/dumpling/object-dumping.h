@@ -5,13 +5,16 @@
 #ifndef V8_DUMPLING_OBJECT_DUMPING_H_
 #define V8_DUMPLING_OBJECT_DUMPING_H_
 
-#include <fstream>
+#include <iostream>
 
 #include "src/objects/tagged.h"
 
 namespace v8::internal {
 
-void DifferentialFuzzingPrint(Tagged<Object> obj, std::ofstream& os);
+std::string DifferentialFuzzingPrint(Tagged<Object> obj, int depth);
+
+void DifferentialFuzzingPrint(Tagged<Object> obj, std::ostream& os);
+
 
 }  // namespace v8::internal
 

@@ -308,6 +308,13 @@ constexpr size_t kExternalPointerTableReservationSize = 256 * MB;
 // smaller than the maximum table size even after the C++ compiler multiplies
 // them by 8 to be used as indexes into a table of 64 bit pointers.
 constexpr uint32_t kExternalPointerIndexShift = 7;
+#elif defined(V8_TARGET_OS_IOS)
+// iOS restricts large memory allocations, with 128 MB being the maximum size we
+// can configure. If we exceed this, SegmentedTable::Initialize will throw a V8
+// out-of-memory error when running the JetStream benchmark
+// (https://browserbench.org/JetStream/).
+constexpr size_t kExternalPointerTableReservationSize = 128 * MB;
+constexpr uint32_t kExternalPointerIndexShift = 8;
 #else
 constexpr size_t kExternalPointerTableReservationSize = 512 * MB;
 constexpr uint32_t kExternalPointerIndexShift = 6;
@@ -479,8 +486,8 @@ struct TagRange {
     // Need to perform the math with uint32_t. Otherwise, the uint16_ts would
     // be promoted to (signed) int, allowing the compiler to (wrongly) assume
     // that an underflow cannot happen as that would be undefined behavior.
-    return static_cast<uint32_t>(tag) - first <=
-           static_cast<uint32_t>(last) - first;
+    return static_cast<uint32_t>(tag) - static_cast<uint32_t>(first) <=
+           static_cast<uint32_t>(last) - static_cast<uint32_t>(first);
   }
 
   constexpr bool Contains(TagRange tag_range) const {
@@ -1015,6 +1022,24 @@ class Internals {
       kIsolateRegexpExecVectorArgumentOffset + kApiSystemPointerSize;
   static const int kIsolateRootsOffset =
       kContinuationPreservedEmbedderDataOffset + kApiSystemPointerSize;
+
+#if V8_TARGET_ARCH_PPC64
+  static constexpr int kFrameCPSlotCount = 1;
+#else
+  static constexpr int kFrameCPSlotCount = 0;
+#endif
+
+#if V8_TARGET_ARCH_ARM64
+  // The padding required to keep SP 16-byte aligned.
+  static constexpr int kSPAlignmentSlotCount = 1;
+#else
+  static constexpr int kSPAlignmentSlotCount = 0;
+#endif
+
+  static const int kFrameTypeApiCallExit = 18;
+  static const int kFrameTypeApiConstructExit = 19;
+  static const int kFrameTypeApiNamedAccessorExit = 20;
+  static const int kFrameTypeApiIndexedAccessorExit = 21;
 
   // Assert scopes
   static const int kDisallowGarbageCollectionAlign = alignof(uint32_t);

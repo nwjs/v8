@@ -90,6 +90,7 @@ class BaselineCompiler {
   uint32_t CoverageSlot(int operand_index);
   uint32_t Flag8(int operand_index);
   uint32_t Flag16(int operand_index);
+  uint32_t EmbeddedFeedback(int operand_index);
   uint32_t RegisterCount(int operand_index);
   Tagged<TaggedIndex> ConstantPoolIndexAsTagged(int operand_index);
   Tagged<TaggedIndex> FeedbackSlotAsTagged(int operand_index);
@@ -153,6 +154,10 @@ class BaselineCompiler {
 
 #ifdef V8_TRACE_UNOPTIMIZED
   void TraceBytecode(Runtime::FunctionId function_id);
+#endif
+
+#if defined(V8_TRACE_UNOPTIMIZED) || defined(V8_DUMPLING)
+  void EmitTraceBytecodeRuntimeCall(Runtime::FunctionId function_id);
 #endif
 
   // Single bytecode visitors.

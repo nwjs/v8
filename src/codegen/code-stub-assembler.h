@@ -630,6 +630,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   // BigInt operations.
   void GotoIfLargeBigInt(TNode<BigInt> bigint, Label* true_label);
+  void GotoIfLazyClosure(TNode<JSAnyOrSharedFunctionInfo> value,
+                         Label* if_true);
 
   TNode<Word32T> NormalizeShift32OperandIfNecessary(TNode<Word32T> right32);
   TNode<Number> BitwiseOp(TNode<Word32T> left32, TNode<Word32T> right32,
@@ -2924,7 +2926,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsOneByteStringInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsSeqOneByteStringInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsPrimitiveInstanceType(TNode<Int32T> instance_type);
-  TNode<BoolT> IsPrivateName(TNode<Symbol> symbol);
+  TNode<BoolT> IsAnyPrivateName(TNode<Symbol> symbol);
   TNode<BoolT> IsPropertyArray(TNode<HeapObject> object);
   TNode<BoolT> IsPropertyCell(TNode<HeapObject> object);
   TNode<BoolT> IsPromiseReactionJobTask(TNode<HeapObject> object);
@@ -2961,6 +2963,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<BoolT> IsSymbolInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsInternalizedStringInstanceType(TNode<Int32T> instance_type);
+  TNode<BoolT> IsInternalizedStringMap(TNode<Map> map);
+  TNode<BoolT> IsInternalizedString(TNode<HeapObject> object);
   TNode<BoolT> IsSharedStringInstanceType(TNode<Int32T> instance_type);
 #ifdef V8_TEMPORAL_SUPPORT
   TNode<BoolT> IsTemporalInstantInstanceType(TNode<Int32T> instance_type);
@@ -3599,7 +3603,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                          Label* if_found, Label* if_not_found,
                          Label* if_bailout);
 
-  // Operating mode for TryGetOwnProperty and CallGetterIfAccessor
+  // Operating mode for TryGetOwnProperty and
+  // CallGetterIfAccessorAndBailoutOnLazyClosures
   enum GetOwnPropertyMode {
     // kCallJSGetterDontUseCachedName is used when we want to get the result of
     // the getter call, and don't use cached_name_property when the getter is
@@ -3615,7 +3620,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     // descriptor
     kReturnAccessorPair
   };
-  // Receiver handling mode for TryGetOwnProperty and CallGetterIfAccessor.
+  // Receiver handling mode for TryGetOwnProperty and
+  // CallGetterIfAccessorAndBailoutOnLazyClosures.
   enum ExpectedReceiverMode {
     // The receiver is guaranteed to be JSReceiver, no conversion is necessary
     // in case a function callback template has to be called.
@@ -3926,9 +3932,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Equivalent to MemoryChunk::FromAddress().
   TNode<IntPtrT> MemoryChunkFromAddress(TNode<IntPtrT> address);
   // Equivalent to MemoryChunk::Metadata().
-  TNode<IntPtrT> MemoryChunkMetadataFromMemoryChunk(TNode<IntPtrT> address);
-  // Equivalent to MemoryChunkMetadata::FromAddress().
-  TNode<IntPtrT> MemoryChunkMetadataFromAddress(TNode<IntPtrT> address);
+  TNode<IntPtrT> BasePageFromMemoryChunk(TNode<IntPtrT> address);
+  // Equivalent to BasePage::FromAddress().
+  TNode<IntPtrT> BasePageFromAddress(TNode<IntPtrT> address);
 
   // Store a weak in-place reference into the FeedbackVector.
   TNode<MaybeObject> StoreWeakReferenceInFeedbackVector(
@@ -4112,6 +4118,12 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void GotoIfNumberGreaterThanOrEqual(TNode<Number> left, TNode<Number> right,
                                       Label* if_false);
 
+#ifdef V8_ENABLE_SPARKPLUG_PLUS
+  void GenerateStrictEqualAndTryPatchCode(TNode<Object> lhs, TNode<Object> rhs,
+                                          TNode<Int32T> current_type_feedback,
+                                          TNode<UintPtrT> feedback_offset);
+#endif  // V8_ENABLE_SPARKPLUG_PLUS
+
   TNode<Boolean> Equal(TNode<Object> lhs, TNode<Object> rhs,
                        TNode<Context> context,
                        TVariable<Smi>* var_type_feedback = nullptr) {
@@ -4206,9 +4218,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<JSArrayBuffer> array_buffer);
   TNode<RawPtrT> LoadJSArrayBufferBackingStorePtr(
       TNode<JSArrayBuffer> array_buffer);
-  void ThrowIfArrayBufferIsDetached(TNode<Context> context,
-                                    TNode<JSArrayBuffer> array_buffer,
-                                    const char* method_name);
 
   // JSArrayBufferView helpers
   TNode<JSArrayBuffer> LoadJSArrayBufferViewBuffer(
@@ -4221,28 +4230,35 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<JSArrayBufferView> array_buffer_view);
   void StoreJSArrayBufferViewByteOffset(
       TNode<JSArrayBufferView> array_buffer_view, TNode<UintPtrT> value);
-  void ThrowIfArrayBufferViewBufferIsDetached(
-      TNode<Context> context, TNode<JSArrayBufferView> array_buffer_view,
-      const char* method_name);
 
   // JSTypedArray helpers
   TNode<UintPtrT> LoadJSTypedArrayLength(TNode<JSTypedArray> typed_array);
-  TNode<UintPtrT> LoadJSTypedArrayLengthAndCheckDetached(
-      TNode<JSTypedArray> typed_array, Label* detached);
+  TNode<UintPtrT> LoadJSTypedArrayLengthAndValidate(
+      TNode<JSTypedArray> typed_array, TypedArrayAccessMode mode, Label* fail);
+  TNode<UintPtrT> LoadJSTypedArrayLengthAndValidate(
+      TNode<JSTypedArray> typed_array, TNode<JSArrayBuffer> buffer,
+      TypedArrayAccessMode mode, bool is_resizable, Label* fail);
+
   // Helper for length tracking JSTypedArrays and JSTypedArrays backed by
   // ResizableArrayBuffer.
+
   TNode<UintPtrT> LoadVariableLengthJSTypedArrayLength(
       TNode<JSTypedArray> array, TNode<JSArrayBuffer> buffer,
-      Label* detached_or_out_of_bounds);
-  // Helper for length tracking JSTypedArrays and JSTypedArrays backed by
-  // ResizableArrayBuffer.
+      TypedArrayAccessMode mode, Label* fail);
+
   TNode<UintPtrT> LoadVariableLengthJSTypedArrayByteLength(
       TNode<Context> context, TNode<JSTypedArray> array,
       TNode<JSArrayBuffer> buffer);
+
+  // Helper for length tracking JSArrayBufferViews and JSArrayBufferViews backed
+  // by ResizableArrayBuffer.
   TNode<UintPtrT> LoadVariableLengthJSArrayBufferViewByteLength(
       TNode<JSArrayBufferView> array, TNode<JSArrayBuffer> buffer,
-      Label* detached_or_out_of_bounds);
+      TypedArrayAccessMode mode, Label* fail);
 
+  void IsJSArrayBufferViewValid(TNode<JSArrayBufferView> array_buffer_view,
+                                TypedArrayAccessMode mode, Label* valid,
+                                Label* fail);
   void IsJSArrayBufferViewDetachedOrOutOfBounds(
       TNode<JSArrayBufferView> array_buffer_view, Label* detached_or_oob,
       Label* not_detached_nor_oob);
@@ -4662,7 +4678,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // or an accessor pair, as specified by |details|. |holder| is a JSReceiver
   // or empty std::nullopt if holder is not available.
   // Returns either the original value, or the result of the getter call.
-  TNode<Object> CallGetterIfAccessor(
+  TNode<Object> CallGetterIfAccessorAndBailoutOnLazyClosures(
       TNode<Object> value, std::optional<TNode<JSReceiver>> holder,
       TNode<Uint32T> details, TNode<Context> context, TNode<JSAny> receiver,
       ExpectedReceiverMode expected_receiver_mode, TNode<Object> name,

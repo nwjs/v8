@@ -1253,23 +1253,23 @@ OpIndex GraphBuilder::Process(
       return __ Select(cond, vtrue, vfalse,
                        RegisterRepresentation::FromMachineRepresentation(
                            params.representation()),
-                       params.hint(), SelectOp::Implementation::kBranch);
+                       params.hint(), SelectOp::Implementation::kAny);
     }
     case IrOpcode::kWord32Select:
       return __ Select(
           Map<Word32>(node->InputAt(0)), Map<Word32>(node->InputAt(1)),
           Map<Word32>(node->InputAt(2)), RegisterRepresentation::Word32(),
-          BranchHint::kNone, SelectOp::Implementation::kCMove);
+          BranchHint::kNone, SelectOp::Implementation::kForceCMove);
     case IrOpcode::kWord64Select:
       return __ Select(
           Map<Word32>(node->InputAt(0)), Map<Word64>(node->InputAt(1)),
           Map<Word64>(node->InputAt(2)), RegisterRepresentation::Word64(),
-          BranchHint::kNone, SelectOp::Implementation::kCMove);
+          BranchHint::kNone, SelectOp::Implementation::kForceCMove);
     case IrOpcode::kFloat32Select:
       return __ Select(
           Map<Word32>(node->InputAt(0)), Map<Float32>(node->InputAt(1)),
           Map<Float32>(node->InputAt(2)), RegisterRepresentation::Float32(),
-          BranchHint::kNone, SelectOp::Implementation::kCMove);
+          BranchHint::kNone, SelectOp::Implementation::kForceCMove);
 
     case IrOpcode::kLoad:
     case IrOpcode::kLoadImmutable:
@@ -1638,8 +1638,7 @@ OpIndex GraphBuilder::Process(
 
 #ifdef V8_ENABLE_SANDBOX
       if (access.is_bounded_size_access) {
-        value = __ ShiftLeft(value, kBoundedSizeShift,
-                             WordRepresentation::WordPtr());
+        value = __ WordPtrShiftLeft(value, kBoundedSizeShift);
       }
 #endif  // V8_ENABLE_SANDBOX
 
@@ -1715,12 +1714,11 @@ OpIndex GraphBuilder::Process(
       OpIndex value = __ Load(Map(object), kind, rep, access.offset);
 #ifdef V8_ENABLE_SANDBOX
       if (is_sandboxed_external) {
-        value = __ DecodeExternalPointer(value, access.external_pointer_tag);
+        value = __ LoadExternalPointer(value, access.external_pointer_tag);
       }
       if (access.is_bounded_size_access) {
         DCHECK(!is_sandboxed_external);
-        value = __ ShiftRightLogical(value, kBoundedSizeShift,
-                                     WordRepresentation::WordPtr());
+        value = __ WordPtrShiftRightLogical(value, kBoundedSizeShift);
       }
 #endif  // V8_ENABLE_SANDBOX
       return value;

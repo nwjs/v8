@@ -181,6 +181,11 @@ void LateLoadEliminationAnalyzer::ProcessBlock(const Block& block,
     if (ShouldSkipOptimizationStep()) continue;
     if (ShouldSkipOperation(op)) continue;
     switch (op.opcode) {
+#if V8_ENABLE_SANDBOX
+      case Opcode::kLoadTrustedPointer:
+        ProcessTrustedLoad(op_idx, op.Cast<LoadTrustedPointerOp>());
+        break;
+#endif
       case Opcode::kLoad:
         // Eliminate load or update state
         ProcessLoad(op_idx, op.Cast<LoadOp>());
@@ -385,6 +390,33 @@ void LateLoadEliminationAnalyzer::ProcessLoad(OpIndex op_idx,
   memory_.Insert(load, op_idx);
 }
 
+#if V8_ENABLE_SANDBOX
+void LateLoadEliminationAnalyzer::ProcessTrustedLoad(
+    OpIndex op_idx, const LoadTrustedPointerOp& load) {
+  TRACE("> ProcessTrustedLoad(" << op_idx << ")");
+
+  // We need to insert the load into the truncation mapping as a key, because
+  // all loads need to be revisited during processing.
+  int32_truncated_loads_[op_idx];
+
+  if (OpIndex existing = memory_.Find(load); existing.valid()) {
+    const Operation& replacement = graph_.Get(existing);
+    USE(replacement);
+    // All trusted loads have the same representation and they can't alias with
+    // any other loads.
+    DCHECK_EQ(replacement.outputs_rep(), load.outputs_rep());
+    TRACE(">> Found replacement at offset " << existing);
+    replacements_[op_idx] = Replacement::LoadElimination(existing);
+    return;
+  }
+  // Reset the replacement of {op_idx} to Invalid, in case a previous visit of a
+  // loop has set it to something else.
+  replacements_[op_idx] = Replacement::None();
+
+  memory_.Insert(load, op_idx);
+}
+#endif
+
 void LateLoadEliminationAnalyzer::ProcessStore(OpIndex op_idx,
                                                const StoreOp& store) {
   TRACE("> ProcessStore(" << op_idx << ")");
@@ -399,7 +431,7 @@ void LateLoadEliminationAnalyzer::ProcessStore(OpIndex op_idx,
     TRACE(
         ">> Raw base or maybe inner pointer ==> Invalidating whole "
         "maybe-aliasing memory");
-    memory_.InvalidateMaybeAliasing();
+    memory_.InvalidateMaybeAliasing(store.base());
   }
 
   if (!store.kind.load_eliminable) {
@@ -449,7 +481,7 @@ void LateLoadEliminationAnalyzer::ProcessAtomicRMW(OpIndex op_idx,
     return;
   }
   TRACE(">> Invalidating whole maybe-aliasing memory");
-  memory_.InvalidateMaybeAliasing();
+  memory_.InvalidateMaybeAliasing(store.base());
 #endif
 }
 

@@ -349,6 +349,7 @@ void GCTracer::StartCycle(GarbageCollector collector,
       break;
   }
   current_.is_loading = heap_->IsLoading();
+  current_.is_input_handling = heap_->IsInputHandling();
 
   if (collector == GarbageCollector::MARK_COMPACTOR) {
     current_.old_generation_consumed_baseline =
@@ -895,7 +896,7 @@ void GCTracer::Print() const {
       static_cast<double>(current_.end_object_size) / MB,
       static_cast<double>(current_.end_memory_size) / MB,
       static_cast<double>(heap_->memory_allocator()->GetPooledChunksCount() *
-                          PageMetadata::kPageSize) /
+                          NormalPage::kPageSize) /
           MB,
       duration.InMillisecondsF(), total_external_time, incremental_buffer,
       AverageMarkCompactMutatorUtilization(),
@@ -1592,6 +1593,7 @@ void GCTracer::ReportFullCycleToRecorder() {
   event.priority = current_.priority;
   event.reduce_memory = current_.reduce_memory;
   event.is_loading = current_.is_loading;
+  event.is_input_handling = current_.is_input_handling;
 
   // Managed C++ heap statistics:
   if (cpp_heap) {

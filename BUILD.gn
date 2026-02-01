@@ -9,7 +9,6 @@ import("//build/config/dcheck_always_on.gni")
 import("//build/config/host_byteorder.gni")
 import("//build/config/mips.gni")
 import("//build/config/riscv.gni")
-import("//build/config/rust.gni")
 import("//build/config/sanitizers/sanitizers.gni")
 import("//build_overrides/build.gni")
 import("//third_party/icu/config.gni")
@@ -19,6 +18,10 @@ import("gni/v8.gni")
 
 if (is_clang) {
   import("//build/config/clang/clang.gni")
+}
+
+if (v8_enable_temporal_support) {
+  import("//build/config/rust.gni")
 }
 
 if (is_ios) {
@@ -611,10 +614,12 @@ if (v8_enable_sparkplug == "") {
   v8_enable_sparkplug = !v8_jitless
 }
 if (v8_enable_maglev == "") {
-  v8_enable_maglev = v8_enable_turbofan &&
-                     (v8_current_cpu == "arm" || v8_current_cpu == "x64" ||
-                      v8_current_cpu == "arm64" || v8_current_cpu == "s390x" ||
-                      v8_current_cpu == "ppc64" || v8_current_cpu == "riscv64")
+  v8_enable_maglev =
+      v8_enable_turbofan &&
+      (v8_current_cpu == "arm" || v8_current_cpu == "x64" ||
+       v8_current_cpu == "arm64" || v8_current_cpu == "s390x" ||
+       v8_current_cpu == "ppc64" || v8_current_cpu == "riscv64" ||
+       v8_current_cpu == "loong64")
 }
 assert(v8_enable_turbofan || !v8_enable_maglev,
        "Maglev is not available when Turbofan is disabled.")
@@ -1007,6 +1012,8 @@ external_v8_defines = [
   "V8_TARGET_OS_MACOS",
   "V8_TARGET_OS_WIN",
   "V8_TARGET_OS_CHROMEOS",
+  "V8_TARGET_ARCH_ARM64",
+  "V8_TARGET_ARCH_PPC64",
 ]
 
 enabled_external_v8_defines = [
@@ -1087,6 +1094,18 @@ if (target_os == "android") {
 } else if (target_os == "chromeos") {
   enabled_external_v8_defines += [ "V8_HAVE_TARGET_OS" ]
   enabled_external_v8_defines += [ "V8_TARGET_OS_CHROMEOS" ]
+}
+
+# Some V8_TARGET_ARCH_ defines that affect Api constants (see usages of
+# V8_TARGET_ARCH_* in v8-internal.h).
+# The target architecture may differ from host one e.g. in mksnapshot or in
+# msan builds.
+# TODO(ishell): support all target archs and add V8_HAVE_TARGET_ARCH similar
+# to V8_TARGET_OS_* and V8_HAVE_TARGET_OS defines.
+if (v8_current_cpu == "arm64") {
+  enabled_external_v8_defines += [ "V8_TARGET_ARCH_ARM64" ]
+} else if (v8_current_cpu == "ppc64") {
+  enabled_external_v8_defines += [ "V8_TARGET_ARCH_PPC64" ]
 }
 
 disabled_external_v8_defines = external_v8_defines - enabled_external_v8_defines
@@ -1513,24 +1532,16 @@ config("toolchain") {
   ldflags = []
 
   if (v8_current_cpu == "arm") {
-    defines += [ "V8_TARGET_ARCH_ARM" ]
-    if (arm_version >= 7) {
-      defines += [ "CAN_USE_ARMV7_INSTRUCTIONS" ]
-    }
-    if (arm_fpu == "vfpv3-d16") {
-      defines += [ "CAN_USE_VFP3_INSTRUCTIONS" ]
-    } else if (arm_fpu == "vfpv3") {
-      defines += [
-        "CAN_USE_VFP3_INSTRUCTIONS",
-        "CAN_USE_VFP32DREGS",
-      ]
-    } else if (arm_fpu == "neon") {
-      defines += [
-        "CAN_USE_VFP3_INSTRUCTIONS",
-        "CAN_USE_VFP32DREGS",
-        "CAN_USE_NEON",
-      ]
-    }
+    defines += [
+      "V8_TARGET_ARCH_ARM",
+
+      # TODO(arm): Now that we always require v7+ and neon, we can simplify the
+      #            code and then stop defining these.
+      "CAN_USE_ARMV7_INSTRUCTIONS",
+      "CAN_USE_VFP3_INSTRUCTIONS",
+      "CAN_USE_VFP32DREGS",
+      "CAN_USE_NEON",
+    ]
 
     # TODO(infra): Add support for arm_test_noprobe.
 
@@ -1597,14 +1608,14 @@ config("toolchain") {
     defines += [ "V8_TARGET_ARCH_S390X" ]
     if (host_byteorder == "little") {
       defines += [ "V8_TARGET_ARCH_S390X_LE_SIM" ]
-    } else if (current_os != "zos") {
-      cflags += [ "-march=z196" ]
+    } else if (!v8_target_is_simulator && current_os != "zos") {
+      cflags += [ "-march=z14" ]
     }
   }
   if (v8_current_cpu == "ppc64") {
     defines += [ "V8_TARGET_ARCH_PPC64" ]
     cflags += [ "-ffp-contract=off" ]
-    if (current_os == "aix") {
+    if (current_os == "aix" && !is_clang) {
       cflags += [
         # Work around AIX ceil, trunc and round oddities.
         "-mcpu=power5+",
@@ -1613,6 +1624,8 @@ config("toolchain") {
         # Work around AIX assembler popcntb bug.
         "-mno-popcntb",
       ]
+    } else if (!v8_target_is_simulator) {
+      cflags += [ "-mcpu=pwr9" ]
     }
   }
 
@@ -1623,6 +1636,13 @@ config("toolchain") {
     if (riscv_use_rvv || v8_target_is_simulator) {
       defines += [ "CAN_USE_RVV_INSTRUCTIONS" ]
       defines += [ "RVV_VLEN=${riscv_rvv_vlen}" ]
+    }
+
+    if (riscv_use_zicfiss) {
+      defines += [ "V8_ENABLE_RISCV_SHADOW_STACK" ]
+    }
+    if (riscv_use_zicond) {
+      defines += [ "__riscv_zicond" ]
     }
     if (riscv_use_zba) {
       defines += [ "__riscv_zba" ]
@@ -3126,6 +3146,7 @@ v8_source_set("v8_initializers") {
     "src/builtins/builtins-sharedarraybuffer-gen.cc",
     "src/builtins/builtins-string-gen.cc",
     "src/builtins/builtins-string-gen.h",
+    "src/builtins/builtins-string-tsa-inl.h",
     "src/builtins/builtins-string-tsa.cc",
     "src/builtins/builtins-typed-array-gen.cc",
     "src/builtins/builtins-typed-array-gen.h",
@@ -3182,6 +3203,9 @@ v8_source_set("v8_initializers") {
       } else if (v8_current_cpu == "arm64") {
         sources +=
             [ "src/wasm/interpreter/arm64/interpreter-builtins-arm64.cc" ]
+      } else if (v8_current_cpu == "riscv64") {
+        sources +=
+            [ "src/wasm/interpreter/riscv/interpreter-builtins-riscv.cc" ]
       }
     }
   }
@@ -3847,6 +3871,7 @@ v8_header_set("v8_internal_headers") {
     "src/execution/frames.h",
     "src/execution/futex-emulation.h",
     "src/execution/interrupts-scope.h",
+    "src/execution/isolate-data-fields.h",
     "src/execution/isolate-data.h",
     "src/execution/isolate-inl.h",
     "src/execution/isolate-utils-inl.h",
@@ -3892,6 +3917,8 @@ v8_header_set("v8_internal_headers") {
     "src/heap/allocation-result.h",
     "src/heap/allocation-stats.h",
     "src/heap/array-buffer-sweeper.h",
+    "src/heap/base-page-inl.h",
+    "src/heap/base-page.h",
     "src/heap/base-space.h",
     "src/heap/code-range.h",
     "src/heap/code-stats.h",
@@ -3942,8 +3969,8 @@ v8_header_set("v8_internal_headers") {
     "src/heap/incremental-marking-job.h",
     "src/heap/incremental-marking.h",
     "src/heap/index-generator.h",
-    "src/heap/large-page-metadata-inl.h",
-    "src/heap/large-page-metadata.h",
+    "src/heap/large-page-inl.h",
+    "src/heap/large-page.h",
     "src/heap/large-spaces.h",
     "src/heap/linear-allocation-area.h",
     "src/heap/list.h",
@@ -3974,8 +4001,6 @@ v8_header_set("v8_internal_headers") {
     "src/heap/memory-chunk-constants.h",
     "src/heap/memory-chunk-inl.h",
     "src/heap/memory-chunk-layout.h",
-    "src/heap/memory-chunk-metadata-inl.h",
-    "src/heap/memory-chunk-metadata.h",
     "src/heap/memory-chunk.h",
     "src/heap/memory-measurement-inl.h",
     "src/heap/memory-measurement.h",
@@ -3984,14 +4009,15 @@ v8_header_set("v8_internal_headers") {
     "src/heap/minor-gc-job.h",
     "src/heap/minor-mark-sweep-inl.h",
     "src/heap/minor-mark-sweep.h",
-    "src/heap/mutable-page-metadata-inl.h",
-    "src/heap/mutable-page-metadata.h",
+    "src/heap/mutable-page-inl.h",
+    "src/heap/mutable-page.h",
     "src/heap/new-spaces-inl.h",
     "src/heap/new-spaces.h",
+    "src/heap/normal-page-inl.h",
+    "src/heap/normal-page.h",
     "src/heap/object-lock-inl.h",
     "src/heap/object-lock.h",
     "src/heap/object-stats.h",
-    "src/heap/page-metadata.h",
     "src/heap/paged-spaces-inl.h",
     "src/heap/paged-spaces.h",
     "src/heap/parallel-work-item.h",
@@ -4403,6 +4429,7 @@ v8_header_set("v8_internal_headers") {
     "src/sandbox/external-pointer-table-inl.h",
     "src/sandbox/external-pointer-table.h",
     "src/sandbox/external-pointer.h",
+    "src/sandbox/external-strings-cage.h",
     "src/sandbox/hardware-support.h",
     "src/sandbox/indirect-pointer-inl.h",
     "src/sandbox/indirect-pointer-tag.h",
@@ -4447,6 +4474,7 @@ v8_header_set("v8_internal_headers") {
     "src/snapshot/startup-serializer.h",
     "src/strings/char-predicates-inl.h",
     "src/strings/char-predicates.h",
+    "src/strings/owning-external-string-resource.h",
     "src/strings/string-builder-inl.h",
     "src/strings/string-builder.h",
     "src/strings/string-case.h",
@@ -4589,6 +4617,8 @@ v8_header_set("v8_internal_headers") {
       sources += [ "src/maglev/s390/maglev-assembler-s390-inl.h" ]
     } else if (v8_current_cpu == "ppc64") {
       sources += [ "src/maglev/ppc/maglev-assembler-ppc-inl.h" ]
+    } else if (v8_current_cpu == "loong64") {
+      sources += [ "src/maglev/loong64/maglev-assembler-loong64-inl.h" ]
     }
   }
 
@@ -4703,10 +4733,13 @@ v8_header_set("v8_internal_headers") {
       "src/wasm/wasm-opcodes.h",
       "src/wasm/wasm-result.h",
       "src/wasm/wasm-serialization.h",
+      "src/wasm/wasm-stack-wrapper-cache.h",
       "src/wasm/wasm-subtyping.h",
       "src/wasm/wasm-tier.h",
       "src/wasm/wasm-tracing.h",
       "src/wasm/wasm-value.h",
+      "src/wasm/wasm-wrapper-cache-inl.h",
+      "src/wasm/wasm-wrapper-cache.h",
       "src/wasm/well-known-imports.h",
       "src/wasm/wrappers-inl.h",
       "src/wasm/wrappers.h",
@@ -5078,6 +5111,11 @@ v8_header_set("v8_internal_headers") {
         "src/baseline/riscv/baseline-compiler-riscv-inl.h",
       ]
     }
+
+    if (riscv_use_zicfiss) {
+      sources += [ "src/execution/riscv/shadow-stack-riscv.h" ]
+    }
+
     if (v8_enable_webassembly) {
       # Trap handling is enabled on riscv64 Linux and in simulators on
       # x64 on Linux.
@@ -5719,6 +5757,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/handles/traced-handles.cc",
     "src/heap/allocation-observer.cc",
     "src/heap/array-buffer-sweeper.cc",
+    "src/heap/base-page.cc",
     "src/heap/code-range.cc",
     "src/heap/code-stats.cc",
     "src/heap/collection-barrier.cc",
@@ -5749,7 +5788,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/heap/incremental-marking-job.cc",
     "src/heap/incremental-marking.cc",
     "src/heap/index-generator.cc",
-    "src/heap/large-page-metadata.cc",
+    "src/heap/large-page.cc",
     "src/heap/large-spaces.cc",
     "src/heap/local-factory.cc",
     "src/heap/local-heap.cc",
@@ -5761,17 +5800,16 @@ v8_source_set("v8_base_without_compiler") {
     "src/heap/marking.cc",
     "src/heap/memory-allocator.cc",
     "src/heap/memory-balancer.cc",
-    "src/heap/memory-chunk-metadata.cc",
     "src/heap/memory-chunk.cc",
     "src/heap/memory-measurement.cc",
     "src/heap/memory-pool.cc",
     "src/heap/memory-reducer.cc",
     "src/heap/minor-gc-job.cc",
     "src/heap/minor-mark-sweep.cc",
-    "src/heap/mutable-page-metadata.cc",
+    "src/heap/mutable-page.cc",
     "src/heap/new-spaces.cc",
+    "src/heap/normal-page.cc",
     "src/heap/object-stats.cc",
-    "src/heap/page-metadata.cc",
     "src/heap/paged-spaces.cc",
     "src/heap/pretenuring-handler.cc",
     "src/heap/read-only-heap.cc",
@@ -5994,6 +6032,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/sandbox/code-pointer-table.cc",
     "src/sandbox/cppheap-pointer-table.cc",
     "src/sandbox/external-pointer-table.cc",
+    "src/sandbox/external-strings-cage.cc",
     "src/sandbox/hardware-support.cc",
     "src/sandbox/js-dispatch-table.cc",
     "src/sandbox/sandbox.cc",
@@ -6125,6 +6164,11 @@ v8_source_set("v8_base_without_compiler") {
         "src/maglev/ppc/maglev-assembler-ppc.cc",
         "src/maglev/ppc/maglev-ir-ppc.cc",
       ]
+    } else if (v8_current_cpu == "loong64") {
+      sources += [
+        "src/maglev/loong64/maglev-assembler-loong64.cc",
+        "src/maglev/loong64/maglev-ir-loong64.cc",
+      ]
     }
   }
 
@@ -6191,8 +6235,10 @@ v8_source_set("v8_base_without_compiler") {
       "src/wasm/wasm-opcodes.cc",
       "src/wasm/wasm-result.cc",
       "src/wasm/wasm-serialization.cc",
+      "src/wasm/wasm-stack-wrapper-cache.cc",
       "src/wasm/wasm-subtyping.cc",
       "src/wasm/wasm-tracing.cc",
+      "src/wasm/wasm-wrapper-cache.cc",
       "src/wasm/well-known-imports.cc",
     ]
     if (v8_wasm_random_fuzzers) {
@@ -6452,6 +6498,9 @@ v8_source_set("v8_base_without_compiler") {
       }
       if (current_cpu == "x64" && is_linux) {
         sources += [ "src/trap-handler/handler-outside-simulator.cc" ]
+      }
+      if (riscv_use_zicfiss) {
+        sources += [ "src/execution/riscv/shadow-stack-riscv.cc" ]
       }
     }
   } else if (v8_current_cpu == "riscv32") {

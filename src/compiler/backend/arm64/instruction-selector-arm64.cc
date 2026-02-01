@@ -219,7 +219,7 @@ void VisitRR(InstructionSelector* selector, InstructionCode opcode,
   selector->Emit(opcode, g.DefineAsRegister(node), g.UseRegister(op.input(0)));
 }
 
-void VisitSimdShiftRRR(InstructionSelector* selector, ArchOpcode opcode,
+void VisitSimdShiftRRR(InstructionSelector* selector, InstructionCode opcode,
                        OpIndex node, int width) {
   Arm64OperandGenerator g(selector);
   const Operation& op = selector->Get(node);
@@ -2993,6 +2993,14 @@ bool InstructionSelector::ZeroExtendsWord32ToWord64NoPhis(OpIndex node) {
           op.Cast<LoadOp>().loaded_rep.ToRegisterRepresentation();
       return rep == RegisterRepresentation::Word32();
     }
+    case Opcode::kChange: {
+      const ChangeOp& change = op.Cast<ChangeOp>();
+      // Fmov w0,s0 will clear the high 32bit of x0
+      if (change.Is<Opmask::kChangeFloat32ToUint32>()) {
+        return true;
+      }
+      return false;
+    }
     default:
       return false;
   }
@@ -4722,11 +4730,7 @@ void InstructionSelector::VisitInt64AbsWithOverflow(OpIndex node) {
   V(I32x4RelaxedTruncF64x2UZero, kArm64I32x4TruncSatF64x2UZero) \
   V(I16x8BitMask, kArm64I16x8BitMask)                           \
   V(S128Not, kArm64S128Not)                                     \
-  V(V128AnyTrue, kArm64V128AnyTrue)                             \
-  V(I64x2AllTrue, kArm64I64x2AllTrue)                           \
-  V(I32x4AllTrue, kArm64I32x4AllTrue)                           \
-  V(I16x8AllTrue, kArm64I16x8AllTrue)                           \
-  V(I8x16AllTrue, kArm64I8x16AllTrue)
+  V(V128AnyTrue, kArm64V128AnyTrue)
 
 #define SIMD_UNOP_LANE_SIZE_LIST(V) \
   V(F64x2Splat, kArm64FSplat, 64)   \
@@ -4755,18 +4759,18 @@ void InstructionSelector::VisitInt64AbsWithOverflow(OpIndex node) {
   V(I8x16Neg, kArm64INeg, 8)
 
 #define SIMD_SHIFT_OP_LIST(V) \
-  V(I64x2Shl, 64)             \
-  V(I64x2ShrS, 64)            \
-  V(I64x2ShrU, 64)            \
-  V(I32x4Shl, 32)             \
-  V(I32x4ShrS, 32)            \
-  V(I32x4ShrU, 32)            \
-  V(I16x8Shl, 16)             \
-  V(I16x8ShrS, 16)            \
-  V(I16x8ShrU, 16)            \
-  V(I8x16Shl, 8)              \
-  V(I8x16ShrS, 8)             \
-  V(I8x16ShrU, 8)
+  V(I64x2Shl, IShl, 64)       \
+  V(I32x4Shl, IShl, 32)       \
+  V(I16x8Shl, IShl, 16)       \
+  V(I8x16Shl, IShl, 8)        \
+  V(I64x2ShrS, IShrS, 64)     \
+  V(I32x4ShrS, IShrS, 32)     \
+  V(I16x8ShrS, IShrS, 16)     \
+  V(I8x16ShrS, IShrS, 8)      \
+  V(I64x2ShrU, IShrU, 64)     \
+  V(I32x4ShrU, IShrU, 32)     \
+  V(I16x8ShrU, IShrU, 16)     \
+  V(I8x16ShrU, IShrU, 8)
 
 #define SIMD_BINOP_LIST(V)                        \
   V(I32x4Mul, kArm64I32x4Mul)                     \
@@ -4800,7 +4804,6 @@ void InstructionSelector::VisitInt64AbsWithOverflow(OpIndex node) {
   V(F16x8Div, kArm64FDiv, 16)                          \
   V(F16x8Min, kArm64FMin, 16)                          \
   V(F16x8Max, kArm64FMax, 16)                          \
-  V(I64x2Sub, kArm64ISub, 64)                          \
   V(I32x4GtU, kArm64IGtU, 32)                          \
   V(I32x4GeU, kArm64IGeU, 32)                          \
   V(I32x4MinS, kArm64IMinS, 32)                        \
@@ -4830,6 +4833,17 @@ void InstructionSelector::VisitInt64AbsWithOverflow(OpIndex node) {
   V(I8x16MaxS, kArm64IMaxS, 8)                         \
   V(I8x16MinU, kArm64IMinU, 8)                         \
   V(I8x16MaxU, kArm64IMaxU, 8)
+
+#define SIMD_VISIT_ALLTRUE(Name, lane_size)                                \
+  void InstructionSelector::Visit##Name(OpIndex node) {                    \
+    VisitRR(this, kArm64AllTrue | LaneSizeField::encode(lane_size), node); \
+  }
+
+SIMD_VISIT_ALLTRUE(I64x2AllTrue, 64)
+SIMD_VISIT_ALLTRUE(I32x4AllTrue, 32)
+SIMD_VISIT_ALLTRUE(I16x8AllTrue, 16)
+SIMD_VISIT_ALLTRUE(I8x16AllTrue, 8)
+#undef SIMD_VISIT_ALLTRUE
 
 void InstructionSelector::VisitS128Const(OpIndex node) {
   Arm64OperandGenerator g(this);
@@ -5062,9 +5076,11 @@ SIMD_UNOP_LIST(SIMD_VISIT_UNOP)
 #undef SIMD_VISIT_UNOP
 #undef SIMD_UNOP_LIST
 
-#define SIMD_VISIT_SHIFT_OP(Name, width)                \
-  void InstructionSelector::Visit##Name(OpIndex node) { \
-    VisitSimdShiftRRR(this, kArm64##Name, node, width); \
+#define SIMD_VISIT_SHIFT_OP(Name, instruction, width)                     \
+  void InstructionSelector::Visit##Name(OpIndex node) {                   \
+    VisitSimdShiftRRR(this,                                               \
+                      kArm64##instruction | LaneSizeField::encode(width), \
+                      node, width);                                       \
   }
 SIMD_SHIFT_OP_LIST(SIMD_VISIT_SHIFT_OP)
 #undef SIMD_VISIT_SHIFT_OP
@@ -5337,6 +5353,7 @@ void InstructionSelector::VisitS128Xor(OpIndex node) {
 
 namespace {
 
+// Used in ADDL, ADDW, SUBL, and SUBW instructions.
 template <Simd128UnaryOp::Kind K>
 bool CanOptimizeUnaryWithKind(InstructionSelector* selector, const OpIndex node,
                               OpIndex child) {
@@ -5539,8 +5556,103 @@ void InstructionSelector::VisitI16x8Add(OpIndex node) {
 }
 #undef VISIT_SIMD_ADD
 
+namespace {
+template <Simd128UnaryOp::Kind K>
+InstructionCode SublOpcodeFromConvert() {
+  switch (K) {
+    case Simd128UnaryOp::Kind::kI64x2UConvertI32x4Low:
+    case Simd128UnaryOp::Kind::kI32x4UConvertI16x8Low:
+    case Simd128UnaryOp::Kind::kI16x8UConvertI8x16Low:
+      return kArm64Usubl;
+    case Simd128UnaryOp::Kind::kI64x2UConvertI32x4High:
+    case Simd128UnaryOp::Kind::kI32x4UConvertI16x8High:
+    case Simd128UnaryOp::Kind::kI16x8UConvertI8x16High:
+      return kArm64Usubl2;
+    case Simd128UnaryOp::Kind::kI64x2SConvertI32x4Low:
+    case Simd128UnaryOp::Kind::kI32x4SConvertI16x8Low:
+    case Simd128UnaryOp::Kind::kI16x8SConvertI8x16Low:
+      return kArm64Ssubl;
+    case Simd128UnaryOp::Kind::kI64x2SConvertI32x4High:
+    case Simd128UnaryOp::Kind::kI32x4SConvertI16x8High:
+    case Simd128UnaryOp::Kind::kI16x8SConvertI8x16High:
+      return kArm64Ssubl2;
+    default:
+      UNREACHABLE();
+  }
+}
+
+template <Simd128UnaryOp::Kind K>
+InstructionCode SubwOpcodeFromConvert() {
+  switch (K) {
+    case Simd128UnaryOp::Kind::kI64x2UConvertI32x4Low:
+    case Simd128UnaryOp::Kind::kI32x4UConvertI16x8Low:
+    case Simd128UnaryOp::Kind::kI16x8UConvertI8x16Low:
+      return kArm64Usubw;
+    case Simd128UnaryOp::Kind::kI64x2UConvertI32x4High:
+    case Simd128UnaryOp::Kind::kI32x4UConvertI16x8High:
+    case Simd128UnaryOp::Kind::kI16x8UConvertI8x16High:
+      return kArm64Usubw2;
+    case Simd128UnaryOp::Kind::kI64x2SConvertI32x4Low:
+    case Simd128UnaryOp::Kind::kI32x4SConvertI16x8Low:
+    case Simd128UnaryOp::Kind::kI16x8SConvertI8x16Low:
+      return kArm64Ssubw;
+    case Simd128UnaryOp::Kind::kI64x2SConvertI32x4High:
+    case Simd128UnaryOp::Kind::kI32x4SConvertI16x8High:
+    case Simd128UnaryOp::Kind::kI16x8SConvertI8x16High:
+      return kArm64Ssubw2;
+    default:
+      UNREACHABLE();
+  }
+}
+
+template <Simd128UnaryOp::Kind K>
+bool TryEmitSub(InstructionSelector* selector, const OpIndex node,
+                int target_lane_size) {
+  Arm64OperandGenerator g(selector);
+  const Simd128BinopOp* sub_op = selector->Get(node).TryCast<Simd128BinopOp>();
+  bool left = CanOptimizeUnaryWithKind<K>(selector, node, sub_op->left());
+  bool right = CanOptimizeUnaryWithKind<K>(selector, node, sub_op->right());
+  if (left && right) {  // SUBL
+    int opcode = SublOpcodeFromConvert<K>();
+    OpIndex vn = selector->Get(sub_op->left()).Cast<Simd128UnaryOp>().input();
+    OpIndex vm = selector->Get(sub_op->right()).Cast<Simd128UnaryOp>().input();
+    selector->Emit(opcode | LaneSizeField::encode(target_lane_size),
+                   g.DefineAsRegister(node), g.UseRegister(vn),
+                   g.UseRegister(vm));
+    return true;
+  } else if (right) {  // SUBW, optimising right
+    int opcode = SubwOpcodeFromConvert<K>();
+    OpIndex vm = selector->Get(sub_op->right()).Cast<Simd128UnaryOp>().input();
+    selector->Emit(opcode | LaneSizeField::encode(target_lane_size),
+                   g.DefineAsRegister(node), g.UseRegister(sub_op->left()),
+                   g.UseRegister(vm));
+    return true;
+  }
+  // NB: There is no SUBW that optimises left
+  return false;
+}
+}  // namespace
+
+void InstructionSelector::VisitI64x2Sub(OpIndex node) {
+  if (TryEmitSub<Simd128UnaryOp::Kind::kI64x2UConvertI32x4Low>(this, node,
+                                                               64)) {
+    return;
+  } else if (TryEmitSub<Simd128UnaryOp::Kind::kI64x2UConvertI32x4High>(
+                 this, node, 64)) {
+    return;
+  } else if (TryEmitSub<Simd128UnaryOp::Kind::kI64x2SConvertI32x4Low>(
+                 this, node, 64)) {
+    return;
+  } else if (TryEmitSub<Simd128UnaryOp::Kind::kI64x2SConvertI32x4High>(
+                 this, node, 64)) {
+    return;
+  } else {
+    VisitRRR(this, kArm64ISub | LaneSizeField::encode(64), node);
+  }
+}
+
 #define VISIT_SIMD_SUB(Type, LaneSize)                                    \
-  void InstructionSelector::Visit##Type##Sub(OpIndex node) {              \
+  {                                                                       \
     Arm64OperandGenerator g(this);                                        \
     const Simd128BinopOp& sub = Get(node).Cast<Simd128BinopOp>();         \
     const Operation& right = Get(sub.right());                            \
@@ -5555,8 +5667,41 @@ void InstructionSelector::VisitI16x8Add(OpIndex node) {
     VisitRRR(this, kArm64ISub | LaneSizeField::encode(LaneSize), node);   \
   }
 
-VISIT_SIMD_SUB(I32x4, 32)
-VISIT_SIMD_SUB(I16x8, 16)
+void InstructionSelector::VisitI32x4Sub(OpIndex node) {
+  if (TryEmitSub<Simd128UnaryOp::Kind::kI32x4UConvertI16x8Low>(this, node,
+                                                               32)) {
+    return;
+  } else if (TryEmitSub<Simd128UnaryOp::Kind::kI32x4UConvertI16x8High>(
+                 this, node, 32)) {
+    return;
+  } else if (TryEmitSub<Simd128UnaryOp::Kind::kI32x4SConvertI16x8Low>(
+                 this, node, 32)) {
+    return;
+  } else if (TryEmitSub<Simd128UnaryOp::Kind::kI32x4SConvertI16x8High>(
+                 this, node, 32)) {
+    return;
+  } else {
+    VISIT_SIMD_SUB(I32x4, 32)
+  }
+}
+
+void InstructionSelector::VisitI16x8Sub(OpIndex node) {
+  if (TryEmitSub<Simd128UnaryOp::Kind::kI16x8UConvertI8x16Low>(this, node,
+                                                               16)) {
+    return;
+  } else if (TryEmitSub<Simd128UnaryOp::Kind::kI16x8UConvertI8x16High>(
+                 this, node, 16)) {
+    return;
+  } else if (TryEmitSub<Simd128UnaryOp::Kind::kI16x8SConvertI8x16Low>(
+                 this, node, 16)) {
+    return;
+  } else if (TryEmitSub<Simd128UnaryOp::Kind::kI16x8SConvertI8x16High>(
+                 this, node, 16)) {
+    return;
+  } else {
+    VISIT_SIMD_SUB(I16x8, 16)
+  }
+}
 #undef VISIT_SIMD_SUB
 
 namespace {
@@ -5574,13 +5719,28 @@ void VisitSimdReduce(InstructionSelector* selector, OpIndex node,
     VisitSimdReduce(this, node, Opcode);                           \
   }
 
-VISIT_SIMD_REDUCE(I8x16, kArm64I8x16Addv)
-VISIT_SIMD_REDUCE(I16x8, kArm64I16x8Addv)
-VISIT_SIMD_REDUCE(I32x4, kArm64I32x4Addv)
-VISIT_SIMD_REDUCE(I64x2, kArm64I64x2AddPair)
-VISIT_SIMD_REDUCE(F32x4, kArm64F32x4AddReducePairwise)
-VISIT_SIMD_REDUCE(F64x2, kArm64F64x2AddPair)
+VISIT_SIMD_REDUCE(I8x16, kArm64IAddv | LaneSizeField::encode(8))
+VISIT_SIMD_REDUCE(I16x8, kArm64IAddv | LaneSizeField::encode(16))
+VISIT_SIMD_REDUCE(I32x4, kArm64IAddv | LaneSizeField::encode(32))
+VISIT_SIMD_REDUCE(I64x2, kArm64IAddpScalar)
+VISIT_SIMD_REDUCE(F64x2, kArm64FAddpScalar | LaneSizeField::encode(64))
 #undef VISIT_SIMD_REDUCE
+
+void InstructionSelector::VisitF32x4AddReduce(OpIndex node) {
+  Arm64OperandGenerator g(this);
+  InstructionOperand temp = g.TempSimd128Register();
+  OpIndex input = this->Get(node).input(0);
+  Emit(kArm64FAddp | LaneSizeField::encode(32), temp, g.UseRegister(input),
+       g.UseRegister(input));
+  Emit(kArm64FAddpScalar | LaneSizeField::encode(32), g.DefineAsRegister(node),
+       temp);
+}
+
+void InstructionSelector::VisitI32x4AddPairwise(OpIndex node) {
+  Arm64OperandGenerator g(this);
+  Emit(kArm64IAddp | LaneSizeField::encode(32), g.DefineAsRegister(node),
+       g.UseRegister(Get(node).input(0)), g.UseRegister(Get(node).input(1)));
+}
 
 namespace {
 bool isSimdZero(InstructionSelector* selector, OpIndex node) {
@@ -5665,19 +5825,20 @@ void InstructionSelector::VisitI64x2RelaxedLaneSelect(OpIndex node) {
   VisitS128Select(node);
 }
 
-#define VISIT_SIMD_QFMOP(op)                                                  \
-  void InstructionSelector::Visit##op(OpIndex node) {                         \
-    Arm64OperandGenerator g(this);                                            \
-    const Simd128TernaryOp& op = Cast<Simd128TernaryOp>(node);                \
-    Emit(kArm64##op, g.DefineSameAsInput(node, 2), g.UseRegister(op.first()), \
-         g.UseRegister(op.second()), g.UseRegister(op.third()));              \
+#define VISIT_SIMD_QFMOP(op, instruction, lsf)                    \
+  void InstructionSelector::Visit##op(OpIndex node) {             \
+    Arm64OperandGenerator g(this);                                \
+    const Simd128TernaryOp& op = Cast<Simd128TernaryOp>(node);    \
+    Emit(kArm64##instruction | LaneSizeField::encode(lsf),        \
+         g.DefineSameAsInput(node, 2), g.UseRegister(op.first()), \
+         g.UseRegister(op.second()), g.UseRegister(op.third()));  \
   }
-VISIT_SIMD_QFMOP(F64x2Qfma)
-VISIT_SIMD_QFMOP(F64x2Qfms)
-VISIT_SIMD_QFMOP(F32x4Qfma)
-VISIT_SIMD_QFMOP(F32x4Qfms)
-VISIT_SIMD_QFMOP(F16x8Qfma)
-VISIT_SIMD_QFMOP(F16x8Qfms)
+VISIT_SIMD_QFMOP(F64x2Qfma, Ffma, 64)
+VISIT_SIMD_QFMOP(F64x2Qfms, Ffms, 64)
+VISIT_SIMD_QFMOP(F32x4Qfma, Ffma, 32)
+VISIT_SIMD_QFMOP(F32x4Qfms, Ffms, 32)
+VISIT_SIMD_QFMOP(F16x8Qfma, Ffma, 16)
+VISIT_SIMD_QFMOP(F16x8Qfms, Ffms, 16)
 #undef VISIT_SIMD_QFMOP
 
 namespace {
@@ -5772,6 +5933,15 @@ std::optional<ShufflePair> TryMapCanonicalShuffleToShufflePair(
                           kArm64S128UnzipRight, 8),
       CANONICAL_TO_INSTRS(kS8x8DeinterleaveOddOdd, kArm64S128UnzipRight, 8,
                           kArm64S128UnzipRight, 8),
+      // 16x4 Arm64 instructions selected using special 8x8 patterns
+      CANONICAL_TO_INSTRS(kS16x4DeinterleaveEvenEven, kArm64S128UnzipLeft, 16,
+                          kArm64S128UnzipLeft, 16),
+      CANONICAL_TO_INSTRS(kS16x4DeinterleaveOddEven, kArm64S128UnzipRight, 16,
+                          kArm64S128UnzipLeft, 16),
+      CANONICAL_TO_INSTRS(kS16x4DeinterleaveEvenOdd, kArm64S128UnzipLeft, 16,
+                          kArm64S128UnzipRight, 16),
+      CANONICAL_TO_INSTRS(kS16x4DeinterleaveOddOdd, kArm64S128UnzipRight, 16,
+                          kArm64S128UnzipRight, 16),
   });
 #undef CANONICAL_TO_INSTRS
 
@@ -5782,7 +5952,76 @@ std::optional<ShufflePair> TryMapCanonicalShuffleToShufflePair(
   }
   return {};
 }
+
+template <int32_t lane_size>
+constexpr int32_t GetLaneCount() {
+  return kVRegSizeInBits / lane_size;
+}
+
+template <int32_t lane_size>
+OpIndex GetInput(OpIndex input0, OpIndex input1, int32_t lane) {
+  int32_t lane_count = GetLaneCount<lane_size>();
+  return (lane < lane_count) ? input0 : input1;
+}
+
+template <int32_t lane_size>
+int32_t AdjustLane(int32_t lane) {
+  constexpr int32_t lane_count = GetLaneCount<lane_size>();
+  constexpr int32_t max_input0_lane = lane_count - 1;
+  return lane & max_input0_lane;
+}
+
+template <int32_t lane_size>
+void EmitShuffle1(InstructionSelector* selector, OpIndex node, OpIndex input0,
+                  OpIndex input1, uint32_t shuffle) {
+  OpIndex input = GetInput<lane_size>(input0, input1, shuffle);
+  int32_t lane = AdjustLane<lane_size>(shuffle);
+  Arm64OperandGenerator g(selector);
+  // We only need to define one lane, as the rest are undefined, so just use a
+  // dup (as it should be faster than a lane mov).
+  selector->Emit(kArm64S128Dup | LaneSizeField::encode(lane_size),
+                 g.DefineAsRegister(node), g.UseRegister(input),
+                 g.UseImmediate(lane));
+}
+
+template <int32_t lane_size>
+void EmitShuffle2(InstructionSelector* selector, OpIndex node, OpIndex input0,
+                  OpIndex input1, std::array<uint8_t, 2> shuffle) {
+  Arm64OperandGenerator g(selector);
+  // TODO(sparker): Recognise when we're shuffling the same lane, or adjacent
+  // lanes.
+
+  // We only need to define two lanes.
+  InstructionOperand temp = g.TempSimd128Register();
+  {
+    // So, as with Shuffle1, just dup one lane.
+    int32_t lane = shuffle[0];
+    OpIndex input = GetInput<lane_size>(input0, input1, lane);
+    lane = AdjustLane<lane_size>(lane);
+    selector->Emit(kArm64S128Dup | LaneSizeField::encode(lane_size), temp,
+                   g.UseRegister(input), g.UseImmediate(lane));
+  }
+  {
+    // Then overwrite the other with a lane mov.
+    int32_t lane = shuffle[1];
+    OpIndex input = GetInput<lane_size>(input0, input1, lane);
+    lane = AdjustLane<lane_size>(lane);
+    selector->Emit(kArm64S128MoveLane | LaneSizeField::encode(lane_size),
+                   g.DefineSameAsFirst(node), temp, g.UseRegister(input),
+                   g.UseImmediate(lane), g.UseImmediate(1));
+  }
+}
+
 }  // namespace
+
+void InstructionSelector::VisitI8x1Shuffle(OpIndex node) {
+  Arm64OperandGenerator g(this);
+  auto view = this->simd_shuffle_view(node);
+  OpIndex input0 = view.input(0);
+  OpIndex input1 = view.input(1);
+  uint8_t shuffle = view.data()[0];
+  EmitShuffle1<8>(this, node, input0, input1, shuffle);
+}
 
 void InstructionSelector::VisitI8x2Shuffle(OpIndex node) {
   Arm64OperandGenerator g(this);
@@ -5795,23 +6034,23 @@ void InstructionSelector::VisitI8x2Shuffle(OpIndex node) {
 
   uint8_t shuffle16x1;
   if (wasm::SimdShuffle::TryMatch16x1Shuffle(shuffle.data(), &shuffle16x1)) {
-    Emit(kArm64S16x1Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-         g.UseRegister(input1), g.UseImmediate(shuffle16x1));
+    EmitShuffle1<16>(this, node, input0, input1, shuffle16x1);
+    return;
   } else {
-    Emit(kArm64S8x2Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-         g.UseRegister(input1),
-         g.UseImmediate(wasm::SimdShuffle::Pack2Lanes(shuffle)));
+    EmitShuffle2<8>(this, node, input0, input1, shuffle);
   }
 }
 
 void InstructionSelector::VisitI8x4Shuffle(OpIndex node) {
   Arm64OperandGenerator g(this);
   auto view = this->simd_shuffle_view(node);
-  OpIndex input0 = view.input(0);
-  OpIndex input1 = view.input(1);
+  bool is_swizzle;
   constexpr size_t kShuffleBytes = 4;
   std::array<uint8_t, kShuffleBytes> shuffle;
-  std::copy(view.data(), view.data() + kShuffleBytes, shuffle.begin());
+  CanonicalizeShuffle<kSimd128Size, kSimd128QuarterSize>(view, shuffle.data(),
+                                                         &is_swizzle);
+  OpIndex input0 = view.input(0);
+  OpIndex input1 = view.input(1);
   std::array<uint8_t, 2> shuffle16x2;
   uint8_t shuffle32x1;
 
@@ -5852,13 +6091,11 @@ void InstructionSelector::VisitI8x4Shuffle(OpIndex node) {
     return;
   } else if (wasm::SimdShuffle::TryMatch32x1Shuffle(shuffle.data(),
                                                     &shuffle32x1)) {
-    Emit(kArm64S32x1Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-         g.UseRegister(input1), g.UseImmediate(shuffle32x1));
+    EmitShuffle1<32>(this, node, input0, input1, shuffle32x1);
+    return;
   } else if (wasm::SimdShuffle::TryMatch16x2Shuffle(shuffle.data(),
                                                     shuffle16x2.data())) {
-    Emit(kArm64S16x2Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-         g.UseRegister(input1),
-         g.UseImmediate(wasm::SimdShuffle::Pack2Lanes(shuffle16x2)));
+    EmitShuffle2<16>(this, node, input0, input1, shuffle16x2);
   } else {
     InstructionOperand src0, src1;
     ArrangeShuffleTable(&g, input0, input1, &src0, &src1);
@@ -5878,6 +6115,12 @@ void InstructionSelector::VisitI8x8Shuffle(OpIndex node) {
   OpIndex input1 = view.input(1);
   Arm64OperandGenerator g(this);
 
+  uint8_t shuffle64x1;
+  if (wasm::SimdShuffle::TryMatch64x1Shuffle(shuffle.data(), &shuffle64x1)) {
+    EmitShuffle1<64>(this, node, input0, input1, shuffle64x1);
+    return;
+  }
+
   const CanonicalShuffle canonical =
       wasm::SimdShuffle::TryMatchCanonical(shuffle);
 
@@ -5896,13 +6139,7 @@ void InstructionSelector::VisitI8x8Shuffle(OpIndex node) {
     return;
   }
 
-  uint8_t shuffle64x1;
   int index = 0;
-  if (wasm::SimdShuffle::TryMatch64x1Shuffle(shuffle.data(), &shuffle64x1)) {
-    Emit(kArm64S64x1Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-         g.UseRegister(input1), g.UseImmediate(shuffle64x1));
-    return;
-  }
   std::array<uint8_t, 2> shuffle32x2;
   if (wasm::SimdShuffle::TryMatch32x2Shuffle(shuffle.data(),
                                              shuffle32x2.data())) {
@@ -5911,9 +6148,7 @@ void InstructionSelector::VisitI8x8Shuffle(OpIndex node) {
       Emit(kArm64S128Dup | LaneSizeField::encode(32), g.DefineAsRegister(node),
            g.UseRegister(input0), g.UseImmediate(index));
     } else {
-      Emit(kArm64S32x2Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-           g.UseRegister(input1),
-           g.UseImmediate(wasm::SimdShuffle::Pack2Lanes(shuffle32x2)));
+      EmitShuffle2<32>(this, node, input0, input1, shuffle32x2);
     }
     return;
   }
@@ -5992,9 +6227,7 @@ void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
       Emit(kArm64S128Dup | LaneSizeField::encode(64), g.DefineAsRegister(node),
            g.UseRegister(input0), g.UseImmediate(index));
     } else {
-      Emit(kArm64S64x2Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
-           g.UseRegister(input1),
-           g.UseImmediate(wasm::SimdShuffle::Pack2Lanes(shuffle64x2)));
+      EmitShuffle2<64>(this, node, input0, input1, shuffle64x2);
     }
     return;
   }
@@ -6009,8 +6242,17 @@ void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
            g.UseRegister(input0), g.UseImmediate(index));
     } else if (wasm::SimdShuffle::TryMatch32x4OneLaneSwizzle(shuffle32x4.data(),
                                                              &from, &to)) {
-      Emit(kArm64S32x4OneLaneSwizzle, g.DefineAsRegister(node),
-           g.UseRegister(input0), g.TempImmediate(from), g.TempImmediate(to));
+      if (CanCover(node, input0)) {
+        Emit(kArm64S128MoveLane | LaneSizeField::encode(32),
+             g.DefineSameAsFirst(node), g.UseUniqueRegister(input0),
+             g.UseRegister(input0), g.UseImmediate(from), g.UseImmediate(to));
+      } else {
+        InstructionOperand temp = g.TempSimd128Register();
+        Emit(kArm64S128MoveReg, temp, g.UseRegister(input0));
+        Emit(kArm64S128MoveLane | LaneSizeField::encode(32),
+             g.DefineSameAsFirst(node), temp, g.UseRegister(input0),
+             g.UseImmediate(from), g.UseImmediate(to));
+      }
     } else if (canonical == CanonicalShuffle::kIdentity) {
       // Bypass normal shuffle code generation in this case.
       // EmitIdentity
@@ -6116,39 +6358,39 @@ void InstructionSelector::VisitSignExtendWord32ToInt64(OpIndex node) {
 #if V8_ENABLE_WEBASSEMBLY
 namespace {
 void VisitPminOrPmax(InstructionSelector* selector, ArchOpcode opcode,
-                     OpIndex node) {
+                     OpIndex node, int lane_size) {
   Arm64OperandGenerator g(selector);
   const Simd128BinopOp& op = selector->Cast<Simd128BinopOp>(node);
   // Need all unique registers because we first compare the two inputs, then
   // we need the inputs to remain unchanged for the bitselect later.
-  selector->Emit(opcode, g.DefineAsRegister(node),
-                 g.UseUniqueRegister(op.left()),
+  selector->Emit(opcode | LaneSizeField::encode(lane_size),
+                 g.DefineAsRegister(node), g.UseUniqueRegister(op.left()),
                  g.UseUniqueRegister(op.right()));
 }
 }  // namespace
 
 void InstructionSelector::VisitF16x8Pmin(OpIndex node) {
-  VisitPminOrPmax(this, kArm64F16x8Pmin, node);
+  VisitPminOrPmax(this, kArm64Pmin, node, 16);
 }
 
 void InstructionSelector::VisitF16x8Pmax(OpIndex node) {
-  VisitPminOrPmax(this, kArm64F16x8Pmax, node);
+  VisitPminOrPmax(this, kArm64Pmax, node, 16);
 }
 
 void InstructionSelector::VisitF32x4Pmin(OpIndex node) {
-  VisitPminOrPmax(this, kArm64F32x4Pmin, node);
+  VisitPminOrPmax(this, kArm64Pmin, node, 32);
 }
 
 void InstructionSelector::VisitF32x4Pmax(OpIndex node) {
-  VisitPminOrPmax(this, kArm64F32x4Pmax, node);
+  VisitPminOrPmax(this, kArm64Pmax, node, 32);
 }
 
 void InstructionSelector::VisitF64x2Pmin(OpIndex node) {
-  VisitPminOrPmax(this, kArm64F64x2Pmin, node);
+  VisitPminOrPmax(this, kArm64Pmin, node, 64);
 }
 
 void InstructionSelector::VisitF64x2Pmax(OpIndex node) {
-  VisitPminOrPmax(this, kArm64F64x2Pmax, node);
+  VisitPminOrPmax(this, kArm64Pmax, node, 64);
 }
 
 namespace {

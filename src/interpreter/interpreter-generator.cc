@@ -697,7 +697,7 @@ class InterpreterSetNamedPropertyAssembler : public InterpreterAssembler {
                                        OperandScale operand_scale)
       : InterpreterAssembler(state, bytecode, operand_scale) {}
 
-  void SetNamedProperty(Builtin ic_bultin, NamedPropertyType property_type) {
+  void SetNamedProperty(Builtin ic_builtin, NamedPropertyType property_type) {
     TNode<Object> object = LoadRegisterAtOperandIndex(0);
     TNode<Name> name = CAST(LoadConstantPoolEntryAtOperandIndex(1));
     TNode<Object> value = GetAccumulator();
@@ -705,7 +705,7 @@ class InterpreterSetNamedPropertyAssembler : public InterpreterAssembler {
     TNode<HeapObject> maybe_vector = LoadFeedbackVector();
     TNode<Context> context = GetContext();
 
-    TNode<Object> result = CallBuiltin(ic_bultin, context, object, name, value,
+    TNode<Object> result = CallBuiltin(ic_builtin, context, object, name, value,
                                        slot, maybe_vector);
     // To avoid special logic in the deoptimizer to re-materialize the value in
     // the accumulator, we clobber the accumulator after the IC call. It
@@ -1592,15 +1592,15 @@ class InterpreterJSCallAssembler : public InterpreterAssembler {
       case 2:
         CallJSAndDispatch(
             function, context, Int32Constant(arg_count), receiver_mode,
-            LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex + 1),
-            LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex));
+            LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex),
+            LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex + 1));
         break;
       case 3:
         CallJSAndDispatch(
             function, context, Int32Constant(arg_count), receiver_mode,
-            LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex + 2),
+            LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex),
             LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex + 1),
-            LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex));
+            LoadRegisterAtOperandIndex(kFirstArgumentOperandIndex + 2));
         break;
       default:
         UNREACHABLE();
@@ -1860,14 +1860,16 @@ class InterpreterCompareOpAssembler : public InterpreterAssembler {
       }
     }
 
-    UpdateEmbeddedFeedback(var_type_feedback.value(), 1);
+    UpdateEmbeddedFeedback(var_type_feedback.value(),
+                           kEmbeddedFeedbackOperandIndex);
 
     SetAccumulator(result);
     Dispatch();
 
     BIND(&if_exception);
     {
-      UpdateEmbeddedFeedback(var_type_feedback.value(), 1);
+      UpdateEmbeddedFeedback(var_type_feedback.value(),
+                             kEmbeddedFeedbackOperandIndex);
       CallRuntime(Runtime::kReThrow, context, var_exception.value());
       Unreachable();
     }

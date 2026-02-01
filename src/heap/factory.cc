@@ -22,14 +22,14 @@
 #include "src/execution/isolate-inl.h"
 #include "src/execution/protectors-inl.h"
 #include "src/flags/flags.h"
+#include "src/heap/base-page.h"
 #include "src/heap/heap-allocator-inl.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/incremental-marking.h"
-#include "src/heap/large-page-metadata-inl.h"
+#include "src/heap/large-page-inl.h"
 #include "src/heap/mark-compact-inl.h"
-#include "src/heap/memory-chunk-metadata.h"
-#include "src/heap/mutable-page-metadata.h"
+#include "src/heap/mutable-page.h"
 #include "src/heap/read-only-heap.h"
 #include "src/ic/handler-configuration-inl.h"
 #include "src/init/bootstrapper.h"
@@ -72,6 +72,7 @@
 #include "src/objects/megadom-handler-inl.h"
 #include "src/objects/microtask-inl.h"
 #include "src/objects/module-inl.h"
+#include "src/objects/name.h"
 #include "src/objects/objects.h"
 #include "src/objects/promise-inl.h"
 #include "src/objects/property-descriptor-object-inl.h"
@@ -388,6 +389,17 @@ DirectHandle<PrototypeInfo> Factory::NewPrototypeInfo() {
   return direct_handle(result, isolate());
 }
 
+DirectHandle<PrototypeSharedClosureInfo> Factory::NewPrototypeSharedClosureInfo(
+    DirectHandle<Context> context,
+    DirectHandle<ClosureFeedbackCellArray> feedback_array) {
+  auto result = NewStructInternal<PrototypeSharedClosureInfo>(
+      PROTOTYPE_SHARED_CLOSURE_INFO_TYPE, AllocationType::kOld);
+  DisallowGarbageCollection no_gc;
+  result->set_context(*context);
+  result->set_closure_feedback_cell_array(*feedback_array);
+  return direct_handle(result, isolate());
+}
+
 DirectHandle<EnumCache> Factory::NewEnumCache(DirectHandle<FixedArray> keys,
                                               DirectHandle<FixedArray> indices,
                                               AllocationType allocation) {
@@ -445,8 +457,7 @@ DirectHandle<PropertyArray> Factory::NewPropertyArray(
 }
 
 MaybeHandle<FixedArray> Factory::TryNewFixedArray(
-    int length, AllocationType allocation_type) {
-  DCHECK_LE(0, length);
+    uint32_t length, AllocationType allocation_type) {
   if (length == 0) return empty_fixed_array();
 
   int size = FixedArray::SizeFor(length);
@@ -456,7 +467,7 @@ MaybeHandle<FixedArray> Factory::TryNewFixedArray(
   if (!allocation.To(&result)) return MaybeHandle<FixedArray>();
   if ((size > heap->MaxRegularHeapObjectSize(allocation_type)) &&
       v8_flags.use_marking_progress_bar) {
-    LargePageMetadata::FromHeapObject(isolate(), result)
+    LargePage::FromHeapObject(isolate(), result)
         ->marking_progress_tracker()
         .Enable(size);
   }
@@ -1226,7 +1237,8 @@ DirectHandle<JSStringIterator> Factory::NewJSStringIterator(
   return iterator;
 }
 
-Tagged<Symbol> Factory::NewSymbolInternal(AllocationType allocation) {
+Tagged<Symbol> Factory::NewSymbolInternal(PrivateSymbolKind kind,
+                                          AllocationType allocation) {
   DCHECK(allocation != AllocationType::kYoung);
   // Statically ensure that it is safe to allocate symbols in paged spaces.
   static_assert(sizeof(Symbol) <= kMaxRegularHeapObjectSize);
@@ -1248,26 +1260,32 @@ Tagged<Symbol> Factory::NewSymbolInternal(AllocationType allocation) {
                                SKIP_WRITE_BARRIER);
   }
   symbol->set_flags(0);
-  DCHECK(!symbol->is_private());
+  symbol->set_private_symbol_kind(kind);
   return symbol;
 }
 
 Handle<Symbol> Factory::NewSymbol(AllocationType allocation) {
-  return handle(NewSymbolInternal(allocation), isolate());
+  return handle(NewSymbolInternal(PrivateSymbolKind::kPublic, allocation),
+                isolate());
 }
 
 Handle<Symbol> Factory::NewPrivateSymbol(AllocationType allocation) {
   DCHECK(allocation != AllocationType::kYoung);
-  Tagged<Symbol> symbol = NewSymbolInternal(allocation);
-  DisallowGarbageCollection no_gc;
-  symbol->set_is_private(true);
+  Tagged<Symbol> symbol =
+      NewSymbolInternal(PrivateSymbolKind::kInternal, allocation);
   return handle(symbol, isolate());
 }
 
 DirectHandle<Symbol> Factory::NewPrivateNameSymbol(DirectHandle<String> name) {
-  Tagged<Symbol> symbol = NewSymbolInternal();
+  Tagged<Symbol> symbol = NewSymbolInternal(PrivateSymbolKind::kFieldName);
   DisallowGarbageCollection no_gc;
-  symbol->set_is_private_name();
+  symbol->set_description(*name);
+  return direct_handle(symbol, isolate());
+}
+
+DirectHandle<Symbol> Factory::NewPrivateBrandSymbol(DirectHandle<String> name) {
+  Tagged<Symbol> symbol = NewSymbolInternal(PrivateSymbolKind::kBrand);
+  DisallowGarbageCollection no_gc;
   symbol->set_description(*name);
   return direct_handle(symbol, isolate());
 }
@@ -1747,7 +1765,7 @@ Factory::NewWasmDispatchTableForImports(int length, bool shared) {
   // an entry in a std::unordered_map<int, std::shared_ptr<...>>, the map
   // is probably about half full.
   constexpr size_t kPerEntrySize =
-      sizeof(int) + sizeof(std::shared_ptr<wasm::WasmImportWrapperHandle>) +
+      sizeof(int) + sizeof(std::shared_ptr<wasm::WasmWrapperHandle>) +
       2 * sizeof(void*);
   size_t estimated_offheap_size = length * kPerEntrySize;
   DirectHandle<TrustedManaged<WasmDispatchTableData>> offheap_data =
@@ -1898,7 +1916,7 @@ DirectHandle<WasmJSFunctionData> Factory::NewWasmJSFunctionData(
     const wasm::CanonicalSig* sig, DirectHandle<JSReceiver> callable,
     DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
     wasm::Suspend suspend, wasm::Promise promise,
-    std::shared_ptr<wasm::WasmImportWrapperHandle> wrapper_handle) {
+    std::shared_ptr<wasm::WasmWrapperHandle> wrapper_handle) {
   constexpr bool kShared = false;
   DirectHandle<WasmImportData> import_data = NewWasmImportData(
       callable, suspend, DirectHandle<WasmTrustedInstanceData>(), sig, kShared);
@@ -2147,7 +2165,7 @@ DirectHandle<Object> Factory::NewWasmArrayFromElementSegment(
     DirectHandle<WasmTrustedInstanceData> shared_trusted_instance_data,
     uint32_t segment_index, uint32_t start_offset, uint32_t length,
     DirectHandle<Map> map, wasm::CanonicalValueType element_type) {
-  DCHECK(element_type.is_reference());
+  DCHECK(element_type.is_ref());
 
   // If the element segment has not been initialized yet, lazily initialize it
   // now.
@@ -3307,8 +3325,8 @@ DirectHandle<JSObject> Factory::NewSlowJSObjectWithPropertiesAndElements(
   return object;
 }
 
-Handle<JSArray> Factory::NewJSArray(ElementsKind elements_kind, int length,
-                                    int capacity,
+Handle<JSArray> Factory::NewJSArray(ElementsKind elements_kind, uint32_t length,
+                                    uint32_t capacity,
                                     ArrayStorageAllocationMode mode,
                                     AllocationType allocation) {
   DCHECK(capacity >= length);

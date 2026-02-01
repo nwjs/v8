@@ -134,8 +134,8 @@ std::optional<BailoutReason> InstructionSelector::SelectInstructions() {
   }
 
   // Visit each basic block in post order.
-  for (auto i = blocks.rbegin(); i != blocks.rend(); ++i) {
-    VisitBlock(*i);
+  for (const Block* block : base::Reversed(blocks)) {
+    VisitBlock(block);
     if (instruction_selection_failed())
       return BailoutReason::kTurbofanCodeGenerationFailed;
   }
@@ -1318,8 +1318,7 @@ void InstructionSelector::InitializeCallBuffer(
     InstructionOperand op = g.UseLocation(*iter, location);
     UnallocatedOperand unallocated = UnallocatedOperand::cast(op);
     if (unallocated.HasFixedSlotPolicy() && !is_tail_call) {
-      int stack_index = buffer->descriptor->GetStackIndexFromSlot(
-          unallocated.fixed_slot_index());
+      int stack_index = -unallocated.fixed_slot_index() - 1;
       // This can insert empty slots before stack_index and will insert enough
       // slots after stack_index to store the parameter.
       if (static_cast<size_t>(stack_index) >= buffer->pushed_nodes.size()) {
@@ -1973,12 +1972,15 @@ IF_WASM(VISIT_UNSUPPORTED_OP, I64x2AddReduce)
 IF_WASM(VISIT_UNSUPPORTED_OP, F32x4AddReduce)
 IF_WASM(VISIT_UNSUPPORTED_OP, F64x2AddReduce)
 
+IF_WASM(VISIT_UNSUPPORTED_OP, I8x1Shuffle)
 IF_WASM(VISIT_UNSUPPORTED_OP, I8x2Shuffle)
 IF_WASM(VISIT_UNSUPPORTED_OP, I8x4Shuffle)
 IF_WASM(VISIT_UNSUPPORTED_OP, I8x8Shuffle)
 
 IF_WASM(VISIT_UNSUPPORTED_OP, MemoryCopy)
 IF_WASM(VISIT_UNSUPPORTED_OP, MemoryFill)
+
+IF_WASM(VISIT_UNSUPPORTED_OP, I32x4AddPairwise)
 #endif  // !V8_TARGET_ARCH_ARM64
 
 void InstructionSelector::VisitParameter(OpIndex node) {
@@ -3514,7 +3516,7 @@ void InstructionSelector::VisitNode(OpIndex node) {
       const SelectOp& select = op.Cast<SelectOp>();
       // If there is a Select, then it should only be one that is supported by
       // the machine, and it should be meant to be implementation with cmove.
-      DCHECK_EQ(select.implem, SelectOp::Implementation::kCMove);
+      DCHECK_EQ(select.implem, SelectOp::Implementation::kForceCMove);
       MarkAsRepresentation(select.rep, node);
       return VisitSelect(node);
     }
@@ -3708,6 +3710,8 @@ void InstructionSelector::VisitNode(OpIndex node) {
       MarkAsSimd128(node);
       const Simd128ShuffleOp& shuffle = op.Cast<Simd128ShuffleOp>();
       switch (shuffle.kind) {
+        case Simd128ShuffleOp::Kind::kI8x1:
+          return VisitI8x1Shuffle(node);
         case Simd128ShuffleOp::Kind::kI8x2:
           return VisitI8x2Shuffle(node);
         case Simd128ShuffleOp::Kind::kI8x4:

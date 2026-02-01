@@ -9,31 +9,7 @@
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
 
-#include "src/compiler/turboshaft/operations.h"
-#include "src/roots/roots.h"
-
 namespace v8::internal::compiler::turboshaft {
-
-struct RootTypes {
-#define DEFINE_TYPE(type, name, CamelName) using k##CamelName##Type = type;
-  ROOT_LIST(DEFINE_TYPE)
-#undef DEFINE_TYPE
-};
-
-template <typename AssemblerT>
-OpIndex LoadRootHelper(AssemblerT&& assembler, RootIndex index) {
-  if (RootsTable::IsImmortalImmovable(index)) {
-    return assembler.Load(assembler.LoadRootRegister(),
-                          LoadOp::Kind::RawAligned().Immutable(),
-                          MemoryRepresentation::AnyUncompressedTagged(),
-                          IsolateData::root_slot_offset(index));
-  } else {
-    return assembler.Load(assembler.LoadRootRegister(),
-                          LoadOp::Kind::RawAligned(),
-                          MemoryRepresentation::AnyUncompressedTagged(),
-                          IsolateData::root_slot_offset(index));
-  }
-}
 
 #define LOAD_INSTANCE_FIELD(instance, name, representation)           \
   __ Load(instance, compiler::turboshaft::LoadOp::Kind::TaggedBase(), \
@@ -53,10 +29,6 @@ OpIndex LoadRootHelper(AssemblerT&& assembler, RootIndex index) {
   __ Load(instance,                                                     \
           compiler::turboshaft::LoadOp::Kind::TaggedBase().Immutable(), \
           representation, WasmTrustedInstanceData::k##name##Offset)
-
-#define LOAD_ROOT(name)                                    \
-  V<compiler::turboshaft::RootTypes::k##name##Type>::Cast( \
-      LoadRootHelper(Asm(), RootIndex::k##name))
 
 }  // namespace v8::internal::compiler::turboshaft
 

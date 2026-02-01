@@ -97,22 +97,29 @@ namespace {
 #define AS_PTR(x) reinterpret_cast<void*>(x)
 #define AS_OBJ(x) Brief(Tagged<Object>(x))
 
-void PrintFunctionCallbackInfo(Address* implicit_args, Address* js_args,
-                               Address length, std::ostream& os) {
+void PrintFunctionCallbackInfo(Address* values, std::ostream& os) {
   using FCA = FunctionCallbackArguments;
 
-  static_assert(FCA::kArgsLength == 6);
-  os << "FunctionCallbackInfo: "  //
-     << "\n - isolate: " << AS_PTR(implicit_args[FCA::kIsolateIndex])
-     << "\n - return_value: " << AS_OBJ(implicit_args[FCA::kReturnValueIndex])
-     << "\n - target: " << AS_OBJ(implicit_args[FCA::kTargetIndex])
-     << "\n - new_target: " << AS_OBJ(implicit_args[FCA::kNewTargetIndex])
+  static_assert(FCA::kApiArgsLength == 4);
+  uint32_t argc = static_cast<uint32_t>(values[FCA::kArgcIndex]);
+  bool is_construct = values[FCA::kFrameTypeIndex] ==
+                      Smi::FromEnum(StackFrame::API_CONSTRUCT_EXIT).ptr();
 
-     << "\n - argc: " << length  //
-     << "\n - receiver: " << AS_OBJ(js_args[0]);
+  os << "FunctionCallbackInfo: "
+     << (is_construct ? "[[Construct]]" : "[[Call]]")
+     << "\n - isolate: " << AS_PTR(values[FCA::kIsolateIndex])
+     << "\n - return_value: " << AS_OBJ(values[FCA::kReturnValueIndex])
+     << "\n - target: " << AS_OBJ(values[FCA::kTargetIndex]);
 
-  constexpr int kMaxArgs = 4;
-  for (int i = 0; i < std::min(static_cast<int>(length), kMaxArgs); i++) {
+  if (is_construct) {
+    os << "\n - new_target: " << AS_OBJ(values[FCA::kNewTargetIndex]);
+  }
+  os << "\n - argc: " << argc
+     << "\n - receiver: " << AS_OBJ(values[FCA::kReceiverIndex]);
+
+  constexpr uint32_t kMaxArgs = 4;
+  Address* js_args = &values[FCA::kFirstJSArgumentIndex];
+  for (uint32_t i = 0; i < std::min(argc, kMaxArgs); i++) {
     os << "\n - arg[" << i << "]: " << AS_OBJ(js_args[i]);
   }
   os << "\n";
@@ -121,19 +128,29 @@ void PrintFunctionCallbackInfo(Address* implicit_args, Address* js_args,
 void PrintPropertyCallbackInfo(Address* args, std::ostream& os) {
   using PCA = internal::PropertyCallbackArguments;
 
-  static_assert(PCA::kArgsLength == 8);
-  os << "PropertyCallbackInfo: "  //
+  static_assert(PCA::kFullArgsLength == 12 || PCA::kFullArgsLength == 13);
+  bool is_named = args[PCA::kFrameTypeIndex] ==
+                  Smi::FromEnum(StackFrame::API_NAMED_ACCESSOR_EXIT).ptr();
+
+  os << "PropertyCallbackInfo: " << (is_named ? "(named)" : "(indexed)")
      << "\n - isolate: " << AS_PTR(args[PCA::kIsolateIndex])
      << "\n - return_value: " << AS_OBJ(args[PCA::kReturnValueIndex])
-     << "\n - should_throw: " << AS_OBJ(args[PCA::kShouldThrowOnErrorIndex])
      << "\n - holder: " << AS_OBJ(args[PCA::kHolderIndex])
      << "\n - callback_info: " << AS_OBJ(args[PCA::kCallbackInfoIndex])
-     << "\n - property_key: " << AS_OBJ(args[PCA::kPropertyKeyIndex])
      << "\n - receiver: " << AS_OBJ(args[PCA::kThisIndex]);
 
-  // In case it's a setter call there will be additional |value| parameter,
-  // print it as a raw pointer to avoid crashing.
-  os << "\n - value?: " << AS_PTR(args[PCA::kArgsLength]);
+  if (is_named) {
+    os << "\n - property_name: " << AS_OBJ(args[PCA::kPropertyKeyIndex]);
+  } else {
+    os << "\n - property_index: " << args[PCA::kPropertyKeyIndex];
+  }
+
+  // In case it's a setter/definer/deleter call there will be additional
+  // |should_throw_on_error| and |value| parameters, print them as a raw
+  // pointer to avoid crashing. |value| parameter is initialized only for
+  // calls through builtin.
+  os << "\n - should_throw?: " << AS_PTR(args[PCA::kShouldThrowOnErrorIndex])
+     << "\n - value?: " << AS_PTR(args[PCA::kValueIndex]);
   os << "\n";
 }
 
@@ -146,16 +163,13 @@ void PrintFunctionCallbackInfo(void* function_callback_info) {
   using FCI = v8::FunctionCallbackInfo<v8::Value>;
   FCI& info = *reinterpret_cast<FCI*>(function_callback_info);
 
-  // |values| points to the first argument after the receiver.
-  Address* js_args = info.values_ - 1;
-
   // Output into debugger's command window if a debugger is attached.
   DbgStdoutStream dbg_os;
-  PrintFunctionCallbackInfo(info.implicit_args_, js_args, info.length_, dbg_os);
+  PrintFunctionCallbackInfo(info.values_, dbg_os);
   dbg_os << std::flush;
 
   StdoutStream os;
-  PrintFunctionCallbackInfo(info.implicit_args_, js_args, info.length_, os);
+  PrintFunctionCallbackInfo(info.values_, os);
   os << std::flush;
 }
 
@@ -696,16 +710,13 @@ void PrintFixedArrayElements(std::ostream& os, Tagged<T> array) {
       [](Tagged<T> xs, int i) { return Cast<Object>(xs->get(i)); });
 }
 
-void PrintDictionaryElements(std::ostream& os,
-                             Tagged<FixedArrayBase> elements) {
-  // Print some internal fields
-  Tagged<NumberDictionary> dict = Cast<NumberDictionary>(elements);
+void PrintNumberDictionaryFlags(std::ostream& os,
+                                Tagged<NumberDictionary> dict) {
   if (dict->requires_slow_elements()) {
-    os << "\n   - requires_slow_elements";
+    os << "\n - requires_slow_elements";
   } else {
-    os << "\n   - max_number_key: " << dict->max_number_key();
+    os << "\n - max_number_key: " << dict->max_number_key();
   }
-  PrintDictionaryContents(os, dict);
 }
 
 void PrintSloppyArgumentElements(std::ostream& os, ElementsKind kind,
@@ -731,7 +742,7 @@ void PrintSloppyArgumentElements(std::ostream& os, ElementsKind kind,
     PrintFixedArrayElements(os, arguments_store);
   } else {
     DCHECK_EQ(kind, SLOW_SLOPPY_ARGUMENTS_ELEMENTS);
-    PrintDictionaryElements(os, arguments_store);
+    PrintDictionaryContents(os, Cast<NumberDictionary>(arguments_store));
   }
 }
 
@@ -758,7 +769,7 @@ void JSObject::PrintElements(std::ostream& os) {
   // look at what elements() is, as opposed to what it should be according to
   // the map(), as much as possible.
 
-  if (IsFixedArray(elements())) {
+  if (IsFixedArrayExact(elements())) {
     PrintFixedArrayElements(os, Cast<FixedArray>(elements()));
   } else if (IsFixedDoubleArray(elements())) {
     DoPrintElements<FixedDoubleArray>(os, elements(), elements()->length());
@@ -784,10 +795,12 @@ void JSObject::PrintElements(std::ostream& os) {
         UNREACHABLE();
     }
   } else if (IsNumberDictionary(elements())) {
-    PrintDictionaryElements(os, elements());
+    PrintDictionaryContents(os, Cast<NumberDictionary>(elements()));
   } else if (IsSloppyArgumentsElements(elements())) {
     PrintSloppyArgumentElements(os, map()->elements_kind(),
                                 Cast<SloppyArgumentsElements>(elements()));
+  } else {
+    os << "   Unexpected elements backing store\n";
   }
   os << "\n }\n";
 }
@@ -1045,9 +1058,7 @@ void Symbol::SymbolPrint(std::ostream& os) {
   if (IsUndefined(description())) {
     os << " (" << PrivateSymbolToName() << ")";
   }
-  os << "\n - private: " << is_private();
-  os << "\n - private_name: " << is_private_name();
-  os << "\n - private_brand: " << is_private_brand();
+  os << "\n - private_symbol_kind: " << private_symbol_kind();
   os << "\n - is_interesting_symbol: " << is_interesting_symbol();
   os << "\n - is_well_known_symbol: " << is_well_known_symbol();
   os << "\n";
@@ -1561,6 +1572,7 @@ void RegisteredSymbolTable::RegisteredSymbolTablePrint(std::ostream& os) {
 
 void NumberDictionary::NumberDictionaryPrint(std::ostream& os) {
   PrintHashTableHeader(os, this, "NumberDictionary");
+  PrintNumberDictionaryFlags(os, this);
   PrintDictionaryContentsFull(os, this);
 }
 
@@ -2299,12 +2311,14 @@ void JSIteratorFilterHelper::JSIteratorFilterHelperPrint(std::ostream& os) {
 void JSIteratorTakeHelper::JSIteratorTakeHelperPrint(std::ostream& os) {
   JSIteratorHelperPrintHeader(os, "JSIteratorTakeHelper");
   os << "\n - remaining: " << remaining();
+  os << "\n - innerAlive" << innerAlive();
   JSObjectPrintBody(os, *this);
 }
 
 void JSIteratorDropHelper::JSIteratorDropHelperPrint(std::ostream& os) {
   JSIteratorHelperPrintHeader(os, "JSIteratorDropHelper");
   os << "\n - remaining: " << remaining();
+  os << "\n - innerAlive" << innerAlive();
   JSObjectPrintBody(os, *this);
 }
 
@@ -2315,6 +2329,15 @@ void JSIteratorFlatMapHelper::JSIteratorFlatMapHelperPrint(std::ostream& os) {
   os << "\n - innerIterator.object" << Brief(innerIterator_object());
   os << "\n - innerIterator.next" << Brief(innerIterator_next());
   os << "\n - innerAlive" << innerAlive();
+  JSObjectPrintBody(os, *this);
+}
+
+void JSIteratorConcatHelper::JSIteratorConcatHelperPrint(std::ostream& os) {
+  JSIteratorHelperPrintHeader(os, "JSIteratorConcatHelper");
+  os << "\n - iterables: " << Brief(iterables()) << " {";
+  PrintFixedArrayElements(os, iterables());
+  os << "\n - current: " << current();
+  os << "\n - innerAlive: " << innerAlive();
   JSObjectPrintBody(os, *this);
 }
 
@@ -2764,6 +2787,14 @@ void JSModuleNamespace::JSModuleNamespacePrint(std::ostream& os) {
   JSObjectPrintBody(os, *this);
 }
 
+void PrototypeSharedClosureInfo::PrototypeSharedClosureInfoPrint(
+    std::ostream& os) {
+  PrintHeader(os, "PrototypeSharedClosureInfo");
+  os << "\n - context: " << Brief(context());
+  os << "\n - closure feedback cell array: "
+     << Brief(closure_feedback_cell_array());
+}
+
 void PrototypeInfo::PrototypeInfoPrint(std::ostream& os) {
   PrintHeader(os, "PrototypeInfo");
   os << "\n - module namespace: " << Brief(module_namespace());
@@ -2773,6 +2804,8 @@ void PrototypeInfo::PrototypeInfoPrint(std::ostream& os) {
   os << "\n - should_be_fast_map: " << should_be_fast_map();
   os << "\n - prototype_chain_enum_cache: "
      << Brief(prototype_chain_enum_cache());
+  os << "\n - prototype_shared_closure_info: "
+     << Brief(prototype_shared_closure_info());
   for (int i = 0; i < PrototypeInfo::kCachedHandlerCount; i++) {
     os << "\n - cached_handler[" << i << "]: " << Brief(cached_handler(i));
   }
@@ -3179,7 +3212,7 @@ void WasmModuleObject::WasmModuleObjectPrint(std::ostream& os) {
 
 void WasmGlobalObject::WasmGlobalObjectPrint(std::ostream& os) {
   PrintHeader(os, "WasmGlobalObject");
-  if (type().is_reference()) {
+  if (unsafe_type().is_ref()) {
     os << "\n - tagged_buffer: " << Brief(tagged_buffer());
   } else {
     os << "\n - untagged_buffer: " << Brief(untagged_buffer());
@@ -3187,7 +3220,7 @@ void WasmGlobalObject::WasmGlobalObjectPrint(std::ostream& os) {
   os << "\n - offset: " << offset();
   os << "\n - raw_type: " << raw_type();
   os << "\n - is_mutable: " << is_mutable();
-  os << "\n - type: " << type();
+  os << "\n - type: " << unsafe_type();
   os << "\n - is_mutable: " << is_mutable();
   os << "\n";
 }
@@ -3284,11 +3317,7 @@ void AllocationSite::AllocationSitePrint(std::ostream& os) {
 void AllocationMemento::AllocationMementoPrint(std::ostream& os) {
   PrintHeader(os, "AllocationMemento");
   os << "\n - allocation site: ";
-  if (IsValid()) {
-    GetAllocationSite()->AllocationSitePrint(os);
-  } else {
-    os << "<invalid>\n";
-  }
+  GetAllocationSite()->AllocationSitePrint(os);
 }
 
 void ScriptOrModule::ScriptOrModulePrint(std::ostream& os) {
@@ -4441,6 +4470,7 @@ void TransitionArray::PrintInternal(std::ostream& os) {
 void TransitionsAccessor::PrintTransitions(std::ostream& os) {
   switch (encoding()) {
     case kPrototypeInfo:
+    case kPrototypeSharedClosureInfo:
     case kUninitialized:
     case kMigrationTarget:
       return;
@@ -4710,6 +4740,11 @@ V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_OnlyCode(
 V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_StackTrace() {
   i::Isolate* isolate = i::Isolate::Current();
   isolate->PrintStack(stdout);
+}
+
+V8_DEBUGGING_EXPORT extern "C" void _v8_internal_Print_StackTraceConcise() {
+  i::Isolate* isolate = i::Isolate::Current();
+  isolate->PrintStack(stdout, i::Isolate::PrintStackMode::kPrintStackConcise);
 }
 
 namespace _v8_internal_debugonly {

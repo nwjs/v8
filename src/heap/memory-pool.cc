@@ -9,10 +9,10 @@
 #include "src/base/platform/mutex.h"
 #include "src/common/ptr-compr-inl.h"
 #include "src/execution/isolate.h"
-#include "src/heap/large-page-metadata.h"
+#include "src/heap/large-page.h"
 #include "src/heap/memory-allocator.h"
-#include "src/heap/memory-chunk.h"
-#include "src/heap/mutable-page-metadata.h"
+#include "src/heap/memory-chunk-inl.h"
+#include "src/heap/mutable-page.h"
 #include "src/tasks/cancelable-task.h"
 
 namespace v8::internal {
@@ -24,11 +24,11 @@ PooledPage::PooledPage(void* uninitialized_metadata, VirtualMemory reservation,
       epoch_(epoch) {}
 
 // static
-PooledPage PooledPage::Create(PageMetadata* metadata, Epoch epoch) {
+PooledPage PooledPage::Create(NormalPage* metadata, Epoch epoch) {
   // This method is called only on the main thread and only during the
   // atomic pause so a lock is not needed.
   DCHECK_NOT_NULL(metadata);
-  DCHECK_EQ(metadata->size(), PageMetadata::kPageSize);
+  DCHECK_EQ(metadata->size(), NormalPage::kPageSize);
   DCHECK(!metadata->is_large());
   DCHECK(!metadata->is_trusted());
   DCHECK(!metadata->is_executable());
@@ -47,13 +47,13 @@ PooledPage PooledPage::Create(PageMetadata* metadata, Epoch epoch) {
   // Destroy the chunk and the metadata object but do not release the underlying
   // memory as that is going to be pooled.
   chunk->~MemoryChunk();
-  metadata->~PageMetadata();
+  metadata->~NormalPage();
 
   return PooledPage(metadata, std::move(chunk_reservation), epoch);
 }
 
 // static
-PooledPage PooledPage::Create(LargePageMetadata* metadata, Epoch epoch) {
+PooledPage PooledPage::Create(LargePage* metadata, Epoch epoch) {
   DCHECK_NOT_NULL(metadata);
   DCHECK(metadata->is_large());
   // Ensure that ReleaseAllAllocatedMemory() was called on the page.
@@ -68,7 +68,7 @@ PooledPage PooledPage::Create(LargePageMetadata* metadata, Epoch epoch) {
   // Destroy the chunk and the metadata object but do not release the underlying
   // memory as that is going to be pooled.
   chunk->~MemoryChunk();
-  metadata->~LargePageMetadata();
+  metadata->~LargePage();
 
   return PooledPage(metadata, std::move(chunk_reservation), epoch);
 }
@@ -236,7 +236,7 @@ MemoryPool::PoolReleaseStats MemoryPool::PoolImpl<PoolEntry>::ReleaseUpTo(
   return {freed, pool_emptied};
 }
 
-bool MemoryPool::LargePagePoolImpl::Add(std::vector<LargePageMetadata*>& pages,
+bool MemoryPool::LargePagePoolImpl::Add(std::vector<LargePage*>& pages,
                                         Epoch epoch) {
   bool added_to_pool = false;
   base::MutexGuard guard(&mutex_);
@@ -244,17 +244,17 @@ bool MemoryPool::LargePagePoolImpl::Add(std::vector<LargePageMetadata*>& pages,
 
   const size_t max_total_size = v8_flags.max_large_page_pool_size * MB;
 
-  std::erase_if(pages, [this, &added_to_pool, epoch,
-                        max_total_size](LargePageMetadata* page) {
-    if (total_size_ + page->size() > max_total_size) {
-      return false;
-    }
+  std::erase_if(pages,
+                [this, &added_to_pool, epoch, max_total_size](LargePage* page) {
+                  if (total_size_ + page->size() > max_total_size) {
+                    return false;
+                  }
 
-    total_size_ += page->size();
-    pages_.emplace_back(PooledPage::Create(page, epoch));
-    added_to_pool = true;
-    return true;
-  });
+                  total_size_ += page->size();
+                  pages_.emplace_back(PooledPage::Create(page, epoch));
+                  added_to_pool = true;
+                  return true;
+                });
 
   DCHECK_EQ(total_size_, ComputeTotalSize());
   return added_to_pool;
@@ -333,7 +333,7 @@ size_t MemoryPool::LargePagePoolImpl::ComputeTotalSize() const {
 
 void MemoryPool::LargePagePoolImpl::TearDown() { CHECK(pages_.empty()); }
 
-PooledPage MemoryPool::CreatePooledPage(PageMetadata* metadata) {
+PooledPage MemoryPool::CreatePooledPage(NormalPage* metadata) {
   return PooledPage::Create(metadata,
                             current_epoch_.load(std::memory_order_relaxed));
 }
@@ -398,11 +398,11 @@ size_t MemoryPool::GetSharedCount() const { return page_pool_.SharedSize(); }
 
 size_t MemoryPool::GetTotalCount() const { return page_pool_.Size(); }
 
-void MemoryPool::Add(Isolate* isolate, MutablePageMetadata* page) {
+void MemoryPool::Add(Isolate* isolate, MutablePage* page) {
   DCHECK_NOT_NULL(isolate);
   page_pool_.PutLocal(
       isolate,
-      PooledPage::Create(static_cast<PageMetadata*>(page),
+      PooledPage::Create(static_cast<NormalPage*>(page),
                          current_epoch_.load(std::memory_order_relaxed)));
   PostDelayedReleaseTaskIfNeeded(isolate);
 }
@@ -416,8 +416,7 @@ std::optional<PooledPage::Result> MemoryPool::Remove(Isolate* isolate) {
   return result->ToResult();
 }
 
-void MemoryPool::AddLarge(Isolate* isolate,
-                          std::vector<LargePageMetadata*>& pages) {
+void MemoryPool::AddLarge(Isolate* isolate, std::vector<LargePage*>& pages) {
   large_pool_.Add(pages, current_epoch_.load(std::memory_order_relaxed));
   PostDelayedReleaseTaskIfNeeded(isolate);
 }
@@ -481,7 +480,7 @@ class MemoryPool::ReleasePooledChunksTask final : public CancelableTask {
     // Repost itself to the next heartbeat only if pool is not fully emptied.
     if (!stats.pool_emptied) {
       pool_->PostDelayedReleaseTask(
-          isolate_, base::TimeDelta::FromSeconds(v8_flags.page_pool_timeout));
+          isolate_, base::TimeDelta::FromSeconds(v8_flags.memory_pool_timeout));
     }
   }
 
@@ -492,7 +491,7 @@ class MemoryPool::ReleasePooledChunksTask final : public CancelableTask {
 
 void MemoryPool::PostDelayedReleaseTask(Isolate* isolate,
                                         base::TimeDelta delay) {
-  DCHECK(v8_flags.page_pool_timeout);
+  DCHECK(v8_flags.memory_pool_timeout);
   // With these scheme, a pooled page may be reclaimed in [timeout, 2 * timeout)
   // second. This helps to prevent the case when a page is too prematurely
   // freed, e.g. when a GC runs right before the task is executed.
@@ -504,8 +503,10 @@ void MemoryPool::PostDelayedReleaseTask(Isolate* isolate,
     isolate->task_runner()->PostDelayedTask(std::move(task),
                                             delay.InSecondsF());
   } else {
+    // We use priority `kUserVisible` to avoid priority inversion with the main
+    // thread when taking a global lock to work with the memory pool.
     V8::GetCurrentPlatform()->PostDelayedTaskOnWorkerThread(
-        TaskPriority::kBestEffort, std::move(task), delay.InSecondsF());
+        TaskPriority::kUserVisible, std::move(task), delay.InSecondsF());
   }
   posted_time_.store(base::TimeTicks::Now(), std::memory_order_relaxed);
 }
@@ -514,11 +515,11 @@ void MemoryPool::PostDelayedReleaseTaskIfNeeded(Isolate* isolate) {
   // Allow some seconds slack if the task was not executed. This could happen if
   // the worker thread on which the task was scheduled has died.
   static constexpr base::TimeDelta kTimeSlack = base::TimeDelta::FromSeconds(4);
-  const int page_pool_timeout = v8_flags.page_pool_timeout;
-  if (page_pool_timeout <= 0) return;
+  const int memory_pool_timeout = v8_flags.memory_pool_timeout;
+  if (memory_pool_timeout <= 0) return;
 
   const base::TimeDelta delta =
-      base::TimeDelta::FromSeconds(page_pool_timeout) + kTimeSlack;
+      base::TimeDelta::FromSeconds(memory_pool_timeout) + kTimeSlack;
   const base::TimeTicks now = base::TimeTicks::Now();
   const base::TimeTicks deadline =
       posted_time_.load(std::memory_order_relaxed) + delta;

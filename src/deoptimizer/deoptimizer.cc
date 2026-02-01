@@ -380,8 +380,10 @@ class ActivationsFinder : public ThreadVisitor {
               // Replace the current pc on the stack with the trampoline.
               // TODO(v8:10026): avoid replacing a signed pointer.
               Address* pc_addr = it.frame()->pc_address();
+
               PointerAuthentication::ReplacePC(pc_addr, new_pc,
-                                               kSystemPointerSize);
+                                               kSystemPointerSize,
+                                               it.frame()->iteration_depth());
             }
           }
         }
@@ -743,7 +745,7 @@ DirectHandle<Code> Deoptimizer::compiled_code() const {
 
 Deoptimizer::~Deoptimizer() {
   DCHECK(input_ == nullptr && output_ == nullptr);
-#ifdef V8_ENABLE_CET_SHADOW_STACK
+#if defined(V8_ENABLE_CET_SHADOW_STACK) || defined(V8_ENABLE_RISCV_SHADOW_STACK)
   DCHECK_NULL(shadow_stack_);
 #endif
   DCHECK_NULL(disallow_garbage_collection_);
@@ -758,7 +760,7 @@ void Deoptimizer::DeleteFrameDescriptions() {
   delete[] output_;
   input_ = nullptr;
   output_ = nullptr;
-#ifdef V8_ENABLE_CET_SHADOW_STACK
+#if defined(V8_ENABLE_CET_SHADOW_STACK) || defined(V8_ENABLE_RISCV_SHADOW_STACK)
   if (shadow_stack_ != nullptr) {
     delete[] shadow_stack_;
     shadow_stack_ = nullptr;
@@ -790,8 +792,7 @@ int LookupCatchHandler(Isolate* isolate, TranslatedFrame* translated_frame,
   switch (translated_frame->kind()) {
     case TranslatedFrame::kUnoptimizedFunction: {
       int bytecode_offset = translated_frame->bytecode_offset().ToInt();
-      HandlerTable table(
-          translated_frame->raw_shared_info()->GetBytecodeArray(isolate));
+      HandlerTable table(translated_frame->raw_bytecode_array());
       int handler_index = table.LookupHandlerIndexForRange(bytecode_offset);
       if (handler_index == HandlerTable::kNoHandlerFound) return handler_index;
       *data_out = table.GetRangeData(handler_index);
@@ -1697,7 +1698,14 @@ void Deoptimizer::DoComputeOutputFrames() {
           Deoptimizer::kAdaptShadowStackOffsetToSubtract;
     }
   }
-#endif  // V8_ENABLE_CET_SHADOW_STACK
+#elif V8_ENABLE_RISCV_SHADOW_STACK
+  CHECK_EQ(shadow_stack_count_, 0);
+  shadow_stack_ = new intptr_t[count];
+  for (int i = static_cast<int>(count) - 1; i > 0; i--) {
+    if (!output_[i]->HasCallerPc()) continue;
+    shadow_stack_[shadow_stack_count_++] = output_[i]->GetCallerPc();
+  }
+#endif  // V8_ENABLE_RISCV_SHADOW_STACK
 
   // Determine if the code object must be replaced or not.
   if (IsJSFunction(function_)) {

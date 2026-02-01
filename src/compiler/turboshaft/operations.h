@@ -355,8 +355,9 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
 #define TURBOSHAFT_OTHER_OPERATION_LIST(V) \
   V(Allocate)                              \
   V(MajorGCForCompilerTesting)             \
-  V(DecodeExternalPointer)                 \
-  V(JSStackCheck)
+  V(JSStackCheck)                          \
+  IF_SANDBOX(V, LoadExternalPointer)       \
+  IF_SANDBOX(V, LoadTrustedPointer)
 
 #define TURBOSHAFT_OPERATION_LIST_NOT_BLOCK_TERMINATOR(V) \
   TURBOSHAFT_WASM_OPERATION_LIST(V)                       \
@@ -527,7 +528,7 @@ class InputsRepFactory {
   };
 };
 
-struct EffectDimensions {
+struct __attribute__((packed)) EffectDimensions {
   // Produced by loads, consumed by operations that should not move before loads
   // because they change memory.
   bool load_heap_memory : 1;
@@ -622,7 +623,7 @@ static_assert(sizeof(EffectDimensions) == sizeof(EffectDimensions::Bits));
 // they become more restricted in their movement. Note that calls are not the
 // most side-effectful operations, as they do not leave the heap in an
 // inconsistent state, so they do not need to be marked as raw heap access.
-struct OpEffects {
+struct __attribute__((packed)) OpEffects {
   EffectDimensions produces;
   EffectDimensions consumes;
 
@@ -2516,29 +2517,13 @@ struct TaggedBitcastOp : FixedArityOperationT<1, TaggedBitcastOp> {
                   RegisterRepresentation to, Kind kind)
       : Base(input), kind(kind), from(from), to(to) {}
 
-  void Validate(const Graph& graph) const {
-    if (kind == Kind::kSmi) {
-      DCHECK((from.IsWord() && to.IsTaggedOrCompressed()) ||
-             (from.IsTaggedOrCompressed() && to.IsWord()));
-      DCHECK_IMPLIES(from == RegisterRepresentation::Word64() ||
-                         to == RegisterRepresentation::Word64(),
-                     Is64());
-    } else {
-      // TODO(nicohartmann@): Without implicit truncation, the first case might
-      // not be correct anymore.
-      DCHECK((from.IsWord() && to == RegisterRepresentation::Tagged()) ||
-             (from == RegisterRepresentation::Tagged() &&
-              to == RegisterRepresentation::WordPtr()) ||
-             (from == RegisterRepresentation::Compressed() &&
-              to == RegisterRepresentation::Word32()));
-    }
-  }
+  V8_EXPORT_PRIVATE void Validate(const Graph& graph) const;
   auto options() const { return std::tuple{from, to, kind}; }
 };
 std::ostream& operator<<(std::ostream& os, TaggedBitcastOp::Kind assumption);
 
 struct SelectOp : FixedArityOperationT<3, SelectOp> {
-  enum class Implementation : uint8_t { kBranch, kCMove };
+  enum class Implementation : uint8_t { kAny, kForceBranch, kForceCMove };
 
   RegisterRepresentation rep;
   BranchHint hint;
@@ -2559,15 +2544,32 @@ struct SelectOp : FixedArityOperationT<3, SelectOp> {
       : Base(cond, vtrue, vfalse), rep(rep), hint(hint), implem(implem) {}
 
   void Validate(const Graph& graph) const {
-    DCHECK_IMPLIES(implem == Implementation::kCMove,
-                   (rep == RegisterRepresentation::Word32() &&
-                    SupportedOperations::word32_select()) ||
-                       (rep == RegisterRepresentation::Word64() &&
-                        SupportedOperations::word64_select()) ||
-                       (rep == RegisterRepresentation::Float32() &&
-                        SupportedOperations::float32_select()) ||
-                       (rep == RegisterRepresentation::Float64() &&
-                        SupportedOperations::float64_select()));
+#ifdef DEBUG
+    if (implem == Implementation::kForceCMove) {
+      switch (rep.value()) {
+        case RegisterRepresentation::Enum::kWord32:
+          DCHECK(SupportedOperations::word32_select());
+          break;
+        case RegisterRepresentation::Enum::kWord64:
+          DCHECK(SupportedOperations::word64_select());
+          break;
+        case RegisterRepresentation::Enum::kFloat32:
+          DCHECK(SupportedOperations::float32_select());
+          break;
+        case RegisterRepresentation::Enum::kFloat64:
+          DCHECK(SupportedOperations::float64_select());
+          break;
+
+        case RegisterRepresentation::Enum::kCompressed:
+        case RegisterRepresentation::Enum::kTagged:
+          FATAL("CMove for Tagged/Compressed values isn't implemented yet");
+
+        case RegisterRepresentation::Enum::kSimd128:
+        case RegisterRepresentation::Enum::kSimd256:
+          FATAL("CMove for Simd register not supported");
+      }
+    }
+#endif
   }
 
   V<Word32> cond() const { return input<Word32>(0); }
@@ -2900,7 +2902,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
 // When result_rep is RegisterRepresentation::Compressed(), then the load does
 // not decompress the value.
 struct LoadOp : OperationT<LoadOp> {
-  struct Kind {
+  struct __attribute__((packed)) Kind {
     // The `base` input is a tagged pointer to a HeapObject.
     bool tagged_base : 1;
     // The effective address might be unaligned. This is only set to true if
@@ -3135,6 +3137,35 @@ V8_INLINE size_t hash_value(LoadOp::Kind kind) {
       (kind.load_eliminable << 2) | (kind.is_immutable << 3) |
       (kind.with_trap_handler << 4) | (kind.is_atomic << 5));
 }
+
+#if V8_ENABLE_SANDBOX
+struct LoadTrustedPointerOp : FixedArityOperationT<2, LoadTrustedPointerOp> {
+  const bool is_immutable;
+  IndirectPointerTag tag;
+
+  static constexpr OpEffects effects =
+      OpEffects().CanReadMemory().CanDependOnChecks();
+
+  explicit LoadTrustedPointerOp(V<WordPtr> table, V<Word32> handle,
+                                bool is_immutable, IndirectPointerTag tag)
+      : Base(table, handle), is_immutable(is_immutable), tag(tag) {}
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::WordPtr(),
+                          MaybeRegisterRepresentation::Word32()>();
+  }
+
+  V<WordPtr> table() const { return input<WordPtr>(0); }
+  V<Word32> handle() const { return input<Word32>(1); }
+
+  auto options() const { return std::tuple{is_immutable, tag}; }
+};
+#endif
 
 struct AtomicRMWOp : OperationT<AtomicRMWOp> {
   enum class BinOp : uint8_t {
@@ -3633,8 +3664,8 @@ struct AllocateOp : FixedArityOperationT<1, AllocateOp> {
   }
 };
 
-struct DecodeExternalPointerOp
-    : FixedArityOperationT<1, DecodeExternalPointerOp> {
+#if V8_ENABLE_SANDBOX
+struct LoadExternalPointerOp : FixedArityOperationT<1, LoadExternalPointerOp> {
   ExternalPointerTagRange tag_range;
 
   // Accessing external pointers is only safe if the garbage collected pointer
@@ -3653,13 +3684,14 @@ struct DecodeExternalPointerOp
 
   V<Word32> handle() const { return input<Word32>(0); }
 
-  DecodeExternalPointerOp(V<Word32> handle, ExternalPointerTagRange tag_range)
+  LoadExternalPointerOp(V<Word32> handle, ExternalPointerTagRange tag_range)
       : Base(handle), tag_range(tag_range) {}
 
   void Validate(const Graph& graph) const { DCHECK(!tag_range.IsEmpty()); }
   void PrintOptions(std::ostream& os) const;
   auto options() const { return std::tuple{tag_range}; }
 };
+#endif
 
 struct JSStackCheckOp : OperationT<JSStackCheckOp> {
   enum class Kind : uint8_t { kFunctionEntry, kBuiltinEntry, kLoop };
@@ -4116,7 +4148,7 @@ struct MajorGCForCompilerTestingOp
     return MaybeRepVector<>();
   }
 
-  explicit MajorGCForCompilerTestingOp() : Base() {}
+  MajorGCForCompilerTestingOp() : Base() {}
 
   auto options() const { return std::tuple{}; }
 };
@@ -5012,7 +5044,11 @@ struct ConvertUntaggedToJSPrimitiveOp
     return InputsRepFactory::SingleRep(input_rep);
   }
 
-  V<Untagged> input() const { return Base::input<Untagged>(0); }
+  template <IsUntagged T>
+  V<T> input() const {
+    DCHECK_EQ(V<T>::rep, input_rep);
+    return Base::input<T>(0);
+  }
 
   ConvertUntaggedToJSPrimitiveOp(V<Untagged> input, JSPrimitiveKind kind,
                                  RegisterRepresentation input_rep,
@@ -7137,7 +7173,7 @@ struct NullOp : FixedArityOperationT<0, NullOp> {
   }
 
   void Validate(const Graph& graph) const {
-    DCHECK(type.is_object_reference() && type.is_nullable());
+    DCHECK(type.is_ref() && type.is_nullable());
   }
 
   auto options() const { return std::tuple{type}; }
@@ -7263,6 +7299,8 @@ struct WasmTypeCheckOp : OperationT<WasmTypeCheckOp> {
                               OptionalV<Map> rtt, WasmTypeCheckConfig config) {
     return Base::New(graph, 1 + rtt.valid(), object, rtt, config);
   }
+
+  void Validate(const Graph& graph) const { DCHECK(config.is_valid()); }
 };
 
 struct WasmTypeCastOp : OperationT<WasmTypeCastOp> {
@@ -7309,6 +7347,8 @@ struct WasmTypeCastOp : OperationT<WasmTypeCastOp> {
                              WasmTypeCheckConfig config) {
     return Base::New(graph, 1 + rtt.valid(), object, rtt, config);
   }
+
+  void Validate(const Graph& graph) const { DCHECK(config.is_valid()); }
 };
 
 // Annotate a value with a wasm type.
@@ -7336,7 +7376,7 @@ struct WasmTypeAnnotationOp : FixedArityOperationT<1, WasmTypeAnnotationOp> {
     // In theory, the operation could be used for non-reference types as well.
     // This would require updating inputs_rep and outputs_rep to be based on
     // the wasm type.
-    DCHECK(type.is_object_reference());
+    DCHECK(type.is_ref());
   }
 
   auto options() const { return std::tuple(type); }
@@ -7604,7 +7644,7 @@ struct StructAtomicRMWOp : OperationT<StructAtomicRMWOp> {
     DCHECK_LT(field_index, type->field_count());
     DCHECK(type->field(field_index) == wasm::kWasmI32 ||
            type->field(field_index) == wasm::kWasmI64 ||
-           (type->field(field_index).is_reference() &&
+           (type->field(field_index).is_ref() &&
             (bin_op == BinOp::kExchange || bin_op == BinOp::kCompareExchange)));
     DCHECK_EQ(bin_op == BinOp::kCompareExchange, expected().valid());
   }
@@ -7759,7 +7799,7 @@ struct ArrayAtomicRMWOp : OperationT<ArrayAtomicRMWOp> {
 
   void Validate(const Graph& graph) const {
     DCHECK(element_type == wasm::kWasmI32 || element_type == wasm::kWasmI64 ||
-           (element_type.is_reference() &&
+           (element_type.is_ref() &&
             (bin_op == BinOp::kExchange || bin_op == BinOp::kCompareExchange)));
     DCHECK_EQ(bin_op == BinOp::kCompareExchange, expected().valid());
   }
@@ -8096,7 +8136,8 @@ struct Simd128ConstantOp : FixedArityOperationT<0, Simd128ConstantOp> {
   V(F16x8Eq)                                       \
   V(F16x8Ne)                                       \
   V(F16x8Lt)                                       \
-  V(F16x8Le)
+  V(F16x8Le)                                       \
+  V(I32x4AddPairwise)
 
 #define FOREACH_SIMD_128_BINARY_OPCODE(V)     \
   FOREACH_SIMD_128_BINARY_MANDATORY_OPCODE(V) \
@@ -8132,6 +8173,8 @@ struct Simd128BinopOp : FixedArityOperationT<2, Simd128BinopOp> {
       case Kind::kF32x4Mul:
 
       case Kind::kS128Xor:
+
+      case Kind::kI32x4AddPairwise:
         return true;
       default:
         return false;
@@ -8843,6 +8886,7 @@ struct Simd128LoadTransformOp
 // among the input lanes according to `shuffle`.
 struct Simd128ShuffleOp : FixedArityOperationT<2, Simd128ShuffleOp> {
   enum class Kind : uint8_t {
+    kI8x1,
     kI8x2,
     kI8x4,
     kI8x8,
@@ -8871,6 +8915,9 @@ struct Simd128ShuffleOp : FixedArityOperationT<2, Simd128ShuffleOp> {
     switch (kind) {
       default:
         UNREACHABLE();
+      case Kind::kI8x1:
+        count = 1;
+        break;
       case Kind::kI8x2:
         count = 2;
         break;
@@ -9016,10 +9063,10 @@ struct Simd256Extract128LaneOp
     return MaybeRepVector<RegisterRepresentation::Simd256()>();
   }
 
-  Simd256Extract128LaneOp(OpIndex input, uint8_t lane)
+  Simd256Extract128LaneOp(V<Simd256> input, uint8_t lane)
       : Base(input), lane(lane) {}
 
-  OpIndex input() const { return Base::input(0); }
+  V<Simd256> input() const { return Base::input<Simd256>(0); }
 
   void Validate(const Graph& graph) const {
 #if DEBUG

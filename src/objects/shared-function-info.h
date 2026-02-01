@@ -469,6 +469,7 @@ class SharedFunctionInfo
   DECL_GETTER(HasBytecodeArray, bool)
   template <typename IsolateT>
   inline Tagged<BytecodeArray> GetBytecodeArray(IsolateT* isolate) const;
+  inline Tagged<BytecodeArray> GetBytecodeArrayForGC(Isolate* isolate) const;
 
   // Sets the bytecode for this SFI. This is only allowed when this SFI has not
   // yet been compiled or if it has been "uncompiled", or in other words when
@@ -669,10 +670,6 @@ class SharedFunctionInfo
   // Defines the index in a native context of closure's map instantiated using
   // this shared function info.
   DECL_INT_ACCESSORS(function_map_index)
-
-  // Clear uninitialized padding space. This ensures that the snapshot content
-  // is deterministic.
-  inline void clear_padding();
 
   // Recalculates the |map_index| value after modifications of this shared info.
   inline void UpdateFunctionMapIndex();
@@ -907,6 +904,9 @@ class SharedFunctionInfo
   FRIEND_TEST(PreParserTest, LazyFunctionLength);
 
   TQ_OBJECT_CONSTRUCTORS(SharedFunctionInfo)
+
+ private:
+  inline Tagged<BytecodeArray> GetBytecodeArrayInternal(Isolate* isolate) const;
 };
 
 std::ostream& operator<<(std::ostream& os, SharedFunctionInfo::Inlineability i);

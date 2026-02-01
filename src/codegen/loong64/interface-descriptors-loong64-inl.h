@@ -138,8 +138,6 @@ constexpr Register DefineKeyedOwnDescriptor::FlagsRegister() { return a5; }
 constexpr Register StoreTransitionDescriptor::MapRegister() { return a5; }
 
 // static
-constexpr Register ApiGetterDescriptor::HolderRegister() { return a0; }
-// static
 constexpr Register ApiGetterDescriptor::CallbackRegister() { return a3; }
 
 // static
@@ -157,6 +155,22 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() { return a3; }
 
 // static
 constexpr Register TypeConversionDescriptor::ArgumentRegister() { return a0; }
+
+// static
+constexpr Register
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::FlagsRegister() {
+  return t1;
+}
+// static
+constexpr Register MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::
+    FeedbackVectorRegister() {
+  return t2;
+}
+// static
+constexpr Register
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::TemporaryRegister() {
+  return a5;
+}
 
 // static
 constexpr auto TypeofDescriptor::registers() { return RegisterArray(a0); }

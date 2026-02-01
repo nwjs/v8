@@ -310,7 +310,7 @@ class MaglevGraphBuilder {
 
   std::pair<interpreter::Register, int> GetResultLocationAndSize() const;
 
-  void AttachExceptionHandlerInfo(Node* node);
+  void AttachExceptionHandlerInfo(NodeBase* node);
 
   template <typename NodeT>
   void MarkPossibleSideEffect(NodeT* node);
@@ -323,6 +323,10 @@ class MaglevGraphBuilder {
 
   static SpeculationMode GetSpeculationMode(
       compiler::JSHeapBroker* broker, compiler::FeedbackSource feedback_source);
+
+#ifdef DEBUG
+  bool MayNeedContextPhis() const;
+#endif
 
  private:
   class DeoptFrameScopeBase;
@@ -342,13 +346,13 @@ class MaglevGraphBuilder {
     MaglevSubGraphBuilder(MaglevGraphBuilder* builder, int variable_count);
     LoopLabel BeginLoop(std::initializer_list<Variable*> loop_vars);
     template <typename ControlNodeT, typename... Args>
-    void GotoIfTrue(Label* true_target,
-                    std::initializer_list<ValueNode*> control_inputs,
-                    Args&&... args);
+    ReduceResult GotoIfTrue(Label* true_target,
+                            std::initializer_list<ValueNode*> control_inputs,
+                            Args&&... args);
     template <typename ControlNodeT, typename... Args>
-    void GotoIfFalse(Label* false_target,
-                     std::initializer_list<ValueNode*> control_inputs,
-                     Args&&... args);
+    ReduceResult GotoIfFalse(Label* false_target,
+                             std::initializer_list<ValueNode*> control_inputs,
+                             Args&&... args);
     void GotoOrTrim(Label* label);
     void Goto(Label* label);
     void ReducePredecessorCount(Label* label, unsigned num = 1);
@@ -660,11 +664,11 @@ class MaglevGraphBuilder {
   // oddballs.
   //
   // Deopts if the ToNumber is non-trivial.
-  ValueNode* GetTruncatedInt32ForToNumber(ValueNode* value,
-                                          NodeType allowed_input_type);
+  ReduceResult GetTruncatedInt32ForToNumber(ValueNode* value,
+                                            NodeType allowed_input_type);
 
-  ValueNode* GetTruncatedInt32ForToNumber(interpreter::Register reg,
-                                          NodeType allowed_input_type) {
+  ReduceResult GetTruncatedInt32ForToNumber(interpreter::Register reg,
+                                            NodeType allowed_input_type) {
     return GetTruncatedInt32ForToNumber(current_interpreter_frame_.get(reg),
                                         allowed_input_type);
   }
@@ -687,6 +691,10 @@ class MaglevGraphBuilder {
     return reducer_.TryGetConstant<T>(node, constant_node);
   }
 
+  enum CheckType GetCheckType(NodeType type) {
+    return reducer_.GetCheckType(type);
+  }
+
   std::optional<int32_t> TryGetInt32Constant(ValueNode* value);
   std::optional<uint32_t> TryGetUint32Constant(ValueNode* value);
   std::optional<Float64> TryGetFloat64OrHoleyFloat64Constant(
@@ -696,12 +704,12 @@ class MaglevGraphBuilder {
 
   // Get an Int32 representation node whose value is equivalent to the given
   // node.
-  ValueNode* GetInt32(ValueNode* value, bool can_be_heap_number = false);
+  ReduceResult GetInt32(ValueNode* value, bool can_be_heap_number = false);
   ReduceResult GetInt32(ReduceResult value_result,
                         bool can_be_heap_number = false);
 
-  void EnsureInt32(ValueNode* value, bool can_be_heap_number = false);
-  void EnsureInt32(interpreter::Register reg);
+  ReduceResult EnsureInt32(ValueNode* value, bool can_be_heap_number = false);
+  ReduceResult EnsureInt32(interpreter::Register reg);
 
 #ifdef V8_ENABLE_UNDEFINED_DOUBLE
   std::optional<double> TryGetHoleyFloat64Constant(ValueNode* value);
@@ -739,7 +747,7 @@ class MaglevGraphBuilder {
                        record_use_repr_hint);
   }
 
-  ValueNode* GetAccumulatorTruncatedInt32ForToNumber(
+  ReduceResult GetAccumulatorTruncatedInt32ForToNumber(
       NodeType allowed_input_type) {
     return GetTruncatedInt32ForToNumber(
         interpreter::Register::virtual_accumulator(), allowed_input_type);
@@ -863,8 +871,14 @@ class MaglevGraphBuilder {
                      BasicBlockRef& refs_to_block);
   void StartFallthroughBlock(int next_block_offset, BasicBlock* predecessor);
   template <typename ControlNodeT, typename... Args>
-  BasicBlock* FinishBlock(std::initializer_list<ValueNode*> control_inputs,
-                          Args&&... args);
+  std::optional<BasicBlock*> FinishBlock(
+      std::initializer_list<ValueNode*> control_inputs, Args&&... args);
+
+  // This version can be used when the control node doesn't have inputs, or the
+  // input conversion will always succeed, and thus we cannot bail out.
+  template <typename ControlNodeT, typename... Args>
+  BasicBlock* FinishBlockNoAbort(
+      std::initializer_list<ValueNode*> control_inputs, Args&&... args);
 
   ValueNode* GetValueOrUndefined(ValueNode* maybe_value) {
     if (maybe_value == nullptr) {
@@ -1025,13 +1039,15 @@ class MaglevGraphBuilder {
   MaybeReduceResult TryReduceGetIterator(ValueNode* receiver, int load_slot,
                                          int call_slot);
 
-  ReduceResult BuildCallSelf(ValueNode* context, ValueNode* function,
-                             ValueNode* new_target,
-                             compiler::SharedFunctionInfoRef shared,
-                             CallArguments& args);
+  MaybeReduceResult BuildCallSelf(ValueNode* context, ValueNode* function,
+                                  ValueNode* new_target,
+                                  compiler::SharedFunctionInfoRef shared,
+                                  CallArguments& args);
   MaybeReduceResult TryReduceBuiltin(
       compiler::JSFunctionRef target, compiler::SharedFunctionInfoRef shared,
       CallArguments& args, const compiler::FeedbackSource& feedback_source);
+  MaybeReduceResult TryReduceAsyncFunctionEnter(ValueNode* closure,
+                                                ValueNode* reducer);
   bool TargetIsCurrentCompilingUnit(compiler::JSFunctionRef target);
   bool IsTheHoleConstant(ValueNode* node);
   ReduceResult BuildCallKnownJSFunction(
@@ -1133,6 +1149,8 @@ class MaglevGraphBuilder {
 
   MaybeReduceResult TryBuildAndAllocateJSGeneratorObject(ValueNode* closure,
                                                          ValueNode* receiver);
+  MaybeReduceResult TryBuildAndAllocateJSAsyncFunctionObject(
+      ValueNode* closure, ValueNode* receiver, VirtualObject* promise);
 
   ReduceResult BuildGenericConstruct(
       ValueNode* target, ValueNode* new_target, ValueNode* context,
@@ -1185,7 +1203,7 @@ class MaglevGraphBuilder {
       ValueNode* this_function, ValueNode* new_target,
       std::pair<interpreter::Register, interpreter::Register> result);
 
-  ValueNode* BuildSmiUntag(ValueNode* node);
+  ReduceResult BuildSmiUntag(ValueNode* node);
   ReduceResult BuildGetCharCodeAt(ValueNode* string, ValueNode* index);
 
   ReduceResult BuildCheckSmi(ValueNode* object, bool elidable = true);
@@ -1239,7 +1257,7 @@ class MaglevGraphBuilder {
   template <bool flip = false>
   ReduceResult BuildToBoolean(ValueNode* node);
   ReduceResult BuildLogicalNot(ValueNode* value);
-  ValueNode* BuildTestUndetectable(ValueNode* value);
+  ReduceResult BuildTestUndetectable(ValueNode* value);
   ReduceResult BuildToNumberOrToNumeric(Object::Conversion mode);
 
   enum class TrackObjectMode { kLoad, kStore };
@@ -1252,10 +1270,12 @@ class MaglevGraphBuilder {
                                AllocationType allocation_type);
 
   void BuildInitializeStore(vobj::Field desc, InlinedAllocation* alloc,
-                            AllocationType allocation_type, ValueNode* value);
+                            AllocationType allocation_type, ValueNode* value,
+                            StoreTaggedMode store_mode);
   void BuildInitializeStore_Tagged(vobj::Field desc, InlinedAllocation* alloc,
                                    AllocationType allocation_type,
-                                   ValueNode* value);
+                                   ValueNode* value,
+                                   StoreTaggedMode store_mode);
   void BuildInitializeStore_TrustedPointer(vobj::Field desc,
                                            InlinedAllocation* alloc,
                                            AllocationType allocation_type,
@@ -1357,7 +1377,8 @@ class MaglevGraphBuilder {
                                       LoadType length_type = LoadType::kSmi);
   ReduceResult BuildLoadJSDataViewByteLength(ValueNode* js_data_view);
   ReduceResult BuildLoadJSDataViewDataPointer(ValueNode* js_data_view);
-  ReduceResult BuildLoadElements(ValueNode* object);
+  ReduceResult BuildLoadElements(
+      ValueNode* object, std::optional<ElementsKind> kind = std::nullopt);
 
   ReduceResult BuildLoadJSFunctionFeedbackCell(ValueNode* closure);
   ReduceResult BuildLoadJSFunctionContext(ValueNode* closure);
@@ -1541,11 +1562,17 @@ class MaglevGraphBuilder {
                                          ValueNode* closure,
                                          ValueNode* receiver,
                                          ValueNode* register_file);
+  VirtualObject* CreateJSAsyncFunctionObject(ValueNode* context,
+                                             ValueNode* closure,
+                                             ValueNode* receiver,
+                                             ValueNode* register_file,
+                                             ValueNode* promise);
   VirtualObject* CreateJSIteratorResult(compiler::MapRef map, ValueNode* value,
                                         ValueNode* done);
   VirtualObject* CreateJSStringIterator(compiler::MapRef map,
                                         ValueNode* string);
   VirtualObject* CreateJSStringWrapper(ValueNode* value);
+  VirtualObject* CreateJSPromiseObject();
 
   InlinedAllocation* ExtendOrReallocateCurrentAllocationBlock(
       AllocationType allocation_type, VirtualObject* value);
@@ -1555,6 +1582,8 @@ class MaglevGraphBuilder {
   void AddDeoptUse(ValueNode* node);
   void AddDeoptUse(VirtualObject* alloc);
   void AddNonEscapingUses(InlinedAllocation* allocation, int use_count);
+
+  void AddDeoptUseToScopeData(DeoptFrame::FrameData& data);
 
   std::optional<VirtualObject*> TryGetNonEscapingArgumentsObject(
       ValueNode* value);
@@ -1650,7 +1679,8 @@ class MaglevGraphBuilder {
   void MergeIntoFrameState(BasicBlock* block, int target);
   void MergeDeadIntoFrameState(int target);
   void MergeDeadLoopIntoFrameState(int target);
-  void MergeIntoInlinedReturnFrameState(BasicBlock* block);
+  void MergeIntoInlinedReturnFrameStateForReturn(BasicBlock* block);
+  void MergeIntoInlinedReturnFrameStateForSuspendGenerator(BasicBlock* block);
 
   bool HasValidInitialMap(compiler::JSFunctionRef new_target,
                           compiler::JSFunctionRef constructor);
@@ -1666,6 +1696,8 @@ class MaglevGraphBuilder {
     kDefault,
     kAlwaysTrue,
     kAlwaysFalse,
+    // Bailed out before evaluating the condition
+    kAbort
   };
 
   static inline BranchType NegateBranchType(BranchType jump_type) {
@@ -1774,6 +1806,7 @@ class MaglevGraphBuilder {
     BranchResult FromBool(bool value) const;
     BranchResult AlwaysTrue() const { return FromBool(true); }
     BranchResult AlwaysFalse() const { return FromBool(false); }
+    static BranchResult Abort() { return BranchResult::kAbort; }
 
     template <typename NodeT, typename... Args>
     BranchResult Build(std::initializer_list<ValueNode*> inputs,
@@ -1839,16 +1872,12 @@ class MaglevGraphBuilder {
                                           BasicBlockRef* true_target,
                                           BasicBlockRef* false_target);
 
-  template <typename FCond, typename FTrue, typename FFalse>
-  ValueNode* Select(FCond cond, FTrue if_true, FFalse if_false);
+  ReduceResult BuildInt32Max(ValueNode* a, ValueNode* b);
+  ReduceResult BuildInt32Min(ValueNode* a, ValueNode* b);
 
-  ValueNode* BuildInt32Max(ValueNode* a, ValueNode* b);
-  ValueNode* BuildInt32Min(ValueNode* a, ValueNode* b);
-
-  ReduceResult SelectReduction(
-      base::FunctionRef<BranchResult(BranchBuilder&)> cond,
-      base::FunctionRef<ReduceResult()> if_true,
-      base::FunctionRef<ReduceResult()> if_false);
+  ReduceResult Select(base::FunctionRef<BranchResult(BranchBuilder&)> cond,
+                      base::FunctionRef<ReduceResult()> if_true,
+                      base::FunctionRef<ReduceResult()> if_false);
 
   void MarkBranchDeadAndJumpIfNeeded(bool is_jump_taken);
 
@@ -2034,6 +2063,8 @@ class MaglevGraphBuilder {
   EagerDeoptFrameScope* current_eager_deopt_scope_ = nullptr;
   LazyDeoptFrameScope* current_lazy_deopt_scope_ = nullptr;
   LazyDeoptResultLocationScope* lazy_deopt_result_location_scope_ = nullptr;
+
+  compiler::OptionalScopeInfoRef last_suspend_scope_info_ = {};
 
   struct HandlerTableEntry {
     int end;

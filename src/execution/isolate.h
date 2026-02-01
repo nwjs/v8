@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <memory>
@@ -773,8 +774,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
                : shared_space_isolate()->shared_struct_type_registry_.get();
   }
 
-  Address get_address_from_id(IsolateAddressId id);
-
   // Access to top context (where the current function object was created).
   Tagged<Context> context() const { return thread_local_top()->context_; }
   inline void set_context(Tagged<Context> context);
@@ -953,6 +952,15 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void PrintStack(StringStream* accumulator,
                   PrintStackMode mode = kPrintStackVerbose);
   void PrintStack(FILE* out, PrintStackMode mode = kPrintStackVerbose);
+
+  // Prints minimal stack trace without allocating on the V8 heap (native
+  // allocations are allowed). Used for printing the JS stack on OOM errors.
+  void PrintMinimalStack(FILE* out);
+  std::string BuildMinimalStack(size_t max_length = SIZE_MAX);
+
+  // Reports the minimal stack trace as a crash key. Used for OOM errors.
+  void ReportStackAsCrashKey();
+
   DirectHandle<String> StackTraceString();
   // Stores a stack trace in a stack-allocated temporary buffer which will
   // end up in the minidump for debugging purposes.
@@ -1810,6 +1818,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return next_unique_sfi_id_.fetch_add(1, std::memory_order_relaxed);
   }
 
+  void InitializeNextUniqueSfiId(uint32_t id) {
+    uint32_t expected = 0;  // Called at most once per Isolate on startup.
+    bool successfully_exchanged = next_unique_sfi_id_.compare_exchange_strong(
+        expected, id, std::memory_order_relaxed, std::memory_order_relaxed);
+    CHECK(successfully_exchanged);
+  }
+
 #ifdef V8_ENABLE_JAVASCRIPT_PROMISE_HOOKS
   void SetHasContextPromiseHooks(bool context_promise_hook) {
     promise_hook_flags_ = PromiseHookFields::HasContextPromiseHook::update(
@@ -2069,6 +2084,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 #endif  // V8_ENABLE_ETW_STACK_WALKING
 
   void SetIsLoading(bool is_loading);
+  void SetIsInputHandling(bool is_input_handling);
 
   void set_code_coverage_mode(debug::CoverageMode coverage_mode) {
     code_coverage_mode_.store(coverage_mode, std::memory_order_relaxed);
@@ -2157,8 +2173,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // before such a mode change to ensure that this cannot happen.
   void CollectSourcePositionsForAllBytecodeArrays();
 
-  void AddCodeMemoryChunk(MutablePageMetadata* chunk);
-  void RemoveCodeMemoryChunk(MutablePageMetadata* chunk);
+  void AddCodeMemoryChunk(MutablePage* chunk);
+  void RemoveCodeMemoryChunk(MutablePage* chunk);
   void AddCodeRange(Address begin, size_t length_in_bytes);
 
   bool RequiresCodeRange() const;
@@ -2414,15 +2430,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void Freeze(bool is_frozen) {
     is_frozen_ = is_frozen;
-    if (v8_flags.memory_reducer_respects_frozen_state && IsFrozen()) {
-      // We will either finalize an ongoing GC, or simply do a GC to reclaim
-      // any unreachable memory.
-      heap()->FinalizeIncrementalMarkingAtomicallyIfRunning(
-          i::GarbageCollectionReason::kFrozen);
-      heap()->EnsureSweepingCompleted(
-          Heap::SweepingForcedFinalizationMode::kUnifiedHeap,
-          CompleteSweepingReason::kFreeze);
-    }
   }
 
   static void IterateRegistersAndStackOfSimulator(
@@ -2555,7 +2562,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   int stack_trace_nesting_level_ = 0;
   std::atomic<bool> was_locker_ever_used_{false};
   StringStream* incomplete_message_ = nullptr;
-  Address isolate_addresses_[kIsolateAddressCount + 1] = {};
   Bootstrapper* bootstrapper_ = nullptr;
   TieringManager* tiering_manager_ = nullptr;
   CompilationCache* compilation_cache_ = nullptr;
@@ -2752,12 +2758,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   std::atomic<int> next_optimization_id_ = 0;
 
-  void InitializeNextUniqueSfiId(uint32_t id) {
-    uint32_t expected = 0;  // Called at most once per Isolate on startup.
-    bool successfully_exchanged = next_unique_sfi_id_.compare_exchange_strong(
-        expected, id, std::memory_order_relaxed, std::memory_order_relaxed);
-    CHECK(successfully_exchanged);
-  }
   std::atomic<uint32_t> next_unique_sfi_id_;
 
   unsigned next_module_async_evaluation_ordinal_;

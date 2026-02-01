@@ -159,7 +159,7 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
     requested = kMinimumCodeRangeSize;
   }
 
-  const size_t kPageSize = MutablePageMetadata::kPageSize;
+  const size_t kPageSize = MutablePage::kPageSize;
   const size_t allocate_page_size = page_allocator->AllocatePageSize();
   CHECK(IsAligned(kPageSize, allocate_page_size));
 
@@ -321,9 +321,11 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
 
 #if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
   red_zones_.Initialize(page_allocator_.get());
-  // Contiguous RO space supports checking for RO space objects via raw full
-  // addresses. In case we cross a `kPtrComprCageBaseAlignment` boundary we
-  // need to add a red zone.
+  // Contiguous RO space supports checking for RO space objects via raw
+  // compressed addresses. In case the code range crosses a
+  // `kPtrComprCageBaseAlignment` (4GiB) boundary we need to add a
+  // corresponding red zone to the code range so that no compressed
+  // code pointers look like RO-space.
   //
   // Cases:
   // - CR: code range
@@ -336,8 +338,9 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
   // The checks below only work when the code range is not fully contained
   // within the aligned region.
   CHECK_GE(size(), kContiguousReadOnlyReservationSize);
-  // There's at most one kPtrComprCageBaseAlignment region that overlaps with
-  // the code range. The code below can deal with multiple overlaps though.
+  // Read-only red zone addresses repeat every kPtrComprCageBaseAlignment
+  // (4GiB), but there's at most one red zone region that overlaps with the
+  // code range. The code below can deal with multiple overlaps though.
   CHECK_GE(kPtrComprCageBaseAlignment - kContiguousReadOnlyReservationSize,
            size());
   // To keep it simple and avoid computing various cases, we just loop over

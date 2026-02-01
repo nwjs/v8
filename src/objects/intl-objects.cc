@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/api/api-inl.h"
@@ -919,11 +920,11 @@ MaybeDirectHandle<String> Intl::StringLocaleConvertCase(
   std::vector<std::string> requested_locales;
   if (!CanonicalizeLocaleList(isolate, locales, true).To(&requested_locales))
     return {};
-  std::string requested_locale = requested_locales.empty()
-                                     ? isolate->DefaultLocale()
-                                     : requested_locales[0];
+  std::string_view requested_locale = requested_locales.empty()
+                                          ? isolate->DefaultLocale()
+                                          : requested_locales[0];
   size_t dash = requested_locale.find('-');
-  if (dash != std::string::npos) {
+  if (dash != std::string_view::npos) {
     requested_locale = requested_locale.substr(0, dash);
   }
 
@@ -948,7 +949,8 @@ MaybeDirectHandle<String> Intl::StringLocaleConvertCase(
   // Greek (el) does not require any adjustment.
   if (V8_UNLIKELY((requested_locale == "tr") || (requested_locale == "el") ||
                   (requested_locale == "lt") || (requested_locale == "az"))) {
-    return LocaleConvertCase(isolate, s, to_upper, requested_locale.c_str());
+    return LocaleConvertCase(isolate, s, to_upper,
+                             std::string(requested_locale).c_str());
   } else {
     if (to_upper) {
       return ConvertToUpper(isolate, s);
@@ -2197,10 +2199,10 @@ MaybeDirectHandle<JSArray> VectorToJSArray(
     Isolate* isolate, const std::vector<std::string>& array) {
   Factory* factory = isolate->factory();
   DirectHandle<FixedArray> fixed_array =
-      factory->NewFixedArray(static_cast<int32_t>(array.size()));
-  int32_t index = 0;
+      factory->NewFixedArray(static_cast<uint32_t>(array.size()));
+  uint32_t index = 0;
   for (const std::string& item : array) {
-    DirectHandle<String> str = factory->NewStringFromAsciiChecked(item.c_str());
+    DirectHandle<String> str = factory->NewStringFromAsciiChecked(item);
     fixed_array->set(index++, *str);
   }
   return factory->NewJSArrayWithElements(fixed_array);
@@ -2302,10 +2304,10 @@ MaybeDirectHandle<JSArray> AvailableUnits(Isolate* isolate) {
   Factory* factory = isolate->factory();
   std::set<std::string> sanctioned(Intl::SanctionedSimpleUnits());
   DirectHandle<FixedArray> fixed_array =
-      factory->NewFixedArray(static_cast<int32_t>(sanctioned.size()));
-  int32_t index = 0;
+      factory->NewFixedArray(static_cast<uint32_t>(sanctioned.size()));
+  uint32_t index = 0;
   for (const std::string& item : sanctioned) {
-    DirectHandle<String> str = factory->NewStringFromAsciiChecked(item.c_str());
+    DirectHandle<String> str = factory->NewStringFromAsciiChecked(item);
     fixed_array->set(index++, *str);
   }
   return factory->NewJSArrayWithElements(fixed_array);

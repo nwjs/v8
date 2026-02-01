@@ -10,7 +10,7 @@
 #include "src/heap/parked-scope-inl.h"
 #include "src/objects/bytecode-array.h"
 #include "src/objects/fixed-array.h"
-#include "src/sandbox/bytecode-verifier.h"
+#include "test/common/noop-bytecode-verifier.h"
 #include "test/unittests/heap/heap-utils.h"
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -162,8 +162,7 @@ class SharedLargeOldSpaceAllocationThread final : public ParkingThread {
                 i_client_isolate->factory()->NewFixedArray(
                     kMaxRegularHeapObjectSize / kTaggedSize,
                     AllocationType::kSharedOld);
-            CHECK(MemoryChunkMetadata::FromHeapObject(i_client_isolate,
-                                                      *fixed_array)
+            CHECK(BasePage::FromHeapObject(i_client_isolate, *fixed_array)
                       ->is_large());
           }
 
@@ -212,8 +211,7 @@ class SharedTrustedLargeObjectSpaceAllocationThread final
             DirectHandle<TrustedByteArray> fixed_array =
                 i_client_isolate->factory()->NewTrustedByteArray(
                     kMaxRegularHeapObjectSize, AllocationType::kSharedTrusted);
-            CHECK(MemoryChunkMetadata::FromHeapObject(i_client_isolate,
-                                                      *fixed_array)
+            CHECK(BasePage::FromHeapObject(i_client_isolate, *fixed_array)
                       ->is_large());
           }
 
@@ -271,8 +269,8 @@ TEST_F(SharedHeapTest, TrustedToSharedTrustedPointer) {
       constant_pool, handler_table);
   // We still need to verify the bytecode, otherwise the bytecode array won't
   // be published (be sandbox-accessible), causing the GC to be surprised. We
-  // could use dummy verification here though if necessary.
-  BytecodeVerifier::Verify(isolate, bc);
+  // use a no-op verifier here since this test uses invalid bytecode.
+  NoOpBytecodeVerifier::Verify(i_isolate(), bc);
   CHECK_EQ(MemoryChunk::FromHeapObject(*bc)->Metadata()->owner()->identity(),
            TRUSTED_SPACE);
 

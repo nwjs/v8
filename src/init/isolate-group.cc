@@ -26,6 +26,10 @@
 #include <partition_alloc/partition_alloc.h>
 #endif
 
+#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
+#include "src/sandbox/external-strings-cage.h"
+#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
+
 namespace v8 {
 namespace internal {
 
@@ -73,13 +77,13 @@ class IsolateGroupAccessScope final {
 #endif  // V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
 
 #ifdef V8_ENABLE_SANDBOX
-void IsolateGroup::MemoryChunkMetadataTableEntry::SetMetadata(
-    MemoryChunkMetadata* metadata, Isolate* isolate) {
+void IsolateGroup::BasePageTableEntry::SetMetadata(BasePage* metadata,
+                                                   Isolate* isolate) {
   metadata_ = metadata;
   // Read-only and shared pages can be accessed from any isolate, mark the entry
   // with the sentinel.
   if (metadata &&
-      (metadata->IsReadOnlyPageMetadata() || metadata->is_writable_shared())) {
+      (metadata->IsReadOnlyPage() || metadata->is_writable_shared())) {
     isolate_ =
         reinterpret_cast<Isolate*>(kReadOnlyOrSharedEntryIsolateSentinel);
     return;
@@ -207,6 +211,13 @@ void IsolateGroup::Initialize(bool process_wide, Sandbox* sandbox) {
   }
 
   js_dispatch_table()->Initialize();
+
+#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
+  if (!external_strings_cage_.Initialize()) {
+    V8::FatalProcessOutOfMemory(
+        nullptr, "Failed to reserve virtual memory for ExternalStringsCage");
+  }
+#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
 }
 #elif defined(V8_COMPRESS_POINTERS)
 void IsolateGroup::Initialize(bool process_wide) {

@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
@@ -71,6 +72,7 @@
 #include "src/parsing/scanner-character-streams.h"
 #include "src/profiler/profile-generator.h"
 #include "src/snapshot/snapshot.h"
+#include "src/strings/owning-external-string-resource.h"
 #include "src/tasks/cancelable-task.h"
 #include "src/tracing/perfetto-sdk.h"
 #include "src/utils/ostreams.h"
@@ -86,6 +88,7 @@
 #endif  // V8_ENABLE_MAGLEV
 
 #ifdef V8_ENABLE_PARTITION_ALLOC
+#include <partition_alloc/partition_root.h>
 #include <partition_alloc/shim/allocator_shim_default_dispatch_to_partition_alloc.h>
 #endif  // V8_ENABLE_PARTITION_ALLOC
 
@@ -528,22 +531,6 @@ static platform::tracing::TraceConfig* CreateTraceConfigFromJSON(
 }
 
 }  // namespace tracing
-
-class ExternalOwningOneByteStringResource
-    : public String::ExternalOneByteStringResource {
- public:
-  ExternalOwningOneByteStringResource() = default;
-  ExternalOwningOneByteStringResource(
-      std::unique_ptr<base::OS::MemoryMappedFile> file)
-      : file_(std::move(file)) {}
-  const char* data() const override {
-    return static_cast<char*>(file_->memory());
-  }
-  size_t length() const override { return file_->size(); }
-
- private:
-  std::unique_ptr<base::OS::MemoryMappedFile> file_;
-};
 
 // static variables:
 CounterMap* Shell::counter_map_;
@@ -5253,14 +5240,16 @@ MaybeLocal<String> Shell::ReadFile(Isolate* isolate, const char* name,
     return MaybeLocal<String>();
   }
   size_t full_file_size = file->size();
-  if (full_file_size > size_t{i::kMaxInt}) {
+  if (full_file_size > size_t{String::kMaxLength}) {
     FATAL("Input file too large (%zu bytes)", full_file_size);
   }
+  static_assert(String::kMaxLength <= i::kMaxInt);
   int size = static_cast<int>(full_file_size);
   char* chars = static_cast<char*>(file->memory());
   if (i::v8_flags.use_external_strings && i::String::IsAscii(chars, size)) {
     String::ExternalOneByteStringResource* resource =
-        new ExternalOwningOneByteStringResource(std::move(file));
+        new i::OwningExternalOneByteStringResource(
+            std::string_view(chars, size));
     return String::NewExternalOneByte(isolate, resource);
   }
   return String::NewFromUtf8(isolate, chars, NewStringType::kNormal, size);
@@ -5509,6 +5498,14 @@ bool SourceGroup::Execute(Isolate* isolate) {
     Local<String> file_name =
         String::NewFromUtf8(isolate, "fuzzcode.js", NewStringType::kNormal)
             .ToLocalChecked();
+
+#ifdef V8_DUMPLING
+    v8::internal::Isolate* internal_isolate =
+        reinterpret_cast<v8::internal::Isolate*>(isolate);
+    if (internal_isolate->dumpling_manager()->IsDumpingEnabled()) {
+      internal_isolate->dumpling_manager()->PrepareForNextREPRLCycle();
+    }
+#endif  // V8_DUMPLING
 
     size_t script_size;
     CHECK_EQ(read(REPRL_CRFD, &script_size, 8), 8);
@@ -7066,11 +7063,15 @@ void ConfigurePartitionAllocIfEnabled() {
   static constexpr size_t kThreadCacheLargeSizeThreshold = 1 << 15;
   ::partition_alloc::ThreadCache::SetLargestCachedSize(
       kThreadCacheLargeSizeThreshold);
-#if defined(V8_OS_DARWIN) || defined(V8_OS_WIN)
-  allocator_shim::AdjustDefaultAllocatorForForeground();
-#endif  // defined(V8_OS_DARWIN) || defined(V8_OS_WIN)
+  // Adjust slot span ring size to 1024. Keep it aligned with constants in
+  // partition_alloc_constants.h
+  static constexpr int kForegroundMaxEmptySlotSpansDirtyBytesShift = 2;
+  static constexpr int kSlotSpanRingSize = 1 << 10;
+  allocator_shim::internal::PartitionAllocMalloc::Allocator()
+      ->AdjustSlotSpanRing(kSlotSpanRingSize,
+                           kForegroundMaxEmptySlotSpansDirtyBytesShift);
 #endif  // PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC)
-#endif
+#endif  // defined(V8_ENABLE_PARTITION_ALLOC)
 }
 
 }  // namespace
