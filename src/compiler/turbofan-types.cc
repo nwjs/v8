@@ -264,6 +264,7 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
     case JS_ASYNC_FUNCTION_OBJECT_TYPE:
     case JS_ASYNC_GENERATOR_OBJECT_TYPE:
     case JS_MODULE_NAMESPACE_TYPE:
+    case JS_DEFERRED_MODULE_NAMESPACE_TYPE:
     case JS_ARRAY_BUFFER_TYPE:
     case JS_ARRAY_ITERATOR_TYPE:
     case JS_REG_EXP_TYPE:
@@ -344,6 +345,7 @@ Type::bitset BitsetType::Lub(MapRefLike map, JSHeapBroker* broker) {
 #undef TYPED_ARRAY_CONSTRUCTORS_SWITCH
       DCHECK(!map.is_undetectable());
       return kCallableFunction;
+    case JS_DETACHED_TYPED_ARRAY_TYPE:
     case JS_TYPED_ARRAY_TYPE:
       DCHECK(!map.is_callable());
       DCHECK(!map.is_undetectable());

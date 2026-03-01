@@ -1068,7 +1068,6 @@ class ApiConstructExitFrame : public ApiCallbackExitFrame {
 // preprocessing of exceptions thrown from these callbacks.
 class ApiAccessorExitFrame : public ExitFrame {
  public:
-  inline Tagged<Object> receiver() const;
   inline Tagged<Object> holder() const;
 
   // Summarize Frame
@@ -1084,7 +1083,6 @@ class ApiAccessorExitFrame : public ExitFrame {
   inline explicit ApiAccessorExitFrame(StackFrameIteratorBase* iterator);
 
   inline FullObjectSlot property_key_slot() const;
-  inline FullObjectSlot receiver_slot() const;
   inline FullObjectSlot holder_slot() const;
 
   friend class StackFrameIteratorBase;

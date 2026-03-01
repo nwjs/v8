@@ -14,14 +14,6 @@
 namespace v8 {
 namespace internal {
 
-#ifdef V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS
-// EXPAND is needed to work around MSVC's broken __VA_ARGS__ expansion.
-#define IF_TSA(TSA_MACRO, CSA_MACRO, ...) EXPAND(TSA_MACRO(__VA_ARGS__))
-#else
-// EXPAND is needed to work around MSVC's broken __VA_ARGS__ expansion.
-#define IF_TSA(TSA_MACRO, CSA_MACRO, ...) EXPAND(CSA_MACRO(__VA_ARGS__))
-#endif
-
 #if V8_ENABLE_GEARBOX
 #define WITH_GEARBOX(KIND, NAME, ...) \
   KIND(NAME##_Generic, __VA_ARGS__)   \
@@ -101,16 +93,17 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   GENERATE_MACRO(V, OutOfObject, NonDouble, Field, 2)                          \
   GENERATE_MACRO(V, OutOfObject, NonDouble, Field, 3)
 
-#define LOAD_IC_HANDLER_LIST(V, GENERATE_MACRO)                              \
-  GENERATE_MACRO(V, /*Location*/, /*Representation*/, Uninitialized,         \
-                 /*Index*/)                                                  \
-  GENERATE_MACRO(V, InObject, NonDouble, Field, /*Index*/)                   \
-  LOAD_IC_IN_OBJECT_FIELD_WITH_INDEX_HANDLER_LIST(V, GENERATE_MACRO)         \
-  GENERATE_MACRO(V, OutOfObject, NonDouble, Field, /*Index*/)                \
-  LOAD_IC_OUT_OF_OBJECT_FIELD_WITH_INDEX_HANDLER_LIST(V, GENERATE_MACRO)     \
-  GENERATE_MACRO(V, /*Location*/, Double, Field, /*Index*/)                  \
-  GENERATE_MACRO(V, /*Location*/, /*Representation*/, ConstantFromPrototype, \
-                 /*Index*/)                                                  \
+#define LOAD_IC_HANDLER_LIST(V, GENERATE_MACRO)                                \
+  GENERATE_MACRO(V, /*Location*/, /*Representation*/, Uninitialized,           \
+                 /*Index*/)                                                    \
+  GENERATE_MACRO(V, InObject, NonDouble, Field, /*Index*/)                     \
+  LOAD_IC_IN_OBJECT_FIELD_WITH_INDEX_HANDLER_LIST(V, GENERATE_MACRO)           \
+  GENERATE_MACRO(V, OutOfObject, NonDouble, Field, /*Index*/)                  \
+  LOAD_IC_OUT_OF_OBJECT_FIELD_WITH_INDEX_HANDLER_LIST(V, GENERATE_MACRO)       \
+  GENERATE_MACRO(V, /*Location*/, Double, Field, /*Index*/)                    \
+  GENERATE_MACRO(V, /*Location*/, /*Representation*/, ConstantFromPrototype,   \
+                 /*Index*/)                                                    \
+  GENERATE_MACRO(V, /*Location*/, /*Representation*/, StringLength, /*Index*/) \
   GENERATE_MACRO(V, /*Location*/, /*Representation*/, Generic, /*Index*/)
 
 #define GENERATE_BUILTIN_LOAD_IC_DEFINITION(V, Location, Representation, Kind, \
@@ -373,7 +366,9 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   ASM(CallApiCallbackGeneric, CallApiCallbackGeneric)                          \
   ASM(CallApiCallbackOptimizedNoProfiling, CallApiCallbackOptimized)           \
   ASM(CallApiCallbackOptimized, CallApiCallbackOptimized)                      \
-  ASM(CallApiGetter, ApiGetter)                                                \
+  ASM(CallApiGetter, CallApiGetter)                                            \
+  ASM(CallNamedInterceptorGetter, CallApiGetter)                               \
+  ASM(CallNamedInterceptorSetter, CallApiSetter)                               \
   TFC(HandleApiCallOrConstruct, JSTrampoline)                                  \
   CPP(HandleApiConstruct, kDontAdaptArgumentsSentinel)                         \
   CPP(HandleApiCallAsFunctionDelegate, kDontAdaptArgumentsSentinel)            \
@@ -932,6 +927,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(NumberPrototypeToFixed, kDontAdaptArgumentsSentinel)                     \
   CPP(NumberPrototypeToLocaleString, kDontAdaptArgumentsSentinel)              \
   CPP(NumberPrototypeToPrecision, kDontAdaptArgumentsSentinel)                 \
+  CPP(MathSumPrecise, JSParameterCount(1))                                     \
   TFC(SameValue, CompareNoContext)                                             \
   TFC(SameValueNumbersOnly, CompareNoContext)                                  \
                                                                                \
@@ -982,24 +978,24 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFC(Add_RhsIsStringConstant_Internalize_Baseline, BinaryOp_Baseline)         \
                                                                                \
   /* Compare ops with feedback collection */                                   \
-  TFC(Equal_Baseline, Compare_Baseline)                                        \
+  TFC(Equal_Baseline, Compare_WithEmbeddedFeedbackOffset)                      \
   TFC(StrictEqual_Generic_Baseline, Compare_WithEmbeddedFeedbackOffset)        \
                                                                                \
   /* Typed StirctEqual baseline stubs */                                       \
   IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_STRICTEQUAL_HANDLER, TFC)           \
   IF_SPARKPLUG_PLUS(TFC, StrictEqualAndTryPatchCode, CompareAndTryPatchCode)   \
                                                                                \
-  TFC(LessThan_Baseline, Compare_Baseline)                                     \
-  TFC(GreaterThan_Baseline, Compare_Baseline)                                  \
-  TFC(LessThanOrEqual_Baseline, Compare_Baseline)                              \
-  TFC(GreaterThanOrEqual_Baseline, Compare_Baseline)                           \
+  TFC(LessThan_Baseline, Compare_WithEmbeddedFeedbackOffset)                   \
+  TFC(GreaterThan_Baseline, Compare_WithEmbeddedFeedbackOffset)                \
+  TFC(LessThanOrEqual_Baseline, Compare_WithEmbeddedFeedbackOffset)            \
+  TFC(GreaterThanOrEqual_Baseline, Compare_WithEmbeddedFeedbackOffset)         \
                                                                                \
-  TFC(Equal_WithFeedback, Compare_WithFeedback)                                \
+  TFC(Equal_WithEmbeddedFeedback, Compare_WithEmbeddedFeedback)                \
   TFC(StrictEqual_WithEmbeddedFeedback, Compare_WithEmbeddedFeedback)          \
-  TFC(LessThan_WithFeedback, Compare_WithFeedback)                             \
-  TFC(GreaterThan_WithFeedback, Compare_WithFeedback)                          \
-  TFC(LessThanOrEqual_WithFeedback, Compare_WithFeedback)                      \
-  TFC(GreaterThanOrEqual_WithFeedback, Compare_WithFeedback)                   \
+  TFC(LessThan_WithEmbeddedFeedback, Compare_WithEmbeddedFeedback)             \
+  TFC(GreaterThan_WithEmbeddedFeedback, Compare_WithEmbeddedFeedback)          \
+  TFC(LessThanOrEqual_WithEmbeddedFeedback, Compare_WithEmbeddedFeedback)      \
+  TFC(GreaterThanOrEqual_WithEmbeddedFeedback, Compare_WithEmbeddedFeedback)   \
                                                                                \
   /* Unary ops with feedback collection */                                     \
   TFC(BitwiseNot_Baseline, UnaryOp_Baseline)                                   \
@@ -1167,7 +1163,8 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFJ(StringPrototypeSplit, kDontAdaptArgumentsSentinel)                       \
   /* ES6 #sec-string.raw */                                                    \
   CPP(StringRaw, kDontAdaptArgumentsSentinel)                                  \
-  IF_TSA(TFC_TSA, IGNORE_BUILTIN, ToString, ToString)                          \
+  /*SELECT_TSA_LEVEL(IGNORE_BUILTIN, TFC_TSA, IGNORE_BUILTIN, ToString,        \
+   * ToString)*/                                                               \
                                                                                \
   /* Symbol */                                                                 \
   /* ES #sec-symbol-constructor */                                             \
@@ -1570,6 +1567,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFC(FindNonDefaultConstructorOrConstruct,                                    \
       FindNonDefaultConstructorOrConstruct)                                    \
   TFS(OrdinaryGetOwnPropertyDescriptor, NeedsContext::kYes, kReceiver, kKey)   \
+  TFS(CheckMaglevType, NeedsContext::kNo, kObject, kType)                      \
   IF_SHADOW_STACK(ASM, AdaptShadowStackForDeopt, Void)                         \
                                                                                \
   /* Trace */                                                                  \
@@ -2299,12 +2297,19 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(StringPrototypeToUpperCase, kDontAdaptArgumentsSentinel)
 #endif  // V8_INTL_SUPPORT
 
+#ifdef V8_DUMPLING
+#define BUILTIN_LIST_DUMPLING(ASM) ASM(DumpFrame, Void)
+#else
+#define BUILTIN_LIST_DUMPLING(ASM)
+#endif
+
 #define BUILTIN_LIST(CPP, TFJ_TSA, TFJ, TFC_TSA, TFC, TFS, TFH, BCH_TSA, BCH, \
                      ASM)                                                     \
   BUILTIN_LIST_BASE(CPP, TFJ_TSA, TFJ, TFC_TSA, TFC, TFS, TFH, ASM)           \
-  BUILTIN_LIST_FROM_TORQUE(CPP, TFJ, TFC, TFS, TFH, ASM)                      \
+  BUILTIN_LIST_FROM_TORQUE(CPP, TFJ, TFC_TSA, TFC, TFS, TFH, ASM)             \
   BUILTIN_LIST_INTL(CPP, TFJ, TFS)                                            \
   BUILTIN_LIST_TEMPORAL(CPP, TFJ)                                             \
+  BUILTIN_LIST_DUMPLING(ASM)                                                  \
   BUILTIN_LIST_BYTECODE_HANDLERS(BCH_TSA, BCH)
 
 // See the comment on top of BUILTIN_LIST_BASE_TIER0 for an explanation of
@@ -2315,9 +2320,10 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
 #define BUILTIN_LIST_TIER1(CPP, TFJ_TSA, TFJ, TFC, TFS, TFH, BCH_TSA, BCH, \
                            ASM)                                            \
   BUILTIN_LIST_BASE_TIER1(CPP, TFJ_TSA, TFJ, TFC, TFS, TFH, ASM)           \
-  BUILTIN_LIST_FROM_TORQUE(CPP, TFJ, TFC, TFS, TFH, ASM)                   \
+  BUILTIN_LIST_FROM_TORQUE(CPP, TFJ, TFC_TSA, TFC, TFS, TFH, ASM)          \
   BUILTIN_LIST_INTL(CPP, TFJ, TFS)                                         \
   BUILTIN_LIST_TEMPORAL(CPP, TFJ)                                          \
+  BUILTIN_LIST_DUMPLING(ASM)                                               \
   BUILTIN_LIST_BYTECODE_HANDLERS(BCH_TSA, BCH)
 
 // The exception thrown in the following builtins are caught

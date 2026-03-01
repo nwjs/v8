@@ -2313,7 +2313,7 @@ class BodyGen {
     return true;  // It always produces the desired result type.
   }
 
-  bool ref_cast_desc(HeapType type, DataRange* data, Nullability nullable) {
+  bool ref_cast_desc_eq(HeapType type, DataRange* data, Nullability nullable) {
     if (!builder_->builder()
              ->GetType_Unsafe(type.ref_index())
              .has_descriptor()) {
@@ -2327,8 +2327,8 @@ class BodyGen {
             false, RefTypeKind::kStruct)
             .AsExact(type.exactness());
     GenerateRef(desc_type, data, kNonNullable);
-    builder_->EmitWithPrefix(nullable ? kExprRefCastDescNull
-                                      : kExprRefCastDesc);
+    builder_->EmitWithPrefix(nullable ? kExprRefCastDescEqNull
+                                      : kExprRefCastDescEq);
     builder_->EmitHeapType(type);
     return true;
   }
@@ -2534,8 +2534,8 @@ class BodyGen {
                                              RefTypeKind::kStruct)
                                  .AsExact(target_type.exactness());
         GenerateRef(desc_type, data, kNonNullable);
-        if (opcode == kExprBrOnCast) opcode = kExprBrOnCastDesc;
-        if (opcode == kExprBrOnCastFail) opcode = kExprBrOnCastDescFail;
+        if (opcode == kExprBrOnCast) opcode = kExprBrOnCastDescEq;
+        if (opcode == kExprBrOnCastFail) opcode = kExprBrOnCastDescEqFail;
       }
     }
     builder_->EmitWithPrefix(opcode);
@@ -3853,8 +3853,7 @@ class BodyGen {
     }
 
     constexpr auto alternatives_indexed_type =
-        CreateArray(&BodyGen::new_object,                     //
-                    &BodyGen::get_local_ref,                  //
+        CreateArray(&BodyGen::get_local_ref,                  //
                     &BodyGen::array_get_ref,                  //
                     &BodyGen::array_atomic_get_ref,           //
                     &BodyGen::array_atomic_rmw_xchg_ref,      //
@@ -3864,10 +3863,14 @@ class BodyGen {
                     &BodyGen::struct_atomic_rmw_xchg_ref,     //
                     &BodyGen::struct_atomic_rmw_cmpxchg_ref,  //
                     &BodyGen::ref_cast,                       //
-                    &BodyGen::ref_cast_desc,                  //
+                    &BodyGen::ref_cast_desc_eq,               //
                     &BodyGen::ref_get_desc,                   //
                     &BodyGen::ref_as_non_null,                //
-                    &BodyGen::br_on_cast);                    //
+                    // Note: More expensive operations (in terms of generated
+                    // code) should come last, because we will try the first
+                    // alternatives first when we run out of input bytes.
+                    &BodyGen::new_object,   //
+                    &BodyGen::br_on_cast);  //
 
     constexpr auto alternatives_func_any =
         CreateArray(&BodyGen::table_get,                   //
@@ -3900,8 +3903,8 @@ class BodyGen {
     if (type.has_index()) {
       if (options_.generate_wasm_gc() &&
           type.ref_index() == string_imports_.array_i8 &&
-          data->get<uint8_t>() < 18) {
-        // ~1/14th chance, fits the number of remaining alternatives (13)
+          data->get<uint8_t>() < 16) {
+        // ~1/16th chance, fits the number of remaining alternatives (15)
         // quite well.
         return string_toutf8array(data);
       }
@@ -4151,7 +4154,7 @@ class BodyGen {
 
     // Split the types in two halves and recursively generate each half.
     // Each half is non empty to ensure termination.
-    size_t split_index = data->get<uint8_t>() % (types.size() - 1) + 1;
+    size_t split_index = types.size() / 2;
     base::Vector<const ValueType> lower_half = types.SubVector(0, split_index);
     base::Vector<const ValueType> upper_half =
         types.SubVector(split_index, types.size());
@@ -4289,8 +4292,8 @@ class ModuleGen {
  public:
   explicit ModuleGen(Zone* zone, WasmModuleGenerationOptions options,
                      WasmModuleBuilder* fn, DataRange* module_range,
-                     uint8_t num_functions, uint8_t num_structs,
-                     uint8_t num_arrays, uint8_t num_signatures)
+                     int num_functions, int num_structs, int num_arrays,
+                     int num_signatures)
       : zone_(zone),
         options_(options),
         builder_(fn),
@@ -4487,8 +4490,8 @@ class ModuleGen {
       } while (false);
 
       // TODO(42204563): Add support for shared structs.
-      StructType::Builder struct_builder(zone_, num_fields, is_descriptor,
-                                         false);
+      StructType::Builder<Zone> struct_builder(zone_, num_fields, is_descriptor,
+                                               false);
 
       // Add all fields from super type.
       uint32_t field_index = 0;
@@ -4625,7 +4628,7 @@ class ModuleGen {
     }
   }
 
-  void GenerateRandomExceptions(uint8_t num_exceptions) {
+  void GenerateRandomExceptions(int num_exceptions) {
     for (int i = 0; i < num_exceptions; ++i) {
       FunctionSig* sig = GenerateSig(kExceptionSig, num_types_);
       builder_->AddTag(sig);
@@ -4701,8 +4704,13 @@ class ModuleGen {
     static constexpr base::Vector<const char> kTextEncoder =
         base::StaticCharVector("wasm:text-encoder");
 
+    // The signatures of compile-time imports must be defined in singleton
+    // recgroups, so we can't allow them to get deduplicated against existing
+    // signatures that might be in nontrivial recgroups.
+    static constexpr bool kForceNewSig = true;
 #define STRINGFUNC(name, sig, group) \
-  strings.name = builder_->AddImport(base::CStrVector(#name), &sig, group)
+  strings.name =                     \
+      builder_->AddImport(base::CStrVector(#name), &sig, group, kForceNewSig)
 
     STRINGFUNC(cast, kSig_e_r, kJsString);
     STRINGFUNC(test, kSig_i_r, kJsString);
@@ -4831,10 +4839,10 @@ class ModuleGen {
   const WasmModuleGenerationOptions options_;
   WasmModuleBuilder* const builder_;
   DataRange* const module_range_;
-  const uint8_t num_functions_;
-  const uint8_t num_structs_;
-  const uint8_t num_arrays_;
-  const uint16_t num_types_;
+  const int num_functions_;
+  const int num_structs_;
+  const int num_arrays_;
+  const int num_types_;
   std::vector<ExportData>* imports_ = nullptr;
 };
 
@@ -5128,7 +5136,7 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
   // At least 1 function is needed.
   int max_num_functions = MaxNumOfFunctions();
   CHECK_GE(max_num_functions, 1);
-  uint8_t num_functions = 1 + (module_range.get<uint8_t>() % max_num_functions);
+  int num_functions = 1 + (module_range.get<uint8_t>() % max_num_functions);
 
   // In case of WasmGC expressions:
   // Add struct and array types first so that we get a chance to generate
@@ -5136,8 +5144,8 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
   // Currently, `BodyGen` assumes this order for struct/array/signature
   // definitions.
   // Otherwise, for non-WasmGC we can't use structs/arrays.
-  uint8_t num_structs = 0;
-  uint8_t num_arrays = 0;
+  int num_structs = 0;
+  int num_arrays = 0;
   std::vector<ModuleTypeIndex> array_types;
   std::vector<ModuleTypeIndex> struct_types;
 
@@ -5153,7 +5161,7 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
                  module_range.get<uint8_t>() % kMaxArrays;
   }
 
-  uint8_t num_signatures = num_functions;
+  int num_signatures = num_functions;
   ModuleGen gen_module(zone, options, &builder, &module_range, num_functions,
                        num_structs, num_arrays, num_signatures);
 
@@ -5337,7 +5345,7 @@ base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
     }
     // TODO(403372470): Add support for custom descriptors.
     // TODO(42204563): Add support for shared structs.
-    StructType::Builder struct_builder(zone, num_fields, false, false);
+    StructType::Builder<Zone> struct_builder(zone, num_fields, false, false);
 
     // Add all fields from super type.
     uint32_t field_index = 0;

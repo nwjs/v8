@@ -190,6 +190,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // Create a new PrototypeInfo struct.
   DirectHandle<PrototypeInfo> NewPrototypeInfo();
   DirectHandle<PrototypeSharedClosureInfo> NewPrototypeSharedClosureInfo(
+      DirectHandle<ObjectBoilerplateDescription> object_boilerplate_description,
       DirectHandle<Context> context,
       DirectHandle<ClosureFeedbackCellArray> feedback_array);
 
@@ -737,6 +738,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       DirectHandle<JSFunction> function);
 
   DirectHandle<JSModuleNamespace> NewJSModuleNamespace();
+
+  DirectHandle<JSDeferredModuleNamespace> NewJSDeferredModuleNamespace();
 
   DirectHandle<JSWrappedFunction> NewJSWrappedFunction(
       DirectHandle<NativeContext> creation_context,

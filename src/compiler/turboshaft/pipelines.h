@@ -28,6 +28,7 @@
 #include "src/compiler/turboshaft/sidetable.h"
 #include "src/compiler/turboshaft/store-store-elimination-phase.h"
 #include "src/compiler/turboshaft/tracing.h"
+#include "src/compiler/turboshaft/turbolev-frontend-pipeline.h"
 #include "src/compiler/turboshaft/turbolev-graph-builder.h"
 #include "src/compiler/turboshaft/type-assertions-phase.h"
 #include "src/compiler/turboshaft/typed-optimizations-phase.h"
@@ -101,14 +102,14 @@ class V8_EXPORT_PRIVATE Pipeline {
     if constexpr (std::is_same_v<result_t, void>) {
       phase.Run(data_, temp_zone, std::forward<Args>(args)...);
       if constexpr (produces_printable_graph<Phase>::value) {
-        PrintGraph(temp_zone, Phase::phase_name());
+        PrintGraph(Phase::phase_name());
       }
       return !data_->info()->was_cancelled();
     } else {
       static_assert(std::is_same_v<result_t, std::optional<BailoutReason>>);
       auto result = phase.Run(data_, temp_zone, std::forward<Args>(args)...);
       if constexpr (produces_printable_graph<Phase>::value) {
-        PrintGraph(temp_zone, Phase::phase_name());
+        PrintGraph(Phase::phase_name());
       }
       return data_->info()->was_cancelled() ? BailoutReason::kCancelled
                                             : result;
@@ -116,7 +117,7 @@ class V8_EXPORT_PRIVATE Pipeline {
     UNREACHABLE();
   }
 
-  void PrintGraph(Zone* zone, const char* phase_name) {
+  void PrintGraph(const char* phase_name) {
     CodeTracer* code_tracer = nullptr;
     if (data_->info()->trace_turbo_graph()) {
       // NOTE: We must not call `GetCodeTracer` if tracing is not enabled,
@@ -125,7 +126,7 @@ class V8_EXPORT_PRIVATE Pipeline {
       code_tracer = data_->GetCodeTracer();
       DCHECK_NOT_NULL(code_tracer);
     }
-    PrintTurboshaftGraph(data_, zone, code_tracer, phase_name);
+    PrintTurboshaftGraph(data_, code_tracer, phase_name);
   }
 
   void TraceSequence(const char* phase_name) {
@@ -154,12 +155,24 @@ class V8_EXPORT_PRIVATE Pipeline {
   bool CreateGraphWithMaglev(Linkage* linkage) {
     UnparkedScopeIfNeeded unparked_scope(data_->broker());
 
-    BeginPhaseKind("V8.TFGraphCreation");
+    // TODO(victorgomes): Should we rename this to V8.TurbolevFrontend instead?
+    PhaseScopeKind scope_kind(data_->pipeline_statistics(),
+                              "V8.TFGraphCreation");
     turboshaft::Tracing::Scope tracing_scope(data_->info());
-    std::optional<BailoutReason> bailout =
-        Run<turboshaft::TurbolevGraphBuildingPhase>(linkage);
-    EndPhaseKind();
 
+    TurbolevFrontendPipeline frontend(data_, linkage);
+    maglev::MaglevGraphLabellerScope current_thread_graph_labeller(
+        frontend.graph_labeller());
+
+    std::optional<maglev::Graph*> maglev_graph = frontend.Run();
+    if (!maglev_graph.has_value()) {
+      data_->info()->AbortOptimization(
+          BailoutReason::kMaglevGraphBuildingFailed);
+      return false;
+    }
+
+    std::optional<BailoutReason> bailout =
+        Run<turboshaft::TurbolevGraphBuildingPhase>(*maglev_graph);
     if (bailout.has_value()) {
       data_->info()->AbortOptimization(bailout.value());
       return false;
@@ -170,8 +183,6 @@ class V8_EXPORT_PRIVATE Pipeline {
 
   bool CreateGraphFromTurbofan(compiler::TFPipelineData* turbofan_data,
                                Linkage* linkage) {
-    CHECK_IMPLIES(!v8_flags.disable_optimizing_compilers, v8_flags.turboshaft);
-
     UnparkedScopeIfNeeded scope(data_->broker(),
                                 v8_flags.turboshaft_trace_reduction ||
                                     v8_flags.turboshaft_trace_emitted);

@@ -36,6 +36,7 @@
 #include "src/compiler/turboshaft/zone-with-name.h"
 #include "src/compiler/write-barrier-kind.h"
 #include "src/flags/flags.h"
+#include "src/maglev/maglev-node-type.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-objects.h"
@@ -145,12 +146,8 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(StringAsWtf16)                        \
   V(StringPrepareForGetCodeUnit)
 
-#ifdef V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 #define TURBOSHAFT_DEINTERLEAVED_OPERATION_LIST(V) \
   V(Simd128LoadPairDeinterleave)
-#else
-#define TURBOSHAFT_DEINTERLEAVED_OPERATION_LIST(V)
-#endif
 
 #if V8_ENABLE_WASM_SIMD256_REVEC
 #define TURBOSHAFT_SIMD256_COMMOM_OPERATION_LIST(V) \
@@ -193,6 +190,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(Simd128Ternary)                       \
   V(Simd128ExtractLane)                   \
   V(Simd128ReplaceLane)                   \
+  V(Simd128MoveLane)                      \
   V(Simd128LaneMemory)                    \
   V(Simd128LoadTransform)                 \
   V(Simd128Shuffle)                       \
@@ -282,6 +280,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(TransitionElementsKindOrCheckMap)           \
   V(DebugPrint)                                 \
   V(CheckTurboshaftTypeOf)                      \
+  V(CheckMaglevType)                            \
   V(TypeHint)
 
 // These Operations are the lowest level handled by Turboshaft, and are
@@ -2602,7 +2601,12 @@ struct PhiOp : OperationT<PhiOp> {
   }
 
   explicit PhiOp(base::Vector<const OpIndex> inputs, RegisterRepresentation rep)
-      : Base(inputs), rep(rep) {}
+      : Base(inputs), rep(rep) {
+    // We add an additional CHECK specifically for Phi, to prevent Wasm from
+    // passing too many inputs, e.g. as part of a br_table operation.
+    CHECK_LE(inputs.size(),
+             std::numeric_limits<decltype(this->input_count)>::max());
+  }
 
   // Helpers to access loop phis forward/backedge. These should only be used for
   // loop phis (which isn't trivial to DCHECK since PhiOp doesn't know if it's a
@@ -3141,14 +3145,15 @@ V8_INLINE size_t hash_value(LoadOp::Kind kind) {
 #if V8_ENABLE_SANDBOX
 struct LoadTrustedPointerOp : FixedArityOperationT<2, LoadTrustedPointerOp> {
   const bool is_immutable;
-  IndirectPointerTag tag;
+  IndirectPointerTagRange tag_range;
 
   static constexpr OpEffects effects =
       OpEffects().CanReadMemory().CanDependOnChecks();
 
   explicit LoadTrustedPointerOp(V<WordPtr> table, V<Word32> handle,
-                                bool is_immutable, IndirectPointerTag tag)
-      : Base(table, handle), is_immutable(is_immutable), tag(tag) {}
+                                bool is_immutable,
+                                IndirectPointerTagRange tag_range)
+      : Base(table, handle), is_immutable(is_immutable), tag_range(tag_range) {}
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     return RepVector<RegisterRepresentation::Tagged()>();
@@ -3163,7 +3168,8 @@ struct LoadTrustedPointerOp : FixedArityOperationT<2, LoadTrustedPointerOp> {
   V<WordPtr> table() const { return input<WordPtr>(0); }
   V<Word32> handle() const { return input<Word32>(1); }
 
-  auto options() const { return std::tuple{is_immutable, tag}; }
+  void PrintOptions(std::ostream& os) const;
+  auto options() const { return std::tuple{is_immutable, tag_range}; }
 };
 #endif
 
@@ -3511,11 +3517,8 @@ struct StoreOp : OperationT<StoreOp> {
   uint8_t element_size_log2;  // multiply index with 2^element_size_log2
   int32_t offset;             // add offset to scaled index
   bool maybe_initializing_or_transitioning;
-  uint16_t
-      shifted_indirect_pointer_tag;  // for indirect pointer stores, the
-                                     // IndirectPointerTag of the store shifted
-                                     // to the right by kIndirectPointerTagShift
-                                     // (so it fits into 16 bits).
+  uint16_t indirect_pointer_tag_;
+
   // TODO(saelo): now that we have a pointer tag in these low-level operations,
   // we could also consider passing the external pointer tag (for external
   // pointers) through to the macro assembler (where we have routines to work
@@ -3562,8 +3565,7 @@ struct StoreOp : OperationT<StoreOp> {
   }
 
   IndirectPointerTag indirect_pointer_tag() const {
-    uint64_t shifted = shifted_indirect_pointer_tag;
-    return static_cast<IndirectPointerTag>(shifted << kIndirectPointerTagShift);
+    return static_cast<IndirectPointerTag>(indirect_pointer_tag_);
   }
 
   StoreOp(
@@ -3580,8 +3582,8 @@ struct StoreOp : OperationT<StoreOp> {
         offset(offset),
         maybe_initializing_or_transitioning(
             maybe_initializing_or_transitioning),
-        shifted_indirect_pointer_tag(maybe_indirect_pointer_tag >>
-                                     kIndirectPointerTagShift) {
+        indirect_pointer_tag_(
+            static_cast<uint16_t>(maybe_indirect_pointer_tag)) {
     DCHECK_EQ(indirect_pointer_tag(), maybe_indirect_pointer_tag);
     input(0) = base;
     input(1) = value;
@@ -4844,6 +4846,26 @@ struct CheckTurboshaftTypeOfOp
       : Base(input), rep(rep), type(std::move(type)), successful(successful) {}
 
   auto options() const { return std::tuple{rep, type, successful}; }
+};
+
+struct CheckMaglevTypeOp : FixedArityOperationT<1, CheckMaglevTypeOp> {
+  maglev::NodeType type;
+
+  static constexpr OpEffects effects =
+      OpEffects().CanDependOnChecks().CanReadMemory().RequiredWhenUnused();
+  base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+  }
+
+  V<Object> input() const { return Base::input<Object>(0); }
+
+  CheckMaglevTypeOp(V<Object> input, maglev::NodeType type)
+      : Base(input), type(type) {}
+
+  auto options() const { return std::tuple{type}; }
 };
 
 struct ObjectIsOp : FixedArityOperationT<1, ObjectIsOp> {
@@ -8671,6 +8693,40 @@ struct Simd128ReplaceLaneOp : FixedArityOperationT<2, Simd128ReplaceLaneOp> {
 
   static constexpr OpEffects effects = OpEffects();
 
+  static MachineRepresentation element_rep(Kind kind) {
+    switch (kind) {
+      case Kind::kI8x16:
+        return MachineRepresentation::kWord8;
+      case Kind::kI16x8:
+        return MachineRepresentation::kWord16;
+      case Kind::kI32x4:
+        return MachineRepresentation::kWord32;
+      case Kind::kI64x2:
+        return MachineRepresentation::kWord64;
+      case Kind::kF16x8:
+      case Kind::kF32x4:
+        return MachineRepresentation::kFloat32;
+      case Kind::kF64x2:
+        return MachineRepresentation::kFloat64;
+    }
+  }
+
+  static uint8_t lane_count(Kind kind) {
+    switch (kind) {
+      case Kind::kI8x16:
+        return 16;
+      case Kind::kI16x8:
+      case Kind::kF16x8:
+        return 8;
+      case Kind::kI32x4:
+      case Kind::kF32x4:
+        return 4;
+      case Kind::kI64x2:
+      case Kind::kF64x2:
+        return 2;
+    }
+  }
+
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     return RepVector<RegisterRepresentation::Simd128()>();
   }
@@ -8689,24 +8745,7 @@ struct Simd128ReplaceLaneOp : FixedArityOperationT<2, Simd128ReplaceLaneOp> {
 
   void Validate(const Graph& graph) const {
 #if DEBUG
-    uint8_t lane_count;
-    switch (kind) {
-      case Kind::kI8x16:
-        lane_count = 16;
-        break;
-      case Kind::kI16x8:
-      case Kind::kF16x8:
-        lane_count = 8;
-        break;
-      case Kind::kI32x4:
-      case Kind::kF32x4:
-        lane_count = 4;
-        break;
-      case Kind::kI64x2:
-      case Kind::kF64x2:
-        lane_count = 2;
-        break;
-    }
+    uint8_t lane_count = Simd128ReplaceLaneOp::lane_count(kind);
     DCHECK_LT(lane, lane_count);
 #endif
   }
@@ -8729,6 +8768,44 @@ struct Simd128ReplaceLaneOp : FixedArityOperationT<2, Simd128ReplaceLaneOp> {
         return RegisterRepresentation::Float64();
     }
   }
+};
+
+struct Simd128MoveLaneOp : FixedArityOperationT<2, Simd128MoveLaneOp> {
+  using Kind = Simd128ReplaceLaneOp::Kind;
+
+  const Kind kind;
+  const uint8_t into_lane;
+  const uint8_t from_lane;
+
+  static constexpr OpEffects effects = OpEffects();
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Simd128()>();
+  }
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return InitVectorOf(storage, {RegisterRepresentation::Simd128(),
+                                  RegisterRepresentation::Simd128()});
+  }
+
+  Simd128MoveLaneOp(V<Simd128> into, V<Simd128> from, Kind kind,
+                    uint8_t into_lane, uint8_t from_lane)
+      : Base(into, from),
+        kind(kind),
+        into_lane(into_lane),
+        from_lane(from_lane) {}
+
+  V<Simd128> into() const { return input<Simd128>(0); }
+  V<Simd128> from() const { return input<Simd128>(1); }
+
+  void Validate(const Graph& graph) const {
+    DCHECK_NE(kind, Kind::kF16x8);
+    DCHECK_LT(into_lane, Simd128ReplaceLaneOp::lane_count(kind));
+    DCHECK_LT(from_lane, Simd128ReplaceLaneOp::lane_count(kind));
+  }
+
+  auto options() const { return std::tuple{kind, into_lane, from_lane}; }
+  void PrintOptions(std::ostream& os) const;
 };
 
 // If `mode` is `kLoad`, load a value from `base() + index() + offset`, whose
@@ -8766,6 +8843,21 @@ struct Simd128LaneMemoryOp : FixedArityOperationT<3, Simd128LaneMemoryOp> {
     return MaybeRepVector<RegisterRepresentation::WordPtr(),
                           RegisterRepresentation::WordPtr(),
                           RegisterRepresentation::Simd128()>();
+  }
+
+  static LaneKind LaneKindFromBytes(uint8_t size) {
+    switch (size) {
+      default:
+        UNREACHABLE();
+      case 1:
+        return LaneKind::k8;
+      case 2:
+        return LaneKind::k16;
+      case 4:
+        return LaneKind::k32;
+      case 8:
+        return LaneKind::k64;
+    }
   }
 
   Simd128LaneMemoryOp(OpIndex base, OpIndex index, OpIndex value, Mode mode,
@@ -8950,8 +9042,6 @@ struct Simd128ShuffleOp : FixedArityOperationT<2, Simd128ShuffleOp> {
   void PrintOptions(std::ostream& os) const;
 };
 
-#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
-
 // Load from memory and write the result into two registers, the first
 // containing the even numbered elements and the other containing the odd
 // elements.
@@ -9013,8 +9103,6 @@ struct Simd128LoadPairDeinterleaveOp
 
   void PrintOptions(std::ostream& os) const;
 };
-
-#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 
 #if V8_ENABLE_WASM_SIMD256_REVEC
 
@@ -9770,10 +9858,8 @@ inline OpEffects Operation::Effects() const {
       return Cast<Simd128LaneMemoryOp>().Effects();
     case Opcode::kSimd128LoadTransform:
       return Cast<Simd128LoadTransformOp>().Effects();
-#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
     case Opcode::kSimd128LoadPairDeinterleave:
       return Cast<Simd128LoadPairDeinterleaveOp>().Effects();
-#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 #if V8_ENABLE_WASM_SIMD256_REVEC
     case Opcode::kSimd256LoadTransform:
       return Cast<Simd256LoadTransformOp>().Effects();
@@ -9887,6 +9973,9 @@ constexpr size_t input_count(RegisterRepresentation) { return 0; }
 constexpr size_t input_count(MemoryRepresentation) { return 0; }
 constexpr size_t input_count(OpEffects) { return 0; }
 constexpr size_t input_count(ExternalPointerTagRange) { return 0; }
+#if V8_ENABLE_SANDBOX
+constexpr size_t input_count(IndirectPointerTagRange) { return 0; }
+#endif
 inline size_t input_count(const ElementsTransition) { return 0; }
 inline size_t input_count(const ElementsTransitionWithMultipleSources) {
   return 0;

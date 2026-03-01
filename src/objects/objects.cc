@@ -1331,6 +1331,15 @@ MaybeHandle<Object> Object::GetProperty(LookupIterator* it,
       case LookupIterator::ACCESS_CHECK:
         if (it->HasAccess()) continue;
         return JSObject::GetPropertyWithFailedAccessCheck(it);
+      case LookupIterator::MODULE_NAMESPACE: {
+        if (JSDeferredModuleNamespace::TriggersEvaluation(it)) {
+          Isolate* isolate = it->isolate();
+          JSDeferredModuleNamespace::EvaluateModuleSync(
+              isolate, it->GetHolder<JSDeferredModuleNamespace>());
+          RETURN_EXCEPTION_IF_EXCEPTION(isolate);
+        }
+        continue;
+      }
       case LookupIterator::ACCESSOR:
         return GetPropertyWithAccessor(it);
       case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
@@ -1569,13 +1578,6 @@ MaybeDirectHandle<JSPrototype> JSProxy::GetPrototype(
 MaybeHandle<JSAny> Object::GetPropertyWithAccessor(LookupIterator* it) {
   Isolate* isolate = it->isolate();
   DirectHandle<Object> structure = it->GetAccessors();
-  DirectHandle<JSAny> receiver = it->GetReceiver();
-  // In case of global IC, the receiver is the global object. Replace by the
-  // global proxy.
-  if (IsJSGlobalObject(*receiver)) {
-    receiver =
-        direct_handle(Cast<JSGlobalObject>(*receiver)->global_proxy(), isolate);
-  }
 
   // We should never get here to initialize a const with the hole value since a
   // const declaration would conflict with the getter.
@@ -1590,16 +1592,11 @@ MaybeHandle<JSAny> Object::GetPropertyWithAccessor(LookupIterator* it) {
       return isolate->factory()->undefined_value();
     }
 
-    if (info->is_sloppy() && !IsJSReceiver(*receiver)) {
-      ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
-                                 Object::ConvertReceiver(isolate, receiver));
-    }
-
-    PropertyCallbackArguments args(isolate, *receiver, it->GetHolderForApi());
+    PropertyCallbackArguments args(isolate, it->GetHolderForApi());
     DirectHandle<JSAny> result = args.CallAccessorGetter(isolate, info, name);
     RETURN_EXCEPTION_IF_EXCEPTION(isolate);
     Handle<JSAny> reboxed_result(*result, isolate);
-    if (info->replace_on_access() && IsJSReceiver(*receiver)) {
+    if (info->replace_on_access()) {
       RETURN_ON_EXCEPTION(isolate, Accessors::ReplaceAccessorWithDataProperty(
                                        isolate, args.holder(), name, result));
     }
@@ -1614,6 +1611,15 @@ MaybeHandle<JSAny> Object::GetPropertyWithAccessor(LookupIterator* it) {
 
   // Regular accessor.
   DirectHandle<Object> getter(accessor_pair->getter(), isolate);
+
+  DirectHandle<JSAny> receiver = it->GetReceiver();
+  // In case of global IC, the receiver is the global object. Replace by the
+  // global proxy.
+  if (IsJSGlobalObject(*receiver)) {
+    receiver =
+        direct_handle(Cast<JSGlobalObject>(*receiver)->global_proxy(), isolate);
+  }
+
   if (IsFunctionTemplateInfo(*getter)) {
     DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
     SaveAndSwitchContext save(isolate, holder->GetCreationContext().value());
@@ -1634,13 +1640,6 @@ Maybe<bool> Object::SetPropertyWithAccessor(LookupIterator* it,
                                             Maybe<ShouldThrow> should_throw) {
   Isolate* isolate = it->isolate();
   DirectHandle<Object> structure = it->GetAccessors();
-  DirectHandle<JSAny> receiver = it->GetReceiver();
-  // In case of global IC, the receiver is the global object. Replace by the
-  // global proxy.
-  if (IsJSGlobalObject(*receiver)) {
-    receiver =
-        direct_handle(Cast<JSGlobalObject>(*receiver)->global_proxy(), isolate);
-  }
 
   // We should never get here to initialize a const with the hole value since a
   // const declaration would conflict with the setter.
@@ -1658,12 +1657,7 @@ Maybe<bool> Object::SetPropertyWithAccessor(LookupIterator* it,
       return Just(true);
     }
 
-    if (info->is_sloppy() && !IsJSReceiver(*receiver)) {
-      ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
-                                 Object::ConvertReceiver(isolate, receiver));
-    }
-
-    PropertyCallbackArguments args(isolate, *receiver, it->GetHolderForApi(),
+    PropertyCallbackArguments args(isolate, it->GetHolderForApi(),
                                    should_throw);
     bool result = args.CallAccessorSetter(isolate, info, name, value);
     RETURN_VALUE_IF_EXCEPTION(isolate, Nothing<bool>());
@@ -1672,7 +1666,7 @@ Maybe<bool> Object::SetPropertyWithAccessor(LookupIterator* it,
       // failed to set the property.
       RETURN_FAILURE(isolate, GetShouldThrow(isolate, should_throw),
                      NewTypeError(MessageTemplate::kStrictCannotSetProperty,
-                                  it->GetName(), receiver));
+                                  it->GetName(), args.holder()));
     }
     return Just(result);
   }
@@ -1680,6 +1674,15 @@ Maybe<bool> Object::SetPropertyWithAccessor(LookupIterator* it,
   // Regular accessor.
   DirectHandle<Object> setter(Cast<AccessorPair>(*structure)->setter(),
                               isolate);
+
+  DirectHandle<JSAny> receiver = it->GetReceiver();
+  // In case of global IC, the receiver is the global object. Replace by the
+  // global proxy.
+  if (IsJSGlobalObject(*receiver)) {
+    receiver =
+        direct_handle(Cast<JSGlobalObject>(*receiver)->global_proxy(), isolate);
+  }
+
   if (IsFunctionTemplateInfo(*setter)) {
     DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
     SaveAndSwitchContext save(isolate, holder->GetCreationContext().value());
@@ -2318,17 +2321,12 @@ void HeapObject::RehashBasedOnMap(IsolateT* isolate) {
 template void HeapObject::RehashBasedOnMap(Isolate* isolate);
 template void HeapObject::RehashBasedOnMap(LocalIsolate* isolate);
 
-void DescriptorArray::GeneralizeAllFields(bool clear_constness) {
+void DescriptorArray::GeneralizeAllFields() {
   int length = number_of_descriptors();
   for (InternalIndex i : InternalIndex::Range(length)) {
     PropertyDetails details = GetDetails(i);
     details = details.CopyWithRepresentation(Representation::Tagged());
     if (details.location() == PropertyLocation::kField) {
-      // Since constness is not propagated across proto transitions we must
-      // clear the flag here.
-      if (clear_constness) {
-        details = details.CopyWithConstness(PropertyConstness::kMutable);
-      }
       DCHECK_EQ(PropertyKind::kData, details.kind());
       SetValue(i, FieldType::Any());
     }
@@ -2435,7 +2433,12 @@ Maybe<bool> Object::SetPropertyInternal(LookupIterator* it,
         }
         return Object::SetSuperProperty(it, value, store_origin, should_throw);
       }
-
+      case LookupIterator::MODULE_NAMESPACE: {
+        Isolate* isolate = it->isolate();
+        RETURN_FAILURE(isolate, GetShouldThrow(isolate, should_throw),
+                       NewTypeError(MessageTemplate::kStrictCannotSetProperty,
+                                    it->GetName(), it->GetReceiver()));
+      }
       case LookupIterator::ACCESSOR: {
         if (it->IsReadOnly()) {
           return WriteToReadOnlyProperty(it, value, should_throw);
@@ -2650,6 +2653,12 @@ Maybe<bool> Object::SetSuperProperty(LookupIterator* it,
         RETURN_FAILURE(it->isolate(), kThrowOnError,
                        NewTypeError(MessageTemplate::kWasmObjectsAreOpaque));
 
+      case LookupIterator::MODULE_NAMESPACE: {
+        RETURN_FAILURE(isolate, GetShouldThrow(isolate, should_throw),
+                       NewTypeError(MessageTemplate::kStrictCannotSetProperty,
+                                    it->GetName(), it->GetReceiver()));
+      }
+
       case LookupIterator::TRANSITION:
         UNREACHABLE();
     }
@@ -2840,7 +2849,8 @@ Maybe<bool> Object::TransitionAndWriteDataProperty(
     LookupIterator* it, DirectHandle<Object> value,
     PropertyAttributes attributes, Maybe<ShouldThrow> should_throw,
     StoreOrigin store_origin) {
-  DirectHandle<JSReceiver> receiver = it->GetStoreTarget<JSReceiver>();
+  DirectHandle<JSTransitionableReceiver> receiver =
+      it->GetStoreTarget<JSTransitionableReceiver>();
   it->UpdateProtector();
   // Migrate to the most up-to-date map that will be able to store |value|
   // under it->name() with |attributes|.
@@ -5059,7 +5069,7 @@ template <typename Derived, typename Shape>
 void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base) {
   DisallowGarbageCollection no_gc;
   WriteBarrierModeScope mode = GetWriteBarrierMode(no_gc);
-  ReadOnlyRoots roots = EarlyGetReadOnlyRoots();
+  EarlyReadOnlyRoots roots = EarlyGetReadOnlyRoots();
   uint32_t capacity = Capacity();
   bool done = false;
   for (int probe = 1; !done; probe++) {
@@ -5094,7 +5104,7 @@ void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base) {
     }
   }
   // Wipe deleted entries.
-  Tagged<Object> the_hole = roots.the_hole_value();
+  Tagged<TheHole> the_hole = roots.the_hole_value();
   Tagged<HeapObject> undefined = roots.undefined_value();
   Derived* self = static_cast<Derived*>(this);
   for (InternalIndex current : InternalIndex::Range(capacity)) {

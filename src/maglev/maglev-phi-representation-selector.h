@@ -30,12 +30,13 @@ constexpr bool IsUntagging(Opcode op) {
     case Opcode::kCheckedObjectToIndex:
     case Opcode::kTruncateCheckedNumberOrOddballToInt32:
     case Opcode::kTruncateUnsafeNumberOrOddballToInt32:
+    case Opcode::kTruncateCheckedNumberAsSafeIntToInt32:
+    case Opcode::kTruncateUnsafeNumberAsSafeIntToInt32:
     case Opcode::kCheckedNumberOrOddballToFloat64:
     case Opcode::kCheckedNumberToFloat64:
     case Opcode::kUnsafeNumberOrOddballToFloat64:
     case Opcode::kUnsafeNumberToFloat64:
     case Opcode::kCheckedNumberOrOddballToHoleyFloat64:
-    case Opcode::kCheckedNumberToShiftedInt53:
       return true;
     default:
       return false;
@@ -79,6 +80,7 @@ class MaglevPhiRepresentationSelector {
   }
 
   ProcessResult Process(JumpLoop* node, const ProcessingState&) {
+    eager_deopt_frame_ = &node->eager_deopt_info()->top_frame();
     FixLoopPhisBackedge(node->target());
     return ProcessResult::kContinue;
   }
@@ -97,7 +99,6 @@ class MaglevPhiRepresentationSelector {
     return eager_deopt_frame_;
   }
 
- private:
   enum class UntaggingKind : uint8_t {
     kNone,
 
@@ -122,10 +123,9 @@ class MaglevPhiRepresentationSelector {
     kKnownSmi,
     kKnownNumber,
 
-    // TODO(dmercadier): this is a temporary kind that should be removed and
-    // kPredecessorUncheckedSmi/kPredecessorUncheckedNumber should be used
-    // instead.
-    kLoadTaggedField,
+    // A backedge that is equal to the Phi itself. Something like
+    // `n10 = Phi(n3, n10)`.
+    kSelfBackedge,
 
     // Note that the following cases can currently lead to deopt loops (but we
     // accept that since in general they do improve performance).
@@ -148,25 +148,26 @@ class MaglevPhiRepresentationSelector {
   };
   using UntaggingKindList = base::SmallVector<UntaggingKind, 8>;
 
+ private:
   // Update the inputs of {phi} so that they all have {repr} representation, and
   // updates {phi}'s representation to {repr}.
   void ConvertTaggedPhiTo(Phi* phi, ValueRepresentation repr,
-                          const UntaggingKindList& untagging_kinds);
+                          const UntaggingKindList& untagging_kinds,
+                          bool truncating = false);
   void UntagInputWithHoistedUntagging(Phi* phi, ValueRepresentation repr,
-                                      int input_index, ValueNode* input,
+                                      bool truncating, int input_index,
+                                      ValueNode* input,
                                       UntaggingKind untagging_kind);
   void UntagSmiConstantInput(Phi* phi, ValueRepresentation repr,
                              int input_index, const SmiConstant* input);
-  void UntagConstantInput(Phi* phi, ValueRepresentation repr, int input_index,
-                          const Constant* input);
-  void UntagConversionInput(Phi* phi, ValueRepresentation repr, int input_index,
-                            ValueNode* input);
+  void UntagConstantInput(Phi* phi, ValueRepresentation repr, bool truncating,
+                          int input_index, const Constant* input);
+  void UntagConversionInput(Phi* phi, ValueRepresentation repr, bool truncating,
+                            int input_index, ValueNode* input);
   void UntagUntaggedPhiInput(Phi* phi, ValueRepresentation repr,
-                             int input_index, Phi* input_phi);
+                             bool truncating, int input_index, Phi* input_phi);
   void UntagBackedgePhiInput(Phi* phi, ValueRepresentation repr,
                              int input_index, Phi* input_phi);
-  void UntagLoadTaggedFieldInput(Phi* phi, ValueRepresentation repr,
-                                 int input_index, LoadTaggedField* load);
   template <class NodeT>
   ValueNode* GetReplacementForPhiInputConversion(ValueNode* input, Phi* phi,
                                                  uint32_t input_index);
@@ -256,11 +257,14 @@ class MaglevPhiRepresentationSelector {
   // then {predecessor_index} should be set to the id of this input (ie, 0 for
   // the 1st input, 1 for the 2nd, etc.), so that we can use the SnapshotTable
   // to find existing tagging for {phi} in the {predecessor_index}th predecessor
-  // of the current block.
+  // of the current block. If {force_smi} is true, then the inserted tagging
+  // will produce a Smi or deopt (eg, instead of a Int32ToNumber we'll insert a
+  // CheckedSmiTagInt32).
   ValueNode* EnsurePhiTagged(
       Phi* phi, BasicBlock* block, BasicBlockPosition pos,
       const ProcessingState* state,
-      std::optional<int> predecessor_index = std::nullopt);
+      std::optional<int> predecessor_index = std::nullopt,
+      bool force_smi = false);
 
   template <typename NodeT, typename... Args>
   NodeT* AddNewNodeNoInputConversion(BasicBlock* block, BasicBlockPosition pos,
@@ -291,6 +295,8 @@ class MaglevPhiRepresentationSelector {
 
   Zone* zone() const { return graph_->zone(); }
 
+  bool is_turbolev() const { return graph_->compilation_info()->is_turbolev(); }
+
   Graph* graph_;
 
   MaglevReducer<MaglevPhiRepresentationSelector> reducer_;
@@ -310,6 +316,9 @@ class MaglevPhiRepresentationSelector {
 
   DeoptFrame* eager_deopt_frame_ = nullptr;
 };
+
+std::ostream& operator<<(std::ostream& os,
+                         MaglevPhiRepresentationSelector::UntaggingKind kind);
 
 }  // namespace maglev
 }  // namespace internal

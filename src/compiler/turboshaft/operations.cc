@@ -803,6 +803,15 @@ void LoadExternalPointerOp::PrintOptions(std::ostream& os) const {
 }
 #endif
 
+#if V8_ENABLE_SANDBOX
+void LoadTrustedPointerOp::PrintOptions(std::ostream& os) const {
+  os << '[';
+  os << "is_immutable: " << is_immutable << ", ";
+  os << "tag_range: [" << tag_range.first << ", " << tag_range.last << "]";
+  os << ']';
+}
+#endif
+
 void FrameStateOp::PrintOptions(std::ostream& os) const {
   os << '[';
   os << (inlined ? "inlined" : "not inlined");
@@ -1869,8 +1878,9 @@ void Simd128ExtractLaneOp::PrintOptions(std::ostream& os) const {
   os << ", " << static_cast<int32_t>(lane) << ']';
 }
 
-void Simd128ReplaceLaneOp::PrintOptions(std::ostream& os) const {
-  os << '[';
+static void PrintReplaceLaneKind(Simd128ReplaceLaneOp::Kind kind,
+                                 std::ostream& os) {
+  using Kind = Simd128ReplaceLaneOp::Kind;
   switch (kind) {
     case Kind::kI8x16:
       os << "I8x16";
@@ -1894,6 +1904,18 @@ void Simd128ReplaceLaneOp::PrintOptions(std::ostream& os) const {
       os << "F64x2";
       break;
   }
+}
+
+void Simd128MoveLaneOp::PrintOptions(std::ostream& os) const {
+  os << '[';
+  PrintReplaceLaneKind(kind, os);
+  os << ", " << static_cast<int32_t>(into_lane) << ", "
+     << static_cast<int32_t>(from_lane) << ']';
+}
+
+void Simd128ReplaceLaneOp::PrintOptions(std::ostream& os) const {
+  os << '[';
+  PrintReplaceLaneKind(kind, os);
   os << ", " << static_cast<int32_t>(lane) << ']';
 }
 
@@ -1960,7 +1982,6 @@ void Simd128ShuffleOp::PrintOptions(std::ostream& os) const {
   os << ']';
 }
 
-#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 void Simd128LoadPairDeinterleaveOp::PrintOptions(std::ostream& os) const {
   os << '[';
   if (load_kind.maybe_unaligned) os << "unaligned, ";
@@ -1982,7 +2003,6 @@ void Simd128LoadPairDeinterleaveOp::PrintOptions(std::ostream& os) const {
   }
   os << ']';
 }
-#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 
 #if V8_ENABLE_WASM_SIMD256_REVEC
 void Simd256ConstantOp::PrintOptions(std::ostream& os) const {
@@ -2353,10 +2373,10 @@ bool Operation::IsProtectedLoad() const {
     return load->kind.with_trap_handler;
   } else if (const auto* load_t = TryCast<Simd128LoadTransformOp>()) {
     return load_t->load_kind.with_trap_handler;
-#ifdef V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
-  } else if (const auto* load_t = TryCast<Simd128LoadPairDeinterleaveOp>()) {
-    return load_t->load_kind.with_trap_handler;
-#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+  } else if (const auto* load_pd = TryCast<Simd128LoadPairDeinterleaveOp>()) {
+    return load_pd->load_kind.with_trap_handler;
+  } else if (const auto* load_lane = TryCast<Simd128LaneMemoryOp>()) {
+    return load_lane->kind.with_trap_handler;
   }
   return false;
 }

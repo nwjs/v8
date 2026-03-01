@@ -315,7 +315,7 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildJSToWasmWrapperImpl(
               JSFunction::kSharedFunctionInfoOffset);
   V<WasmFunctionData> function_data = V<WasmFunctionData>::Cast(
       __ LoadTrustedPointer(sfi, LoadOp::Kind::TaggedBase().Immutable(),
-                            kWasmFunctionDataIndirectPointerTag,
+                            kWasmExportedFunctionDataIndirectPointerTag,
                             SharedFunctionInfo::kTrustedFunctionDataOffset));
   // If we are not inlining the Wasm body, we don't need the Wasm instance.
 
@@ -423,8 +423,8 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmToJSWrapper(
           __ LoadTaggedField(suspender, WasmSuspenderObject::kResumeOffset),
           __ template LoadRoot<RootIndex::kUndefinedValue>());
       IF (for_stress_testing) {
-        __ WasmCallRuntime(__ phase_zone(), Runtime::kThrowWasmSuspendError, {},
-                           native_context);
+        __ WasmCallRuntime(__ phase_zone(), Runtime::kThrowWasmJSPISuspendError,
+                           {}, native_context);
         __ Unreachable();
       }
     }
@@ -436,8 +436,8 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmToJSWrapper(
     OpIndex active_stack_has_js_frames =
         __ WordPtrEqual(__ IntPtrConstant(0), old_sp);
     IF (active_stack_has_js_frames) {
-      __ WasmCallRuntime(__ phase_zone(), Runtime::kThrowWasmSuspendError, {},
-                         native_context);
+      __ WasmCallRuntime(__ phase_zone(), Runtime::kThrowWasmJSPISuspendError,
+                         {}, native_context);
       __ Unreachable();
     }
     if (v8_flags.experimental_wasm_wasmfx) {
@@ -449,8 +449,8 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmToJSWrapper(
       OpIndex has_js_frames = this->CallC(
           &sig, ExternalReference::wasm_suspender_has_js_frames(), {isolate});
       IF (has_js_frames) {
-        __ WasmCallRuntime(__ phase_zone(), Runtime::kThrowWasmSuspendError, {},
-                           native_context);
+        __ WasmCallRuntime(__ phase_zone(), Runtime::kThrowWasmJSPISuspendError,
+                           {}, native_context);
         __ Unreachable();
       }
     }
@@ -595,10 +595,13 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmStackEntryWrapper() {
   OpIndex result_buffer =
       __ StackSlot(size, std::max(2 * kSystemPointerSize, alignment));
   IterateWasmFXArgBuffer(sig_->returns(), [&](size_t index, int offset) {
-    __ StoreOffHeap(result_buffer, returns[index],
-                    MemoryRepresentation::FromMachineType(
-                        sig_->GetReturn(index).machine_type()),
-                    offset);
+    CanonicalValueType type = sig_->GetReturn(index);
+    // On-stack refs are uncompressed.
+    MemoryRepresentation rep =
+        type.is_ref()
+            ? MemoryRepresentation::AnyUncompressedTagged()
+            : MemoryRepresentation::FromMachineType(type.machine_type());
+    __ StoreOffHeap(result_buffer, returns[index], rep, offset);
   });
 
   CallBuiltin<WasmFXReturnDescriptor>(Builtin::kWasmFXReturn,
@@ -647,7 +650,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildCapiCallWrapper() {
   V<HeapObject> shared = LoadSharedFunctionInfo(function_node);
   V<WasmFunctionData> function_data = V<WasmFunctionData>::Cast(
       __ LoadTrustedPointer(shared, LoadOp::Kind::TaggedBase(),
-                            kWasmFunctionDataIndirectPointerTag,
+                            kWasmCapiFunctionDataIndirectPointerTag,
                             SharedFunctionInfo::kTrustedFunctionDataOffset));
   V<Object> host_data_foreign = __ LoadTaggedField(
       function_data, WasmCapiFunctionData::kEmbedderDataOffset);

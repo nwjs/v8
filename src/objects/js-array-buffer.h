@@ -94,14 +94,27 @@ class JSArrayBuffer
   // An ArrayBuffer with a size greater than zero is never empty.
   DECL_GETTER(IsEmpty, bool)
 
-  DECL_ACCESSORS(detach_key, Tagged<Object>)
+  DECL_ACCESSORS(views_or_detach_key, Tagged<MaybeObject>)
+  inline Tagged<MaybeObject> views() const;
+  inline void set_views(Tagged<MaybeObject> value,
+                        WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  void AttachView(Tagged<JSArrayBufferView> view);
+
+  inline Tagged<Object> DetachKey(Isolate* isolate);
+  static void SetDetachKey(DirectHandle<JSArrayBuffer> array_buffer,
+                           DirectHandle<Object> key, Isolate* isolate);
+
+  static constexpr Tagged<Smi> kNoView = Smi::zero();
+  static constexpr Tagged<Smi> kManyViews = Smi::FromInt(1);
 
   // Initializes the fields of the ArrayBuffer. The provided backing_store can
   // be nullptr. If it is not nullptr, then the function registers it with
   // src/heap/array-buffer-tracker.h.
   V8_EXPORT_PRIVATE void Setup(SharedFlag shared, ResizableFlag resizable,
                                std::shared_ptr<BackingStore> backing_store,
-                               Isolate* isolate);
+                               Isolate* isolate,
+                               Tagged<MaybeObject> views = kNoView);
 
   // Detach the backing store from this array buffer if it is detachable.
   // This sets the internal pointer and length to 0 and unregisters the backing
@@ -144,11 +157,6 @@ class JSArrayBuffer
   // Frees the associated ArrayBufferExtension and returns its backing store.
   std::shared_ptr<BackingStore> RemoveExtension();
 
-  // Marks ArrayBufferExtension
-  void MarkExtension();
-  void YoungMarkExtension();
-  void YoungMarkExtensionPromoted();
-
   //
   // Serializer/deserializer support.
   //
@@ -184,7 +192,14 @@ class JSArrayBuffer
   }
 
  private:
-  void DetachInternal(bool force_for_wasm_memory, Isolate* isolate);
+  DECL_ACCESSORS(detach_key, Tagged<Cell>)
+  inline bool has_detach_key() const;
+
+  static void DetachInternal(DirectHandle<JSArrayBuffer> array_buffer,
+                             bool force_for_wasm_memory, Isolate* isolate);
+
+  static bool TryDetachViews(DirectHandle<JSArrayBuffer> array_buffer,
+                             Isolate* isolate);
 
 #if V8_COMPRESS_POINTERS
   // When pointer compression is enabled, the pointer to the extension is
@@ -230,17 +245,45 @@ class ArrayBufferExtension final
       : backing_store_(std::move(backing_store)),
         accounting_state_(AccountingLengthField::encode(static_cast<size_t>(
                               backing_store_->PerIsolateAccountingLength())) |
-                          AgeField::encode(static_cast<uint8_t>(age))) {}
+                          AgeField::encode(static_cast<uint8_t>(age))) {
+    initialized_for_gc_.store(true, std::memory_order_release);
+  }
+
+  // Barrier used for publishing the object. This barrier must be used whenever
+  // the extension is accessed off the main thread.
+  //
+  // The constructor sets a value with release that is read with acquire in this
+  // varrier.
+  void InitializationBarrier() const {
+    std::ignore = initialized_for_gc_.load(std::memory_order_acquire);
+  }
 
   void Mark() { marked_.store(true, std::memory_order_relaxed); }
   void Unmark() { marked_.store(false, std::memory_order_relaxed); }
   bool IsMarked() const { return marked_.load(std::memory_order_relaxed); }
 
-  void YoungMark() { set_young_gc_state(GcState::Copied); }
-  void YoungMarkPromoted() { set_young_gc_state(GcState::Promoted); }
-  void YoungUnmark() { set_young_gc_state(GcState::Dead); }
-  bool IsYoungMarked() const { return young_gc_state() != GcState::Dead; }
-  bool IsYoungPromoted() const { return young_gc_state() == GcState::Promoted; }
+  void YoungMark() {
+    DCHECK_EQ(ArrayBufferExtension::Age::kYoung, age());
+    set_young_gc_state(GcState::Copied);
+  }
+  void YoungMarkPromoted() {
+    // When iterating promoted pages the extension object is already set as
+    // being promoted which happens before the page iteration. This may even run
+    // racefully between AB sweeping and page iteration.
+    set_young_gc_state(GcState::Promoted);
+  }
+  void YoungUnmark() {
+    DCHECK_EQ(ArrayBufferExtension::Age::kYoung, age());
+    set_young_gc_state(GcState::Dead);
+  }
+  bool IsYoungMarked() const {
+    DCHECK_EQ(ArrayBufferExtension::Age::kYoung, age());
+    return young_gc_state() != GcState::Dead;
+  }
+  bool IsYoungPromoted() const {
+    DCHECK_EQ(ArrayBufferExtension::Age::kYoung, age());
+    return young_gc_state() == GcState::Promoted;
+  }
 
   std::shared_ptr<BackingStore> backing_store() { return backing_store_; }
   void set_backing_store(std::shared_ptr<BackingStore> backing_store) {
@@ -307,6 +350,7 @@ class ArrayBufferExtension final
   std::shared_ptr<BackingStore> backing_store_;
   ArrayBufferExtension* next_ = nullptr;
   std::atomic<uint64_t> accounting_state_;
+  std::atomic<bool> initialized_for_gc_{false};
   std::atomic<bool> marked_{false};
   std::atomic<GcState> young_gc_state_{GcState::Dead};
 };
@@ -451,6 +495,9 @@ class JSTypedArray
   static constexpr size_t kMaxSizeInHeap = 64;
 #endif
 
+  static inline void MarkDetached(DirectHandle<JSTypedArray> array,
+                                  Isolate* isolate);
+
  private:
   template <typename IsolateT>
   friend class Deserializer;
@@ -465,6 +512,15 @@ class JSTypedArray
   inline void set_external_pointer(Isolate* isolate, Address value);
 
   TQ_OBJECT_CONSTRUCTORS(JSTypedArray)
+};
+
+class JSDetachedTypedArray
+    : public TorqueGeneratedJSDetachedTypedArray<JSDetachedTypedArray,
+                                                 JSTypedArray> {
+ public:
+  DECL_PRINTER(JSDetachedTypedArray)
+  DECL_VERIFIER(JSDetachedTypedArray)
+  TQ_OBJECT_CONSTRUCTORS(JSDetachedTypedArray)
 };
 
 class JSDataViewOrRabGsabDataView

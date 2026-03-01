@@ -604,7 +604,7 @@ ArchOpcode GetLoadOpcode(MemoryRepresentation loaded_rep,
       DCHECK_EQ(result_rep, RegisterRepresentation::Word64());
       return kRiscvLd;
     case MemoryRepresentation::Float16():
-      UNIMPLEMENTED();
+      return kRiscvLoadHalf;
     case MemoryRepresentation::Float32():
       DCHECK_EQ(result_rep, RegisterRepresentation::Float32());
       return kRiscvLoadFloat;
@@ -666,7 +666,7 @@ ArchOpcode GetStoreOpcode(MemoryRepresentation stored_rep) {
     case MemoryRepresentation::Uint64():
       return kRiscvSd;
     case MemoryRepresentation::Float16():
-      UNIMPLEMENTED();
+      return kRiscvStoreHalf;
     case MemoryRepresentation::Float32():
       return kRiscvStoreFloat;
     case MemoryRepresentation::Float64():
@@ -997,7 +997,7 @@ void InstructionSelector::VisitInt32Add(OpIndex node) {
 // Try to match Add(z, a, slli(x, y)) and emit shxadd(z, x, a) for it.
 bool TryEmitShxadd(InstructionSelector* selector, OpIndex add, OpIndex lhs,
                    OpIndex rhs) {
-  if (CpuFeatures::IsSupported(ZBA)) return false;
+  if (!CpuFeatures::IsSupported(ZBA)) return false;
   const Operation& left_op = selector->Get(lhs);
   if ((left_op.Is<Opmask::kWord64ShiftLeft>() &&
        selector->CanCover(add, lhs))) {
@@ -2894,6 +2894,10 @@ InstructionSelector::SupportedMachineOperatorFlags() {
              MachineOperatorBuilder::kWord64Ctz |
              MachineOperatorBuilder::kWord32Popcnt |
              MachineOperatorBuilder::kWord64Popcnt;
+  }
+  if (CpuFeatures::IsSupported(ZFH)) {
+    flags |= MachineOperatorBuilder::kFloat16 |
+             MachineOperatorBuilder::kFloat16RawBitsConversion;
   }
   return flags;
 }

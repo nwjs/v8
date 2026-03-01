@@ -26,6 +26,7 @@
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array.h"
 #include "src/objects/js-function.h"
+#include "src/objects/module.h"
 #include "src/objects/objects.h"
 #include "src/sandbox/testing.h"
 #ifdef ENABLE_VTUNE_TRACEMARK
@@ -4545,6 +4546,27 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
     }
   }
 
+  {  // -- J S D e f e r r e d M o d u l e N a m e s p a c e
+    DirectHandle<Map> map = factory->NewContextfulMapForCurrentContext(
+        JS_DEFERRED_MODULE_NAMESPACE_TYPE, JSDeferredModuleNamespace::kSize,
+        TERMINAL_FAST_ELEMENTS_KIND,
+        JSDeferredModuleNamespace::kInObjectFieldCount);
+    map->SetConstructor(native_context()->object_function());
+    Map::SetPrototype(isolate(), map, isolate_->factory()->null_value());
+    Map::EnsureDescriptorSlack(isolate(), map, 1);
+    native_context()->set_js_deferred_module_namespace_map(*map);
+
+    {  // Install @@toStringTag.
+      PropertyAttributes attribs =
+          static_cast<PropertyAttributes>(DONT_DELETE | DONT_ENUM | READ_ONLY);
+      Descriptor d =
+          Descriptor::DataField(isolate(), factory->to_string_tag_symbol(),
+                                JSModuleNamespace::kToStringTagFieldIndex,
+                                attribs, Representation::Tagged());
+      map->AppendDescriptor(isolate(), &d);
+    }
+  }
+
   {  // -- I t e r a t o r and helpers
     DirectHandle<JSObject> iterator_prototype(
         native_context()->initial_iterator_prototype(), isolate());
@@ -5486,6 +5508,8 @@ EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_intl_best_fit_matcher)
 
 #undef EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE
 
+void Genesis::InitializeGlobal_js_esm_ns_reexport() {}
+
 void Genesis::InitializeGlobal_js_atomics_pause() {
   if (!v8_flags.js_atomics_pause) return;
   DirectHandle<JSGlobalObject> global(native_context()->global_object(),
@@ -5544,6 +5568,7 @@ void Genesis::InitializeGlobal_js_iterator_sequencing() {
   Map::SetPrototype(isolate(), map, iterator_helper_prototype);
   map->SetConstructor(*iterator_function);
   native_context()->set_iterator_concat_helper_map(*map);
+  LOG(isolate_, MapDetails(*map));
   SimpleInstallFunction(isolate_, iterator_function, "concat",
                         Builtin::kIteratorConcat, 0, kDontAdapt);
 }
@@ -5998,6 +6023,17 @@ void Genesis::InitializeGlobal_harmony_temporal() {
     JSObject::SetAccessor(date_prototype, name, accessor, DONT_ENUM).Check();
   }
 #endif  // V8_TEMPORAL_SUPPORT
+}
+
+void Genesis::InitializeGlobal_js_sum_precise() {
+  if (!v8_flags.js_sum_precise) return;
+  DirectHandle<JSGlobalObject> global(native_context()->global_object(),
+                                      isolate());
+  DirectHandle<JSObject> math = Cast<JSObject>(
+      JSReceiver::GetProperty(isolate(), global, "Math").ToHandleChecked());
+
+  SimpleInstallFunction(isolate_, math, "sumPrecise", Builtin::kMathSumPrecise,
+                        1, kAdapt);
 }
 
 DirectHandle<JSFunction> Genesis::CreateArrayBuffer(

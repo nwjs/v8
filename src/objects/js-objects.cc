@@ -126,6 +126,15 @@ Maybe<bool> JSReceiver::HasProperty(LookupIterator* it) {
       case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
         // TypedArray out-of-bounds access.
         return Just(false);
+      case LookupIterator::MODULE_NAMESPACE: {
+        if (JSDeferredModuleNamespace::TriggersEvaluation(it)) {
+          DirectHandle<JSDeferredModuleNamespace> holder =
+              it->GetHolder<JSDeferredModuleNamespace>();
+          JSDeferredModuleNamespace::EvaluateModuleSync(it->isolate(), holder);
+          RETURN_EXCEPTION_IF_EXCEPTION(it->isolate());
+        }
+        continue;
+      }
       case LookupIterator::ACCESSOR:
       case LookupIterator::DATA:
         return Just(true);
@@ -202,6 +211,15 @@ Handle<Object> JSReceiver::GetDataProperty(LookupIterator* it,
         return it->GetDataValue(allocation_policy);
       case LookupIterator::NOT_FOUND:
         return it->isolate()->factory()->undefined_value();
+      case LookupIterator::MODULE_NAMESPACE: {
+        DirectHandle<JSModuleNamespace> ns = it->GetHolder<JSModuleNamespace>();
+        if (IsJSDeferredModuleNamespace(*ns) &&
+            JSDeferredModuleNamespace::TriggersEvaluation(it)) {
+          it->NotFound();
+          return it->isolate()->factory()->undefined_value();
+        }
+        continue;
+      }
     }
     UNREACHABLE();
   }
@@ -230,6 +248,7 @@ Maybe<bool> JSReceiver::CheckPrivateNameStore(LookupIterator* it,
       Cast<String>(Cast<Symbol>(it->GetName())->description()), isolate);
   for (;; it->Next()) {
     switch (it->state()) {
+      case LookupIterator::MODULE_NAMESPACE:
       case LookupIterator::TRANSITION:
       case LookupIterator::INTERCEPTOR:
       case LookupIterator::JSPROXY:
@@ -763,6 +782,15 @@ Maybe<PropertyAttributes> JSReceiver::GetPropertyAttributes(
         return JSObject::GetPropertyAttributesWithFailedAccessCheck(it);
       case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
         return Just(ABSENT);
+      case LookupIterator::MODULE_NAMESPACE: {
+        if (JSDeferredModuleNamespace::TriggersEvaluation(it)) {
+          DirectHandle<JSDeferredModuleNamespace> holder =
+              it->GetHolder<JSDeferredModuleNamespace>();
+          JSDeferredModuleNamespace::EvaluateModuleSync(it->isolate(), holder);
+          RETURN_EXCEPTION_IF_EXCEPTION(it->isolate());
+        }
+        continue;
+      }
       case LookupIterator::ACCESSOR:
         if (IsJSModuleNamespace(*it->GetHolder<Object>())) {
           return JSModuleNamespace::GetPropertyAttributes(it);
@@ -1011,6 +1039,15 @@ Maybe<bool> JSReceiver::DeleteProperty(LookupIterator* it,
       }
       case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
         return Just(true);
+      case LookupIterator::MODULE_NAMESPACE: {
+        if (JSDeferredModuleNamespace::TriggersEvaluation(it)) {
+          DirectHandle<JSDeferredModuleNamespace> holder =
+              it->GetHolder<JSDeferredModuleNamespace>();
+          JSDeferredModuleNamespace::EvaluateModuleSync(it->isolate(), holder);
+          RETURN_EXCEPTION_IF_EXCEPTION(it->isolate());
+        }
+        continue;
+      }
       case LookupIterator::DATA:
       case LookupIterator::ACCESSOR: {
         DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
@@ -1243,12 +1280,7 @@ MaybeHandle<JSAny> GetPropertyWithInterceptorInternal(
   }
 
   DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
-  DirectHandle<Object> receiver = it->GetReceiver();
-  if (!IsJSReceiver(*receiver)) {
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
-                               Object::ConvertReceiver(isolate, receiver));
-  }
-  PropertyCallbackArguments args(isolate, *receiver, it->GetHolderForApi());
+  PropertyCallbackArguments args(isolate, it->GetHolderForApi());
 
   DirectHandle<JSAny> result;
   if (it->IsElement(*holder)) {
@@ -1276,12 +1308,7 @@ Maybe<PropertyAttributes> GetPropertyAttributesWithInterceptorInternal(
   DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
   DCHECK_IMPLIES(!it->IsElement(*holder) && IsSymbol(*it->name()),
                  interceptor->can_intercept_symbols());
-  DirectHandle<Object> receiver = it->GetReceiver();
-  if (!IsJSReceiver(*receiver)) {
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
-                               Object::ConvertReceiver(isolate, receiver));
-  }
-  PropertyCallbackArguments args(isolate, *receiver, it->GetHolderForApi());
+  PropertyCallbackArguments args(isolate, it->GetHolderForApi());
   if (interceptor->has_query()) {
     DirectHandle<Object> result;
     if (it->IsElement(*holder)) {
@@ -1339,13 +1366,7 @@ Maybe<InterceptorResult> SetPropertyWithInterceptorInternal(
   }
 
   DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
-  DirectHandle<Object> receiver = it->GetReceiver();
-  if (!IsJSReceiver(*receiver)) {
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
-                               Object::ConvertReceiver(isolate, receiver));
-  }
-  PropertyCallbackArguments args(isolate, *receiver, it->GetHolderForApi(),
-                                 should_throw);
+  PropertyCallbackArguments args(isolate, it->GetHolderForApi(), should_throw);
 
   v8::Intercepted intercepted =
       it->IsElement(*holder)
@@ -1369,11 +1390,6 @@ Maybe<InterceptorResult> DefinePropertyWithInterceptorInternal(
   }
 
   DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
-  DirectHandle<Object> receiver = it->GetReceiver();
-  if (!IsJSReceiver(*receiver)) {
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
-                               Object::ConvertReceiver(isolate, receiver));
-  }
 
   std::unique_ptr<v8::PropertyDescriptor> descriptor(
       new v8::PropertyDescriptor());
@@ -1412,8 +1428,7 @@ Maybe<InterceptorResult> DefinePropertyWithInterceptorInternal(
     descriptor->set_configurable(desc->configurable());
   }
 
-  PropertyCallbackArguments args(isolate, *receiver, it->GetHolderForApi(),
-                                 should_throw);
+  PropertyCallbackArguments args(isolate, it->GetHolderForApi(), should_throw);
 
   v8::Intercepted intercepted =
       it->IsElement(*holder)
@@ -1845,6 +1860,7 @@ Maybe<bool> JSReceiver::AddPrivateField(LookupIterator* it,
     case LookupIterator::WASM_OBJECT:
       RETURN_FAILURE(isolate, kThrowOnError,
                      NewTypeError(MessageTemplate::kWasmObjectsAreOpaque));
+    case LookupIterator::MODULE_NAMESPACE:
     case LookupIterator::DATA:
     case LookupIterator::INTERCEPTOR:
     case LookupIterator::ACCESSOR:
@@ -1911,13 +1927,7 @@ Maybe<bool> GetPropertyDescriptorWithInterceptor(LookupIterator* it,
   Handle<JSAny> result;
   DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
 
-  DirectHandle<Object> receiver = it->GetReceiver();
-  if (!IsJSReceiver(*receiver)) {
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
-                               Object::ConvertReceiver(isolate, receiver));
-  }
-
-  PropertyCallbackArguments args(isolate, *receiver, it->GetHolderForApi());
+  PropertyCallbackArguments args(isolate, it->GetHolderForApi());
   if (it->IsElement(*holder)) {
     result =
         args.CallIndexedDescriptor(isolate, interceptor, it->array_index());
@@ -2571,6 +2581,8 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSArrayIterator::kHeaderSize;
     case JS_TYPED_ARRAY_TYPE:
       return JSTypedArray::kHeaderSize;
+    case JS_DETACHED_TYPED_ARRAY_TYPE:
+      return JSDetachedTypedArray::kHeaderSize;
     case JS_DATA_VIEW_TYPE:
       return JSDataView::kHeaderSize;
     case JS_RAB_GSAB_DATA_VIEW_TYPE:
@@ -2622,6 +2634,8 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSIteratorConcatHelper::kHeaderSize;
     case JS_MODULE_NAMESPACE_TYPE:
       return JSModuleNamespace::kHeaderSize;
+    case JS_DEFERRED_MODULE_NAMESPACE_TYPE:
+      return JSDeferredModuleNamespace::kHeaderSize;
     case JS_SHARED_ARRAY_TYPE:
       return JSSharedArray::kHeaderSize;
     case JS_SHARED_STRUCT_TYPE:
@@ -3722,6 +3736,7 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
       case LookupIterator::JSPROXY:
       case LookupIterator::TRANSITION:
       case LookupIterator::STRING_LOOKUP_START_OBJECT:
+      case LookupIterator::MODULE_NAMESPACE:
         UNREACHABLE();
       case LookupIterator::WASM_OBJECT:
         continue;  // {AddDataProperty} will throw if no other case is hit.
@@ -4192,13 +4207,8 @@ Maybe<InterceptorResult> JSObject::DeletePropertyWithInterceptor(
     return Just(InterceptorResult::kNotIntercepted);
   }
   DirectHandle<JSObject> holder = it->GetHolder<JSObject>();
-  DirectHandle<Object> receiver = it->GetReceiver();
-  if (!IsJSReceiver(*receiver)) {
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
-                               Object::ConvertReceiver(isolate, receiver));
-  }
 
-  PropertyCallbackArguments args(isolate, *receiver, it->GetHolderForApi(),
+  PropertyCallbackArguments args(isolate, it->GetHolderForApi(),
                                  Just(should_throw));
 
   v8::Intercepted intercepted =
@@ -5416,9 +5426,7 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate,
   isolate->UpdateProtectorsOnSetPrototype(real_receiver, value);
 
   DirectHandle<Map> new_map =
-      v8_flags.move_prototype_transitions_first
-          ? MapUpdater(isolate, map).ApplyPrototypeTransition(value)
-          : Map::TransitionToUpdatePrototype(isolate, map, value);
+      MapUpdater(isolate, map).ApplyPrototypeTransition(value);
 
   DCHECK(new_map->prototype() == *value);
   JSObject::MigrateToMap(isolate, real_receiver, new_map);

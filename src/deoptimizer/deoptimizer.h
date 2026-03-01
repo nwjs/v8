@@ -83,6 +83,12 @@ class Deoptimizer : public Malloced {
     return bytecode_offset_in_outermost_frame_;
   }
 
+// TODO(mdanylo): for Dumpling only use ro-functions that are guaranteed to not
+// change state and metadata.
+#ifdef V8_DUMPLING
+  void VirtualMaterializeAndPrint();
+#endif  // V8_DUMPLING
+
   static Deoptimizer* New(Address raw_function, DeoptimizeKind kind,
                           Address from, int fp_to_sp_delta, Isolate* isolate);
   static Deoptimizer* Grab(Isolate* isolate);
@@ -328,6 +334,12 @@ class Deoptimizer : public Malloced {
   DisallowGarbageCollection* disallow_garbage_collection_;
 #endif  // DEBUG
 
+  // Use a DisallowSandboxAccess scope for most of the deoptimizer to prevent
+  // the deoptimizer from accessing untrusted data in the sandbox. This way, we
+  // get some level of assurance that actions taken by the deoptimizer cannot
+  // be influenced by untrusted in-sandbox data but purely rely on trusted data.
+  std::optional<DisallowSandboxAccess> disallow_sandbox_access_;
+
   // Note: This is intentionally not a unique_ptr s.t. the Deoptimizer
   // satisfies is_standard_layout, needed for offsetof().
   CodeTracer::Scope* const trace_scope_;
@@ -337,11 +349,6 @@ class Deoptimizer : public Malloced {
   // as members for reuse for multiple signatures during one de-optimization.
   std::optional<AccountingAllocator> alloc_;
   std::optional<Zone> zone_;
-#endif
-#if V8_ENABLE_WEBASSEMBLY
-  // Wasm deoptimizations should not access the heap at all. All deopt data is
-  // stored off-heap.
-  std::optional<DisallowSandboxAccess> no_sandbox_access_during_wasm_deopt_;
 #endif
 
   friend class DeoptimizedFrameInfo;

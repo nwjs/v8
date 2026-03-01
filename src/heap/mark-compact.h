@@ -315,7 +315,6 @@ class MarkCompactCollector final {
   void ClearFullMapTransitions();
   void TrimDescriptorArray(Tagged<Map> map,
                            Tagged<DescriptorArray> descriptors);
-  void TrimEnumCache(Tagged<Map> map, Tagged<DescriptorArray> descriptors);
   bool CompactTransitionArray(Tagged<Map> map,
                               Tagged<TransitionArray> transitions,
                               Tagged<DescriptorArray> descriptors);
@@ -342,12 +341,6 @@ class MarkCompactCollector final {
       WeakObjects::WeakObjectWorklist<TObjectAndSlot>::Local& worklist,
       Tagged<HeapObjectReference> cleared_weak_ref);
 
-  // Goes through the list of encountered non-trivial weak references and
-  // filters out those whose values are still alive. This is performed in a
-  // parallel job.
-  void FilterNonTrivialWeakReferences();
-  class FilterNonTrivialWeakRefJobItem;
-
   // Goes through the list of encountered non-trivial weak references with
   // dead values. If the value is a dead map and the parent map transitions to
   // the dead map via weak cell, then this function also clears the map
@@ -356,7 +349,7 @@ class MarkCompactCollector final {
 
   // Goes through the list of encountered JSWeakRefs and WeakCells and clears
   // those with dead values.
-  void ProcessJSWeakRefs();
+  void ProcessJSWeakRefs(JobDelegate* delegate);
 
   // Starts sweeping of spaces by contributing on the main thread and setting
   // up other pages for sweeping. Does not start sweeper tasks.
@@ -381,9 +374,6 @@ class MarkCompactCollector final {
   static const int kEphemeronChunkSize = 8 * KB;
 
   int NumberOfParallelEphemeronVisitingTasks(size_t elements);
-
-  void RightTrimDescriptorArray(Tagged<DescriptorArray> array,
-                                int descriptors_to_trim);
 
   void StartSweepNewSpace();
   void SweepLargeSpace(LargeObjectSpace* space);
@@ -473,6 +463,7 @@ class MarkCompactCollector final {
   friend class RecordMigratedSlotVisitor;
   friend class RootMarkingVisitor;
   friend class PrecisePagePinningVisitor;
+  friend class StringForwardingTableCleanerBase;
 };
 
 }  // namespace internal

@@ -29,6 +29,7 @@ class ReadOnlyPage;
 class ReadOnlySpace;
 class SharedReadOnlySpace;
 class SnapshotData;
+class EarlyReadOnlyRoots;
 
 // This class transparently manages read-only space, roots and cache creation
 // and destruction.
@@ -73,7 +74,7 @@ class ReadOnlyHeap final {
   V8_EXPORT_PRIVATE static bool SandboxSafeContains(Tagged<HeapObject> object);
   // Returns the current isolates roots table during initialization as opposed
   // to the shared one in case the latter is not initialized yet.
-  V8_EXPORT_PRIVATE inline static ReadOnlyRoots EarlyGetReadOnlyRoots(
+  V8_EXPORT_PRIVATE inline static EarlyReadOnlyRoots EarlyGetReadOnlyRoots(
       Tagged<HeapObject> object);
 
   ReadOnlySpace* read_only_space() const { return read_only_space_; }
@@ -81,9 +82,6 @@ class ReadOnlyHeap final {
 #ifdef V8_ENABLE_SANDBOX
   CodePointerTable::Space* code_pointer_space() { return &code_pointer_space_; }
 #endif  // V8_ENABLE_SANDBOX
-  JSDispatchTable::Space* js_dispatch_table_space() {
-    return &js_dispatch_table_space_;
-  }
 
   void InitializeIsolateRoots(Isolate* isolate);
   void InitializeFromIsolateRoots(Isolate* isolate);
@@ -116,7 +114,6 @@ class ReadOnlyHeap final {
   // are never deallocated.
   CodePointerTable::Space code_pointer_space_;
 #endif  // V8_ENABLE_SANDBOX
-  JSDispatchTable::Space js_dispatch_table_space_;
 
  private:
   friend ReadOnlyRoots GetReadOnlyRoots();

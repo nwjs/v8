@@ -508,7 +508,39 @@ void PrintSingleDeoptFrame(
       break;
     }
   }
+  if (v8_flags.print_maglev_deopt_verbose) {
+    os << " (addr:" << &frame << ")";
+  }
 }
+
+namespace {
+void PrintVirtualObject(std::ostream& os, VirtualObject* vobj) {
+  os << "[";
+  bool is_first = true;
+  vobj->ForEachSlot(
+      [&](maglev::ValueNode* value_node, maglev::vobj::Field desc) -> bool {
+        switch (desc.type) {
+          case maglev::vobj::FieldType::kTagged:
+          case maglev::vobj::FieldType::kTrustedPointer:
+          case maglev::vobj::FieldType::kFloat64: {
+            if (!is_first) os << ",";
+            is_first = false;
+            os << PrintNodeLabel(value_node);
+            if (VirtualObject* nested = value_node->TryCast<VirtualObject>()) {
+              os << "=VO";
+              PrintVirtualObject(os, nested);
+            }
+            break;
+          }
+          case maglev::vobj::FieldType::kInt32:
+          case maglev::vobj::FieldType::kNone:
+            UNREACHABLE();
+        }
+        return true;
+      });
+  os << "]";
+}
+}  // namespace
 
 void PrintVirtualObjects(std::ostream& os, std::vector<BasicBlock*> targets,
                          const DeoptFrame& frame, int max_node_id) {
@@ -518,7 +550,9 @@ void PrintVirtualObjects(std::ostream& os, std::vector<BasicBlock*> targets,
   os << "  │       VOs : { ";
   const VirtualObjectList& virtual_objects = frame.GetVirtualObjects();
   for (auto vo : virtual_objects) {
-    os << PrintNodeLabel(vo) << "; ";
+    os << PrintNodeLabel(vo) << "=";
+    PrintVirtualObject(os, vo);
+    os << ";";
   }
   os << "}\n";
 }
@@ -648,29 +682,17 @@ void PrintExceptionHandlerPoint(std::ostream& os,
 
   // The exception handler liveness should be a subset of lazy_deopt_info one.
   auto* liveness = block->state()->frame_state().liveness();
-  LazyDeoptInfo* deopt_info = node->lazy_deopt_info();
 
-  const InterpretedDeoptFrame* lazy_frame;
-  switch (deopt_info->top_frame().type()) {
-    case DeoptFrame::FrameType::kInterpretedFrame:
-      lazy_frame = &deopt_info->top_frame().as_interpreted();
-      break;
-    case DeoptFrame::FrameType::kInlinedArgumentsFrame:
-      UNREACHABLE();
-    case DeoptFrame::FrameType::kConstructInvokeStubFrame:
-    case DeoptFrame::FrameType::kBuiltinContinuationFrame:
-      lazy_frame = &deopt_info->top_frame().parent()->as_interpreted();
-      break;
-  }
+  const maglev::InterpretedDeoptFrame& lazy_frame =
+      node->lazy_deopt_info()->GetFrameForExceptionHandler(info);
 
   PrintVerticalArrows(os, targets);
   PrintPadding(os, max_node_id, 0);
 
   os << "  ↳ throw @" << handler_offset << " (b" << block->id() << ") : {";
   bool first = true;
-  lazy_frame->as_interpreted().frame_state()->ForEachValue(
-      lazy_frame->as_interpreted().unit(),
-      [&](ValueNode* node, interpreter::Register reg) {
+  lazy_frame.frame_state()->ForEachValue(
+      lazy_frame.unit(), [&](ValueNode* node, interpreter::Register reg) {
         if (!reg.is_parameter() && !liveness->RegisterIsLive(reg.index())) {
           // Skip, since not live at the handler offset.
           return;
@@ -789,9 +811,6 @@ ProcessResult MaglevPrintingVisitor::Process(Phi* phi,
     case ValueRepresentation::kInt32:
       os_ << "ᴵ";
       break;
-    case ValueRepresentation::kShiftedInt53:
-      os_ << "ᴵ⁵³";
-      break;
     case ValueRepresentation::kUint32:
       os_ << "ᵁ";
       break;
@@ -842,6 +861,9 @@ ProcessResult MaglevPrintingVisitor::Process(Phi* phi,
       os_ << ", live range: [" << node_info->live_range().start << "-"
           << node_info->live_range().end << "]";
     }
+  } else if (phi->unused_inputs_were_visited()) {
+    // This node is dead, node sweeper will remove it.
+    os_ << "🪦";
   } else {
     os_ << ", " << phi->use_count() << " uses";
   }
@@ -992,9 +1014,6 @@ ProcessResult MaglevPrintingVisitor::Process(ControlNode* control_node,
             break;
           case ValueRepresentation::kUint32:
             os_ << "ᵁ";
-            break;
-          case ValueRepresentation::kShiftedInt53:
-            os_ << "ᴵ⁵³";
             break;
           case ValueRepresentation::kFloat64:
             os_ << "ᶠ";

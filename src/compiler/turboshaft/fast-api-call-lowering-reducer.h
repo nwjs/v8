@@ -116,7 +116,7 @@ class FastApiCallLoweringReducer : public Next {
       GOTO(done, FastApiCallOp::kSuccessValue);
       BIND(trigger_exception);
       __ template CallRuntime<typename runtime::PropagateException>(
-          frame_state, __ NoContextConstant(), {}, LazyDeoptOnThrow::kNo);
+          frame_state, context, {}, LazyDeoptOnThrow::kNo);
 
       __ Unreachable();
     }
@@ -208,7 +208,8 @@ class FastApiCallLoweringReducer : public Next {
           V<Word32> instance_type = __ LoadInstanceTypeField(map);
 
           V<Word32> encoding = __ Word32BitwiseAnd(
-              instance_type, kStringRepresentationAndEncodingMask);
+              instance_type,
+              kIsNotStringMask | kStringRepresentationAndEncodingMask);
           GOTO_IF_NOT(__ Word32Equal(encoding, kSeqOneByteStringTag),
                       handle_error);
 

@@ -56,7 +56,8 @@ InstructionSelector::InstructionSelector(
     TickCounter* tick_counter, JSHeapBroker* broker,
     size_t* max_unoptimized_frame_height, size_t* max_pushed_argument_count,
     InstructionSelector::SourcePositionMode source_position_mode,
-    Features features, InstructionSelector::EnableScheduling enable_scheduling,
+    CpuFeatureSet features,
+    InstructionSelector::EnableScheduling enable_scheduling,
     InstructionSelector::EnableRootsRelativeAddressing
         enable_roots_relative_addressing,
     InstructionSelector::EnableTraceTurboJson trace_turbo,
@@ -1391,12 +1392,10 @@ bool InstructionSelector::IsSourcePositionUsed(OpIndex node) {
             operation.TryCast<Simd128LaneMemoryOp>()) {
       return lm->kind.with_trap_handler;
     }
-#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
     if (const Simd128LoadPairDeinterleaveOp* dl =
             operation.TryCast<Simd128LoadPairDeinterleaveOp>()) {
       return dl->load_kind.with_trap_handler;
     }
-#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 #endif
     if (additional_protected_instructions_->Contains(node.id())) {
       return true;
@@ -1965,6 +1964,8 @@ IF_WASM(VISIT_UNSUPPORTED_OP, I64x2ReplaceLane)
 
 #if !V8_TARGET_ARCH_ARM64
 
+IF_WASM(VISIT_UNSUPPORTED_OP, Simd128LoadPairDeinterleave)
+
 IF_WASM(VISIT_UNSUPPORTED_OP, I8x16AddReduce)
 IF_WASM(VISIT_UNSUPPORTED_OP, I16x8AddReduce)
 IF_WASM(VISIT_UNSUPPORTED_OP, I32x4AddReduce)
@@ -1981,7 +1982,16 @@ IF_WASM(VISIT_UNSUPPORTED_OP, MemoryCopy)
 IF_WASM(VISIT_UNSUPPORTED_OP, MemoryFill)
 
 IF_WASM(VISIT_UNSUPPORTED_OP, I32x4AddPairwise)
+
+IF_WASM(VISIT_UNSUPPORTED_OP, I8x16MoveLane)
+IF_WASM(VISIT_UNSUPPORTED_OP, I16x8MoveLane)
+IF_WASM(VISIT_UNSUPPORTED_OP, I32x4MoveLane)
+IF_WASM(VISIT_UNSUPPORTED_OP, I64x2MoveLane)
+IF_WASM(VISIT_UNSUPPORTED_OP, F32x4MoveLane)
+IF_WASM(VISIT_UNSUPPORTED_OP, F64x2MoveLane)
 #endif  // !V8_TARGET_ARCH_ARM64
+
+IF_WASM(VISIT_UNSUPPORTED_OP, F16x8MoveLane)
 
 void InstructionSelector::VisitParameter(OpIndex node) {
   const ParameterOp& parameter = Cast<ParameterOp>(node);
@@ -2064,10 +2074,10 @@ void InstructionSelector::VisitProjection(OpIndex node) {
     UNREACHABLE();
   } else if (value_op.Is<AtomicWord32PairOp>()) {
     // Nothing to do here.
-#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+#if V8_ENABLE_WEBASSEMBLY
   } else if (value_op.Is<Simd128LoadPairDeinterleaveOp>()) {
     MarkAsUsed(projection.input());
-#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
+#endif  // V8_ENABLE_WEBASSEMBLY
   } else {
     UNIMPLEMENTED();
   }
@@ -3742,6 +3752,26 @@ void InstructionSelector::VisitNode(OpIndex node) {
           return VisitF64x2ReplaceLane(node);
       }
     }
+    case Opcode::kSimd128MoveLane: {
+      const Simd128MoveLaneOp& move = op.Cast<Simd128MoveLaneOp>();
+      MarkAsSimd128(node);
+      switch (move.kind) {
+        case Simd128MoveLaneOp::Kind::kI8x16:
+          return VisitI8x16MoveLane(node);
+        case Simd128MoveLaneOp::Kind::kI16x8:
+          return VisitI16x8MoveLane(node);
+        case Simd128MoveLaneOp::Kind::kI32x4:
+          return VisitI32x4MoveLane(node);
+        case Simd128MoveLaneOp::Kind::kI64x2:
+          return VisitI64x2MoveLane(node);
+        case Simd128MoveLaneOp::Kind::kF16x8:
+          UNIMPLEMENTED();
+        case Simd128MoveLaneOp::Kind::kF32x4:
+          return VisitF32x4MoveLane(node);
+        case Simd128MoveLaneOp::Kind::kF64x2:
+          return VisitF64x2MoveLane(node);
+      }
+    }
     case Opcode::kSimd128ExtractLane: {
       const Simd128ExtractLaneOp& extract = op.Cast<Simd128ExtractLaneOp>();
       switch (extract.kind) {
@@ -3780,6 +3810,7 @@ void InstructionSelector::VisitNode(OpIndex node) {
     case Opcode::kSimd128LaneMemory: {
       const Simd128LaneMemoryOp& memory = op.Cast<Simd128LaneMemoryOp>();
       MarkAsSimd128(node);
+      DCHECK_EQ(memory.offset, 0);
       if (memory.mode == Simd128LaneMemoryOp::Mode::kLoad) {
         return VisitLoadLane(node);
       } else {
@@ -3799,7 +3830,6 @@ void InstructionSelector::VisitNode(OpIndex node) {
       }
     }
 
-#if V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
     case Opcode::kSimd128LoadPairDeinterleave: {
       OptionalOpIndex projection0 = FindProjection(node, 0);
       DCHECK(projection0.valid());
@@ -3809,7 +3839,6 @@ void InstructionSelector::VisitNode(OpIndex node) {
       MarkAsSimd128(projection1.value());
       return VisitSimd128LoadPairDeinterleave(node);
     }
-#endif  // V8_ENABLE_WASM_DEINTERLEAVED_MEM_OPS
 
     // SIMD256
 #if V8_ENABLE_WASM_SIMD256_REVEC
@@ -4068,7 +4097,7 @@ InstructionSelector InstructionSelector::ForTurboshaft(
     EnableSwitchJumpTable enable_switch_jump_table, TickCounter* tick_counter,
     JSHeapBroker* broker, size_t* max_unoptimized_frame_height,
     size_t* max_pushed_argument_count, SourcePositionMode source_position_mode,
-    Features features, EnableScheduling enable_scheduling,
+    CpuFeatureSet features, EnableScheduling enable_scheduling,
     EnableRootsRelativeAddressing enable_roots_relative_addressing,
     EnableTraceTurboJson trace_turbo,
     EnsureDeterministicNan ensure_deterministic_nan) {

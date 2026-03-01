@@ -174,7 +174,8 @@ bool Runtime::IsNonReturning(FunctionId id) {
 #if V8_ENABLE_WEBASSEMBLY
     case Runtime::kThrowWasmError:
     case Runtime::kThrowWasmStackOverflow:
-    case Runtime::kThrowWasmSuspendError:
+    case Runtime::kThrowWasmJSPISuspendError:
+    case Runtime::kThrowWasmFXSuspendError:
 #endif  // V8_ENABLE_WEBASSEMBLY
       return true;
     default:
@@ -313,6 +314,8 @@ bool Runtime::IsEnabledForFuzzing(FunctionId id) {
 
   // The default case: test functions are exposed, everything else is not.
   switch (id) {
+    // Functions used in testing and outside
+    case Runtime::kArrayBufferDetach:
 #define F(name, nargs, ressize, ...) case k##name:
 #define I(name, nargs, ressize, ...) case kInline##name:
     FOR_EACH_INTRINSIC_TEST(F, I)

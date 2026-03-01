@@ -10,6 +10,7 @@
 #include <optional>
 #include <unordered_map>
 
+#include "absl/container/flat_hash_set.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/common/globals.h"
 #include "src/execution/isolate-inl.h"
@@ -76,7 +77,7 @@ template <RememberedSetType kType>
 void AddToRememberedSet(const Heap* heap, const Tagged<HeapObject> host,
                         Address slot) {
   MemoryChunk* chunk = MemoryChunk::FromHeapObject(host);
-  MutablePage* page = MutablePage::cast(chunk->Metadata(heap->isolate()));
+  MutablePage* page = SbxCast<MutablePage>(chunk->Metadata(heap->isolate()));
   RememberedSet<kType>::template Insert<AccessMode::ATOMIC>(
       page, chunk->Offset(slot));
 }
@@ -519,6 +520,11 @@ class ScavengerObjectVisitorBase : public NewSpaceVisitor<ConcreteVisitor> {
     ExternalPointerHandle handle = slot.Relaxed_LoadHandle();
     Heap* heap = scavenger_->heap();
     ExternalPointerTable& table = heap->isolate()->external_pointer_table();
+    ArrayBufferExtension* array_buffer_extension =
+        slot.tag_range() == kArrayBufferExtensionTag
+            ? reinterpret_cast<ArrayBufferExtension*>(
+                  table.Get(handle, kArrayBufferExtensionTag))
+            : nullptr;
     if constexpr (kExpectedObjectAge == ObjectAge::kYoung) {
       // For survivor objects, mark their EPT entries when they are
       // copied. Scavenger then sweeps the young EPT space at the end of
@@ -534,20 +540,21 @@ class ScavengerObjectVisitorBase : public NewSpaceVisitor<ConcreteVisitor> {
                      heap->old_external_pointer_space(), handle, slot.address(),
                      ExternalPointerTable::EvacuateMarkMode::kTransferMark);
     }
-#endif  // V8_COMPRESS_POINTERS
-  }
-
-  V8_INLINE size_t VisitJSArrayBuffer(Tagged<Map> map,
-                                      Tagged<JSArrayBuffer> object,
-                                      MaybeObjectSize) {
-    if constexpr (kExpectedObjectAge == ObjectAge::kYoung) {
-      object->YoungMarkExtension();
-    } else {
-      object->YoungMarkExtensionPromoted();
+#else   // !V8_COMPRESS_POINTERS
+    ArrayBufferExtension* array_buffer_extension =
+        slot.tag_range() == kArrayBufferExtensionTag
+            ? reinterpret_cast<ArrayBufferExtension*>(
+                  slot.load(scavenger_->heap()->isolate()))
+            : nullptr;
+#endif  // !V8_COMPRESS_POINTERS
+    if (array_buffer_extension) {
+      array_buffer_extension->InitializationBarrier();
+      if constexpr (kExpectedObjectAge == ObjectAge::kYoung) {
+        array_buffer_extension->YoungMark();
+      } else {
+        array_buffer_extension->YoungMarkPromoted();
+      }
     }
-    int size = JSArrayBuffer::BodyDescriptor::SizeOf(map, object);
-    JSArrayBuffer::BodyDescriptor::IterateBody(map, object, size, this);
-    return size;
   }
 
   V8_INLINE size_t VisitJSWeakRef(Tagged<Map> map, Tagged<JSWeakRef> object,
@@ -1095,7 +1102,7 @@ class ObjectPinningVisitorBase : public RootVisitor {
     }
     MemoryChunk* chunk = MemoryChunk::FromHeapObject(object);
     MutablePage* metadata =
-        MutablePage::cast(chunk->Metadata(heap_->isolate()));
+        SbxCast<MutablePage>(chunk->Metadata(heap_->isolate()));
     DCHECK(!metadata->is_large());
     DCHECK(HeapLayout::InYoungGeneration(object));
     DCHECK(Heap::InFromPage(object));
@@ -1209,6 +1216,38 @@ class TreatConservativelyVisitor final : public RootVisitor {
   base::RandomNumberGenerator* const rng_;
   double stressing_threshold_;
 };
+
+void PinObjectsConservative(Heap* heap, Scavenger& scavenger,
+                            PinnedObjects& pinned_objects,
+                            Heap::StackScanMode stack_scan_mode) {
+  Isolate* isolate = heap->isolate();
+  TRACE_GC(heap->tracer(),
+           GCTracer::Scope::SCAVENGER_SCAVENGE_PIN_OBJECTS_CONSERVATIVE);
+  ConservativeObjectPinningVisitor conservative_pinning_visitor(heap, scavenger,
+                                                                pinned_objects);
+  // Scavenger reuses the page's marking bitmap as a temporary object
+  // start bitmap. Stack scanning will incrementally build the map as it
+  // searches through pages.
+  YoungGenerationConservativeStackVisitor stack_visitor(
+      isolate, &conservative_pinning_visitor);
+  // Marker was already set by Heap::CollectGarbage.
+  heap->IterateConservativeStackRoots(&stack_visitor, stack_scan_mode);
+  if (V8_UNLIKELY(v8_flags.stress_scavenger_conservative_object_pinning)) {
+    TreatConservativelyVisitor handles_visitor(&stack_visitor, heap);
+    heap->IterateRootsForPrecisePinning(&handles_visitor);
+  }
+}
+
+void PinObjectsPrecise(Heap* heap, Scavenger& scavenger,
+                       PinnedObjects& pinned_objects) {
+  TRACE_GC(heap->tracer(),
+           GCTracer::Scope::SCAVENGER_SCAVENGE_PIN_OBJECTS_PRECISE);
+  PreciseObjectPinningVisitor precise_pinning_visitor(heap, scavenger,
+                                                      pinned_objects);
+  ClearStaleLeftTrimmedPointerVisitor left_trim_visitor(
+      heap, &precise_pinning_visitor);
+  heap->IterateRootsForPrecisePinning(&left_trim_visitor);
+}
 
 void RestorePinnedObjects(SemiSpaceNewSpace& new_space,
                           const PinnedObjects& pinned_objects) {
@@ -1453,7 +1492,8 @@ class ScavengerEphemeronProcessor final {
         // Checking whether an object is a hole without static roots requires a
         // valid MapWord which is not guaranteed here in case we are looking at
         // a forward pointer.
-        DCHECK_IMPLIES(v8_flags.unmap_holes, !IsAnyHole(key));
+        DCHECK_IMPLIES(V8_STATIC_ROOTS_BOOL && v8_flags.unmap_holes,
+                       !IsAnyHole(key));
         MapWord map_word = key->map_word(kRelaxedLoad);
         if (!map_word.IsForwardingAddress()) {
           // If the key is not forwarded, then it's dead.
@@ -1483,21 +1523,22 @@ class ScavengerEphemeronProcessor final {
         Tagged<HeapObject> key = key_slot.ToHeapObject();
         // If the key is not young, we don't need it in the remembered set.
         if (!HeapLayout::InYoungGeneration(key)) {
-          iti = indices.erase(iti);
+          indices.erase(iti++);
         }
         // If the key is not in the from page, it's not being scavenged.
         if (!Heap::InFromPage(key)) continue;
         // Checking whether an object is a hole without static roots requires a
         // valid MapWord which is not guaranteed here in case we are looking at
         // a forward pointer.
-        DCHECK_IMPLIES(v8_flags.unmap_holes, !IsAnyHole(key));
+        DCHECK_IMPLIES(V8_STATIC_ROOTS_BOOL && v8_flags.unmap_holes,
+                       !IsAnyHole(key));
         MapWord map_word = key->map_word(kRelaxedLoad);
         DCHECK_IMPLIES(Heap::InToPage(key), !map_word.IsForwardingAddress());
         if (!map_word.IsForwardingAddress()) {
           // If the key is not forwarded, then it's dead.
           DCHECK(IsUnscavengedHeapObject(key));
           table->RemoveEntry(InternalIndex(*iti));
-          iti = indices.erase(iti);
+          indices.erase(iti++);
         } else {
           // Otherwise, we need to update the key slot to the forwarded address.
           DCHECK(!IsUnscavengedHeapObject(key));
@@ -1506,7 +1547,7 @@ class ScavengerEphemeronProcessor final {
           if (!HeapLayout::InYoungGeneration(forwarded)) {
             // If the key was promoted out of new space, we don't need to keep
             // it in the remembered set.
-            iti = indices.erase(iti);
+            indices.erase(iti++);
           } else {
             ++iti;
           }
@@ -1619,17 +1660,26 @@ void ScavengerCollector::CollectGarbage() {
       !is_using_conservative_stack_scanning && !is_using_precise_pinning;
 
   const int num_scavenge_tasks = NumberOfScavengeTasks(heap_);
+  const bool is_logging = isolate->log_object_relocation();
+
+  // Create a separate scavenger for the main thread to use during root
+  // iteration. This runs in parallel with background threads, so it needs
+  // its own scavenger to avoid conflicts.
+  Scavenger main_thread_scavenger(
+      heap_, is_logging, &empty_chunks, &copied_list, &promoted_list,
+      &ephemeron_table_list, &js_weak_refs_list, &weak_cells_list,
+      should_handle_weak_objects_weakly);
+
+  // Create scavengers for the parallel job (background threads + joining
+  // thread).
   std::vector<std::unique_ptr<Scavenger>> scavengers;
   scavengers.reserve(num_scavenge_tasks);
-
-  const bool is_logging = isolate->log_object_relocation();
   for (int i = 0; i < num_scavenge_tasks; ++i) {
     scavengers.emplace_back(std::make_unique<Scavenger>(
         heap_, is_logging, &empty_chunks, &copied_list, &promoted_list,
         &ephemeron_table_list, &js_weak_refs_list, &weak_cells_list,
         should_handle_weak_objects_weakly));
   }
-  Scavenger& main_thread_scavenger = *scavengers[0].get();
 
   {
     // Identify weak unmodified handles. Requires an unmodified graph.
@@ -1640,12 +1690,11 @@ void ScavengerCollector::CollectGarbage() {
 
   std::vector<std::pair<ParallelWorkItem, MutablePage*>> old_to_new_chunks;
   {
-    // Copy roots.
-    TRACE_GC(heap_->tracer(), GCTracer::Scope::SCAVENGER_SCAVENGE_ROOTS);
-
     // We must collect old-to-new pages before starting Scavenge because
     // pages could be removed from the old generation for allocation which
     // hides them from the iteration.
+    TRACE_GC(heap_->tracer(),
+             GCTracer::Scope::SCAVENGER_SCAVENGE_COLLECT_OLD_TO_NEW_PAGES);
     OldGenerationMemoryChunkIterator::ForAll(
         heap_, [&old_to_new_chunks](MutablePage* chunk) {
           if (chunk->slot_set<OLD_TO_NEW>() ||
@@ -1654,58 +1703,27 @@ void ScavengerCollector::CollectGarbage() {
             old_to_new_chunks.emplace_back(ParallelWorkItem{}, chunk);
           }
         });
-
-    if (is_using_conservative_stack_scanning) {
-      // Pinning objects must be the first step and must happen before
-      // scavenging any objects. Specifically we must all pin all objects
-      // before visiting other pinned objects. If we scavenge some object X
-      // and move it before all stack-reachable objects are pinned, and we
-      // later find that we need to pin X, it will be too late to undo the
-      // moving.
-      TRACE_GC(heap_->tracer(),
-               GCTracer::Scope::SCAVENGER_SCAVENGE_PIN_OBJECTS);
-      ConservativeObjectPinningVisitor conservative_pinning_visitor(
-          heap_, main_thread_scavenger, pinned_objects);
-      // Scavenger reuses the page's marking bitmap as a temporary object
-      // start bitmap. Stack scanning will incrementally build the map as it
-      // searches through pages.
-      YoungGenerationConservativeStackVisitor stack_visitor(
-          isolate, &conservative_pinning_visitor);
-      // Marker was already set by Heap::CollectGarbage.
-      heap_->IterateConservativeStackRoots(&stack_visitor, stack_scan_mode);
-      if (V8_UNLIKELY(v8_flags.stress_scavenger_conservative_object_pinning)) {
-        TreatConservativelyVisitor handles_visitor(&stack_visitor, heap_);
-        heap_->IterateRootsForPrecisePinning(&handles_visitor);
-      }
-    }
-
-    if (is_using_precise_pinning) {
-      PreciseObjectPinningVisitor precise_pinning_visitor(
-          heap_, main_thread_scavenger, pinned_objects);
-      ClearStaleLeftTrimmedPointerVisitor left_trim_visitor(
-          heap_, &precise_pinning_visitor);
-      heap_->IterateRootsForPrecisePinning(&left_trim_visitor);
-    }
-
-    // Scavenger treats all weak roots except for global handles as strong.
-    // That is why we don't set skip_weak = true here and instead visit
-    // global handles separately.
-    base::EnumSet<SkipRoot> options(
-        {SkipRoot::kExternalStringTable, SkipRoot::kGlobalHandles,
-         SkipRoot::kTracedHandles, SkipRoot::kOldGeneration,
-         SkipRoot::kConservativeStack, SkipRoot::kReadOnlyBuiltins});
-    if (is_using_precise_pinning) {
-      options.Add({SkipRoot::kMainThreadHandles, SkipRoot::kStack});
-    }
-    RootScavengeVisitor root_scavenge_visitor(main_thread_scavenger);
-
-    heap_->IterateRoots(&root_scavenge_visitor, options);
-    isolate->global_handles()->IterateYoungStrongAndDependentRoots(
-        &root_scavenge_visitor);
-    isolate->traced_handles()->IterateYoungRoots(&root_scavenge_visitor);
   }
+
+  // Pinning objects must be the first step and must happen before
+  // scavenging any objects. If we scavenge some object X
+  // and move it before all stack-reachable objects are pinned, and we
+  // later find that we need to pin X, it will be too late to undo the
+  // moving.
+
+  if (is_using_conservative_stack_scanning) [[unlikely]] {
+    PinObjectsConservative(heap_, main_thread_scavenger, pinned_objects,
+                           stack_scan_mode);
+  }
+
+  if (is_using_precise_pinning) [[unlikely]] {
+    PinObjectsPrecise(heap_, main_thread_scavenger, pinned_objects);
+  }
+
   {
-    // Parallel phase scavenging all copied and promoted objects.
+    // Start the parallel scavenger job before iterating roots. This allows
+    // background threads to start processing old_to_new pages while the main
+    // thread iterates roots in parallel.
     TRACE_GC_ARG1(heap_->tracer(),
                   GCTracer::Scope::SCAVENGER_SCAVENGE_PARALLEL_PHASE,
                   "UseBackgroundThreads", heap_->ShouldUseBackgroundThreads());
@@ -1715,9 +1733,43 @@ void ScavengerCollector::CollectGarbage() {
         promoted_list, estimate_concurrency);
     TRACE_GC_NOTE_WITH_FLOW("Parallel scavenge started", job->trace_id(),
                             TRACE_EVENT_FLAG_FLOW_OUT);
-    V8::GetCurrentPlatform()
-        ->CreateJob(v8::TaskPriority::kUserBlocking, std::move(job))
-        ->Join();
+    std::unique_ptr<JobHandle> job_handle = V8::GetCurrentPlatform()->PostJob(
+        v8::TaskPriority::kUserBlocking, std::move(job));
+
+    // Iterate roots on the main thread while background threads scavenge pages.
+    {
+      // Copy roots.
+      TRACE_GC(heap_->tracer(), GCTracer::Scope::SCAVENGER_SCAVENGE_ROOTS);
+      RootScavengeVisitor root_scavenge_visitor(main_thread_scavenger);
+
+      // Scavenger treats all weak roots except for global handles as strong.
+      // That is why we don't set skip_weak = true here and instead visit
+      // global handles separately.
+      base::EnumSet<SkipRoot> options(
+          {SkipRoot::kExternalStringTable, SkipRoot::kGlobalHandles,
+           SkipRoot::kTracedHandles, SkipRoot::kOldGeneration,
+           SkipRoot::kConservativeStack, SkipRoot::kReadOnlyBuiltins});
+      if (is_using_precise_pinning) {
+        options.Add({SkipRoot::kMainThreadHandles, SkipRoot::kStack});
+      }
+
+      heap_->IterateRoots(&root_scavenge_visitor, options);
+      isolate->global_handles()->IterateYoungStrongAndDependentRoots(
+          &root_scavenge_visitor);
+      isolate->traced_handles()->IterateYoungRoots(&root_scavenge_visitor);
+    }
+    // The destructor of RootScavengeVisitor calls Publish(), which publishes
+    // the main thread scavenger's local copied and promoted lists to the global
+    // worklists, making them available for processing by any worker thread.
+    // main_thread_scavenger is not used from this point forward anymore.
+
+    // Notify the job system that more work is available now that root scanning
+    // is finished.
+    job_handle->NotifyConcurrencyIncrease();
+
+    // Join the parallel job: participate in remaining work and wait for
+    // completion.
+    job_handle->Join();
     DCHECK(copied_list.IsEmpty());
     DCHECK(promoted_list.IsEmpty());
 
@@ -1743,6 +1795,7 @@ void ScavengerCollector::CollectGarbage() {
     TRACE_GC(heap_->tracer(), GCTracer::Scope::SCAVENGER_SCAVENGE_FINALIZE);
 
     std::vector<SurvivingNewLargeObjectsMap> surviving_new_large_objects;
+    main_thread_scavenger.Finalize(surviving_new_large_objects);
     for (auto& scavenger : scavengers) {
       scavenger->Finalize(surviving_new_large_objects);
     }
@@ -2372,8 +2425,8 @@ void Scavenger::RecordWeakCellIfNeeded(Tagged<WeakCell> weak_cell) {
 
 void Scavenger::RememberPromotedEphemeron(Tagged<EphemeronHashTable> table,
                                           int index) {
-  auto indices = local_ephemeron_remembered_set_.insert(
-      {table, std::unordered_set<int>()});
+  auto indices = local_ephemeron_remembered_set_.emplace(
+      table, absl::flat_hash_set<int>());
   indices.first->second.insert(index);
 }
 

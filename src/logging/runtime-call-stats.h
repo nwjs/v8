@@ -195,12 +195,13 @@ namespace v8::internal {
   V(Uint8ClampedArray_New)                                 \
   V(UnboundModuleScript_GetSourceMappingURL)               \
   V(UnboundModuleScript_GetSourceURL)                      \
+  V(UnboundModuleScript_ScriptId)                          \
   V(UnboundScript_GetColumnNumber)                         \
-  V(UnboundScript_GetId)                                   \
   V(UnboundScript_GetLineNumber)                           \
   V(UnboundScript_GetName)                                 \
   V(UnboundScript_GetSourceMappingURL)                     \
   V(UnboundScript_GetSourceURL)                            \
+  V(UnboundScript_ScriptId)                                \
   V(ValueDeserializer_ReadHeader)                          \
   V(ValueDeserializer_ReadValue)                           \
   V(ValueSerializer_WriteValue)                            \
@@ -276,6 +277,14 @@ namespace v8::internal {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, SelectInstructions)                \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, SimplifiedLowering)                \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TraceScheduleAndVerify)            \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevMaglevGraphBuilder)        \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevInliner)                   \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevTruncation)                \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevPhiUntagging)              \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevRangeAnalysis)             \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevPostOptimizer)             \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevPostHoc)                   \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevDeadNodeSweeping)          \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftBlockInstrumentation)    \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftBuildGraph)              \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize,                                    \

@@ -7,6 +7,7 @@
 
 #include "src/base/compiler-specific.h"
 #include "src/codegen/tnode.h"
+#include "src/common/globals.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/feedback-source.h"
 #include "src/compiler/globals.h"
@@ -14,6 +15,7 @@
 #include "src/compiler/node.h"
 #include "src/compiler/opcodes.h"
 #include "src/compiler/operator-properties.h"
+#include "src/objects/bytecode-array.h"
 #include "src/objects/feedback-cell.h"
 #include "src/objects/oddball.h"
 #include "src/runtime/runtime.h"
@@ -46,11 +48,9 @@ struct JSOperatorGlobalCache;
 #define JS_BINOP_WITH_FEEDBACK(V) \
   JS_ARITH_BINOP_LIST(V)          \
   JS_BITWISE_BINOP_LIST(V)        \
-  JS_COMPARE_BINOP_COMMON_LIST(V) \
   V(JSInstanceOf, InstanceOf)
 
-#define JS_BINOP_WITH_EMBEDDED_FEEDBACK(V) \
-  JS_COMPARE_BINOP_WITH_EMBEDDED_FEEDBACK_LIST(V)
+#define JS_BINOP_WITH_EMBEDDED_FEEDBACK(V) JS_COMPARE_BINOP_COMMON_LIST(V)
 
 // Predicates.
 class JSOperator final : public AllStatic {
@@ -73,7 +73,6 @@ class JSOperator final : public AllStatic {
     return true;
     switch (opcode) {
       JS_BINOP_WITH_FEEDBACK(CASE);
-      JS_BINOP_WITH_EMBEDDED_FEEDBACK(CASE);
       default:
         return false;
     }
@@ -459,9 +458,19 @@ const FeedbackParameter& FeedbackParameterOf(const Operator* op);
 
 class EmbeddedHintParameter final {
  public:
-  using EmbeddedHint = std::variant<CompareOperationHint>;
+  using EmbeddedHint =
+      std::variant<std::monostate, CompareOperationHint, BinaryOperationHint>;
+
+  EmbeddedHintParameter() : hint_(std::monostate()) {}
   explicit EmbeddedHintParameter(const CompareOperationHint hint)
       : hint_(hint) {}
+  explicit EmbeddedHintParameter(const BinaryOperationHint hint)
+      : hint_(hint) {}
+
+  static EmbeddedHintParameter Invalid() { return EmbeddedHintParameter(); }
+  bool IsInvalid() const {
+    return std::holds_alternative<std::monostate>(hint_);
+  }
 
   const EmbeddedHint& hint() const { return hint_; }
 
@@ -505,6 +514,26 @@ class NamedAccess final {
 
 const NamedAccess& NamedAccessOf(const Operator* op);
 
+struct CreateGeneratorObjectParameters final {
+  IndirectHandle<BytecodeArray> bytecode_array;
+
+  explicit CreateGeneratorObjectParameters(
+      IndirectHandle<BytecodeArray> bytecode_array)
+      : bytecode_array(bytecode_array) {}
+
+  friend bool operator==(CreateGeneratorObjectParameters const&,
+                         CreateGeneratorObjectParameters const&);
+  friend bool operator!=(CreateGeneratorObjectParameters const&,
+                         CreateGeneratorObjectParameters const&);
+
+  friend size_t hash_value(CreateGeneratorObjectParameters const&);
+
+  friend std::ostream& operator<<(std::ostream&,
+                                  CreateGeneratorObjectParameters const&);
+};
+
+const CreateGeneratorObjectParameters& CreateGeneratorObjectParametersOf(
+    const Operator* op);
 
 // Defines the property being loaded from an object by a named load. This is
 // used as a parameter by JSLoadGlobal operator.
@@ -978,13 +1007,12 @@ class V8_EXPORT_PRIVATE JSOperatorBuilder final
   JSOperatorBuilder(const JSOperatorBuilder&) = delete;
   JSOperatorBuilder& operator=(const JSOperatorBuilder&) = delete;
 
-  const Operator* Equal(FeedbackSource const& feedback);
-  const Operator* StrictEqual(FeedbackSource const& feedback);
-  const Operator* StrictEqual(const CompareOperationHint feedback);
-  const Operator* LessThan(FeedbackSource const& feedback);
-  const Operator* GreaterThan(FeedbackSource const& feedback);
-  const Operator* LessThanOrEqual(FeedbackSource const& feedback);
-  const Operator* GreaterThanOrEqual(FeedbackSource const& feedback);
+  const Operator* Equal(const CompareOperationHint type_hint);
+  const Operator* StrictEqual(const CompareOperationHint type_hint);
+  const Operator* LessThan(const CompareOperationHint type_hint);
+  const Operator* GreaterThan(const CompareOperationHint type_hint);
+  const Operator* LessThanOrEqual(const CompareOperationHint type_hint);
+  const Operator* GreaterThanOrEqual(const CompareOperationHint type_hint);
 
   const Operator* BitwiseOr(FeedbackSource const& feedback);
   const Operator* BitwiseXor(FeedbackSource const& feedback);
@@ -1126,7 +1154,8 @@ class V8_EXPORT_PRIVATE JSOperatorBuilder final
 
   const Operator* FindNonDefaultConstructorOrConstruct();
 
-  const Operator* CreateGeneratorObject();
+  const Operator* CreateGeneratorObject(
+      IndirectHandle<BytecodeArray> bytecode_array);
 
   const Operator* LoadGlobal(NameRef name, const FeedbackSource& feedback,
                              TypeofMode typeof_mode = TypeofMode::kNotInside);

@@ -521,8 +521,7 @@ RUNTIME_FUNCTION(Runtime_GenerateWasmCompilationHints) {
   }
 
   if (v8_flags.wasm_generate_compilation_hints) {
-    AccountingAllocator allocator;
-    Zone zone{&allocator, "wasm::EmitCompilationHintsToBuffer"};
+    Zone zone{isolate->allocator(), "wasm::EmitCompilationHintsToBuffer"};
     wasm::ZoneBuffer buffer{&zone};
     wasm::EmitCompilationHintsToBuffer(buffer, native_module);
     wasm::WriteCompilationHintsToFile(buffer, native_module);
@@ -712,8 +711,8 @@ RUNTIME_FUNCTION(Runtime_WasmTraceMemory) {
   const Address address =
       reinterpret_cast<Address>(frame->trusted_instance_data()
                                     ->memory_object(info->mem_index)
-                                    ->array_buffer()
-                                    ->backing_store()) +
+                                    ->backing_store()
+                                    ->buffer_start()) +
       info->offset;
 
   wasm::MemoryTraceEntry trace_entry = {

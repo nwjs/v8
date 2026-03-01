@@ -198,9 +198,6 @@
   'language/statements/try/tco-finally': [SKIP],
   'language/statements/while/tco-body': [SKIP],
 
-  # https://bugs.chromium.org/p/v8/issues/detail?id=5690
-  'language/expressions/call/eval-spread': [FAIL],
-
   # https://bugs.chromium.org/p/v8/issues/detail?id=9875
   'language/expressions/coalesce/tco-pos-undefined': [FAIL],
   'language/expressions/coalesce/tco-pos-null': [FAIL],
@@ -254,34 +251,6 @@
   # there are only 16 tests. Skip for now.
   'staging/sm/Temporal/*': [SKIP],
 
-  # Spec issue: https://github.com/tc39/proposal-intl-era-monthcode/issues/96
-  # We follow the spec, the tests follow an older consensus on the spec.
-  # We need to wait for upstream to make a decision here.
-  'intl402/Temporal/PlainDate/prototype/since/leap-months-chinese': [FAIL],
-  'intl402/Temporal/PlainDate/prototype/since/leap-months-dangi': [FAIL],
-  'intl402/Temporal/PlainDate/prototype/since/leap-months-hebrew': [FAIL],
-  'intl402/Temporal/PlainDate/prototype/until/leap-months-chinese': [FAIL],
-  'intl402/Temporal/PlainDate/prototype/until/leap-months-dangi': [FAIL],
-  'intl402/Temporal/PlainDate/prototype/until/leap-months-hebrew': [FAIL],
-  'intl402/Temporal/PlainDateTime/prototype/since/leap-months-chinese': [FAIL],
-  'intl402/Temporal/PlainDateTime/prototype/since/leap-months-dangi': [FAIL],
-  'intl402/Temporal/PlainDateTime/prototype/since/leap-months-hebrew': [FAIL],
-  'intl402/Temporal/PlainDateTime/prototype/until/leap-months-chinese': [FAIL],
-  'intl402/Temporal/PlainDateTime/prototype/until/leap-months-dangi': [FAIL],
-  'intl402/Temporal/PlainDateTime/prototype/until/leap-months-hebrew': [FAIL],
-  'intl402/Temporal/ZonedDateTime/prototype/since/leap-months-chinese': [FAIL],
-  'intl402/Temporal/ZonedDateTime/prototype/since/leap-months-dangi': [FAIL],
-  'intl402/Temporal/ZonedDateTime/prototype/since/leap-months-hebrew': [FAIL],
-  'intl402/Temporal/ZonedDateTime/prototype/until/leap-months-chinese': [FAIL],
-  'intl402/Temporal/ZonedDateTime/prototype/until/leap-months-dangi': [FAIL],
-  'intl402/Temporal/ZonedDateTime/prototype/until/leap-months-hebrew': [FAIL],
-  'intl402/Temporal/PlainYearMonth/prototype/since/leap-months-chinese': [SKIP],
-  'intl402/Temporal/PlainYearMonth/prototype/since/leap-months-dangi': [SKIP],
-  'intl402/Temporal/PlainYearMonth/prototype/since/leap-months-hebrew': [SKIP],
-  'intl402/Temporal/PlainYearMonth/prototype/until/leap-months-chinese': [SKIP],
-  'intl402/Temporal/PlainYearMonth/prototype/until/leap-months-dangi': [SKIP],
-  'intl402/Temporal/PlainYearMonth/prototype/until/leap-months-hebrew': [SKIP],
-
   # toLocaleString with just an era setting should format as default
   # b/463427743
   'intl402/Temporal/Instant/prototype/toLocaleString/era': [FAIL],
@@ -291,13 +260,8 @@
   'intl402/Temporal/PlainYearMonth/prototype/toLocaleString/era': [FAIL],
   'intl402/DateTimeFormat/prototype/format/temporal-objects-format-with-era': [FAIL],
   'intl402/DateTimeFormat/prototype/formatRange/temporal-objects-format-with-era': [FAIL],
-  'intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-format-with-era': [FAIL],
-  'intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-format-with-era': [FAIL],
-
-  # Old tests with formatting differences between ICU4C versions
 
   # End Temporal test expectations
-
 
   # https://github.com/tc39/test262/pull/3988
   'intl402/DurationFormat/prototype/format/precision-exact-mathematical-values': [FAIL],
@@ -667,15 +631,6 @@
   '*': [SKIP],  # only relevant for mjsunit tests.
 }],
 
-################################################################################
-# Test expectations should be updated because of crbug.com/381805376
-[ALWAYS, {
-  'staging/sm/Iterator/prototype/every/check-fn-after-getting-iterator': [SKIP],
-  'staging/sm/Iterator/prototype/find/check-fn-after-getting-iterator': [SKIP],
-  'staging/sm/Iterator/prototype/forEach/check-fn-after-getting-iterator': [SKIP],
-  'staging/sm/Iterator/prototype/reduce/check-fn-after-getting-iterator': [SKIP],
-  'staging/sm/Iterator/prototype/some/check-fn-after-getting-iterator': [SKIP],
-}],
 
 
 
@@ -727,16 +682,6 @@
 # Roll-watcher patch
 [ALWAYS, {
   # https://github.com/tc39/test262/pull/4146
-  'built-ins/Math/sumPrecise/length': [SKIP],
-  'built-ins/Math/sumPrecise/name': [SKIP],
-  'built-ins/Math/sumPrecise/not-a-constructor': [SKIP],
-  'built-ins/Math/sumPrecise/prop-desc': [SKIP],
-  'built-ins/Math/sumPrecise/sum': [SKIP],
-  'built-ins/Math/sumPrecise/sum-is-NaN': [SKIP],
-  'built-ins/Math/sumPrecise/sum-is-infinite': [SKIP],
-  'built-ins/Math/sumPrecise/sum-is-minus-zero': [SKIP],
-  'built-ins/Math/sumPrecise/takes-iterable': [SKIP],
-  'built-ins/Math/sumPrecise/throws-on-non-number': [SKIP],
   'intl402/DateTimeFormat/offset-timezone-no-unicode-minus-sign': [SKIP],
 }],
 # End roll-watcher patch
@@ -787,32 +732,10 @@
 # End roll-watcher patch
 ####
 
-
-
 ####
 # import test262@dad2774b2eab2119cc8390ae65db4a5016de2dfe
 [ALWAYS, {
-  'language/import/import-defer/deferred-namespace-object/exotic-object-behavior': [SKIP],
   'language/import/import-defer/deferred-namespace-object/identity': [SKIP],
-  'language/import/import-defer/errors/get-other-while-dep-evaluating-async/main': [SKIP],
-  'language/import/import-defer/errors/get-other-while-dep-evaluating/main': [SKIP],
-  'language/import/import-defer/errors/get-other-while-evaluating-async/main': [SKIP],
-  'language/import/import-defer/errors/get-other-while-evaluating/main': [SKIP],
-  'language/import/import-defer/errors/get-self-while-defer-evaluating/main': [SKIP],
-  'language/import/import-defer/errors/get-self-while-evaluating': [SKIP],
-  'language/import/import-defer/errors/get-self-while-evaluating-async/main': [SKIP],
-  'language/import/import-defer/errors/module-throws/defer-import-after-evaluation': [SKIP],
-  'language/import/import-defer/errors/module-throws/third-party-evaluation-after-defer-import': [SKIP],
-  'language/import/import-defer/errors/module-throws/trigger-evaluation': [SKIP],
-  'language/import/import-defer/evaluation-sync/import-defer-does-not-evaluate': [SKIP],
-  'language/import/import-defer/evaluation-sync/module-imported-defer-and-eager': [SKIP],
-  'language/import/import-defer/evaluation-top-level-await/flattening-order/main': [SKIP],
-  'language/import/import-defer/evaluation-top-level-await/import-defer-async-module/main': [SKIP],
-  'language/import/import-defer/evaluation-top-level-await/import-defer-transitive-async-module/main': [SKIP],
-  'language/import/import-defer/evaluation-top-level-await/sync-dependency-of-deferred-async-module/main': [SKIP],
-  'language/import/import-defer/syntax/import-attributes': [SKIP],
-  'language/import/import-defer/syntax/valid-default-binding-named-defer': [SKIP],
-  'language/import/import-defer/syntax/valid-defer-namespace': [SKIP],
 }],
 # end import test262@dad2774b2eab2119cc8390ae65db4a5016de2dfe
 ####
@@ -820,8 +743,6 @@
 ####
 # import test262@d49db639a89df9cc2b6c02554beb41acaec95c38
 [ALWAYS, {
-  'language/import/import-defer/deferred-namespace-object/to-string-tag': [FAIL],
-
   'staging/sm/class/superCallOrder': [FAIL],
   'staging/sm/class/superPropOrdering': [FAIL],
   'staging/sm/DataView/detach-after-construction': [FAIL],
@@ -879,52 +800,6 @@
 }],
 # End roll-watcher patch
 ####
-
-####
-# import test262@e7a84b0a090ca86cc05f2e90116115c8c2a7c059
-[ALWAYS, {
-  'language/import/import-defer/evaluation-triggers/ignore-exported-then-defineOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-exported-then-delete': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-exported-then-get': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-exported-then-getOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-exported-then-hasProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-getPrototypeOf': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-isExtensible': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-not-exported-then-defineOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-not-exported-then-delete': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-not-exported-then-get': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-not-exported-then-getOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-not-exported-then-hasProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-preventExtensions': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-setPrototypeOf': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-set-string-exported': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-set-string-not-exported': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-other-defineOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-other-delete': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-other-get': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-other-getOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-other-hasProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-toStringTag-defineOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-toStringTag-delete': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-toStringTag-get': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-toStringTag-getOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/ignore-symbol-toStringTag-hasProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-exported-string-defineOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-exported-string-delete': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-exported-string-get': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-exported-string-getOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-exported-string-hasProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-not-exported-string-defineOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-not-exported-string-delete': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-not-exported-string-get': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-not-exported-string-getOwnProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-not-exported-string-hasProperty': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-ownPropertyKey-names': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-ownPropertyKeys': [SKIP],
- 'language/import/import-defer/evaluation-triggers/trigger-ownPropertyKeys-symbols': [SKIP],
-}],
-# end import test262@e7a84b0a090ca86cc05f2e90116115c8c2a7c059
-###
 
 ####
 # import test262@bc5c14176e2b11a78859571eb693f028c8822458
@@ -1126,21 +1001,6 @@
 ####
 # Roll-watcher patch
 [ALWAYS, {
-  'built-ins/Temporal/Duration/compare/relativeto-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/Duration/prototype/toJSON/large-with-small-units': [SKIP],
-  'built-ins/Temporal/Duration/prototype/toString/large-with-small-units': [SKIP],
-  'built-ins/Temporal/Duration/prototype/total/relativeto-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/PlainDateTime/compare/argument-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/PlainDateTime/from/argument-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/PlainDateTime/prototype/equals/argument-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/PlainDateTime/prototype/since/argument-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/PlainDateTime/prototype/until/argument-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/ZonedDateTime/compare/argument-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/ZonedDateTime/from/argument-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/ZonedDateTime/prototype/equals/argument-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-optional-properties': [SKIP],
-  'built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-optional-properties': [SKIP],
   'built-ins/ThrowTypeError/distinct-cross-realm': [SKIP],
   'built-ins/Uint8Array/prototype/setFromBase64/trailing-garbage': [SKIP],
   'intl402/Intl/supportedValuesOf/calendars-required-by-intl-era-monthcode': [SKIP],
@@ -1271,23 +1131,8 @@
 
   # Times out
   'built-ins/RegExp/property-escapes/generated/strings/RGI_Emoji': [SKIP],
-
-  # Unknown issue
-  # b/464065358
-  'language/module-code/ambiguous-export-bindings/namespace-unambiguous-if-export-star-as-from-and-import-star-as-and-export': [FAIL],
-  'language/module-code/ambiguous-export-bindings/namespace-unambiguous-if-import-star-as-and-export': [FAIL],
-  'language/module-code/ambiguous-export-bindings/namespace-unambiguous-if-export-star-as-from': [FAIL],
 }],
 # end import test262@bc5c6fe5bc9c82f031058e3bbe16bf3937a81fc5
-####
-
-####
-# Roll-watcher patch
-[ALWAYS, {
-  'intl402/DateTimeFormat/prototype/formatRangeToParts/temporal-objects-format-with-era': [SKIP],
-  'intl402/DateTimeFormat/prototype/formatToParts/temporal-objects-format-with-era': [SKIP],
-}],
-# End roll-watcher patch
 ####
 
 ####
@@ -1297,28 +1142,6 @@
 }],
 # End roll-watcher patch
 ####
-
-
-####
-# import test262@c0cf527756840ae8ba679e53e627ec20f3bbc5c8
-[ALWAYS, {
-  'language/import/import-defer/evaluation-triggers/ignore-exported-then-get-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/ignore-exported-then-hasProperty-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/ignore-not-exported-then-get-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/ignore-not-exported-then-hasProperty-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/ignore-private-name-access': [SKIP],
-  'language/import/import-defer/evaluation-triggers/ignore-symbol-other-get-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/ignore-symbol-other-hasProperty-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/ignore-symbol-toStringTag-get-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/ignore-symbol-toStringTag-hasProperty-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/trigger-exported-string-get-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/trigger-exported-string-hasProperty-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/trigger-not-exported-string-get-in-prototype': [SKIP],
-  'language/import/import-defer/evaluation-triggers/trigger-not-exported-string-hasProperty-in-prototype': [SKIP],
-}],
-# end import test262@c0cf527756840ae8ba679e53e627ec20f3bbc5c8
-####
-
 
 ####
 # Roll-watcher patch

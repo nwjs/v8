@@ -513,7 +513,11 @@ class PromotedPageRecordMigratedSlotVisitor final
   V8_INLINE size_t VisitJSArrayBuffer(Tagged<Map> map,
                                       Tagged<JSArrayBuffer> object,
                                       MaybeObjectSize maybe_object_size) {
-    object->YoungMarkExtensionPromoted();
+    ArrayBufferExtension* extension = object->extension();
+    if (extension) {
+      extension->InitializationBarrier();
+      extension->YoungMarkPromoted();
+    }
     return NewSpaceVisitor<PromotedPageRecordMigratedSlotVisitor>::
         VisitJSArrayBuffer(map, object, maybe_object_size);
   }
@@ -646,7 +650,7 @@ void ZapDeadObjectsInRange(Heap* heap, Address dead_start, Address dead_end,
 
 void Sweeper::LocalSweeper::ParallelIteratePromotedPage(MutablePage* page) {
   DCHECK(v8_flags.minor_ms);
-  DCHECK(!page->Chunk()->IsBlackAllocatedPage());
+  DCHECK(!page->is_black_allocated());
   DCHECK_NOT_NULL(page);
   {
     base::MutexGuard guard(page->mutex());
@@ -659,7 +663,7 @@ void Sweeper::LocalSweeper::ParallelIteratePromotedPage(MutablePage* page) {
     const bool is_large_page = page->is_large();
     if (is_large_page) {
       DCHECK_EQ(LO_SPACE, page->owner_identity());
-      record_visitor.Process(LargePage::cast(page)->GetObject());
+      record_visitor.Process(SbxCast<LargePage>(page)->GetObject());
       page->ReleaseSlotSet(SURVIVOR_TO_EXTERNAL_POINTER);
     } else {
       DCHECK_EQ(OLD_SPACE, page->owner_identity());
@@ -1175,7 +1179,7 @@ void Sweeper::RawSweep(NormalPage* p,
          (space->identity() == NEW_SPACE && v8_flags.minor_ms));
   DCHECK(!p->Chunk()->IsEvacuationCandidate());
   DCHECK(!p->SweepingDone());
-  DCHECK(!p->Chunk()->IsBlackAllocatedPage());
+  DCHECK(!p->is_black_allocated());
   DCHECK_IMPLIES(space->identity() == NEW_SPACE,
                  !heap_->incremental_marking()->IsMinorMarking());
   DCHECK_IMPLIES(space->identity() != NEW_SPACE,
@@ -1405,7 +1409,7 @@ void Sweeper::AddNewSpacePage(NormalPage* page) {
 void Sweeper::AddPageImpl(AllocationSpace space, NormalPage* page) {
   DCHECK(heap_->IsMainThread());
   DCHECK(page->SweepingDone());
-  DCHECK(!page->Chunk()->IsBlackAllocatedPage());
+  DCHECK(!page->is_black_allocated());
   DCHECK(IsValidSweepingSpace(space));
   DCHECK_IMPLIES(v8_flags.concurrent_sweeping && (space != NEW_SPACE),
                  !major_sweeping_state_.HasValidJob());
@@ -1479,7 +1483,7 @@ void Sweeper::PrepareToBeSweptPage(AllocationSpace space, NormalPage* page) {
 }
 
 void Sweeper::PrepareToBeIteratedPromotedPage(NormalPage* page) {
-  DCHECK(!page->Chunk()->IsBlackAllocatedPage());
+  DCHECK(!page->is_black_allocated());
   DCHECK_EQ(OLD_SPACE, page->owner_identity());
   VerifyPreparedPage(page);
   page->set_concurrent_sweeping_state(

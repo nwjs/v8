@@ -207,9 +207,10 @@ TEST_F(IsolateTest, DebugTraceMinimal) {
   std::string output = crash_key_store.ValueForKey("v8-oom-stack");
   const char* expected_output =
       "f3 in test.js\n"
-      "f2 in test.js\n"
-      "f1 in test.js\n"
-      "<none> in test.js\n";
+      "f2 in =\n"
+      "f1 in =\n"
+      "<none> in =\n"
+      "$\n";
   EXPECT_EQ(output, expected_output);
 }
 

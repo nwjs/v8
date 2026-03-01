@@ -757,7 +757,7 @@ FunctionLiteral* Parser::DoParseProgram(Isolate* isolate, ParseInfo* info) {
 
   ScopedModification<Mode> mode_scope(
       &mode_, allow_lazy_ ? PARSE_LAZILY : PARSE_EAGERLY);
-  ResetInfoId();
+  ResetInfoId(kFunctionLiteralIdTopLevel);
 
   FunctionLiteral* result = nullptr;
   {
@@ -1852,6 +1852,10 @@ void Parser::ParseExportStar() {
   // never conflict with a string literal export name, as literal string export
   // names in local name positions (i.e. left of 'as' or in a clause without
   // 'as') are disallowed without a following 'from' clause.
+  //
+  // TODO(olivf): Investigate if the private local name is still needed.
+  // Re-exports of namespaces are now special exports which are resolved to the
+  // imported module's special namespace binding cell.
 
   ExpectContextualKeyword(ast_value_factory()->as_string());
   const AstRawString* export_name = ParseExportSpecifierName();
@@ -2916,8 +2920,9 @@ FunctionLiteral* Parser::ParseFunctionLiteral(
   // try to lazy parse in the first place, we'll have to parse eagerly.
   bool did_preparse_successfully =
       should_preparse &&
-      SkipFunction(function_name, kind, function_syntax_kind, scope,
-                   &num_parameters, &function_length, &produced_preparse_data);
+      SkipFunction(function_literal_id, function_name, kind,
+                   function_syntax_kind, scope, &num_parameters,
+                   &function_length, &produced_preparse_data);
 
   if (!did_preparse_successfully) {
     // If skipping aborted, it rewound the scanner until before the lparen.
@@ -2986,7 +2991,8 @@ FunctionLiteral* Parser::ParseFunctionLiteral(
   return function_literal;
 }
 
-bool Parser::SkipFunction(const AstRawString* function_name, FunctionKind kind,
+bool Parser::SkipFunction(int function_literal_id,
+                          const AstRawString* function_name, FunctionKind kind,
                           FunctionSyntaxKind function_syntax_kind,
                           DeclarationScope* function_scope, int* num_parameters,
                           int* function_length,
@@ -3052,8 +3058,8 @@ bool Parser::SkipFunction(const AstRawString* function_name, FunctionKind kind,
   }
 
   PreParser::PreParseResult result = reusable_preparser()->PreParseFunction(
-      function_name, kind, function_syntax_kind, function_scope, use_counts_,
-      produced_preparse_data);
+      function_literal_id, function_name, kind, function_syntax_kind,
+      function_scope, use_counts_, produced_preparse_data);
 
   if (timer && timer->Elapsed().InNanoseconds() > 0) {
     auto end = timer->Elapsed();
