@@ -14,7 +14,7 @@
 #include "src/base/numbers/dtoa.h"
 #include "src/base/numbers/strtod.h"
 #include "src/base/small-vector.h"
-#include "src/bigint/bigint.h"
+#include "src/bigint/bigint-inl.h"
 #include "src/common/assert-scope.h"
 #include "src/handles/handles.h"
 #include "src/heap/factory.h"
@@ -484,7 +484,7 @@ enum class Sign { kNegative, kPositive, kNone };
 }  // namespace
 
 // ES6 18.2.5 parseInt(string, radix) (with NumberParseIntHelper subclass);
-// and BigInt parsing cases from https://tc39.github.io/proposal-bigint/
+// and BigInt parsing cases from https://tc39.es/proposal-bigint/
 // (with StringToBigIntHelper subclass).
 class StringToIntHelper {
  public:
@@ -1139,7 +1139,8 @@ std::string_view DoubleToStringView(double v, base::Vector<char> buffer) {
     default: {
       if (IsInt32Double(v)) {
         // This will trigger if v is -0 and -0.0 is stringified to "0".
-        // (see ES section 7.1.12.1 #sec-tostring-applied-to-the-number-type)
+        // (see ES section 7.1.12.1
+        // https://tc39.es/ecma262/#sec-tostring-applied-to-the-number-type)
         return IntToStringView(FastD2I(v), buffer);
       }
       SimpleStringBuilder builder(buffer.begin(), buffer.size());

@@ -67,7 +67,7 @@ DirectHandle<JSRegExpResultIndices> JSRegExpResultIndices::BuildIndices(
   // Create a groups property which returns a dictionary of named captures to
   // their corresponding capture indices.
   auto names = Cast<FixedArray>(maybe_names);
-  int num_names = names->length() >> 1;
+  const int num_names = static_cast<int>(names->ulength().value() >> 1);
   DirectHandle<HeapObject> group_names;
   if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
     group_names = isolate->factory()->NewSwissNameDictionary(num_names);
@@ -372,9 +372,9 @@ MaybeDirectHandle<JSRegExp> JSRegExp::Initialize(Isolate* isolate,
   if (IsJSFunction(constructor) &&
       Cast<JSFunction>(constructor)->initial_map() == map) {
     // If we still have the original map, set in-object properties directly.
-    regexp->InObjectPropertyAtPut(JSRegExp::kLastIndexFieldIndex,
-                                  Smi::FromInt(kInitialLastIndexValue),
-                                  SKIP_WRITE_BARRIER);
+    regexp->InObjectPropertyPutAtOffset(JSRegExp::kLastIndexOffset,
+                                        Smi::FromInt(kInitialLastIndexValue),
+                                        SKIP_WRITE_BARRIER);
   } else {
     // Map has changed, so use generic, but slower, method.
     RETURN_ON_EXCEPTION(

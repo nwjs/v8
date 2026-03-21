@@ -58,7 +58,17 @@ int MacroAssembler::RequiredStackSizeForCallerSaved(SaveFPRegsMode fp_mode,
   bytes += list.Count() * kSystemPointerSize;
 
   if (fp_mode == SaveFPRegsMode::kSave) {
-    bytes += kCallerSavedFPU.Count() * kSimd128Size;
+#if V8_ENABLE_WEBASSEMBLY
+    bool generating_builtins =
+        isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
+    if (generating_builtins || CpuFeatures::SupportsWasmSimd128()) {
+      bytes += kCallerSavedFPU.Count() * kSimd128Size;
+    } else {
+      bytes += kCallerSavedFPU.Count() * kDoubleSize;
+    }
+#else
+    bytes += kCallerSavedFPU.Count() * kDoubleSize;
+#endif
   }
 
   return bytes;
@@ -76,9 +86,9 @@ int MacroAssembler::PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
 
   if (fp_mode == SaveFPRegsMode::kSave) {
 #if V8_ENABLE_WEBASSEMBLY
-    bool generating_bultins =
+    bool generating_builtins =
         isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
-    if (generating_bultins) {
+    if (generating_builtins) {
       Label no_simd, done;
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
@@ -101,15 +111,16 @@ int MacroAssembler::PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
       Sub_d(sp, sp, kCallerSavedFPU.Count() * kDoubleSize);
 
       bind(&done);
+      bytes += kCallerSavedFPU.Count() * kSimd128Size;
     } else {
       if (CpuFeatures::SupportsWasmSimd128()) {
         MultiPushLSX(kCallerSavedFPU);
+        bytes += kCallerSavedFPU.Count() * kSimd128Size;
       } else {
         MultiPushFPU(kCallerSavedFPU);
-        Sub_d(sp, sp, Operand(kCallerSavedFPU.Count() * kDoubleSize));
+        bytes += kCallerSavedFPU.Count() * kDoubleSize;
       }
     }
-    bytes += kCallerSavedFPU.Count() * kSimd128Size;
 #else
     MultiPushFPU(kCallerSavedFPU);
     bytes += kCallerSavedFPU.Count() * kDoubleSize;
@@ -124,9 +135,9 @@ int MacroAssembler::PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
   int bytes = 0;
   if (fp_mode == SaveFPRegsMode::kSave) {
 #if V8_ENABLE_WEBASSEMBLY
-    bool generating_bultins =
+    bool generating_builtins =
         isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
-    if (generating_bultins) {
+    if (generating_builtins) {
       // Check if machine has simd enabled, if so push vector registers. If not
       // then only push double registers.
       Label no_simd, done;
@@ -151,15 +162,16 @@ int MacroAssembler::PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
       MultiPopFPU(kCallerSavedFPU);
 
       bind(&done);
+      bytes += kCallerSavedFPU.Count() * kSimd128Size;
     } else {
       if (CpuFeatures::SupportsWasmSimd128()) {
         MultiPopLSX(kCallerSavedFPU);
+        bytes += kCallerSavedFPU.Count() * kSimd128Size;
       } else {
-        Add_d(sp, sp, Operand(kCallerSavedFPU.Count() * kDoubleSize));
         MultiPopFPU(kCallerSavedFPU);
+        bytes += kCallerSavedFPU.Count() * kDoubleSize;
       }
     }
-    bytes += kCallerSavedFPU.Count() * kSimd128Size;
 #else
     MultiPopFPU(kCallerSavedFPU);
     bytes += kCallerSavedFPU.Count() * kDoubleSize;
@@ -626,6 +638,7 @@ void MacroAssembler::LoadCodeEntrypointViaCodePointer(Register destination,
   Ld_wu(destination, field_operand);
   srli_d(destination, destination, kCodePointerHandleShift);
   slli_d(destination, destination, kCodePointerTableEntrySizeLog2);
+  static_assert(kCodePointerTableEntryEntrypointOffset == 0);
   Ld_d(destination, MemOperand(scratch, destination));
   if (tag != 0) {
     li(scratch, Operand(tag));
@@ -6094,6 +6107,10 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     __ Branch(&propagate_exception, ne, scratch, Operand(scratch2));
   }
 
+#ifndef V8_ENABLE_MEMORY_CORRUPTION_API
+  // This check doesn't make sense in for sandbox testing since
+  // Sandbox.getObjectAt(..) might legitimately return non-JSAny values
+  // and this check just hinders debugging.
   if (v8_flags.debug_code) {
     Label ok;
     if (handle_interceptor_result) {
@@ -6103,6 +6120,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                    AbortReason::kAPICallReturnedInvalidObject);
     __ bind(&ok);
   }
+#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
 
   if (argc_operand == nullptr) {
     DCHECK_NE(slots_to_drop_on_return, 0);

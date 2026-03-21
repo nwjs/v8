@@ -1165,12 +1165,12 @@ template <typename... Args>
 Local<FixedArray> MakeInternalFixedArray(i::Isolate* i_isolate, Args... args) {
   i::DirectHandle<i::FixedArray> fixed_array =
       i_isolate->factory()->NewFixedArray(sizeof...(args));
-  int index = 0;
+  uint32_t index = 0;
   auto add = [&](Local<Data> obj) {
     fixed_array->set(index++, *Utils::OpenHandle(*obj));
   };
   (add(args), ...);
-  DCHECK_EQ(fixed_array->length(), index);
+  DCHECK_EQ(fixed_array->ulength().value(), index);
   return Utils::FixedArrayToLocal(fixed_array);
 }
 
@@ -1841,8 +1841,7 @@ std::optional<i::wasm::ValueType> GetValueType(
     return i::wasm::kWasmArrayRef;
   } else if (string->IsEqualTo(base::CStrVector("i31ref"))) {
     return i::wasm::kWasmI31Ref;
-  } else if (enabled_features.has_exnref() &&
-             string->IsEqualTo(base::CStrVector("exnref"))) {
+  } else if (string->IsEqualTo(base::CStrVector("exnref"))) {
     return i::wasm::kWasmExnRef;
   }
   // Unrecognized type.
@@ -1890,7 +1889,7 @@ bool ToF64(Local<v8::Value> value, Local<Context> context, double* f64_value) {
 }
 }  // namespace
 
-// WebAssembly.Global
+// new WebAssembly.Global(descriptor[, value])
 void WebAssemblyGlobalImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   WasmJSApiScope js_api_scope{info, "WebAssembly.Global()"};
   auto [isolate, i_isolate, thrower] = js_api_scope.isolates_and_thrower();
@@ -1943,8 +1942,8 @@ void WebAssemblyGlobalImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   i::MaybeDirectHandle<i::WasmGlobalObject> maybe_global_obj =
       i::WasmGlobalObject::New(
           i_isolate, i::DirectHandle<i::WasmTrustedInstanceData>(),
-          i::MaybeDirectHandle<i::JSArrayBuffer>(),
-          i::MaybeDirectHandle<i::FixedArray>(), type, offset, is_mutable);
+          i::MaybeDirectHandle<i::WasmGlobalObject::BufferType>(), type, offset,
+          is_mutable);
 
   i::DirectHandle<i::WasmGlobalObject> global_obj;
   if (!maybe_global_obj.ToHandle(&global_obj)) {
@@ -2035,6 +2034,7 @@ void WebAssemblyGlobalImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
     case i::wasm::kI8:
     case i::wasm::kI16:
     case i::wasm::kF16:
+    case i::wasm::kWaitQueue:
     case i::wasm::kVoid:
     case i::wasm::kTop:
     case i::wasm::kBottom:
@@ -2207,6 +2207,7 @@ V8_WARN_UNUSED_RESULT bool EncodeExceptionValues(
       case i::wasm::kI8:
       case i::wasm::kI16:
       case i::wasm::kF16:
+      case i::wasm::kWaitQueue:
       case i::wasm::kVoid:
       case i::wasm::kTop:
       case i::wasm::kBottom:
@@ -2691,6 +2692,10 @@ V8_WARN_UNUSED_RESULT bool WasmObjectToJSReturnValue(
       default:
         break;
     }
+  } else if (unsafe_type.has_index() &&
+             unsafe_type.ref_type_kind() == i::wasm::RefTypeKind::kCont) {
+    thrower->TypeError("invalid type %s", unsafe_type.name().c_str());
+    return false;
   }
   return_value.Set(Utils::ToLocal(i::wasm::WasmToJSObject(isolate, value)));
   return true;
@@ -3042,6 +3047,7 @@ void WebAssemblyExceptionGetArgImpl(
       case i::wasm::kI8:
       case i::wasm::kI16:
       case i::wasm::kF16:
+      case i::wasm::kWaitQueue:
       case i::wasm::kVoid:
       case i::wasm::kTop:
       case i::wasm::kBottom:
@@ -3095,6 +3101,7 @@ void WebAssemblyExceptionGetArgImpl(
     case i::wasm::kI8:
     case i::wasm::kI16:
     case i::wasm::kF16:
+    case i::wasm::kWaitQueue:
     case i::wasm::kVoid:
     case i::wasm::kTop:
     case i::wasm::kBottom:
@@ -3155,6 +3162,7 @@ void WebAssemblyGlobalGetValueCommon(WasmJSApiScope& js_api_scope) {
     case i::wasm::kI8:
     case i::wasm::kI16:
     case i::wasm::kF16:
+    case i::wasm::kWaitQueue:
     case i::wasm::kTop:
     case i::wasm::kBottom:
     case i::wasm::kVoid:
@@ -3250,6 +3258,7 @@ void WebAssemblyGlobalSetValueImpl(
     case i::wasm::kI8:
     case i::wasm::kI16:
     case i::wasm::kF16:
+    case i::wasm::kWaitQueue:
     case i::wasm::kTop:
     case i::wasm::kBottom:
     case i::wasm::kVoid:
@@ -3577,16 +3586,19 @@ void WasmJs::PrepareForSnapshot(Isolate* isolate) {
                                   isolate);
     Map::EnsureDescriptorSlack(isolate, initial_map, 2);
     {
-      Descriptor d = Descriptor::DataField(
-          isolate, f->wasm_exception_tag_symbol(),
-          WasmExceptionPackage::kTagIndex, DONT_ENUM, Representation::Tagged());
+      Descriptor d =
+          Descriptor::DataField(isolate, f->wasm_exception_tag_symbol(),
+                                initial_map->GetInObjectPropertyOffset(
+                                    WasmExceptionPackage::kTagIndex),
+                                DONT_ENUM, Representation::Tagged(), true);
       initial_map->AppendDescriptor(isolate, &d);
     }
     {
       Descriptor d =
           Descriptor::DataField(isolate, f->wasm_exception_values_symbol(),
-                                WasmExceptionPackage::kValuesIndex, DONT_ENUM,
-                                Representation::Tagged());
+                                initial_map->GetInObjectPropertyOffset(
+                                    WasmExceptionPackage::kValuesIndex),
+                                DONT_ENUM, Representation::Tagged(), true);
       initial_map->AppendDescriptor(isolate, &d);
     }
   }

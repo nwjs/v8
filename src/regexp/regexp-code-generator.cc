@@ -31,9 +31,9 @@ RegExpCodeGenerator::RegExpCodeGenerator(
       masm_(masm),
       bytecode_(bytecode),
       iter_(bytecode_),
-      labels_(zone_.AllocateArray<Label>(bytecode_->length())),
-      jump_targets_(bytecode_->length(), &zone_),
-      indirect_jump_targets_(bytecode_->length(), &zone_),
+      labels_(zone_.AllocateArray<Label>(bytecode_->ulength().value())),
+      jump_targets_(bytecode_->ulength().value(), &zone_),
+      indirect_jump_targets_(bytecode_->ulength().value(), &zone_),
       has_unsupported_bytecode_(false) {}
 
 RegExpCodeGenerator::Result RegExpCodeGenerator::Assemble(
@@ -48,7 +48,8 @@ RegExpCodeGenerator::Result RegExpCodeGenerator::Assemble(
     analysis.Analyze();
     if (v8_flags.trace_regexp_bytecode_analysis) {
       std::unique_ptr<char[]> pattern_cstring = source->ToCString();
-      RegExpBytecodeDisassemble(bytecode_->begin(), bytecode_->length(),
+      RegExpBytecodeDisassemble(bytecode_->begin(),
+                                bytecode_->ulength().value(),
                                 pattern_cstring.get(), &analysis);
     }
   }
@@ -286,9 +287,11 @@ Handle<ByteArray> CreateBitTableByteArray(
       isolate->factory()->NewByteArray(RegExpMacroAssembler::kTableSize);
   const bool fill_nibble_table = !nibble_table.is_null();
   if (fill_nibble_table) {
-    DCHECK_EQ(nibble_table->length(),
-              RegExpMacroAssembler::kTableSize / kBitsPerByte);
-    std::memset(nibble_table->begin(), 0, nibble_table->length());
+    const uint32_t nibble_table_len = nibble_table->length().value();
+    DCHECK_EQ(
+        nibble_table_len,
+        static_cast<uint32_t>(RegExpMacroAssembler::kTableSize / kBitsPerByte));
+    std::memset(nibble_table->begin(), 0, nibble_table_len);
   }
   for (int i = 0; i < RegExpMacroAssembler::kTableSize / kBitsPerByte; i++) {
     uint8_t byte = table_data[i];

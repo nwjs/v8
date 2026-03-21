@@ -149,13 +149,14 @@ class LineEndsWrapper {
       : ends_array_(String::CalculateLineEnds(isolate, string, false)),
         string_len_(string->length()) {}
   int length() {
-    return ends_array_->length() + 1;
+    // TODO(375937549): Consider returning uint32_t.
+    return static_cast<int>(ends_array_->ulength().value() + 1);
   }
   // Returns start for any line including start of the imaginary line after
   // the last line.
   int GetLineStart(int index) { return index == 0 ? 0 : GetLineEnd(index - 1); }
   int GetLineEnd(int index) {
-    if (index == ends_array_->length()) {
+    if (static_cast<uint32_t>(index) == ends_array_->ulength().value()) {
       // End of the last line is always an end of the whole string.
       // If the string ends with a new line character, the last line is an
       // empty string after this character.
@@ -988,7 +989,8 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
     if (!sfi->HasBytecodeArray()) continue;
     Tagged<TrustedFixedArray> constants =
         sfi->GetBytecodeArray(isolate)->constant_pool();
-    for (int i = 0; i < constants->length(); ++i) {
+    uint32_t constants_len = constants->ulength().value();
+    for (uint32_t i = 0; i < constants_len; ++i) {
       if (!IsSharedFunctionInfo(constants->get(i))) continue;
       data = nullptr;
       if (!function_data_map.Lookup(Cast<SharedFunctionInfo>(constants->get(i)),
@@ -1044,7 +1046,8 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
     if (!sfi->HasBytecodeArray()) continue;
     Tagged<TrustedFixedArray> constants =
         sfi->GetBytecodeArray(isolate)->constant_pool();
-    for (int i = 0; i < constants->length(); ++i) {
+    uint32_t constants_len = constants->ulength().value();
+    for (uint32_t i = 0; i < constants_len; ++i) {
       if (!IsSharedFunctionInfo(constants->get(i))) continue;
       Tagged<SharedFunctionInfo> inner_sfi =
           Cast<SharedFunctionInfo>(constants->get(i));
@@ -1079,7 +1082,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
     for (Tagged<SharedFunctionInfo> sfi = script_it.Next(); !sfi.is_null();
          sfi = script_it.Next()) {
       DCHECK_EQ(sfi->script(), *new_script);
-      DCHECK_EQ(sfi->function_literal_id(kRelaxedLoad),
+      DCHECK_EQ(static_cast<uint32_t>(sfi->function_literal_id(kRelaxedLoad)),
                 script_it.CurrentIndex());
       // Don't check the start position of the top-level function, as it can
       // overlap with a function in the script.
@@ -1095,7 +1098,8 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
       // scripts function list.
       Tagged<TrustedFixedArray> constants =
           sfi->GetBytecodeArray(isolate)->constant_pool();
-      for (int i = 0; i < constants->length(); ++i) {
+      uint32_t constants_len = constants->ulength().value();
+      for (uint32_t i = 0; i < constants_len; ++i) {
         if (!IsSharedFunctionInfo(constants->get(i))) continue;
         Tagged<SharedFunctionInfo> inner_sfi =
             Cast<SharedFunctionInfo>(constants->get(i));

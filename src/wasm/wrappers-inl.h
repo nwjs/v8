@@ -83,6 +83,7 @@ auto WasmWrapperTSGraphBuilder<Assembler>::ToJS(OpIndex ret,
       case NumericKind::kI8:
       case NumericKind::kI16:
       case NumericKind::kF16:
+      case NumericKind::kWaitQueue:
         UNREACHABLE();
     }
   }
@@ -237,9 +238,10 @@ auto WasmWrapperTSGraphBuilder<Assembler>::InlineWasmFunctionInsideWrapper(
     if (inlined_function_data_.has_value()) {
       CHECK(v8_flags.turboshaft_wasm_in_js_inlining);
       WasmBodyInliningResult inlining_result =
-          static_cast<Assembler*>(&Asm())->TryInlineWasmCall(
+          static_cast<Assembler*>(&Asm())->TryInlineWasmBody(
               inlined_function_data_->native_module,
-              inlined_function_data_->function_index, inlined_args);
+              inlined_function_data_->function_index, inlined_args,
+              lazy_deopt_on_throw);
       switch (inlining_result.type) {
         case WasmBodyInliningResult::Type::kSuccessWithValue:
           DCHECK_EQ(sig_->return_count(), 1);
@@ -579,9 +581,13 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmStackEntryWrapper() {
   args[0] = instance;
   // Unpack continuation params.
   IterateWasmFXArgBuffer(sig_->parameters(), [&](size_t index, int offset) {
-    args[index + 1] = __ LoadOffHeap(arg_buffer, offset,
-                                     MemoryRepresentation::FromMachineType(
-                                         sig_->GetParam(index).machine_type()));
+    CanonicalValueType type = sig_->GetParam(index);
+    // On-stack refs are uncompressed.
+    MemoryRepresentation rep =
+        type.is_ref()
+            ? MemoryRepresentation::AnyUncompressedTagged()
+            : MemoryRepresentation::FromMachineType(type.machine_type());
+    args[index + 1] = __ LoadOffHeap(arg_buffer, offset, rep);
   });
 
   base::Vector<OpIndex> returns =

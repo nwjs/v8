@@ -13,6 +13,7 @@
 #include "src/ast/ast-source-ranges.h"
 #include "src/base/bits.h"
 #include "src/builtins/accessors.h"
+#include "src/builtins/builtins-promise.h"
 #include "src/builtins/constants-table-builder.h"
 #include "src/codegen/compilation-cache.h"
 #include "src/codegen/compiler.h"
@@ -437,6 +438,7 @@ DirectHandle<Hole> Factory::NewHole() {
   UNREACHABLE();
 }
 
+// TODO(375937549): Convert length to uint32_t.
 DirectHandle<PropertyArray> Factory::NewPropertyArray(
     int length, AllocationType allocation) {
   DCHECK_LE(0, length);
@@ -446,7 +448,7 @@ DirectHandle<PropertyArray> Factory::NewPropertyArray(
   result->set_map_after_allocation(isolate(), *property_array_map(),
                                    SKIP_WRITE_BARRIER);
   Tagged<PropertyArray> array = Cast<PropertyArray>(result);
-  array->initialize_length(length);
+  array->initialize_length(static_cast<uint32_t>(length));
   MemsetTagged(array->data_start(), read_only_roots().undefined_value(),
                length);
   return direct_handle(array, isolate());
@@ -800,9 +802,9 @@ MaybeHandle<String> Factory::NewStringFromUtf8(
     DirectHandle<ByteArray> array, uint32_t start, uint32_t end,
     unibrow::Utf8Variant utf8_variant, AllocationType allocation) {
   DCHECK_LE(start, end);
-  DCHECK_LE(end, array->length());
+  DCHECK_LE(end, array->ulength().value());
   // {end - start} can never be more than what the Utf8Decoder can handle.
-  static_assert(ByteArray::kMaxLength <= kMaxInt);
+  static_assert(ByteArray::kMaxLength <= static_cast<uint32_t>(kMaxInt));
   auto peek_bytes = [&]() -> base::Vector<const uint8_t> {
     const uint8_t* contents = reinterpret_cast<const uint8_t*>(array->begin());
     return {contents + start, end - start};
@@ -951,21 +953,21 @@ MaybeDirectHandle<String> Factory::NewStringFromTwoByteLittleEndian(
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-DirectHandle<String> Factory::NewInternalizedStringImpl(
+DirectHandle<InternalizedString> Factory::NewInternalizedStringImpl(
     DirectHandle<String> string, int len, uint32_t hash_field) {
   if (string->IsOneByteRepresentation()) {
     DirectHandle<SeqOneByteString> result =
         AllocateRawOneByteInternalizedString(len, hash_field);
     DisallowGarbageCollection no_gc;
     String::WriteToFlat(*string, result->GetChars(no_gc), 0, len);
-    return result;
+    return Cast<InternalizedString>(result);
   }
 
   DirectHandle<SeqTwoByteString> result =
       AllocateRawTwoByteInternalizedString(len, hash_field);
   DisallowGarbageCollection no_gc;
   String::WriteToFlat(*string, result->GetChars(no_gc), 0, len);
-  return result;
+  return Cast<InternalizedString>(result);
 }
 
 StringTransitionStrategy Factory::ComputeInternalizationStrategyForString(
@@ -1010,7 +1012,7 @@ StringTransitionStrategy Factory::ComputeInternalizationStrategyForString(
 }
 
 template <class StringClass>
-DirectHandle<StringClass> Factory::InternalizeExternalString(
+DirectHandle<InternalizedString> Factory::InternalizeExternalString(
     DirectHandle<String> string) {
   DirectHandle<Map> map =
       GetInPlaceInternalizedStringMap(string->map()).ToHandleChecked();
@@ -1023,12 +1025,12 @@ DirectHandle<StringClass> Factory::InternalizeExternalString(
   external_string->set_raw_hash_field(cast_string->raw_hash_field());
   external_string->SetResource(isolate(), nullptr);
   isolate()->heap()->RegisterExternalString(external_string);
-  return direct_handle(external_string, isolate());
+  return direct_handle(Cast<InternalizedString>(external_string), isolate());
 }
 
-template DirectHandle<ExternalOneByteString> Factory::InternalizeExternalString<
+template DirectHandle<InternalizedString> Factory::InternalizeExternalString<
     ExternalOneByteString>(DirectHandle<String>);
-template DirectHandle<ExternalTwoByteString> Factory::InternalizeExternalString<
+template DirectHandle<InternalizedString> Factory::InternalizeExternalString<
     ExternalTwoByteString>(DirectHandle<String>);
 
 StringTransitionStrategy Factory::ComputeSharingStrategyForString(
@@ -1383,7 +1385,7 @@ DirectHandle<Context> Factory::NewScriptContext(
 }
 
 Handle<ScriptContextTable> Factory::NewScriptContextTable() {
-  static constexpr int kInitialCapacity = 0;
+  static constexpr uint32_t kInitialCapacity = 0;
   return ScriptContextTable::New(isolate(), kInitialCapacity);
 }
 
@@ -1570,20 +1572,23 @@ DirectHandle<AccessorInfo> Factory::NewAccessorInfo() {
 }
 
 DirectHandle<InterceptorInfo> Factory::NewInterceptorInfo(
-    AllocationType allocation) {
+    InterceptorKind kind, AllocationType allocation) {
   Tagged<InterceptorInfo> info =
       Cast<InterceptorInfo>(New(interceptor_info_map(), allocation));
   DisallowGarbageCollection no_gc;
   info->set_data(*undefined_value());
-  info->set_flags(0);
+  info->set_flags(
+      InterceptorInfo::NamedBit::encode(kind == InterceptorKind::kNamed));
   info->clear_padding();
 
   // Initialization of these lazy-initialized callback fields is the same
   // for named and indexed versions.
 #define INIT_CALLBACK_FIELD(Name, name) info->init_named_##name();
 
-  INTERCEPTOR_INFO_CALLBACK_LIST(INIT_CALLBACK_FIELD)
+  COMMON_INTERCEPTOR_INFO_CALLBACK_LIST(INIT_CALLBACK_FIELD)
 #undef INIT_CALLBACK_FIELD
+
+  info->init_indexed_index_of();
 
   return direct_handle(info, isolate());
 }
@@ -1654,7 +1659,7 @@ Handle<Script> Factory::CloneScript(DirectHandle<Script> script,
 }
 
 DirectHandle<CallableTask> Factory::NewCallableTask(
-    DirectHandle<JSReceiver> callable, DirectHandle<Context> context) {
+    DirectHandle<JSReceiver> callable, DirectHandle<NativeContext> context) {
   DCHECK(IsCallable(*callable));
   auto microtask = NewStructInternal<CallableTask>(CALLABLE_TASK_TYPE,
                                                    AllocationType::kYoung);
@@ -1961,18 +1966,17 @@ DirectHandle<WasmResumeData> Factory::NewWasmResumeData(
 
 DirectHandle<WasmSuspenderObject> Factory::NewWasmSuspenderObject() {
   Tagged<Map> map = *wasm_suspender_object_map();
-  Tagged<WasmSuspenderObject> obj =
+  Tagged<WasmSuspenderObject> suspender =
       TrustedCast<WasmSuspenderObject>(AllocateRawWithImmortalMap(
           map->instance_size(), AllocationType::kTrusted, map));
-  auto suspender = handle(obj, isolate());
-  // Ensure that all properties are initialized before the allocation below.
+  DisallowGarbageCollection no_gc;
   suspender->InitAndPublish(isolate());
   suspender->init_stack(IsolateForSandbox(isolate()), nullptr);
   suspender->clear_parent();
   suspender->set_promise(*undefined_value());
   suspender->set_resume(*undefined_value());
   suspender->set_reject(*undefined_value());
-  return suspender;
+  return direct_handle(suspender, isolate());
 }
 
 DirectHandle<WasmSuspenderObject> Factory::NewWasmSuspenderObjectInitialized() {
@@ -2002,14 +2006,25 @@ DirectHandle<WasmSuspenderObject> Factory::NewWasmSuspenderObjectInitialized() {
 }
 
 DirectHandle<WasmContinuationObject> Factory::NewWasmContinuationObject(
-    wasm::StackMemory* stack) {
+    DirectHandle<WasmStackObject> stack_obj) {
   Tagged<Map> map = *wasm_continuation_object_map();
   Tagged<WasmContinuationObject> obj =
       Cast<WasmContinuationObject>(AllocateRawWithImmortalMap(
           map->instance_size(), AllocationType::kYoung, map));
   DirectHandle<WasmContinuationObject> cont(obj, isolate());
-  cont->init_stack(IsolateForSandbox(isolate()), stack);
+  cont->set_stack_obj(*stack_obj);
   return cont;
+}
+
+DirectHandle<WasmStackObject> Factory::NewWasmStackObject(
+    wasm::StackMemory* stack) {
+  Tagged<Map> map = *wasm_stack_object_map();
+  Tagged<WasmStackObject> obj =
+      Cast<WasmStackObject>(AllocateRawWithImmortalMap(
+          map->instance_size(), AllocationType::kYoung, map));
+  DirectHandle<WasmStackObject> result(obj, isolate());
+  result->init_stack(isolate(), stack);
+  return result;
 }
 
 DirectHandle<WasmExportedFunctionData> Factory::NewWasmExportedFunctionData(
@@ -2094,7 +2109,8 @@ Tagged<WasmArray> Factory::NewWasmArrayUninitialized(uint32_t length,
 DirectHandle<WasmArray> Factory::NewWasmArray(wasm::ValueType element_type,
                                               uint32_t length,
                                               wasm::WasmValue initial_value,
-                                              DirectHandle<Map> map) {
+                                              DirectHandle<Map> map,
+                                              WriteBarrierMode write_barrier) {
   Tagged<WasmArray> result = NewWasmArrayUninitialized(length, map);
   DisallowGarbageCollection no_gc;
   if (element_type.is_numeric()) {
@@ -2110,7 +2126,7 @@ DirectHandle<WasmArray> Factory::NewWasmArray(wasm::ValueType element_type,
     }
   } else {
     for (uint32_t i = 0; i < length; i++) {
-      result->SetTaggedElement(i, initial_value.to_ref());
+      result->SetTaggedElement(i, initial_value.to_ref(), write_barrier);
     }
   }
   return direct_handle(result, isolate());
@@ -2118,7 +2134,7 @@ DirectHandle<WasmArray> Factory::NewWasmArray(wasm::ValueType element_type,
 
 DirectHandle<WasmArray> Factory::NewWasmArrayFromElements(
     const wasm::ArrayType* type, base::Vector<wasm::WasmValue> elements,
-    DirectHandle<Map> map) {
+    DirectHandle<Map> map, WriteBarrierMode write_barrier) {
   uint32_t length = static_cast<uint32_t>(elements.size());
   Tagged<WasmArray> result = NewWasmArrayUninitialized(length, map);
   DisallowGarbageCollection no_gc;
@@ -2131,7 +2147,7 @@ DirectHandle<WasmArray> Factory::NewWasmArrayFromElements(
     }
   } else {
     for (uint32_t i = 0; i < length; i++) {
-      result->SetTaggedElement(i, elements[i].to_ref());
+      result->SetTaggedElement(i, elements[i].to_ref(), write_barrier);
     }
   }
   return direct_handle(result, isolate());
@@ -2139,18 +2155,19 @@ DirectHandle<WasmArray> Factory::NewWasmArrayFromElements(
 
 DirectHandle<WasmArray> Factory::NewWasmArrayFromMemory(
     uint32_t length, DirectHandle<Map> map,
-    wasm::CanonicalValueType element_type, Address source) {
+    wasm::CanonicalValueType element_type, base::Vector<const uint8_t> source) {
   DCHECK(element_type.is_numeric());
   Tagged<WasmArray> result = NewWasmArrayUninitialized(length, map);
   DisallowGarbageCollection no_gc;
 #if V8_TARGET_BIG_ENDIAN
   MemCopyAndSwitchEndianness(reinterpret_cast<void*>(result->ElementAddress(0)),
-                             reinterpret_cast<void*>(source), length,
+                             source.data(), length,
                              element_type.value_kind_size());
 #else
-  MemCopy(reinterpret_cast<void*>(result->ElementAddress(0)),
-          reinterpret_cast<void*>(source),
-          length * element_type.value_kind_size());
+  size_t byte_length = length * element_type.value_kind_size();
+  DCHECK_LE(byte_length, source.size());
+  MemCopy(reinterpret_cast<void*>(result->ElementAddress(0)), source.data(),
+          byte_length);
 #endif
 
   return direct_handle(result, isolate());
@@ -2341,9 +2358,11 @@ DirectHandle<PropertyCell> Factory::NewProtector() {
       direct_handle(Smi::FromInt(Protectors::kProtectorValid), isolate()));
 }
 
+// TODO(375937549): Convert number_of_transitions and slack to uint32_t.
 DirectHandle<TransitionArray> Factory::NewTransitionArray(
     int number_of_transitions, int slack) {
-  int capacity = TransitionArray::LengthFor(number_of_transitions + slack);
+  const uint32_t capacity = static_cast<uint32_t>(
+      TransitionArray::LengthFor(number_of_transitions + slack));
   DirectHandle<TransitionArray> array = Cast<TransitionArray>(
       NewWeakFixedArrayWithMap(read_only_roots().transition_array_map(),
                                capacity, AllocationType::kOld));
@@ -2648,7 +2667,7 @@ Handle<JSObject> Factory::CopyJSObjectWithAllocationSite(
   SLOW_DCHECK(clone->GetElementsKind() == source->GetElementsKind());
   Tagged<FixedArrayBase> elements = source->elements();
   // Update elements if necessary.
-  if (elements->length() > 0) {
+  if (elements->ulength().value() > 0) {
     Tagged<FixedArrayBase> elem;
     if (elements->map() == *fixed_cow_array_map()) {
       elem = elements;
@@ -2688,12 +2707,13 @@ Handle<JSObject> Factory::CopyJSObjectWithAllocationSite(
 
 namespace {
 template <typename T>
-void initialize_length(Tagged<T> array, int length) {
+void initialize_length(Tagged<T> array, uint32_t length) {
   array->set_length(length);
 }
 
 template <>
-void initialize_length<PropertyArray>(Tagged<PropertyArray> array, int length) {
+void initialize_length<PropertyArray>(Tagged<PropertyArray> array,
+                                      uint32_t length) {
   array->initialize_length(length);
 }
 
@@ -2709,7 +2729,7 @@ inline void InitEmbedderFields(Tagged<JSObject> obj,
 template <typename T>
 Handle<T> Factory::CopyArrayWithMap(DirectHandle<T> src, DirectHandle<Map> map,
                                     AllocationType allocation) {
-  int len = src->length();
+  const uint32_t len = src->ulength().value();
   Tagged<HeapObject> new_object = AllocateRawFixedArray(len, allocation);
   DisallowGarbageCollection no_gc;
   new_object->set_map_after_allocation(isolate(), *map, SKIP_WRITE_BARRIER);
@@ -2722,12 +2742,12 @@ Handle<T> Factory::CopyArrayWithMap(DirectHandle<T> src, DirectHandle<Map> map,
 }
 
 template <typename T>
-Handle<T> Factory::CopyArrayAndGrow(DirectHandle<T> src, int grow_by,
+Handle<T> Factory::CopyArrayAndGrow(DirectHandle<T> src, uint32_t grow_by,
                                     AllocationType allocation) {
   DCHECK_LT(0, grow_by);
-  DCHECK_LE(grow_by, kMaxInt - src->length());
-  int old_len = src->length();
-  int new_len = old_len + grow_by;
+  const uint32_t old_len = src->ulength().value();
+  DCHECK_LE(grow_by + old_len, static_cast<uint32_t>(kMaxInt));
+  const uint32_t new_len = old_len + grow_by;
   // TODO(jgruber,v8:14345): Use T::Allocate instead.
   Tagged<HeapObject> new_object = AllocateRawFixedArray(new_len, allocation);
   DisallowGarbageCollection no_gc;
@@ -2777,7 +2797,8 @@ DirectHandle<WeakArrayList> Factory::NewWeakArrayList(
 }
 
 Handle<FixedArray> Factory::CopyFixedArrayAndGrow(
-    DirectHandle<FixedArray> array, int grow_by, AllocationType allocation) {
+    DirectHandle<FixedArray> array, uint32_t grow_by,
+    AllocationType allocation) {
   return CopyArrayAndGrow(array, grow_by, allocation);
 }
 
@@ -2788,7 +2809,7 @@ DirectHandle<WeakFixedArray> Factory::CopyWeakFixedArray(
 }
 
 DirectHandle<WeakFixedArray> Factory::CopyWeakFixedArrayAndGrow(
-    DirectHandle<WeakFixedArray> src, int grow_by) {
+    DirectHandle<WeakFixedArray> src, uint32_t grow_by) {
   DCHECK(!IsTransitionArray(*src));  // Compacted by GC, this code doesn't work
   return CopyArrayAndGrow(src, grow_by, AllocationType::kOld);
 }
@@ -2837,15 +2858,14 @@ DirectHandle<WeakArrayList> Factory::CompactWeakArrayList(
 }
 
 DirectHandle<PropertyArray> Factory::CopyPropertyArrayAndGrow(
-    DirectHandle<PropertyArray> array, int grow_by) {
+    DirectHandle<PropertyArray> array, uint32_t grow_by) {
   return CopyArrayAndGrow(array, grow_by, AllocationType::kYoung);
 }
 
 Handle<FixedArray> Factory::CopyFixedArrayUpTo(DirectHandle<FixedArray> array,
-                                               int new_len,
+                                               uint32_t new_len,
                                                AllocationType allocation) {
-  DCHECK_LE(0, new_len);
-  DCHECK_LE(new_len, array->length());
+  DCHECK_LE(new_len, array->ulength().value());
   if (new_len == 0) return empty_fixed_array();
   Tagged<HeapObject> heap_object = AllocateRawFixedArray(new_len, allocation);
   DisallowGarbageCollection no_gc;
@@ -2860,14 +2880,14 @@ Handle<FixedArray> Factory::CopyFixedArrayUpTo(DirectHandle<FixedArray> array,
 }
 
 Handle<FixedArray> Factory::CopyFixedArray(Handle<FixedArray> array) {
-  if (array->length() == 0) return array;
+  if (array->ulength().value() == 0) return array;
   return CopyArrayWithMap(DirectHandle<FixedArray>(array),
                           direct_handle(array->map(), isolate()));
 }
 
 Handle<FixedDoubleArray> Factory::CopyFixedDoubleArray(
     Handle<FixedDoubleArray> array) {
-  int len = array->length();
+  const uint32_t len = array->ulength().value();
   if (len == 0) return array;
   Handle<FixedDoubleArray> result =
       Cast<FixedDoubleArray>(NewFixedDoubleArray(len));
@@ -3144,12 +3164,11 @@ Handle<JSGlobalObject> Factory::NewJSGlobalObject(
   // Make sure no field properties are described in the initial map.
   // This guarantees us that normalizing the properties does not
   // require us to change property values to PropertyCells.
-  DCHECK_EQ(map->NextFreePropertyIndex(), 0);
+  DCHECK_EQ(map->GetInObjectProperties(), 0);
 
   // Make sure we don't have a ton of pre-allocated slots in the
   // global objects. They will be unused once we normalize the object.
   DCHECK_EQ(map->UnusedPropertyFields(), 0);
-  DCHECK_EQ(map->GetInObjectProperties(), 0);
 
   // Initial size of the backing store to avoid resize of the storage during
   // bootstrapping. The size differs between the JS global object ad the
@@ -3359,10 +3378,12 @@ Handle<JSArray> Factory::NewJSArrayWithElements(
   return array;
 }
 
+// TODO(375937549): Convert length to uint32_t.
 Handle<JSArray> Factory::NewJSArrayWithUnverifiedElements(
     DirectHandle<FixedArrayBase> elements, ElementsKind elements_kind,
     int length, AllocationType allocation) {
-  DCHECK(length <= elements->length());
+  DCHECK_GE(length, 0);
+  DCHECK_LE(static_cast<uint32_t>(length), elements->ulength().value());
   Tagged<NativeContext> native_context = isolate()->raw_native_context();
   Tagged<Map> map = native_context->GetInitialJSArrayMap(elements_kind);
   if (map.is_null()) {
@@ -3388,18 +3409,19 @@ DirectHandle<JSArray> Factory::NewJSArrayForTemplateLiteralArray(
     DirectHandle<FixedArray> cooked_strings,
     DirectHandle<FixedArray> raw_strings, int function_literal_id,
     int slot_id) {
-  DirectHandle<JSArray> raw_object =
-      NewJSArrayWithElements(raw_strings, PACKED_ELEMENTS,
-                             raw_strings->length(), AllocationType::kOld);
+  const uint32_t raw_strings_len = raw_strings->ulength().value();
+  DirectHandle<JSArray> raw_object = NewJSArrayWithElements(
+      raw_strings, PACKED_ELEMENTS, raw_strings_len, AllocationType::kOld);
   JSObject::SetIntegrityLevel(isolate(), raw_object, FROZEN, kThrowOnError)
       .ToChecked();
 
   DirectHandle<NativeContext> native_context = isolate()->native_context();
+  const uint32_t cooked_strings_len = cooked_strings->ulength().value();
   auto template_object =
       Cast<TemplateLiteralObject>(NewJSArrayWithUnverifiedElements(
           direct_handle(native_context->js_array_template_literal_object_map(),
                         isolate()),
-          cooked_strings, cooked_strings->length(), AllocationType::kOld));
+          cooked_strings, cooked_strings_len, AllocationType::kOld));
   DisallowGarbageCollection no_gc;
   Tagged<TemplateLiteralObject> raw_template_object = *template_object;
   DCHECK_EQ(raw_template_object->map(),
@@ -3479,7 +3501,7 @@ DirectHandle<JSModuleNamespace> Factory::NewJSModuleNamespace() {
           map, AllocationType::kYoung, DirectHandle<AllocationSite>::null(),
           NewJSObjectType::kMaybeEmbedderFieldsAndApiWrapper)));
   FieldIndex index = FieldIndex::ForDescriptor(
-      *map, InternalIndex(JSModuleNamespace::kToStringTagFieldIndex));
+      *map, InternalIndex(JSModuleNamespace::kToStringTagIndex));
   module_namespace->FastPropertyAtPut(index, read_only_roots().Module_string(),
                                       SKIP_WRITE_BARRIER);
   return module_namespace;
@@ -3493,7 +3515,7 @@ Factory::NewJSDeferredModuleNamespace() {
           map, AllocationType::kYoung, DirectHandle<AllocationSite>::null(),
           NewJSObjectType::kMaybeEmbedderFieldsAndApiWrapper)));
   FieldIndex index = FieldIndex::ForDescriptor(
-      *map, InternalIndex(JSDeferredModuleNamespace::kToStringTagFieldIndex));
+      *map, InternalIndex(JSModuleNamespace::kToStringTagIndex));
   deferred_namespace->FastPropertyAtPut(
       index, read_only_roots().Deferred_Module_string(), SKIP_WRITE_BARRIER);
 
@@ -3566,9 +3588,11 @@ DirectHandle<SourceTextModule> Factory::NewSourceTextModule(
       ObjectHashTable::New(isolate(), module_info->RegularExportCount());
   DirectHandle<FixedArray> regular_exports =
       NewFixedArray(module_info->RegularExportCount());
-  DirectHandle<FixedArray> regular_imports =
-      NewFixedArray(module_info->regular_imports()->length());
-  int requested_modules_length = module_info->module_requests()->length();
+  const uint32_t regular_imports_len =
+      module_info->regular_imports()->ulength().value();
+  DirectHandle<FixedArray> regular_imports = NewFixedArray(regular_imports_len);
+  const uint32_t requested_modules_length =
+      module_info->module_requests()->ulength().value();
   DirectHandle<FixedArray> requested_modules =
       requested_modules_length > 0 ? NewFixedArray(requested_modules_length)
                                    : empty_fixed_array();
@@ -3607,8 +3631,10 @@ Handle<SyntheticModule> Factory::NewSyntheticModule(
     v8::Module::SyntheticModuleEvaluationSteps evaluation_steps) {
   ReadOnlyRoots roots(isolate());
 
+  const uint32_t exports_len = export_names->ulength().value();
   DirectHandle<ObjectHashTable> exports =
-      ObjectHashTable::New(isolate(), static_cast<int>(export_names->length()));
+      ObjectHashTable::New(isolate(), exports_len);
+
   DirectHandle<Foreign> evaluation_steps_foreign =
       NewForeign<kSyntheticModuleTag>(
           reinterpret_cast<Address>(evaluation_steps));
@@ -3885,7 +3911,8 @@ MaybeDirectHandle<JSBoundFunction> Factory::NewJSBoundFunction(
     base::Vector<DirectHandle<Object>> bound_args,
     DirectHandle<JSPrototype> prototype) {
   DCHECK(IsCallable(*target_function));
-  static_assert(Code::kMaxArguments <= FixedArray::kMaxLength);
+  static_assert(static_cast<uint32_t>(Code::kMaxArguments) <=
+                FixedArray::kMaxLength);
   if (bound_args.length() >= Code::kMaxArguments) {
     THROW_NEW_ERROR(isolate(),
                     NewRangeError(MessageTemplate::kTooManyArguments));
@@ -4113,7 +4140,8 @@ Handle<String> Factory::SizeToString(size_t value, bool check_cache) {
     if (value <= JSArray::kMaxArrayIndex &&
         raw->raw_hash_field() == String::kEmptyHashField) {
       uint32_t raw_hash_field = StringHasher::MakeArrayIndexHash(
-          static_cast<uint32_t>(value), raw->length());
+          static_cast<uint32_t>(value), raw->length(),
+          HashSeed(read_only_roots()));
       raw->set_raw_hash_field(raw_hash_field);
     }
   }
@@ -4508,8 +4536,9 @@ DirectHandle<Map> Factory::CreateSloppyFunctionMap(
   if (IsFunctionModeWithName(function_mode)) {
     // Add name field.
     DirectHandle<Name> name = isolate()->factory()->name_string();
-    Descriptor d = Descriptor::DataField(isolate(), name, field_index++,
-                                         roc_attribs, Representation::Tagged());
+    Descriptor d = Descriptor::DataField(
+        isolate(), name, map->GetInObjectPropertyOffset(field_index++),
+        roc_attribs, Representation::Tagged(), true);
     map->AppendDescriptor(isolate(), &d);
 
   } else {
@@ -4599,8 +4628,9 @@ DirectHandle<Map> Factory::CreateStrictFunctionMap(
   if (IsFunctionModeWithName(function_mode)) {
     // Add name field.
     DirectHandle<Name> name = isolate()->factory()->name_string();
-    Descriptor d = Descriptor::DataField(isolate(), name, field_index++,
-                                         roc_attribs, Representation::Tagged());
+    Descriptor d = Descriptor::DataField(
+        isolate(), name, map->GetInObjectPropertyOffset(field_index++),
+        roc_attribs, Representation::Tagged(), true);
     map->AppendDescriptor(isolate(), &d);
 
   } else {
@@ -4687,6 +4717,67 @@ Handle<JSPromise> Factory::NewJSPromise() {
   isolate()->RunAllPromiseHooks(PromiseHookType::kInit, promise,
                                 undefined_value());
   return promise;
+}
+
+DirectHandle<Context> Factory::CreatePromiseAllResolveElementContext(
+    DirectHandle<PromiseCapability> capability) {
+  DirectHandle<Context> context = isolate()->factory()->NewBuiltinContext(
+      isolate()->native_context(),
+      PromiseBuiltins::PromiseAllResolveElementContextSlots::
+          kPromiseAllResolveElementLength);
+  context->SetNoCell(PromiseBuiltins::PromiseAllResolveElementContextSlots::
+                         kPromiseAllResolveElementRemainingSlot,
+                     Smi::FromInt(1));
+  context->SetNoCell(PromiseBuiltins::PromiseAllResolveElementContextSlots::
+                         kPromiseAllResolveElementCapabilitySlot,
+                     *capability);
+  context->SetNoCell(PromiseBuiltins::PromiseAllResolveElementContextSlots::
+                         kPromiseAllResolveElementValuesSlot,
+                     *empty_fixed_array());
+  return context;
+}
+
+DirectHandle<Context> Factory::CreatePromiseResolvingFunctionsContext(
+    DirectHandle<JSPromise> promise) {
+  DirectHandle<Context> context = isolate()->factory()->NewBuiltinContext(
+      isolate()->native_context(),
+      PromiseBuiltins::PromiseResolvingFunctionContextSlot::
+          kPromiseContextLength);
+  context->SetNoCell(
+      PromiseBuiltins::PromiseResolvingFunctionContextSlot::kPromiseSlot,
+      *promise);
+  context->SetNoCell(PromiseBuiltins::PromiseResolvingFunctionContextSlot::
+                         kAlreadyResolvedSlot,
+                     *false_value());
+  context->SetNoCell(
+      PromiseBuiltins::PromiseResolvingFunctionContextSlot::kDebugEventSlot,
+      *false_value());
+  DCHECK_EQ(PromiseBuiltins::PromiseResolvingFunctionContextSlot::
+                kPromiseContextLength,
+            Context::MIN_CONTEXT_SLOTS + 3);
+  return context;
+}
+
+DirectHandle<JSFunction> Factory::CreatePromiseAllResolveElementFunction(
+    DirectHandle<Context> context, int index) {
+  DirectHandle<SharedFunctionInfo> sfi = direct_handle(
+      isolate()->heap()->promise_all_resolve_element_closure_shared_fun(),
+      isolate());
+  DirectHandle<JSFunction> function =
+      Factory::JSFunctionBuilder{isolate(), sfi, context}.Build();
+  function->set_raw_properties_or_hash(Smi::FromInt(index));
+  return function;
+}
+
+DirectHandle<PromiseCapability> Factory::CreatePromiseCapabilityObject(
+    DirectHandle<JSPromise> promise, DirectHandle<JSFunction> resolve,
+    DirectHandle<JSFunction> reject) {
+  Handle<PromiseCapability> capability = Cast<PromiseCapability>(
+      NewStruct(PROMISE_CAPABILITY_TYPE, AllocationType::kYoung));
+  capability->set_promise(*promise);
+  capability->set_resolve(*resolve);
+  capability->set_reject(*reject);
+  return capability;
 }
 
 bool Factory::CanAllocateInReadOnlySpace() {

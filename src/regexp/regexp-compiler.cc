@@ -339,9 +339,6 @@ RegExpCompiler::CompilationResult RegExpCompiler::Assemble(
   macro_assembler_ = macro_assembler;
 
   auto ReportError = [this]() {
-    if (v8_flags.correctness_fuzzer_suppressions) {
-      FATAL("Aborting on excess zone allocation");
-    }
     macro_assembler_->AbortedCodeGeneration();
     return CompilationResult::RegExpTooBig();
   };
@@ -352,6 +349,7 @@ RegExpCompiler::CompilationResult RegExpCompiler::Assemble(
   macro_assembler_->PushBacktrack(&fail);
   Trace new_trace;
   if (start->Emit(this, &new_trace).IsError()) {
+    work_list_ = nullptr;
     return ReportError();
   }
   macro_assembler_->BindJumpTarget(&fail);
@@ -363,11 +361,15 @@ RegExpCompiler::CompilationResult RegExpCompiler::Assemble(
     node->set_on_work_list(false);
     if (!node->label()->is_bound()) {
       if (node->Emit(this, &new_trace).IsError()) {
+        work_list_ = nullptr;
         return ReportError();
       }
     }
   }
-  if (IsRegExpTooBig()) return ReportError();
+  if (IsRegExpTooBig()) {
+    work_list_ = nullptr;
+    return ReportError();
+  }
 
   DirectHandle<HeapObject> code = macro_assembler_->GetCode(pattern, flags_);
   isolate->IncreaseTotalRegexpCodeGenerated(code);
@@ -2899,10 +2901,10 @@ int BoyerMooreLookahead::GetSkipTable(
   const int kDontSkipArrayEntry = 1;
 
   std::memset(boolean_skip_table->begin(), kSkipArrayEntry,
-              boolean_skip_table->length());
+              boolean_skip_table->ulength().value());
   const bool fill_nibble_table = !nibble_table.is_null();
   if (fill_nibble_table) {
-    std::memset(nibble_table->begin(), 0, nibble_table->length());
+    std::memset(nibble_table->begin(), 0, nibble_table->ulength().value());
   }
 
   for (int i = max_lookahead; i >= min_lookahead; i--) {
@@ -3789,9 +3791,6 @@ class Analysis : public NodeVisitor {
   void EnsureAnalyzed(RegExpNode* that) {
     StackLimitCheck check(isolate());
     if (check.HasOverflowed()) {
-      if (v8_flags.correctness_fuzzer_suppressions) {
-        FATAL("Analysis: Aborting on stack overflow");
-      }
       fail(RegExpError::kAnalysisStackOverflow);
       return;
     }
@@ -4054,7 +4053,8 @@ RegExpNode* RegExpCompiler::PreprocessRegExp(RegExpCompileData* data,
   RegExpNode* captured_body =
       RegExpCapture::ToNode(data->tree, 0, this, accept());
   RegExpNode* node = captured_body;
-  if (!data->tree->IsAnchoredAtStart() && !IsSticky(flags())) {
+  if (!data->tree->IsCertainlyAnchoredAtStart(RegExpNode::kRecursionBudget) &&
+      !IsSticky(flags())) {
     // Add a .*? at the beginning, outside the body capture, unless
     // this expression is anchored at the beginning or sticky.
     TRACE_GRAPH("* Add .*? at beginning of unanchored, non-sticky RegExp");
@@ -4104,5 +4104,13 @@ void RegExpCompiler::set_diagnostics(
   diagnostics_ = std::move(diagnostics);
 }
 #endif
+#undef TRACE_COMPILER
+#undef TRACE
+#undef TRACE_WITH_NODE
+#undef TRACE_WITH_NODE_AND_TRACE
+#undef TRACE_EMIT
+#undef TRACE_GRAPH
+#undef TRACE_GRAPH_WITH_NODE
+#undef REGISTER_NODE
 
 }  // namespace v8::internal

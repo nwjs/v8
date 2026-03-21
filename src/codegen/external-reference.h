@@ -189,8 +189,6 @@ enum class IsolateFieldId : uint8_t;
   V(mod_two_doubles_operation, "mod_two_doubles")                              \
   V(mutable_big_int_absolute_add_and_canonicalize_function,                    \
     "MutableBigInt_AbsoluteAddAndCanonicalize")                                \
-  V(mutable_big_int_absolute_compare_function,                                 \
-    "MutableBigInt_AbsoluteCompare")                                           \
   V(mutable_big_int_absolute_sub_and_canonicalize_function,                    \
     "MutableBigInt_AbsoluteSubAndCanonicalize")                                \
   V(mutable_big_int_absolute_mul_and_canonicalize_function,                    \
@@ -271,7 +269,8 @@ enum class IsolateFieldId : uint8_t;
   IF_WASM(V, wasm_resume_jspi_stack, "wasm_resume_jspi_stack")                 \
   IF_WASM(V, wasm_resume_wasmfx_stack, "wasm_resume_wasmfx_stack")             \
   IF_WASM(V, wasm_suspend_wasmfx_stack, "wasm_suspend_wasmfx_stack")           \
-  IF_WASM(V, wasm_return_stack, "wasm_return_stack")                           \
+  IF_WASM(V, wasm_return_jspi_stack, "wasm_return_jspi_stack")                 \
+  IF_WASM(V, wasm_return_wasmfx_stack, "wasm_return_wasmfx_stack")             \
   IF_WASM(V, wasm_retire_stack, "wasm_retire_stack")                           \
   IF_WASM(V, wasm_switch_to_the_central_stack,                                 \
           "wasm::switch_to_the_central_stack")                                 \
@@ -361,6 +360,7 @@ enum class IsolateFieldId : uint8_t;
           "wasm::f16x8_demote_f64x2_zero_wrapper")                             \
   IF_WASM(V, wasm_f16x8_qfma, "wasm::f16x8_qfma_wrapper")                      \
   IF_WASM(V, wasm_f16x8_qfms, "wasm::f16x8_qfms_wrapper")                      \
+  IF_WASM(V, wasm_data_drop, "wasm::data_drop")                                \
   IF_WASM(V, wasm_memory_init, "wasm::memory_init")                            \
   IF_WASM(V, wasm_memory_copy, "wasm::memory_copy")                            \
   IF_WASM(V, wasm_memory_fill, "wasm::memory_fill")                            \
@@ -368,6 +368,7 @@ enum class IsolateFieldId : uint8_t;
   IF_WASM(V, wasm_array_fill, "wasm::array_fill")                              \
   IF_WASM(V, wasm_string_to_f64, "wasm_string_to_f64")                         \
   IF_WASM(V, wasm_atomic_notify, "wasm_atomic_notify")                         \
+  IF_WASM(V, wasm_managed_object_notify, "wasm_managed_object_notify")         \
   IF_WASM(V, wasm_WebAssemblyCompile, "wasm::WebAssemblyCompile")              \
   IF_WASM(V, wasm_WebAssemblyException, "wasm::WebAssemblyException")          \
   IF_WASM(V, wasm_WebAssemblyExceptionGetArg,                                  \
@@ -463,6 +464,14 @@ enum class IsolateFieldId : uint8_t;
           "tsan_seq_cst_store_function_32_bits")                               \
   IF_TSAN(V, tsan_seq_cst_store_function_64_bits,                              \
           "tsan_seq_cst_store_function_64_bits")                               \
+  IF_TSAN(V, tsan_release_store_function_8_bits,                               \
+          "tsan_release_store_function_8_bits")                                \
+  IF_TSAN(V, tsan_release_store_function_16_bits,                              \
+          "tsan_release_store_function_16_bits")                               \
+  IF_TSAN(V, tsan_release_store_function_32_bits,                              \
+          "tsan_release_store_function_32_bits")                               \
+  IF_TSAN(V, tsan_release_store_function_64_bits,                              \
+          "tsan_release_store_function_64_bits")                               \
   IF_TSAN(V, tsan_relaxed_load_function_32_bits,                               \
           "tsan_relaxed_load_function_32_bits")                                \
   IF_TSAN(V, tsan_relaxed_load_function_64_bits,                               \

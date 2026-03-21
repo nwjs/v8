@@ -1520,7 +1520,7 @@ class ParserBase {
 
   // Parse a SubStatement in strict mode, or with an extra block scope in
   // sloppy mode to handle
-  // ES#sec-functiondeclarations-in-ifstatement-statement-clauses
+  // https://tc39.es/ecma262/#sec-functiondeclarations-in-ifstatement-statement-clauses
   StatementT ParseScopedStatement(ZonePtrList<const AstRawString>* labels);
 
   StatementT ParseVariableStatement(VariableDeclarationContext var_context,
@@ -2853,7 +2853,10 @@ ParserBase<Impl>::ParseClassPropertyDefinition(ClassInfo* class_info,
     case ParsePropertyKind::kShorthand:
     case ParsePropertyKind::kSpread:
       impl()->ReportUnexpectedTokenAt(
-          Scanner::Location(name_token_position, name_expression->position()),
+          Scanner::Location(name_token_position,
+                            name_expression->position() == -1
+                                ? name_token_position
+                                : name_expression->position()),
           name_token);
       return impl()->NullLiteralProperty();
   }
@@ -3346,7 +3349,7 @@ ParserBase<Impl>::ParseAssignmentExpressionCoverGrammarContinuation(
         // Syntax Error if LHS is neither object literal nor an array literal
         // (Parenthesized literals are
         // CoverParenthesizedExpressionAndArrowParameterList).
-        // #sec-assignment-operators-static-semantics-early-errors
+        // https://tc39.es/ecma262/#sec-assignment-operators-static-semantics-early-errors
         impl()->ReportMessageAt(loc, MessageTemplate::kInvalidLhsInAssignment);
       }
     }
@@ -4576,7 +4579,7 @@ void ParserBase<Impl>::ParseVariableDeclarations(
       DCHECK(!impl()->IsIdentifier(pattern));
     } else {
       // `using` declarations should have an identifier.
-      impl()->ReportMessageAt(Scanner::Location(decl_pos, end_position()),
+      impl()->ReportMessageAt(scanner_->peek_location(),
                               MessageTemplate::kDeclarationMissingInitializer,
                               "using");
       return;
@@ -4960,8 +4963,9 @@ void ParserBase<Impl>::ParseFunctionBody(
         }
       }
 
-      // According to ES#sec-functiondeclarationinstantiation step 27,28
-      // when hasParameterExpressions is true, we need bind var declared
+      // According to
+      // https://tc39.es/ecma262/#sec-functiondeclarationinstantiation step
+      // 27,28 when hasParameterExpressions is true, we need bind var declared
       // arguments to "arguments exotic object", so we here first declare
       // "arguments exotic object", then var declared arguments will be
       // initialized with "arguments exotic object"
@@ -5039,10 +5043,10 @@ bool ParserBase<Impl>::IsNextLetKeyword() {
     case Token::kFutureStrictReservedWord:
     case Token::kEscapedStrictReservedWord:
       // The early error rule for future reserved keywords
-      // (ES#sec-identifiers-static-semantics-early-errors) uses the static
-      // semantics StringValue of IdentifierName, which normalizes escape
-      // sequences. So, both escaped and unescaped future reserved keywords are
-      // allowed as identifiers in sloppy mode.
+      // (https://tc39.es/ecma262/#sec-identifiers-static-semantics-early-errors)
+      // uses the static semantics StringValue of IdentifierName, which
+      // normalizes escape sequences. So, both escaped and unescaped future
+      // reserved keywords are allowed as identifiers in sloppy mode.
       return is_sloppy(language_mode());
     default:
       return false;
@@ -5882,7 +5886,7 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseStatement(
     case Token::kFunction:
       // FunctionDeclaration only allowed as a StatementListItem, not in
       // an arbitrary Statement position. Exceptions such as
-      // ES#sec-functiondeclarations-in-ifstatement-statement-clauses
+      // https://tc39.es/ecma262/#sec-functiondeclarations-in-ifstatement-statement-clauses
       // are handled by calling ParseScopedStatement rather than
       // ParseStatement directly.
       impl()->ReportMessageAt(scanner()->peek_location(),
@@ -6080,7 +6084,8 @@ ParserBase<Impl>::ParseExpressionOrLabelledStatement(
       this->scope()->DeleteUnresolved(label);
 
       Consume(Token::kColon);
-      // ES#sec-labelled-function-declarations Labelled Function Declarations
+      // https://tc39.es/ecma262/#sec-labelled-function-declarations Labelled
+      // Function Declarations
       if (peek() == Token::kFunction && is_sloppy(language_mode()) &&
           allow_function == kAllowLabelledFunctionStatement) {
         return ParseFunctionDeclaration();
@@ -6464,6 +6469,12 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseTryStatement() {
   Consume(Token::kTry);
   int pos = position();
 
+  std::optional<typename Scope::Snapshot>
+      try_catch_with_outer_generator_snapshot;
+  if (scope()->HasOuterGenerator()) {
+    try_catch_with_outer_generator_snapshot.emplace(scope());
+  }
+
   BlockT try_block = ParseBlock(nullptr);
 
   CatchInfo catch_info(this);
@@ -6569,6 +6580,12 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseTryStatement() {
   }
 
   RETURN_IF_PARSE_ERROR;
+
+  if (try_catch_with_outer_generator_snapshot.has_value()) {
+    try_catch_with_outer_generator_snapshot
+        ->MarkUnresolvedVariablesAsInsideTryCatchWithOuterGenerator();
+  }
+
   return impl()->RewriteTryStatement(try_block, catch_block, catch_range,
                                      finally_block, finally_range, catch_info,
                                      pos);

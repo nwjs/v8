@@ -77,6 +77,7 @@ inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, Register base,
     case kBottom:
     case kI8:
     case kF16:
+    case kWaitQueue:
       UNREACHABLE();
   }
 }
@@ -111,6 +112,7 @@ inline void Store(LiftoffAssembler* assm, Register base, int32_t offset,
     case kBottom:
     case kI8:
     case kF16:
+    case kWaitQueue:
       UNREACHABLE();
   }
 }
@@ -147,6 +149,7 @@ inline void push(LiftoffAssembler* assm, LiftoffRegister reg, ValueKind kind,
     case kI8:
     case kI16:
     case kF16:
+    case kWaitQueue:
       UNREACHABLE();
   }
 }
@@ -578,12 +581,10 @@ void LiftoffAssembler::EmitWriteBarrier(Register target_object,
   bind(&exit);
 }
 
-void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
-                                          Register offset_reg,
-                                          int32_t offset_imm, Register src,
-                                          LiftoffRegList pinned,
-                                          uint32_t* protected_store_pc,
-                                          SkipWriteBarrier skip_write_barrier) {
+void LiftoffAssembler::StoreTaggedPointer(
+    Register dst_addr, Register offset_reg, int32_t offset_imm, Register src,
+    LiftoffRegList pinned, uint32_t* protected_store_pc,
+    compiler::WriteBarrierKind write_barrier) {
   DCHECK_GE(offset_imm, 0);
   DCHECK_LE(offset_imm, std::numeric_limits<int32_t>::max());
   static_assert(kTaggedSize == kInt32Size);
@@ -595,7 +596,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
 
   if (v8_flags.disable_write_barriers) return;
 
-  if (skip_write_barrier) {
+  if (write_barrier == compiler::kNoWriteBarrier) {
     if (v8_flags.verify_write_barriers) {
       CallVerifySkippedWriteBarrierStubSaveRegisters(dst_addr, src,
                                                      SaveFPRegsMode::kSave);
@@ -1669,6 +1670,8 @@ void LiftoffAssembler::emit_i32_muli(Register dst, Register lhs, int32_t imm) {
   }
 }
 
+void LiftoffAssembler::SpillDivRegisters() { SpillRegisters(eax, edx); }
+
 namespace liftoff {
 enum class DivOrRem : uint8_t { kDiv, kRem };
 template <bool is_signed, DivOrRem div_or_rem>
@@ -1681,15 +1684,15 @@ void EmitInt32DivOrRem(LiftoffAssembler* assm, Register dst, Register lhs,
       is_signed && div_or_rem == DivOrRem::kRem;
   DCHECK_EQ(needs_unrepresentable_check, trap_div_unrepresentable != nullptr);
 
-  // For division, the lhs is always taken from {edx:eax}. Thus, make sure that
-  // these registers are unused. If {rhs} is stored in one of them, move it to
-  // another temporary register.
-  // Do all this before any branch, such that the code is executed
-  // unconditionally, as the cache state will also be modified unconditionally.
-  assm->SpillRegisters(eax, edx);
+  // For division, the lhs is always taken from {edx:eax}. Callers need to
+  // make sure these registers are unused. If {rhs} is stored in one of them,
+  // move it to another temporary register.
+  DCHECK(assm->cache_state()->is_free(LiftoffRegister(eax)));
+  DCHECK(assm->cache_state()->is_free(LiftoffRegister(edx)));
+  LiftoffRegList unavailable{eax, edx, lhs};
+  CacheStatePreservingTempRegisters temps{assm, unavailable};
   if (rhs == eax || rhs == edx) {
-    LiftoffRegList unavailable{eax, edx, lhs};
-    Register tmp = assm->GetUnusedRegister(kGpReg, unavailable).gp();
+    Register tmp = temps.Acquire();
     assm->mov(tmp, rhs);
     rhs = tmp;
   }

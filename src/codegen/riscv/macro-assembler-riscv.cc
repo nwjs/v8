@@ -457,7 +457,8 @@ void MacroAssembler::LoadCodeEntrypointViaCodePointer(Register destination,
   SrlWord(destination, destination, kCodePointerHandleShift);
   SllWord(destination, destination, kCodePointerTableEntrySizeLog2);
   AddWord(scratch, scratch, destination);
-  LoadWord(destination, MemOperand(scratch, 0));
+  LoadWord(destination,
+           MemOperand(scratch, kCodePointerTableEntryEntrypointOffset));
   if (tag != 0) {
     li(scratch, Operand(tag));
     Xor(destination, destination, scratch);
@@ -514,7 +515,11 @@ void MacroAssembler::LoadExternalPointerField(Register destination,
   // We don't expect to see empty fields here. If this is ever needed, consider
   // using an dedicated empty value entry for those tags instead (i.e. an entry
   // with the right tag and nullptr payload).
-  DCHECK(!ExternalPointerCanBeEmpty(tag_range));
+  // Although interceptor callbacks can be empty in general, once we decide
+  // to generate a code loading a callback value it's guaranteed that the
+  // external pointer handle is not empty.
+  DCHECK(!ExternalPointerCanBeEmpty(tag_range) ||
+         kAnyInterceptorInfoExternalPointerTagRange.Contains(tag_range));
   // We need another scratch register for the 64-bit tag constant. Instead of
   // forcing the `And` to allocate a new temp register (which we may not have),
   // reuse the temp register that we used for the external pointer table base.
@@ -7631,17 +7636,20 @@ void MacroAssembler::ResolveWasmCodePointer(Register target,
   li(scratch, global_jump_table);
 
 #ifdef V8_ENABLE_SANDBOX
+  static constexpr int kNumRelevantBits =
+      base::bits::WhichPowerOfTwo(WasmCodePointer::kIndexSpaceSize);
+  static constexpr int kLeftShift =
+      base::bits::WhichPowerOfTwo(sizeof(wasm::WasmCodePointerTableEntry));
+
   static_assert(sizeof(wasm::WasmCodePointerTableEntry) == 16);
-  CalcScaledAddress(target, scratch, target, 4);
+  // Mask the target index to prevent OOB access and shift for table indexing.
+  SllWord(target, target, kLeftShift);
+  And(target, target, Operand(((1U << kNumRelevantBits) - 1) << kLeftShift));
+  // Calculate address: table_base + (target << kLeftShift)
+  AddWord(target, scratch, target);
   LoadWord(
       scratch,
       MemOperand(target, wasm::WasmCodePointerTable::kOffsetOfSignatureHash));
-  // bool has_second_tmp = temps.CanAcquire();
-  // Register signature_hash_register = has_second_tmp ? temps.Acquire() :
-  // target; if (!has_second_tmp) {
-  //   Push(signature_hash_register);
-  // }
-  // li(signature_hash_register, Operand(signature_hash));
   SbxCheck(Condition::kEqual, AbortReason::kWasmSignatureMismatch, scratch,
            Operand(signature_hash));
 #else
@@ -7668,10 +7676,18 @@ void MacroAssembler::CallWasmCodePointerNoSignatureCheck(Register target) {
   UseScratchRegisterScope temps(this);
   Register scratch = temps.Acquire();
   li(scratch, global_jump_table);
-  constexpr unsigned int kEntrySizeLog2 =
-      std::bit_width(sizeof(wasm::WasmCodePointerTableEntry)) - 1;
-  CalcScaledAddress(target, scratch, target, kEntrySizeLog2);
-  LoadWord(target, MemOperand(target));
+
+  static constexpr int kNumRelevantBits =
+      base::bits::WhichPowerOfTwo(WasmCodePointer::kIndexSpaceSize);
+  static constexpr int kLeftShift =
+      base::bits::WhichPowerOfTwo(sizeof(wasm::WasmCodePointerTableEntry));
+
+  SllWord(target, target, kLeftShift);
+  And(target, target, Operand(((1U << kNumRelevantBits) - 1) << kLeftShift));
+
+  AddWord(scratch, scratch, target);
+  LoadWord(target, MemOperand(scratch));
+
   Call(target);
 }
 
@@ -8099,7 +8115,10 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                               ER::exception_address(isolate), no_reg));
     __ Branch(&propagate_exception, ne, scratch, Operand(scratch2));
   }
-
+#ifndef V8_ENABLE_MEMORY_CORRUPTION_API
+  // This check doesn't make sense in for sandbox testing since
+  // Sandbox.getObjectAt(..) might legitimately return non-JSAny values
+  // and this check just hinders debugging.
   if (v8_flags.debug_code) {
     Label ok;
     if (handle_interceptor_result) {
@@ -8109,7 +8128,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                    AbortReason::kAPICallReturnedInvalidObject);
     __ bind(&ok);
   }
-
+#endif
   if (argc_operand == nullptr) {
     DCHECK_NE(slots_to_drop_on_return, 0);
     __ AddWord(sp, sp, Operand(slots_to_drop_on_return * kSystemPointerSize));

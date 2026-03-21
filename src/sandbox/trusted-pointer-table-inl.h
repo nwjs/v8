@@ -60,6 +60,10 @@ bool TrustedPointerTableEntry::HasPointer(
   return payload.IsTaggedWithTagIn(tag_range);
 }
 
+IndirectPointerTag TrustedPointerTableEntry::GetTag() const {
+  return payload_.load(std::memory_order_relaxed).ExtractTag();
+}
+
 void TrustedPointerTableEntry::Unpublish() {
   auto old_payload = payload_.load(std::memory_order_relaxed);
   auto new_payload = old_payload;
@@ -167,6 +171,11 @@ void TrustedPointerTable::Publish(TrustedPointerHandle handle,
                                   IndirectPointerTag tag) {
   uint32_t index = HandleToIndex(handle);
   at(index).Publish(tag);
+}
+
+void TrustedPointerTable::Unpublish(TrustedPointerHandle handle) {
+  uint32_t index = HandleToIndex(handle);
+  at(index).Unpublish();
 }
 
 bool TrustedPointerTable::IsUnpublished(TrustedPointerHandle handle) const {

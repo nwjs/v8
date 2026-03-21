@@ -56,7 +56,7 @@ inline std::ostream& operator<<(std::ostream& os, AddressType address_type) {
   return os << AddressTypeToStr(address_type);
 }
 
-// Reference to a string in the wire bytes.
+// Reference to a byte range in the wire bytes.
 class WireBytesRef {
  public:
   constexpr WireBytesRef() = default;
@@ -98,11 +98,13 @@ struct WasmGlobal {
   bool mutability = false;       // {true} if mutable.
   ConstantExpression init = {};  // the initialization expression of the global.
   union {
-    // Index of imported mutable global.
-    uint32_t index;
-    // Offset into global memory (if not imported & mutable). Expressed in bytes
-    // for value-typed globals, and in tagged words for reference-typed globals.
-    uint32_t offset;
+    // Used for mutable imported globals. Stores the index into the instance's
+    // `imported_mutable_globals_buffers` and `imported_mutable_globals_offsets`
+    // arrays.
+    uint32_t mutable_imported_global_index;
+    // Used for non-imported or non-mutable globals: Index into the instance's
+    // `tagged_globals_buffer` or `untagged_globals_buffer`.
+    uint32_t index_in_buffer;
   };
   bool shared = false;
   bool imported = false;
@@ -702,16 +704,14 @@ class WasmModuleSignatureStorage {
 
   uint8_t* Allocate(size_t length, size_t align = 1) {
     DCHECK(base::bits::IsPowerOfTwo(align));
-    if (V8_UNLIKELY(storage_.empty())) {
-      Allocate_more_storage(length + align - 1);
-    }
+    if (V8_UNLIKELY(storage_.empty())) AllocateMoreStorage(length + align - 1);
 
     std::vector<uint8_t>* last = &storage_.back();
     size_t last_size = last->size();
     uint8_t* ptr = last->data() + last_size;
     size_t padding = (-reinterpret_cast<intptr_t>(ptr)) & (align - 1);
     if (V8_UNLIKELY(last->capacity() - last_size < length + padding)) {
-      Allocate_more_storage(length + align - 1);
+      AllocateMoreStorage(length + align - 1);
       // Redo calculations from before:
       last = &storage_.back();
       last_size = last->size();
@@ -745,7 +745,7 @@ class WasmModuleSignatureStorage {
   }
 
  private:
-  V8_NOINLINE V8_PRESERVE_MOST void Allocate_more_storage(size_t min_length) {
+  V8_NOINLINE V8_PRESERVE_MOST void AllocateMoreStorage(size_t min_length) {
     size_t new_length =
         std::max(min_length, storage_.empty() ? 4 * (sizeof(FunctionSig) + 4)
                                               : storage_.back().capacity());
@@ -764,7 +764,10 @@ struct V8_EXPORT_PRIVATE WasmModule {
   // called with the V8 fast API. These signatures are added during
   // instantiation, so the `signature_storage` may be changed even when the
   // `WasmModule` is already `const`.
+  // Accesses *after decoding* are synchronized via `signature_storage_mutex`.
   mutable WasmModuleSignatureStorage signature_storage;
+  mutable base::Mutex signature_storage_mutex;
+
   int start_function_index = -1;   // start function, >= 0 if any
 
   // Size of the buffer required for all globals that are not imported and
@@ -793,8 +796,6 @@ struct V8_EXPORT_PRIVATE WasmModule {
   // Position and size of the name section (payload only, i.e. without section
   // ID and length).
   WireBytesRef name_section = {0, 0};
-  // Position and size of the descriptors section.
-  WireBytesRef descriptors_section = {0, 0};
   // Set by the singleton TypeNamesProvider to avoid duplicate work.
   mutable std::atomic<bool> canonical_typenames_decoded = false;
   // Set to true if this module has wasm-gc types in its type section.
@@ -820,10 +821,12 @@ struct V8_EXPORT_PRIVATE WasmModule {
   CompilationPriorities compilation_priorities;
   InstructionFrequencies instruction_frequencies;
   CallTargets call_targets;
+  // Protects the two fields below. Always lock this mutex before
+  // `type_feedback.mutex` to avoid deadlocks.
+  mutable base::Mutex compilation_hints_mutex;
   // When --wasm-generate-compilation-hints, we do not trigger tierup, so we
   // need to know which functions would have been tiered up to mark them for
   // optimization in the generated compilation hints.
-  mutable base::Mutex marked_for_tierup_mutex;
   mutable std::unordered_set<uint32_t> marked_for_tierup;
   // When --wasm-generate-compilation-hints, we need to map feedback slots to
   // offsets in the wire bytes to generate compilation hints. The key in the map

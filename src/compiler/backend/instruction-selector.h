@@ -520,6 +520,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final
       InstructionOperand* temps, FlagsContinuation* cont);
 
   void EmitIdentity(turboshaft::OpIndex node);
+  void EmitIdentity(turboshaft::OpIndex node, turboshaft::OpIndex input);
 
   // ===========================================================================
   // ============== Architecture-independent CPU feature methods. ==============
@@ -900,9 +901,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final
       return op_->stored_rep;
     }
     std::optional<AtomicMemoryOrder> memory_order() const {
-      // TODO(nicohartmann@): Currently we don't support memory orders.
-      if (op_->kind.is_atomic) return AtomicMemoryOrder::kSeqCst;
-      return std::nullopt;
+      return op_->memory_order();
     }
     MemoryAccessKind access_kind() const {
       return op_->kind.with_trap_handler
@@ -1375,7 +1374,10 @@ class V8_EXPORT_PRIVATE InstructionSelector final
       turboshaft::OpIndex call, turboshaft::Block* exception_handler = {},
       base::Vector<turboshaft::EffectHandler> wasm_effect_handlers = {});
   void VisitDeoptimizeIf(turboshaft::OpIndex node);
+#if V8_ENABLE_WEBASSEMBLY
   void VisitTrapIf(turboshaft::OpIndex node);
+  void VisitWasmTrap(turboshaft::OpIndex node);
+#endif  // V8_ENABLE_WEBASSEMBLY
   void VisitTailCall(turboshaft::OpIndex call);
   void VisitGoto(turboshaft::Block* target);
   void VisitBranch(turboshaft::OpIndex input, turboshaft::Block* tbranch,

@@ -320,6 +320,10 @@ class V8_EXPORT WasmMemoryMapDescriptor : public Object {
   static Local<WasmMemoryMapDescriptor> New(Isolate* isolate,
                                             WasmFileDescriptor fd);
 
+  void Unmap();
+
+  size_t Map(Local<WasmMemoryObject> memory, uint32_t offset);
+
  private:
   static void CheckCast(Value* object);
 };

@@ -123,11 +123,12 @@ Maybe<JSDateTimeFormat::HourCycle> GetHourCycle(
 
 class PatternMap {
  public:
-  PatternMap(std::string pattern, std::string value)
-      : pattern(std::move(pattern)), value(std::move(value)) {}
+  template <size_t N, size_t M>
+  constexpr PatternMap(const char (&pattern)[N], const char (&value)[M])
+      : pattern(pattern), value(value) {}
   virtual ~PatternMap() = default;
-  std::string pattern;
-  std::string value;
+  const char* pattern;
+  const char* value;
 };
 
 #define BIT_FIELDS(V, _)      \
@@ -329,8 +330,9 @@ const std::vector<PatternData> CreateCommonData(const PatternData& hour_data) {
   return build;
 }
 
-const std::vector<PatternData> CreateData(const char* digit2,
-                                          const char* numeric) {
+template <size_t N, size_t M>
+const std::vector<PatternData> CreateData(const char (&digit2)[N],
+                                          const char (&numeric)[M]) {
   return CreateCommonData(
       PatternData(Hour::kShift, DateTimeProperty::kHour,
                   {{digit2, "2-digit"}, {numeric, "numeric"}}, k2DigitNumeric));
@@ -350,7 +352,9 @@ const std::vector<PatternData> CreateData(const char* digit2,
 
 class Pattern {
  public:
-  Pattern(const char* d1, const char* d2) : data(CreateData(d1, d2)) {}
+  template <size_t N, size_t M>
+  Pattern(const char (&d1)[N], const char (&d2)[M])
+      : data(CreateData(d1, d2)) {}
   virtual ~Pattern() = default;
   virtual const std::vector<PatternData>& Get() const { return data; }
 
@@ -660,7 +664,7 @@ DirectHandle<Object> JSDateTimeFormat::TimeZone(
                      *(date_time_format->icu_simple_date_format()->raw()));
 }
 
-// ecma402 #sec-intl.datetimeformat.prototype.resolvedoptions
+// https://tc39.es/ecma402/#sec-intl.datetimeformat.prototype.resolvedoptions
 MaybeDirectHandle<JSObject> JSDateTimeFormat::ResolvedOptions(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format) {
   Factory* factory = isolate->factory();
@@ -791,8 +795,7 @@ MaybeDirectHandle<JSObject> JSDateTimeFormat::ResolvedOptions(
         if (pattern.find(pair.pattern) != std::string::npos) {
           Maybe<bool> maybe_create_property = JSReceiver::CreateDataProperty(
               isolate, options, GetPropertyString(*factory, item.property),
-              factory->NewStringFromAsciiChecked(pair.value.c_str()),
-              Just(kDontThrow));
+              factory->NewStringFromAsciiChecked(pair.value), Just(kDontThrow));
           DCHECK(maybe_create_property.FromJust());
           USE(maybe_create_property);
           break;
@@ -825,7 +828,7 @@ MaybeDirectHandle<JSObject> JSDateTimeFormat::ResolvedOptions(
 
 namespace {
 
-// #sec-temporal-istemporalobject
+// https://tc39.es/ecma262/#sec-temporal-istemporalobject
 bool IsTemporalObject(DirectHandle<Object> value) {
 #ifdef V8_TEMPORAL_SUPPORT
   // 1. If Type(value) is not Object, then
@@ -853,7 +856,7 @@ bool IsTemporalObject(DirectHandle<Object> value) {
 #endif  // V8_TEMPORAL_SUPPORT
 }
 
-// #sec-temporal-sametemporaltype
+// https://tc39.es/ecma262/#sec-temporal-sametemporaltype
 bool SameTemporalType(DirectHandle<Object> x, DirectHandle<Object> y) {
 #ifdef V8_TEMPORAL_SUPPORT
   // 1. If either of ! IsTemporalObject(x) or ! IsTemporalObject(y) is false,
@@ -964,7 +967,7 @@ bool CalendarEquals(temporal_rs::AnyCalendarKind kind,
   UNREACHABLE();
 }
 
-// #sec-temporal-handledatetimetemporalinstant
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporalinstant
 Maybe<DateTimeValueRecord> HandleDateTimeTemporalInstant(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
     DirectHandle<JSTemporalInstant> instant, const char* method_name) {
@@ -979,11 +982,11 @@ Maybe<DateTimeValueRecord> HandleDateTimeTemporalInstant(
   return Just(DateTimeValueRecord{milliseconds, PatternKind::kInstant});
 }
 
-// #sec-temporal-handledatetimetemporalyearmonth
-// #sec-temporal-handledatetimetemporalmonthday
-// #sec-temporal-handledatetimetemporaldatetime
-// #sec-temporal-handledatetimetemporaldate
-// #sec-temporal-handledatetimetemporaltime
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporalyearmonth
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporalmonthday
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporaldatetime
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporaldate
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporaltime
 template <typename T>
 Maybe<DateTimeValueRecord> HandleDateTimeTemporalGeneric(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
@@ -1023,7 +1026,7 @@ Maybe<DateTimeValueRecord> HandleDateTimeTemporalGeneric(
       DateTimeValueRecord{static_cast<double>(epoch_milliseconds), kind});
 }
 
-// #sec-temporal-handledatetimetemporalyearmonth
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporalyearmonth
 Maybe<DateTimeValueRecord> HandleDateTimeTemporalYearMonth(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
     DirectHandle<JSTemporalPlainYearMonth> temporal_year_month,
@@ -1049,7 +1052,7 @@ Maybe<DateTimeValueRecord> HandleDateTimeTemporalYearMonth(
   return Just(res);
 }
 
-// #sec-temporal-handledatetimetemporalmonthday
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporalmonthday
 Maybe<DateTimeValueRecord> HandleDateTimeTemporalMonthDay(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
     DirectHandle<JSTemporalPlainMonthDay> temporal_month_day,
@@ -1075,7 +1078,7 @@ Maybe<DateTimeValueRecord> HandleDateTimeTemporalMonthDay(
   return Just(res);
 }
 
-// #sec-temporal-handledatetimetemporaldatetime
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporaldatetime
 Maybe<DateTimeValueRecord> HandleDateTimeTemporalDateTime(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
     DirectHandle<JSTemporalPlainDateTime> date_time, const char* method_name) {
@@ -1083,7 +1086,7 @@ Maybe<DateTimeValueRecord> HandleDateTimeTemporalDateTime(
       isolate, date_time_format, PatternKind::kPlainDateTime, date_time);
 }
 
-// #sec-temporal-handledatetimetemporaldate
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporaldate
 Maybe<DateTimeValueRecord> HandleDateTimeTemporalDate(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
     DirectHandle<JSTemporalPlainDate> temporal_date, const char* method_name) {
@@ -1107,7 +1110,7 @@ Maybe<DateTimeValueRecord> HandleDateTimeTemporalDate(
   return Just(res);
 }
 
-// #sec-temporal-handledatetimetemporaltime
+// https://tc39.es/ecma262/#sec-temporal-handledatetimetemporaltime
 Maybe<DateTimeValueRecord> HandleDateTimeTemporalTime(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
     DirectHandle<JSTemporalPlainTime> temporal_time, const char* method_name) {
@@ -1132,7 +1135,7 @@ Maybe<DateTimeValueRecord> HandleDateTimeTemporalTime(
 }
 #endif  // V8_TEMPORAL_SUPPORT
 
-// #sec-temporal-handledatetimeothers
+// https://tc39.es/ecma262/#sec-temporal-handledatetimeothers
 Maybe<DateTimeValueRecord> HandleDateTimeOthers(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
     DirectHandle<Object> x_obj, const char* method_name) {
@@ -1167,7 +1170,7 @@ Maybe<DateTimeValueRecord> HandleDateTimeOthers(
   return Just(DateTimeValueRecord({x, PatternKind::kDate}));
 }
 
-// #sec-temporal-handledatetimevalue
+// https://tc39.es/ecma262/#sec-temporal-handledatetimevalue
 Maybe<DateTimeValueRecord> HandleDateTimeValue(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
     DirectHandle<Object> x, const char* method_name) {
@@ -1763,7 +1766,7 @@ void ApplyBritishRemoveFullWeekdayComma(
   }
 }
 
-// ecma402/#sec-formatdatetime
+// https://tc39.es/ecma402/#sec-formatdatetime
 // FormatDateTime( dateTimeFormat, x )
 MaybeDirectHandle<String> FormatDateTime(
     Isolate* isolate, const icu::SimpleDateFormat& date_format, double x) {
@@ -1820,7 +1823,7 @@ MaybeDirectHandle<String> FormatDateTimeWithTemporalSupport(
 
 }  // namespace
 
-// ecma402/#sec-datetime-format-functions
+// https://tc39.es/ecma402/#sec-datetime-format-functions
 // DateTime Format Functions
 MaybeDirectHandle<String> JSDateTimeFormat::DateTimeFormat(
     Isolate* isolate, DirectHandle<JSDateTimeFormat> date_time_format,
@@ -2559,7 +2562,7 @@ class DateTimePatternGeneratorCache {
 
 enum FormatMatcherOption { kBestFit, kBasic };
 
-// ecma402/#sec-initializedatetimeformat
+// https://tc39.es/ecma402/#sec-initializedatetimeformat
 MaybeDirectHandle<JSDateTimeFormat> JSDateTimeFormat::New(
     Isolate* isolate, DirectHandle<Map> map, DirectHandle<Object> locales,
     DirectHandle<Object> input_options, const char* service) {
@@ -2639,7 +2642,7 @@ MaybeDirectHandle<JSDateTimeFormat> JSDateTimeFormat::CreateDateTimeFormat(
   }
   // 9. Set opt.[[hc]] to hourCycle.
 
-  // ecma402/#sec-intl.datetimeformat-internal-slots
+  // https://tc39.es/ecma402/#sec-intl.datetimeformat-internal-slots
   // The value of the [[RelevantExtensionKeys]] internal slot is
   // « "ca", "nu", "hc" ».
 
@@ -3092,7 +3095,7 @@ namespace {
 
 // The list comes from third_party/icu/source/i18n/unicode/udat.h.
 // They're mapped to DateTimeFormat components listed at
-// https://tc39.github.io/ecma402/#sec-datetimeformat-abstracts .
+// https://tc39.es/ecma402/#sec-datetimeformat-abstracts .
 DirectHandle<String> IcuDateFieldIdToDateType(int32_t field_id,
                                               Isolate* isolate) {
   switch (field_id) {
@@ -3437,7 +3440,7 @@ std::optional<MaybeDirectHandle<T>> CallICUFormatRange(
     const icu::DateIntervalFormat* format, const icu::Calendar* calendar,
     double x, double y);
 
-// #sec-partitiondatetimerangepattern
+// https://tc39.es/ecma262/#sec-partitiondatetimerangepattern
 template <typename T, std::optional<MaybeDirectHandle<T>> (*Format)(
                           Isolate*, const icu::FormattedValue&)>
 std::optional<MaybeDirectHandle<T>> PartitionDateTimeRangePattern(

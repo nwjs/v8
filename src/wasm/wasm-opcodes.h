@@ -828,6 +828,9 @@ V8_EXPORT_PRIVATE bool IsJSCompatibleSignature(const CanonicalSig* sig);
 
 #define FOREACH_ATOMIC_GC_OPCODE(V) /*          Force 80 columns            */ \
   V(Pause, 0xfe04, _, "pause")                                                 \
+  /* The next two are placeholders, adjust them when the spec defines them. */ \
+  V(StructWait, 0xfe05, _, "struct.wait")                                      \
+  V(StructNotify, 0xfe06, _, "struct.notify")                                  \
   V(StructAtomicGet, 0xfe5c, _, "struct.atomic.get")                           \
   V(StructAtomicGetS, 0xfe5d, _, "struct.atomic.get_s")                        \
   V(StructAtomicGetU, 0xfe5e, _, "struct.atomic.get_u")                        \
@@ -990,6 +993,7 @@ class V8_EXPORT_PRIVATE WasmOpcodes {
   static constexpr bool IsThrowingOpcode(WasmOpcode);
   static constexpr bool IsRelaxedSimdOpcode(WasmOpcode);
   static constexpr bool IsFP16SimdOpcode(WasmOpcode);
+  static constexpr bool IsAtomicRmwOpcode(WasmOpcode);
 #if DEBUG
   static constexpr bool IsMemoryAccessOpcode(WasmOpcode);
 #endif  // DEBUG

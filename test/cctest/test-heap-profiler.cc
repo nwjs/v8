@@ -267,8 +267,8 @@ bool HasString(v8::Isolate* isolate, const v8::HeapGraphNode* node,
 void EnsureNoUninstrumentedInternals(v8::Isolate* isolate,
                                      const v8::HeapGraphNode* node) {
   for (int i = 0; i < 20; ++i) {
-    v8::base::ScopedVector<char> buffer(10);
-    std::string_view str = i::IntToStringView(i, buffer);
+    auto buffer = v8::base::OwnedVector<char>::NewForOverwrite(10);
+    std::string_view str = i::IntToStringView(i, buffer.as_vector());
     // GetProperty requires a null-terminated string.
     const v8::HeapGraphNode* internal = GetProperty(
         isolate, node, v8::HeapGraphEdge::kInternal, std::string(str).c_str());
@@ -1311,12 +1311,12 @@ TEST(HeapSnapshotJSONSerialization) {
   snapshot->Serialize(&stream, v8::HeapSnapshot::kJSON);
   CHECK_GT(stream.size(), 0);
   CHECK_EQ(1, stream.eos_signaled());
-  v8::base::ScopedVector<char> json(stream.size());
-  stream.WriteTo(json);
+  auto json = v8::base::OwnedVector<char>::NewForOverwrite(stream.size());
+  stream.WriteTo(json.as_vector());
 
   // Verify that snapshot string is valid JSON.
   v8::internal::OneByteResource* json_res =
-      new v8::internal::OneByteResource(json);
+      new v8::internal::OneByteResource(json.as_vector());
   v8::Local<v8::String> json_string =
       v8::String::NewExternalOneByte(env.isolate(), json_res).ToLocalChecked();
   v8::Local<v8::Context> context = v8::Context::New(env.isolate());
@@ -1939,11 +1939,14 @@ TEST(HeapSnapshotRetainedObjectInfo) {
   const v8::HeapSnapshot* snapshot = heap_profiler->TakeHeapSnapshot();
   CHECK(ValidateSnapshot(snapshot));
 
+  const v8::HeapGraphNode* gc_roots =
+      GetNode(snapshot->GetRoot(), v8::HeapGraphNode::kSynthetic, "(GC roots)");
+  CHECK_NOT_NULL(gc_roots);
   const v8::HeapGraphNode* native_group_aaa =
-      GetNode(snapshot->GetRoot(), v8::HeapGraphNode::kSynthetic, "aaa-group");
+      GetNode(gc_roots, v8::HeapGraphNode::kSynthetic, "aaa-group");
   CHECK_NOT_NULL(native_group_aaa);
   const v8::HeapGraphNode* native_group_ccc =
-      GetNode(snapshot->GetRoot(), v8::HeapGraphNode::kSynthetic, "ccc-group");
+      GetNode(gc_roots, v8::HeapGraphNode::kSynthetic, "ccc-group");
   CHECK_NOT_NULL(native_group_ccc);
 
   const v8::HeapGraphNode* n_AAA =
@@ -2174,129 +2177,6 @@ TEST(DeleteHeapSnapshot) {
   const_cast<v8::HeapSnapshot*>(s3)->Delete();
   CHECK_EQ(0, heap_profiler->GetSnapshotCount());
   CHECK(!FindHeapSnapshot(heap_profiler, s3));
-}
-
-class NameResolver : public v8::HeapProfiler::ObjectNameResolver {
- public:
-  const char* GetName(v8::Local<v8::Object> object) override {
-    return "Global object name";
-  }
-};
-
-TEST(GlobalObjectNameSimple) {
-  LocalContext env;
-  v8::HandleScope scope(env.isolate());
-  v8::HeapProfiler* heap_profiler = env.isolate()->GetHeapProfiler();
-
-  CompileRun("document = { URL:\"abcdefgh\" };");
-
-  // Allow usages of v8::HeapProfiler::ObjectNameResolver for now.
-  // TODO(https://crbug.com/333672197): remove.
-  START_ALLOW_USE_DEPRECATED()
-  NameResolver name_resolver;
-  const v8::HeapSnapshot* snapshot =
-      heap_profiler->TakeHeapSnapshot(nullptr, &name_resolver);
-  END_ALLOW_USE_DEPRECATED()
-  CHECK(ValidateSnapshot(snapshot));
-  const v8::HeapGraphNode* native_context = GetNativeContext(snapshot);
-  CHECK_NOT_NULL(native_context);
-  CHECK_EQ(std::string("system / NativeContext / Global object name"),
-           std::string(GetName(native_context)));
-
-  const v8::HeapGraphNode* global = GetGlobalObject(snapshot);
-  CHECK_NOT_NULL(global);
-  CHECK_EQ(std::string("Object (global*) / Global object name"),
-           std::string(GetName(global)));
-
-  const v8::HeapGraphNode* global_proxy = GetProperty(
-      env.isolate(), global, v8::HeapGraphEdge::kInternal, "global_proxy");
-  CHECK_NOT_NULL(global_proxy);
-  CHECK_EQ(std::string("Object (global) / Global object name"),
-           std::string(GetName(global_proxy)));
-}
-
-TEST(GlobalObjectName) {
-  v8::Isolate* isolate = CcTest::isolate();
-  v8::HandleScope scope(isolate);
-
-  v8::Local<v8::FunctionTemplate> global_constructor =
-      v8::FunctionTemplate::New(isolate);
-  global_constructor->SetClassName(v8_str("MyGlobal"));
-
-  v8::Local<v8::ObjectTemplate> global_template =
-      v8::ObjectTemplate::New(isolate, global_constructor);
-  LocalContext env(isolate, nullptr, global_template);
-
-  v8::HeapProfiler* heap_profiler = env.isolate()->GetHeapProfiler();
-
-  CompileRun("document = { URL:\"abcdefgh\" };");
-
-  // Allow usages of v8::HeapProfiler::ObjectNameResolver for now.
-  // TODO(https://crbug.com/333672197): remove.
-  START_ALLOW_USE_DEPRECATED()
-  NameResolver name_resolver;
-  const v8::HeapSnapshot* snapshot =
-      heap_profiler->TakeHeapSnapshot(nullptr, &name_resolver);
-  END_ALLOW_USE_DEPRECATED()
-  CHECK(ValidateSnapshot(snapshot));
-  const v8::HeapGraphNode* native_context = GetNativeContext(snapshot);
-  CHECK_NOT_NULL(native_context);
-  CHECK_EQ(std::string("system / NativeContext / Global object name"),
-           std::string(GetName(native_context)));
-
-  const v8::HeapGraphNode* global = GetGlobalObject(snapshot, false);
-  CHECK_NOT_NULL(global);
-  CHECK_EQ(std::string("MyGlobal (global*) / Global object name"),
-           std::string(GetName(global)));
-
-  const v8::HeapGraphNode* global_proxy = GetProperty(
-      env.isolate(), global, v8::HeapGraphEdge::kInternal, "global_proxy");
-  CHECK_NOT_NULL(global_proxy);
-  CHECK_EQ(std::string("MyGlobal (global) / Global object name"),
-           std::string(GetName(global_proxy)));
-}
-
-TEST(GlobalObjectNameDetached) {
-  v8::Isolate* isolate = CcTest::isolate();
-  v8::HandleScope scope(isolate);
-
-  v8::Local<v8::FunctionTemplate> global_constructor =
-      v8::FunctionTemplate::New(isolate);
-  global_constructor->SetClassName(v8_str("MyGlobal"));
-
-  v8::Local<v8::ObjectTemplate> global_template =
-      v8::ObjectTemplate::New(isolate, global_constructor);
-  LocalContext env(isolate, nullptr, global_template);
-
-  v8::HeapProfiler* heap_profiler = env.isolate()->GetHeapProfiler();
-
-  CompileRun("document = { URL:\"abcdefgh\" };");
-
-  env->DetachGlobal();
-
-  // Allow usages of v8::HeapProfiler::ObjectNameResolver for now.
-  // TODO(https://crbug.com/333672197): remove.
-  START_ALLOW_USE_DEPRECATED()
-  NameResolver name_resolver;
-  const v8::HeapSnapshot* snapshot =
-      heap_profiler->TakeHeapSnapshot(nullptr, &name_resolver);
-  END_ALLOW_USE_DEPRECATED()
-  CHECK(ValidateSnapshot(snapshot));
-  const v8::HeapGraphNode* native_context = GetNativeContext(snapshot);
-  CHECK_NOT_NULL(native_context);
-  CHECK_EQ(std::string("system / NativeContext / Global object name"),
-           std::string(GetName(native_context)));
-
-  const v8::HeapGraphNode* global = GetGlobalObject(snapshot, false);
-  CHECK_NOT_NULL(global);
-  CHECK_EQ(std::string("MyGlobal (global*) / Global object name"),
-           std::string(GetName(global)));
-
-  const v8::HeapGraphNode* global_proxy = GetProperty(
-      env.isolate(), global, v8::HeapGraphEdge::kInternal, "global_proxy");
-  CHECK_NOT_NULL(global_proxy);
-  CHECK_EQ(std::string("Object (global) / <detached>"),
-           std::string(GetName(global_proxy)));
 }
 
 class ContextNameResolver : public v8::HeapProfiler::ContextNameResolver {
@@ -3690,8 +3570,10 @@ void CheckEmbedderGraphSnapshot(v8::Isolate* isolate,
   const v8::HeapGraphNode* embedder_node_B =
       GetChildByName(embedder_node_A, "EmbedderNodeB");
   CHECK_EQ(20, GetSize(embedder_node_B));
+  const v8::HeapGraphNode* gc_roots = GetRootChild(snapshot, "(GC roots)");
+  CHECK(gc_roots);
   const v8::HeapGraphNode* embedder_root =
-      GetRootChild(snapshot, "EmbedderRoot");
+      GetChildByName(gc_roots, "EmbedderRoot");
   CHECK(embedder_root);
   const v8::HeapGraphNode* embedder_node_C =
       GetChildByName(embedder_root, "EmbedderNodeC");
@@ -4365,8 +4247,8 @@ TEST(SamplingHeapProfilerPretenuredInlineAllocations) {
 
   GrowNewSpaceToMaximumCapacity(CcTest::heap());
 
-  v8::base::ScopedVector<char> source(1024);
-  v8::base::SNPrintF(source,
+  auto source = v8::base::OwnedVector<char>::NewForOverwrite(1024);
+  v8::base::SNPrintF(source.as_vector(),
                      "var number_elements = %d;"
                      "var elements = new Array(number_elements);"
                      "function f() {"
@@ -4810,8 +4692,8 @@ TEST(HeapSnapshotWithWasmInstance) {
   CHECK_NOT_NULL(trusted_instance_data_node);
   CheckProperties(
       isolate, trusted_instance_data_node,
-      {"dispatch_table0", "dispatch_table_for_imports", "dispatch_tables",
-       "instance_object", "managed_native_module", "map",
+      {"data_segments", "dispatch_table0", "dispatch_table_for_imports",
+       "dispatch_tables", "instance_object", "managed_native_module", "map",
        "memory_bases_and_sizes", "native_context", "shared_part"});
 
   // "module_object" should be the same as the global "module".

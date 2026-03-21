@@ -1265,12 +1265,8 @@ RUNTIME_FUNCTION(Runtime_TakeHeapSnapshot) {
   }
 
   HeapProfiler* heap_profiler = isolate->heap()->heap_profiler();
-  // Since this API is intended for V8 devs, we do not treat globals as roots
-  // here on purpose.
-  v8::HeapProfiler::HeapSnapshotOptions options;
-  options.numerics_mode = v8::HeapProfiler::NumericsMode::kExposeNumericValues;
-  options.snapshot_mode = v8::HeapProfiler::HeapSnapshotMode::kExposeInternals;
-  heap_profiler->TakeSnapshotToFile(options, filename);
+  heap_profiler->TakeSnapshotToFile(
+      HeapProfiler::GetDefaultHeapSnapshotOptionsForTestingUsage(), filename);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -1679,6 +1675,8 @@ int StackSize(Isolate* isolate) {
   return n;
 }
 
+}  // anonymous namespace
+
 void PrintIndentation(int stack_size) {
   const int max_display = 80;
   if (stack_size <= max_display) {
@@ -1687,8 +1685,6 @@ void PrintIndentation(int stack_size) {
     PrintF("%4d:%*s", stack_size, max_display, "...");
   }
 }
-
-}  // namespace
 
 RUNTIME_FUNCTION(Runtime_TraceEnter) {
   SealHandleScope shs(isolate);
@@ -2641,10 +2637,10 @@ RUNTIME_FUNCTION(Runtime_GetBytecode) {
 
   DirectHandle<TrustedFixedArray> constant_pool(bytecode_array->constant_pool(),
                                                 isolate);
-  int cp_length = constant_pool->length();
+  uint32_t cp_length = constant_pool->ulength().value();
   Handle<JSArray> constant_pool_array =
       isolate->factory()->NewJSArray(cp_length);
-  for (int i = 0; i < cp_length; ++i) {
+  for (uint32_t i = 0; i < cp_length; ++i) {
     Handle<Object> value(constant_pool->get(i), isolate);
     RETURN_FAILURE_ON_EXCEPTION(
         isolate, Object::SetElement(isolate, constant_pool_array, i, value,
@@ -2653,7 +2649,7 @@ RUNTIME_FUNCTION(Runtime_GetBytecode) {
 
   DirectHandle<TrustedByteArray> handler_table(bytecode_array->handler_table(),
                                                isolate);
-  int ht_length = handler_table->length();
+  size_t ht_length = static_cast<size_t>(handler_table->ulength().value());
   Handle<JSArrayBuffer> handler_table_buffer =
       isolate->factory()
           ->NewJSArrayBufferAndBackingStore(ht_length,
@@ -2800,6 +2796,22 @@ RUNTIME_FUNCTION(Runtime_InstallBytecode) {
                        *BUILTIN_CODE(isolate, InterpreterEntryTrampoline));
 
   return ReadOnlyRoots(isolate).undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_AllocateHeapNumberWithValue) {
+  HandleScope scope(isolate);
+  CHECK_UNLESS_FUZZING(args.length() == 1);
+  MaybeHandle<Number> result =
+      Object::ToNumber(isolate, handle(args[0], isolate));
+  DirectHandle<Number> result_handle;
+  if (!result.ToHandle(&result_handle)) {
+    return ReadOnlyRoots(isolate).exception();
+  }
+  // Force HeapNumber, even if the value is representable as a Smi.
+  if (IsSmi(*result_handle)) {
+    return *isolate->factory()->NewHeapNumber(i::Smi::ToInt(*result_handle));
+  }
+  return *result_handle;
 }
 
 }  // namespace internal

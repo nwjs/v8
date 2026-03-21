@@ -300,6 +300,7 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
   V(harmony_struct, "harmony structs, shared structs, and shared arrays")
 
 #define JAVASCRIPT_INPROGRESS_FEATURES_BASE(V)       \
+  V(js_iterator_join, "Iterator.prototype.join")     \
   V(js_decorators, "decorators")                     \
   V(js_source_phase_imports, "source phase imports") \
   V(js_defer_import_eval, "defer import eval")
@@ -317,9 +318,8 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
 // Features that are complete (but still behind the --harmony flag).
 #define HARMONY_STAGED_BASE(V)
 
-#define JAVASCRIPT_STAGED_FEATURES_BASE(V)             \
-  V(js_immutable_arraybuffer, "Immutable ArrayBuffer") \
-  V(js_sum_precise, "Math.sumPrecise")
+#define JAVASCRIPT_STAGED_FEATURES_BASE(V) \
+  V(js_immutable_arraybuffer, "Immutable ArrayBuffer")
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
@@ -351,7 +351,8 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
     "Support diamond-importing re-expored namespaces "                       \
     "(https://github.com/tc39/ecma262/pull/3715)")                           \
   V(js_upsert, "upsert")                                                     \
-  V(js_iterator_sequencing, "iterator sequencing")
+  V(js_iterator_sequencing, "iterator sequencing")                           \
+  V(js_sum_precise, "Math.sumPrecise")
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_SHIPPING(V) HARMONY_SHIPPING_BASE(V)
@@ -411,6 +412,10 @@ DEFINE_BOOL(js_nonextensible_applies_to_private, false,
 DEFINE_EXPERIMENTAL_FEATURE(
     for_of_optimization,
     "Experimental flag for improving ForOf loops on ArrayIterator")
+
+DEFINE_EXPERIMENTAL_FEATURE(
+    enable_queue_microtask,
+    "ship a native queueMicrotask implementation on the global object")
 
 #ifdef V8_INTL_SUPPORT
 DEFINE_BOOL(icu_timezone_data, true, "get information about timezones from ICU")
@@ -681,15 +686,17 @@ DEFINE_WEAK_IMPLICATION(maglev_future, maglev_inline_api_calls)
 DEFINE_WEAK_IMPLICATION(maglev_future, maglev_escape_analysis)
 DEFINE_WEAK_IMPLICATION(maglev_future, maglev_licm)
 
-DEFINE_EXPERIMENTAL_FEATURE(
-    maglev_truncated_int32_phis,
-    "Enable truncated to int32 representation in the phi selector")
-DEFINE_WEAK_IMPLICATION(turbolev_future, maglev_truncated_int32_phis)
+DEFINE_BOOL(turbolev_truncated_int32_phis, false,
+            "Enable truncated to int32 representation in the phi selector")
+DEFINE_WEAK_IMPLICATION(turbolev_future, turbolev_truncated_int32_phis)
 
 DEFINE_EXPERIMENTAL_FEATURE(maglev_range_analysis,
                             "Enable Maglev range value analysis pass")
 DEFINE_BOOL(trace_maglev_range_analysis, false,
             "Trace Maglev range value analysis pass")
+DEFINE_BOOL(trace_maglev_kna, false, "Trace Maglev known node aspects")
+DEFINE_BOOL(maglev_use_unreliable_maps, true,
+            "Use unreliable unstable maps in Maglev")
 DEFINE_WEAK_IMPLICATION(turbolev_future, maglev_range_analysis)
 DEFINE_BOOL(maglev_range_verification, false,
             "Run integer range verifiction pass in Turbolev frontend pipeline")
@@ -775,6 +782,9 @@ DEFINE_BOOL(maglev_print_provenance, true,
 
 DEFINE_BOOL(print_maglev_code, false, "print maglev code")
 DEFINE_WEAK_IMPLICATION(print_maglev_code, maglev_print_bytecode)
+
+DEFINE_BOOL(trace_with_compilation_id, true,
+            "prefix maglev/turbolev trace line with a compilation id")
 
 DEFINE_BOOL(trace_maglev_graph_building, false, "trace maglev graph building")
 DEFINE_BOOL(trace_maglev_loop_speeling, false, "trace maglev loop SPeeling")
@@ -1272,7 +1282,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
 // Internalize into a shared string table in the shared isolate
 DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
 DEFINE_IMPLICATION(shared_strings, shared_heap)
-DEFINE_BOOL(shared_string_table, false, "internalize strings into shared table")
+DEFINE_EXPERIMENTAL_FEATURE(shared_string_table,
+                            "internalize strings into shared table")
 DEFINE_IMPLICATION(shared_string_table, shared_strings)
 DEFINE_IMPLICATION(harmony_struct, shared_string_table)
 DEFINE_BOOL_READONLY(always_use_string_forwarding_table, false,
@@ -1734,8 +1745,13 @@ DEFINE_EXPERIMENTAL_FEATURE(turboshaft_typed_optimizations,
                             "performs optimizations based on type information")
 #if V8_TARGET_ARCH_ARM64
 DEFINE_BOOL(wasm_simd_opt, false, "enable optimizations for Webassembly SIMD")
+DEFINE_IMPLICATION(future, wasm_simd_opt)
 DEFINE_EXPERIMENTAL_FEATURE(experimental_wasm_simd_opt,
                             "enable extra optimizations for Webassembly SIMD")
+DEFINE_EXPERIMENTAL_FEATURE(experimental_wasm_deinterleave_loads,
+                            "enable deinterleaving loads for Webassembly SIMD")
+DEFINE_IMPLICATION(experimental_wasm_simd_opt, wasm_simd_opt)
+DEFINE_IMPLICATION(experimental_wasm_deinterleave_loads, wasm_simd_opt)
 #endif  // V8_TARGET_ARCH_ARM64
 
 DEFINE_BOOL(turbolev, false,
@@ -2487,9 +2503,14 @@ DEFINE_BOOL(parallel_gc_clearing, true,
             "use parallel threads to clear weak refs in the atomic pause.")
 DEFINE_BOOL(detect_ineffective_gcs_near_heap_limit, true,
             "trigger out-of-memory failure to avoid GC storm near heap limit")
-DEFINE_BOOL(ineffective_gc_includes_global, false,
-            "includes global size in out-of-memory failure near heap limit")
-DEFINE_BOOL(ineffective_gcs_forces_last_resort, false,
+DEFINE_BOOL(
+    enforce_global_heap_limit, false,
+    "Enforce global size by causing an out-of-memory failure above heap limit")
+// Since the maximum v8_limit is 4Gb, this aligns with
+// ArrayBuffer::kMaxByteLength.
+DEFINE_INT(maximum_global_heap_limit_factor, 8,
+           "Ratio from v8 to global maximum heap size")
+DEFINE_BOOL(ineffective_gcs_forces_last_resort, true,
             "force a last resort GC when we're near heap limit")
 DEFINE_FLOAT(
     ineffective_gc_size_threshold, 0.95,
@@ -2662,9 +2683,6 @@ DEFINE_BOOL(memory_pool, true,
 DEFINE_BOOL(
     memory_pool_share_memory_on_teardown, true,
     "Share memory on Isolate teardown using other Isolate's task runners")
-DEFINE_BOOL(memory_pool_release_before_memory_pressure_gcs, true,
-            "discard the memory pool before invoking the GC on memory pressure "
-            "or last resort GCs")
 DEFINE_BOOL(memory_pool_release_on_malloc_failures, false,
             "discard the memory pool on malloc retries")
 DEFINE_SIZE_T(memory_pool_timeout, 8, "Release pooled pages after X seconds.")
@@ -2912,6 +2930,8 @@ DEFINE_BOOL(force_slow_path, false, "always take the slow path for builtins")
 DEFINE_BOOL(test_small_max_function_context_stub_size, false,
             "enable testing the function context size overflow path "
             "by making the maximum size smaller")
+DEFINE_WEAK_IMPLICATION(future, fast_api_indexof)
+DEFINE_BOOL(fast_api_indexof, false, "enable using indexOf Api callbacks")
 
 DEFINE_BOOL(inline_new, true, "use fast inline allocation")
 DEFINE_NEG_NEG_IMPLICATION(inline_new, turbo_allocation_folding)
@@ -3140,6 +3160,11 @@ DEFINE_IMPLICATION(sparkplug_plus, short_builtin_calls)
 DEFINE_BOOL(super_ic, true, "use an IC for super property loads")
 
 DEFINE_EXPERIMENTAL_FEATURE(mega_dom_ic, "use MegaDOM IC state for API objects")
+
+DEFINE_EXPERIMENTAL_FEATURE(
+    homomorphic_ic,
+    "use Homomorphic IC state for same-handler highly polymorphic ICs")
+DEFINE_INT(homomorphic_ic_count, 8, "local cache size in homomorphic ICs")
 
 // objects.cc
 DEFINE_BOOL(trace_prototype_users, false,
@@ -3526,6 +3551,9 @@ DEFINE_BOOL_READONLY(expose_memory_corruption_api, false,
                      "Exposes the memory corruption API. Set automatically by "
                      "--sandbox-testing and --sandbox-fuzzing.")
 #endif
+
+DEFINE_EXPERIMENTAL_FEATURE(sandbox_prohibit_insecure_mode,
+                            "Prohibits an insecure sandbox setup.")
 
 #if defined(V8_OS_AIX) && defined(COMPONENT_BUILD)
 // FreezeFlags relies on mprotect() method, which does not work by default on
@@ -4060,6 +4088,10 @@ DEFINE_EXPERIMENTAL_FEATURE(
     track_array_buffer_views,
     "Track TypedArrays and DataViews attached to array buffers and "
     "update them in-place when the buffer detaches")
+
+DEFINE_EXPERIMENTAL_FEATURE(
+    superspreading,
+    "Allow arbitrary length spread arguments on supported builtins")
 
 DEFINE_BOOL(is_standalone_d8_shell, false,
             "Tells V8 it's running as part of the d8. This flag should not be "

@@ -563,12 +563,10 @@ void LiftoffAssembler::EmitWriteBarrier(Register target_object,
   bind(&exit);
 }
 
-void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
-                                          Register offset_reg,
-                                          int32_t offset_imm, Register src,
-                                          LiftoffRegList pinned,
-                                          uint32_t* protected_store_pc,
-                                          SkipWriteBarrier skip_write_barrier) {
+void LiftoffAssembler::StoreTaggedPointer(
+    Register dst_addr, Register offset_reg, int32_t offset_imm, Register src,
+    LiftoffRegList pinned, uint32_t* protected_store_pc,
+    compiler::WriteBarrierKind write_barrier) {
   DCHECK_GE(offset_imm, 0);
   Operand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg,
                                      static_cast<uint32_t>(offset_imm));
@@ -577,7 +575,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
 
   if (v8_flags.disable_write_barriers) return;
 
-  if (skip_write_barrier) {
+  if (write_barrier == compiler::kNoWriteBarrier) {
     if (v8_flags.verify_write_barriers) {
       CallVerifySkippedWriteBarrierStubSaveRegisters(dst_addr, src,
                                                      SaveFPRegsMode::kSave);
@@ -1384,6 +1382,8 @@ void LiftoffAssembler::emit_i32_mul(Register dst, Register lhs, Register rhs) {
                                                                      lhs, rhs);
 }
 
+void LiftoffAssembler::SpillDivRegisters() { SpillRegisters(rax, rdx); }
+
 namespace liftoff {
 enum class DivOrRem : uint8_t { kDiv, kRem };
 template <typename type, DivOrRem div_or_rem>
@@ -1405,12 +1405,11 @@ void EmitIntDivOrRem(LiftoffAssembler* assm, Register dst, Register lhs,
     }                             \
   } while (false)
 
-  // For division, the lhs is always taken from {edx:eax}. Thus, make sure that
-  // these registers are unused. If {rhs} is stored in one of them, move it to
-  // another temporary register.
-  // Do all this before any branch, such that the code is executed
-  // unconditionally, as the cache state will also be modified unconditionally.
-  assm->SpillRegisters(rdx, rax);
+  // For division, the lhs is always taken from {rdx:rax}. Callers need to
+  // make sure these registers are unused. If {rhs} is stored in one of them,
+  // move it to another temporary register.
+  DCHECK(assm->cache_state()->is_free(LiftoffRegister(rax)));
+  DCHECK(assm->cache_state()->is_free(LiftoffRegister(rdx)));
   if (rhs == rax || rhs == rdx) {
     iop(mov, kScratchRegister, rhs);
     rhs = kScratchRegister;
@@ -1467,6 +1466,7 @@ void EmitIntDivOrRem(LiftoffAssembler* assm, Register dst, Register lhs,
     iop(mov, dst, kResultReg);
   }
   if (special_case_minus_1) assm->bind(&done);
+#undef iop
 }
 }  // namespace liftoff
 

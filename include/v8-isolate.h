@@ -1916,7 +1916,6 @@ class V8_EXPORT Isolate {
   internal::ValueHelper::InternalRepresentationType GetDataFromSnapshotOnce(
       size_t index);
   int64_t AdjustAmountOfExternalAllocatedMemoryImpl(int64_t change_in_bytes);
-  void HandleExternalMemoryInterrupt();
 };
 
 void Isolate::SetData(uint32_t slot, void* data) {

@@ -7,8 +7,8 @@
 // Christoph Lüders: Fast Multiplication of Large Integers,
 // http://arxiv.org/abs/1503.04955
 
+#include "src/bigint/bigint-inl.h"
 #include "src/bigint/bigint-internal.h"
-#include "src/bigint/digit-arithmetic.h"
 #include "src/bigint/util.h"
 
 namespace v8 {
@@ -313,7 +313,7 @@ void ComputeParameters(uint32_t N, int m, Parameters* params) {
   // We want recursive calls to make progress, so force K to be a multiple
   // of 8 if it's above the recursion threshold. Otherwise, K must be a
   // multiple of kDigitBits.
-  const int threshold = (K + 1 >= kFftInnerThreshold * kDigitBits)
+  const int threshold = (K + 1 >= config::kFftInnerThreshold * kDigitBits)
                             ? 3 + kLog2DigitBits
                             : kLog2DigitBits;
   int K_tz = CountTrailingZeros(K);
@@ -535,6 +535,7 @@ void FFTContainer::Start(Digits X, uint32_t chunk_size, int theta, int omega) {
   const size_t part_length_in_bytes = length_ * sizeof(digit_t);
   uint32_t nhalf = n_ / 2;
   // Unrolled first iteration.
+  chunk_size = std::min(chunk_size, len);
   CopyAndZeroExtend(part_[0], pointer, chunk_size, part_length_in_bytes);
   CopyAndZeroExtend(part_[nhalf], pointer, chunk_size, part_length_in_bytes);
   pointer += chunk_size;
@@ -628,8 +629,11 @@ void FFTContainer::NormalizeAndRecombine(int omega, int m, RWDigits Z,
     for (; j < length_; j++) {
       DCHECK(temp_[j] == 0);
     }
-    if (carry != 0) {
-      DCHECK(zi < Z.len());
+    // Only concurrent in-sandbox corruption can cause carries beyond Z.len().
+    // So guard the store with a bounds check, but have a DCHECK so tests can
+    // detect any implementation bugs leading to an unexpected situation.
+    DCHECK(carry == 0 || zi < Z.len());
+    if (carry != 0 && zi < Z.len()) {
       Z[zi] = carry;
     }
   }
@@ -727,7 +731,7 @@ void FFTContainer::DoPointwiseMultiplication(const FFTContainer& other,
                                              digit_t* temp) {
   // The (K_ & 3) != 0 condition makes sure that the inner FFT gets
   // to split the work into at least 4 chunks.
-  bool use_fft = length_ >= kFftInnerThreshold && (K_ & 3) == 0;
+  bool use_fft = length_ >= config::kFftInnerThreshold && (K_ & 3) == 0;
   Parameters params;
   if (use_fft) ComputeParameters_Inner(K_, &params);
   RWDigits result(temp, 2 * length_);
@@ -765,6 +769,9 @@ void FFTContainer::PointwiseMultiply(const FFTContainer& other) {
 
 // TODO(jkummerow): Consider implementing the "sqrt(2) trick".
 // Gaudry/Kruppa/Zimmerman report that it saved them around 10%.
+
+// TODO(jkummerow): When X is much longer than Y (e.g. 1000x as many digits),
+// it would be quite beneficial to operate in chunks (like Toom3 does).
 
 void ProcessorImpl::MultiplyFFT(RWDigits Z, Digits X, Digits Y) {
   Parameters params;
