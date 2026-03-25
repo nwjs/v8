@@ -820,7 +820,9 @@ path. Add it with -I<path> to the command line
 
 // Exposing private symbols requires exposing public symbols too.
 #ifdef BUILDING_V8_SHARED_PRIVATE
+#ifndef BUILDING_V8_SHARED
 #define BUILDING_V8_SHARED
+#endif
 #endif
 
 #if defined(BUILDING_V8_SHARED) && defined(USING_V8_SHARED)

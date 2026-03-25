@@ -4183,7 +4183,7 @@ void MaglevGraphBuilder::SetKnownValue(ValueNode* node, compiler::ObjectRef ref,
 ReduceResult MaglevGraphBuilder::BuildCheckSmi(
     ValueNode* object, bool elidable,
     AllowWideningSmiToInt32 allow_widening_smi_to_int32) {
-  if (object->StaticTypeIs(broker(), NodeType::kSmi)) return object;
+  if (object->StaticTypeIs(broker(), NodeType::kSmi) && elidable) return object;
   // Check for the empty type first so that we catch the case where
   // GetType(object) is already empty.
   if (IsEmptyNodeType(IntersectType(
@@ -4191,6 +4191,7 @@ ReduceResult MaglevGraphBuilder::BuildCheckSmi(
     return EmitUnconditionalDeopt(DeoptimizeReason::kSmi);
   }
   if (EnsureType(object, NodeType::kSmi) && elidable) return object;
+  RecordSmiUse(object);
   // For constants, we may be able to skip the runtime check.
   if (std::optional<int32_t> constant_value = TryGetInt32Constant(object)) {
     if (Smi::IsValid(constant_value.value())) return object;
@@ -4211,7 +4212,6 @@ ReduceResult MaglevGraphBuilder::BuildCheckSmi(
       AddNewNodeNoInputConversion<CheckHoleyFloat64IsSmi>({object});
       break;
     case ValueRepresentation::kTagged:
-      RecordSmiUse(object);
       AddNewNodeNoInputConversion<CheckSmi>({object});
       break;
     case ValueRepresentation::kIntPtr:
