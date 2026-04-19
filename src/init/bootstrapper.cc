@@ -482,11 +482,8 @@ V8_NOINLINE DirectHandle<JSFunction> CreateFunctionForBuiltinWithPrototype(
   DirectHandle<Map> initial_map = factory->NewContextfulMapForCurrentContext(
       type, instance_size, elements_kind, inobject_properties);
   initial_map->SetConstructor(*result);
-  if (type == JS_FUNCTION_TYPE) {
-    DCHECK_EQ(instance_size, JSFunction::kSizeWithPrototype);
-    // Since we are creating an initial map for JSFunction objects with
-    // prototype slot, set the respective bit.
-    initial_map->set_has_prototype_slot(true);
+  if (DEBUG_BOOL && InstanceTypeChecker::IsJSFunctionWithPrototype(type)) {
+    DCHECK_EQ(instance_size, JSFunctionWithPrototype::kMinSize);
   }
   // TODO(littledan): Why do we have this is_generator test when
   // NewFunctionPrototype already handles finding an appropriately
@@ -578,7 +575,7 @@ V8_NOINLINE DirectHandle<JSFunction> InstallFunction(
 V8_NOINLINE void SetConstructorInstanceType(
     Isolate* isolate, DirectHandle<JSFunction> constructor,
     InstanceType constructor_type) {
-  DCHECK(InstanceTypeChecker::IsJSFunction(constructor_type));
+  DCHECK(InstanceTypeChecker::IsJSFunctionWithPrototype(constructor_type));
   DCHECK_NE(constructor_type, JS_FUNCTION_TYPE);
 
   Tagged<Map> map = constructor->map();
@@ -978,14 +975,16 @@ DirectHandle<Map> CreateNonConstructorMap(Isolate* isolate,
   DirectHandle<Map> map = Map::Copy(isolate, source_map, reason);
   // Ensure the resulting map has prototype slot (it is necessary for storing
   // initial map even when the prototype property is not required).
-  if (!map->has_prototype_slot()) {
+  DCHECK(map->instance_type() == JS_FUNCTION_WITHOUT_PROTOTYPE_TYPE ||
+         map->instance_type() == JS_FUNCTION_TYPE);
+  if (IsJSFunctionWithoutPrototypeMap(*map)) {
     // Re-set the unused property fields after changing the instance size.
     int unused_property_fields = map->UnusedPropertyFields();
+    map->set_instance_type(JS_FUNCTION_TYPE);
     map->set_instance_size(map->instance_size() + kTaggedSize);
     // The prototype slot shifts the in-object properties area by one slot.
     map->SetInObjectPropertiesStartInWords(
         map->GetInObjectPropertiesStartInWords() + 1);
-    map->set_has_prototype_slot(true);
     map->SetInObjectUnusedPropertyFields(unused_property_fields);
   }
   map->set_is_constructor(false);
@@ -2103,6 +2102,33 @@ void LazyInitializeGlobalThisTemporal(
 
 #endif  // V8_TEMPORAL_SUPPORT
 
+void Bootstrapper::InitializeLazyPartOfContext(
+    DirectHandle<NativeContext> native_context, NativeContext::Field index) {
+#define CASE(index_name, type, name) case Context::index_name:
+
+  switch (index) {
+#ifdef V8_TEMPORAL_SUPPORT
+    NATIVE_CONTEXT_FIELDS_TEMPORAL(CASE) {
+      if (!v8_flags.harmony_temporal) return;
+      // Switch context since bootstrapper functions install constructors
+      // into current context.
+      SaveAndSwitchContext save(isolate_, *native_context);
+      // Initialize Temporal-related part of the native context. The value
+      // of globalThis.Temporal remains unchanged (the user code might have
+      // already replaced it with something else).
+      InitializeTemporal(isolate_);
+      return;
+    }
+#endif  // V8_TEMPORAL_SUPPORT
+
+    default:
+      // The index does not belong to any of the lazily initialized parts
+      // of the context.
+      return;
+  }
+#undef CASE
+}
+
 // This is only called if we are not using snapshots.  The equivalent
 // work in the snapshot case is done in HookUpGlobalObject.
 void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
@@ -2280,7 +2306,7 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
     DirectHandle<JSFunction> prototype = empty_function;
     DirectHandle<JSFunction> function_fun =
         InstallFunction(isolate_, global, "Function", JS_FUNCTION_TYPE,
-                        JSFunction::kSizeWithPrototype, 0, prototype,
+                        JSFunctionWithPrototype::kMinSize, 0, prototype,
                         Builtin::kFunctionConstructor, 1, kDontAdapt);
     // Function instances are sloppy by default.
     function_fun->set_prototype_or_initial_map(*isolate_->sloppy_function_map(),
@@ -4691,6 +4717,10 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
     // removed, add the following line to the above macro:
     // V(ITERATOR_FUNCTION, concat, Concat, CONCAT, 0, kDontAdapt)
 
+    // TODO(nikolaos, 465357675): Once the --js-joint-iteration flag is removed,
+    // add the following line to the above macro:
+    // V(ITERATOR_FUNCTION, zip, Zip, ZIP, 1, kDontAdapt)
+
     ITERATOR_HELPERS(INSTALL_ITERATOR_HELPER)
 
 #undef INSTALL_ITERATOR_HELPER
@@ -5215,7 +5245,7 @@ void Genesis::InitializeIteratorFunctions() {
         iter.GetCurrent<JSObject>(), isolate);
     DirectHandle<JSFunction> generator_function_function = CreateFunction(
         isolate, "GeneratorFunction", JS_FUNCTION_TYPE,
-        JSFunction::kSizeWithPrototype, 0, generator_function_prototype,
+        JSFunctionWithPrototype::kMinSize, 0, generator_function_prototype,
         Builtin::kGeneratorFunctionConstructor, 1, kDontAdapt);
     generator_function_function->set_prototype_or_initial_map(
         native_context->generator_function_map(), kReleaseStore);
@@ -5244,7 +5274,8 @@ void Genesis::InitializeIteratorFunctions() {
 
     DirectHandle<JSFunction> async_generator_function_function = CreateFunction(
         isolate, "AsyncGeneratorFunction", JS_FUNCTION_TYPE,
-        JSFunction::kSizeWithPrototype, 0, async_generator_function_prototype,
+        JSFunctionWithPrototype::kMinSize, 0,
+        async_generator_function_prototype,
         Builtin::kAsyncGeneratorFunctionConstructor, 1, kDontAdapt);
     async_generator_function_function->set_prototype_or_initial_map(
         native_context->async_generator_function_map(), kReleaseStore);
@@ -5347,7 +5378,7 @@ void Genesis::InitializeIteratorFunctions() {
 
     DirectHandle<JSFunction> async_function_constructor = CreateFunction(
         isolate, "AsyncFunction", JS_FUNCTION_TYPE,
-        JSFunction::kSizeWithPrototype, 0, async_function_prototype,
+        JSFunctionWithPrototype::kMinSize, 0, async_function_prototype,
         Builtin::kAsyncFunctionConstructor, 1, kDontAdapt);
     async_function_constructor->set_prototype_or_initial_map(
         native_context->async_function_map(), kReleaseStore);
@@ -5594,6 +5625,24 @@ void Genesis::InitializeGlobal_js_iterator_sequencing() {
   LOG(isolate_, MapDetails(*map));
   SimpleInstallFunction(isolate_, iterator_function, "concat",
                         Builtin::kIteratorConcat, 0, kDontAdapt);
+}
+
+void Genesis::InitializeGlobal_js_joint_iteration() {
+  if (!v8_flags.js_joint_iteration) return;
+  auto iterator_helper_prototype = direct_handle(
+      native_context()->initial_iterator_helper_prototype(), isolate_);
+  auto iterator_function =
+      direct_handle(native_context()->initial_iterator_function(), isolate_);
+  DirectHandle<Map> map =
+      isolate_->factory()->NewContextfulMapForCurrentContext(
+          JS_ITERATOR_ZIP_HELPER_TYPE, JSIteratorZipHelper::kHeaderSize,
+          TERMINAL_FAST_ELEMENTS_KIND, 0);
+  Map::SetPrototype(isolate(), map, iterator_helper_prototype);
+  map->SetConstructor(*iterator_function);
+  native_context()->set_iterator_zip_helper_map(*map);
+  LOG(isolate_, MapDetails(*map));
+  SimpleInstallFunction(isolate_, iterator_function, "zip",
+                        Builtin::kIteratorZip, 1, kDontAdapt);
 }
 
 void Genesis::InitializeGlobal_js_upsert() {

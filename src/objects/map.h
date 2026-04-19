@@ -142,6 +142,8 @@ enum VisitorId {
 #undef VISITOR_ID_ENUM_DECL
 };
 
+V8_EXPORT_PRIVATE const char* ToString(VisitorId visitor_id);
+
 enum class ObjectFields {
   kDataOnly,
   kMaybePointers,
@@ -193,7 +195,7 @@ using MapHandlesSpan = v8::MemorySpan<DirectHandle<Map>>;
 //      |          |   - is_undetectable (bit 4)                     |
 //      |          |   - is_access_check_needed (bit 5)              |
 //      |          |   - is_constructor (bit 6)                      |
-//      |          |   - has_prototype_slot (bit 7)                  |
+//      |          |   - TBD (bit 7)                                 |
 //      +----------+-------------------------------------------------+
 //      | Byte     | [bit_field2]                                    |
 //      |          |   - new_target_is_base (bit 0)                  |
@@ -283,6 +285,9 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
         RELAXED_READ_UINT16_FIELD(*this, kInstanceTypeOffset));
   }
   inline void set_instance_type(InstanceType value);
+
+  // Size of this map object.
+  inline int AllocatedSize() const;
 
   // Returns the size of the used in-object area including object header
   // (only used for JSObject in fast mode, for the other kinds of objects it
@@ -430,8 +435,6 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // An "interesting symbol" is one for which Name::IsInteresting()
   // returns true, i.e. a well-known symbol like @@toStringTag.
   DECL_BOOLEAN_ACCESSORS(may_have_interesting_properties)
-
-  DECL_BOOLEAN_ACCESSORS(has_prototype_slot)
 
   // Records and queries whether the instance has a named interceptor.
   DECL_BOOLEAN_ACCESSORS(has_named_interceptor)
@@ -1188,6 +1191,7 @@ class NormalizedMapCache : public WeakFixedArray {
 #define DECL_TESTER(Type, ...) inline bool Is##Type##Map(Tagged<Map> map);
 INSTANCE_TYPE_CHECKERS(DECL_TESTER)
 #undef DECL_TESTER
+inline bool IsMetaMapMap(Tagged<Map> map);
 inline bool IsNullMap(Tagged<Map> map);
 inline bool IsUndefinedMap(Tagged<Map> map);
 inline bool IsBooleanMap(Tagged<Map> map);

@@ -259,7 +259,7 @@ ZoneVector<PackNode*>* SLPTree::GetIntersectPackNodes(OpIndex node) {
   if (it != node_to_intersect_packnodes_.end()) {
     return &(it->second);
   }
-  return nullptr;
+  return analyzer_->GetIntersectPackNodes(node);
 }
 
 template <typename FunctionType>
@@ -353,6 +353,14 @@ bool SLPTree::HasInputDependencies(const NodeGroup& node_group) {
         result = true;
         break;
       } else if (input > start) {
+        // Check whether the input is already a force-packing node.
+        PackNode* pnode = GetPackNode(input);
+        if ((pnode && pnode->IsForcePackNode()) ||
+            GetIntersectPackNodes(input)) {
+          result = true;
+          break;
+        }
+
         // Check side effect from input to start's previous node to simplify
         // reducing of force-packing nodes.
         OpIndex start_prev = graph().PreviousIndex(start);
@@ -894,12 +902,12 @@ bool SLPTree::IsSideEffectFreeRange(OpIndex from, OpIndex to) {
   DCHECK_LE(from.offset(), to.offset());
   if (from == to) return true;
   const OpEffects effects = RefineEffects(graph().Get(to));
-  bool to_is_protected_load = graph().Get(to).IsProtectedLoad();
+  bool to_is_trapping_load = graph().Get(to).IsTrappingLoad();
   for (OpIndex prev_node = graph().PreviousIndex(to); prev_node != from;
        prev_node = graph().PreviousIndex(prev_node)) {
     const OpEffects prev_effects = RefineEffects(graph().Get(prev_node));
-    if ((to_is_protected_load && graph().Get(prev_node).IsProtectedLoad())
-            ? CannotSwapProtectedLoads(prev_effects, effects)
+    if ((to_is_trapping_load && graph().Get(prev_node).IsTrappingLoad())
+            ? CannotSwapTrappingLoads(prev_effects, effects)
             : CannotSwapOperations(prev_effects, effects)) {
       TRACE("break side effect %d, %d\n", prev_node.id(), to.id());
       return false;

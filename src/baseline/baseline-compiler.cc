@@ -74,9 +74,10 @@ template <typename IsolateT>
 Handle<TrustedByteArray> BytecodeOffsetTableBuilder::ToBytecodeOffsetTable(
     IsolateT* isolate) {
   if (bytes_.empty()) return isolate->factory()->empty_trusted_byte_array();
+  const uint32_t bytes_size = static_cast<uint32_t>(bytes_.size());
   Handle<TrustedByteArray> table =
-      isolate->factory()->NewTrustedByteArray(static_cast<int>(bytes_.size()));
-  MemCopy(table->begin(), bytes_.data(), bytes_.size());
+      isolate->factory()->NewTrustedByteArray(bytes_size);
+  MemCopy(table->begin(), bytes_.data(), bytes_size);
   return table;
 }
 
@@ -1115,6 +1116,35 @@ void BaselineCompiler::VisitStaModuleVariable() {
   __ StaModuleVariable(scratch, value, cell_index, depth);
 }
 
+void BaselineCompiler::VisitGetPrivateField() {
+  BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
+  Register context = scratch_scope.AcquireScratch();
+  LoadRegister(context, 0);
+
+  __ LdaContextSlotNoCell(context, ContextSlot(1), Uint(2));
+
+  CallBuiltin<Builtin::kKeyedLoadICBaseline>(
+      RegisterOperand(3),               // object
+      kInterpreterAccumulatorRegister,  // name
+      FeedbackSlotAsTagged(4));         // slot
+}
+
+void BaselineCompiler::VisitSetPrivateField() {
+  BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
+  Register context = scratch_scope.AcquireScratch();
+  LoadRegister(context, 0);
+
+  Register reg(context);
+  __ LdaContextSlotNoCell(context, ContextSlot(1), Uint(2),
+                          BaselineAssembler::CompressionMode::kDefault, reg);
+
+  CallBuiltin<Builtin::kKeyedStoreICBaseline>(
+      RegisterOperand(3),               // object
+      reg,                              // symbol
+      kInterpreterAccumulatorRegister,  // value
+      FeedbackSlotAsTagged(4));         // slot
+}
+
 void BaselineCompiler::VisitSetPrototypeProperties() {
   BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
   Register feedback_array = scratch_scope.AcquireScratch();
@@ -1725,78 +1755,83 @@ void BaselineCompiler::VisitConstructForwardAllArgs() {
       FeedbackSlotAsTagged(1));  // kSlot
 }
 
-void BaselineCompiler::VisitTestEqual() {
-  auto feedback_value_offset =
-      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex);
-  CallBuiltin<Builtin::kEqual_Baseline>(RegisterOperand(0),
-                                        kInterpreterAccumulatorRegister,
-                                        feedback_value_offset);
-}
-
-void BaselineCompiler::VisitTestEqualStrict() {
-  auto feedback_value_offset =
-      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex);
-
 #ifdef V8_ENABLE_SPARKPLUG_PLUS
-  if (allow_sparkplug_plus_) {
-#define TYPED_STRICTEQUAL_CASE(type)                         \
+#define TYPED_COMPARE_CASE(name, type)                       \
   case CompareOperationFeedback::Type::k##type:              \
-    CallBuiltin<Builtin::kStrictEqual_##type##_Baseline>(    \
+    CallBuiltin<Builtin::k##name##_##type##_Baseline>(       \
         RegisterOperand(0), kInterpreterAccumulatorRegister, \
         feedback_value_offset);                              \
     break;
-    switch (static_cast<CompareOperationFeedback::Type>(EmbeddedFeedback(1))) {
-      TYPED_STRICTEQUAL_STUB_LIST(TYPED_STRICTEQUAL_CASE)
-      default:
-        CallBuiltin<Builtin::kStrictEqual_Generic_Baseline>(
-            RegisterOperand(0), kInterpreterAccumulatorRegister,
-            feedback_value_offset);
-        break;
-    }
-#undef TYPED_STRICTEQUAL_CASE
-  } else {
-#endif  // V8_ENABLE_SPARKPLUG_PLUS
 
-    CallBuiltin<Builtin::kStrictEqual_Generic_Baseline>(
-        RegisterOperand(0), kInterpreterAccumulatorRegister,
-        feedback_value_offset);
+#define Equal_CASE(type) TYPED_COMPARE_CASE(Equal, type)
+#define StrictEqual_CASE(type) TYPED_COMPARE_CASE(StrictEqual, type)
+#define LessThan_CASE(type) TYPED_COMPARE_CASE(LessThan, type)
+#define GreaterThan_CASE(type) TYPED_COMPARE_CASE(GreaterThan, type)
+#define LessThanOrEqual_CASE(type) TYPED_COMPARE_CASE(LessThanOrEqual, type)
+#define GreaterThanOrEqual_CASE(type) \
+  TYPED_COMPARE_CASE(GreaterThanOrEqual, type)
 
-#ifdef V8_ENABLE_SPARKPLUG_PLUS
+#define VISIT_TYPED_COMPARE_OPERATION(TypedStubList, Name)                  \
+  auto feedback_value_offset =                                              \
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex);  \
+  if (allow_sparkplug_plus_) {                                              \
+    switch (                                                                \
+        static_cast<CompareOperationFeedback::Type>(EmbeddedFeedback(1))) { \
+      TypedStubList(Name##_CASE) default                                    \
+          : CallBuiltin<Builtin::k##Name##_Generic_Baseline>(               \
+                RegisterOperand(0), kInterpreterAccumulatorRegister,        \
+                feedback_value_offset);                                     \
+      break;                                                                \
+    }                                                                       \
+  } else {                                                                  \
+    CallBuiltin<Builtin::k##Name##_Generic_Baseline>(                       \
+        RegisterOperand(0), kInterpreterAccumulatorRegister,                \
+        feedback_value_offset);                                             \
   }
+#else
+#define VISIT_TYPED_COMPARE_OPERATION(TypedStubList, Name)                 \
+  auto feedback_value_offset =                                             \
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex); \
+  CallBuiltin<Builtin::k##Name##_Generic_Baseline>(                        \
+      RegisterOperand(0), kInterpreterAccumulatorRegister,                 \
+      feedback_value_offset);
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
+
+void BaselineCompiler::VisitTestEqual() {
+  VISIT_TYPED_COMPARE_OPERATION(TYPED_EQUAL_STUB_LIST, Equal)
+}
+
+void BaselineCompiler::VisitTestEqualStrict() {
+  VISIT_TYPED_COMPARE_OPERATION(TYPED_STRICTEQUAL_STUB_LIST, StrictEqual)
 }
 
 void BaselineCompiler::VisitTestLessThan() {
-  auto feedback_value_offset =
-      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex);
-  CallBuiltin<Builtin::kLessThan_Baseline>(RegisterOperand(0),
-                                           kInterpreterAccumulatorRegister,
-                                           feedback_value_offset);
+  VISIT_TYPED_COMPARE_OPERATION(TYPED_RELATIONAL_COMPARE_STUB_LIST, LessThan)
 }
 
 void BaselineCompiler::VisitTestGreaterThan() {
-  auto feedback_value_offset =
-      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex);
-  CallBuiltin<Builtin::kGreaterThan_Baseline>(RegisterOperand(0),
-                                              kInterpreterAccumulatorRegister,
-                                              feedback_value_offset);
+  VISIT_TYPED_COMPARE_OPERATION(TYPED_RELATIONAL_COMPARE_STUB_LIST, GreaterThan)
 }
 
 void BaselineCompiler::VisitTestLessThanOrEqual() {
-  auto feedback_value_offset =
-      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex);
-  CallBuiltin<Builtin::kLessThanOrEqual_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister,
-      feedback_value_offset);
+  VISIT_TYPED_COMPARE_OPERATION(TYPED_RELATIONAL_COMPARE_STUB_LIST,
+                                LessThanOrEqual)
 }
 
 void BaselineCompiler::VisitTestGreaterThanOrEqual() {
-  auto feedback_value_offset =
-      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex);
-  CallBuiltin<Builtin::kGreaterThanOrEqual_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister,
-      feedback_value_offset);
+  VISIT_TYPED_COMPARE_OPERATION(TYPED_RELATIONAL_COMPARE_STUB_LIST,
+                                GreaterThanOrEqual)
 }
+#ifdef V8_ENABLE_SPARKPLUG_PLUS
+#undef Equal_CASE
+#undef StrictEqual_CASE
+#undef LessThan_CASE
+#undef GreaterThan_CASE
+#undef LessThanOrEqual_CASE
+#undef GreaterThanOrEqual_CASE
+#undef TYPED_COMPARE_CASE
+#endif  // V8_ENABLE_SPARKPLUG_PLUS
+#undef VISIT_TYPED_COMPARE_OPERATION
 
 void BaselineCompiler::VisitTestReferenceEqual() {
   SelectBooleanConstant(

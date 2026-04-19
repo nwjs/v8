@@ -942,6 +942,24 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LoadEnumeratedKeyedProperty(
   return *this;
 }
 
+BytecodeArrayBuilder& BytecodeArrayBuilder::GetPrivateField(Register context,
+                                                            int slot_index,
+                                                            int depth,
+                                                            Register object,
+                                                            int feedback_slot) {
+  OutputGetPrivateField(context, slot_index, depth, object, feedback_slot);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::SetPrivateField(Register context,
+                                                            int slot_index,
+                                                            int depth,
+                                                            Register object,
+                                                            int feedback_slot) {
+  OutputSetPrivateField(context, slot_index, depth, object, feedback_slot);
+  return *this;
+}
+
 BytecodeArrayBuilder& BytecodeArrayBuilder::LoadIteratorProperty(
     Register object, int feedback_slot) {
   size_t name_index = IteratorSymbolConstantPoolEntry();
@@ -1606,6 +1624,7 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::CallRuntime(
   DCHECK_EQ(1, Runtime::FunctionForId(function_id)->result_size);
   DCHECK_LE(Bytecodes::SizeForUnsignedOperand(function_id),
             OperandSize::kShort);
+  UpdateMaxArguments(args.register_count());
   if (IntrinsicsHelper::IsSupported(function_id)) {
     IntrinsicsHelper::IntrinsicId intrinsic_id =
         IntrinsicsHelper::FromRuntimeId(function_id);
@@ -1635,6 +1654,7 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::CallRuntimeForPair(
   DCHECK_LE(Bytecodes::SizeForUnsignedOperand(function_id),
             OperandSize::kShort);
   DCHECK_EQ(2, return_pair.register_count());
+  UpdateMaxArguments(args.register_count());
   OutputCallRuntimeForPair(static_cast<uint16_t>(function_id), args,
                            args.register_count(), return_pair);
   return *this;
@@ -1647,6 +1667,7 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::CallRuntimeForPair(
 
 BytecodeArrayBuilder& BytecodeArrayBuilder::CallJSRuntime(int context_index,
                                                           RegisterList args) {
+  UpdateMaxArguments(args.register_count());
   OutputCallJSRuntime(context_index, args, args.register_count());
   return *this;
 }

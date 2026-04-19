@@ -24,9 +24,6 @@
 #include "src/objects/object-macros.h"
 
 namespace v8::internal {
-
-#include "torque-generated/src/objects/fixed-array-tq.inc"
-
 // Limit all fixed arrays to the same max capacity, so that non-resizing
 // transitions between different elements kinds (like Smi to Double) will not
 // error.
@@ -261,6 +258,12 @@ V8_OBJECT class FixedArray
   V8_EXPORT_PRIVATE static HandleType<FixedArray> SetAndGrow(
       Isolate* isolate, HandleType<FixedArray> array, uint32_t index,
       DirectHandle<Object> value);
+  template <template <typename> typename HandleType>
+    requires(
+        std::is_convertible_v<HandleType<FixedArray>, DirectHandle<FixedArray>>)
+  V8_EXPORT_PRIVATE static HandleType<FixedArray> SetAndGrow(
+      Isolate* isolate, HandleType<FixedArray> array, uint32_t index,
+      Tagged<Smi> value);
 
   // Right-trim the array.
   // Invariant: 0 < new_length <= length()
@@ -292,6 +295,13 @@ V8_OBJECT class FixedArray
   static constexpr int kMaxRegularLength = FixedArray::kMaxRegularCapacity;
 
  private:
+  template <template <typename> typename HandleType>
+    requires(
+        std::is_convertible_v<HandleType<FixedArray>, DirectHandle<FixedArray>>)
+  static HandleType<FixedArray> Grow(Isolate* isolate,
+                                     HandleType<FixedArray> array,
+                                     uint32_t index);
+
   inline static Handle<FixedArray> Resize(
       Isolate* isolate, DirectHandle<FixedArray> xs, uint32_t new_capacity,
       AllocationType allocation = AllocationType::kYoung,
@@ -358,9 +368,9 @@ V8_OBJECT class ProtectedFixedArray
   // Allocate a new ProtectedFixedArray of the given capacity, initialized with
   // Smi::zero().
   template <class IsolateT>
-  static inline Handle<ProtectedFixedArray> New(IsolateT* isolate,
-                                                uint32_t capacity,
-                                                bool shared = false);
+  static inline Handle<ProtectedFixedArray> New(
+      IsolateT* isolate, uint32_t capacity,
+      SharedFlag shared = SharedFlag::kNo);
 
   DECL_PRINTER(ProtectedFixedArray)
   DECL_VERIFIER(ProtectedFixedArray)
@@ -570,7 +580,7 @@ V8_OBJECT class WeakHomomorphicFixedArray
  public:
   template <class IsolateT>
   static inline Handle<WeakHomomorphicFixedArray> New(
-      IsolateT* isolate, int capacity,
+      IsolateT* isolate, uint32_t capacity,
       AllocationType allocation = AllocationType::kYoung,
       MaybeDirectHandle<Object> initial_value = {});
 
@@ -636,15 +646,28 @@ V8_OBJECT class ProtectedWeakFixedArray
   class BodyDescriptor;
 } V8_OBJECT_END;
 
+class WeakArrayListShape final : public AllStatic {
+ public:
+  using ElementT = MaybeObject;
+  using CompressionScheme = V8HeapCompressionScheme;
+  static constexpr RootIndex kMapRootIndex = RootIndex::kWeakArrayListMap;
+  static constexpr bool kLengthEqualsCapacity = false;
+
+  V8_ARRAY_EXTRA_FIELDS({ TaggedMember<Smi> length_; });
+};
+
 // WeakArrayList is like a WeakFixedArray with static convenience methods for
 // adding more elements. length() returns the number of elements in the list and
 // capacity() returns the allocated size. The number of elements is stored at
 // kLengthOffset and is updated with every insertion. The array grows
 // dynamically with O(1) amortized insertion.
-class WeakArrayList
-    : public TorqueGeneratedWeakArrayList<WeakArrayList, HeapObject> {
+V8_OBJECT class WeakArrayList
+    : public TaggedArrayBase<WeakArrayList, WeakArrayListShape> {
+  using Super = TaggedArrayBase<WeakArrayList, WeakArrayListShape>;
+
  public:
   DECL_PRINTER(WeakArrayList)
+  DECL_VERIFIER(WeakArrayList)
 
   V8_EXPORT_PRIVATE static Handle<WeakArrayList> AddToEnd(
       Isolate* isolate, Handle<WeakArrayList> array,
@@ -667,32 +690,30 @@ class WeakArrayList
   // Compact weak references to the beginning of the array.
   V8_EXPORT_PRIVATE void Compact(Isolate* isolate);
 
-  inline Tagged<MaybeObject> Get(int index) const;
-  inline Tagged<MaybeObject> Get(PtrComprCageBase cage_base, int index) const;
-  // TODO(jgruber): Remove this once it's no longer needed for compatibility
-  // with WeakFixedArray.
-  inline Tagged<MaybeObject> get(int index) const;
+  inline Tagged<MaybeObject> Get(uint32_t index) const;
 
   // Set the element at index to obj. The underlying array must be large enough.
   // If you need to grow the WeakArrayList, use the static AddToEnd() method
   // instead.
-  inline void Set(int index, Tagged<MaybeObject> value,
+  inline void Set(uint32_t index, Tagged<MaybeObject> value,
                   WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
-  inline void Set(int index, Tagged<Smi> value);
+  inline void Set(uint32_t index, Tagged<Smi> value);
 
-  using TorqueGeneratedWeakArrayList<WeakArrayList, HeapObject>::capacity;
-  inline int capacity(RelaxedLoadTag) const;
+  inline SafeHeapObjectSize capacity() const;
+  inline SafeHeapObjectSize capacity(RelaxedLoadTag) const;
 
   // The function returns an alias instead of uint32_t to incrementally convert
   // callsites without missing any implicit casts.
+  inline SafeHeapObjectSize length() const;
   inline SafeHeapObjectSize ulength() const;
+  inline void set_length(uint32_t value);
 
-  static constexpr int SizeForCapacity(int capacity) {
+  static constexpr int SizeForCapacity(uint32_t capacity) {
     return SizeFor(capacity);
   }
 
-  static constexpr int CapacityForLength(int length) {
-    return length + std::max(length / 2, 2);
+  static constexpr uint32_t CapacityForLength(uint32_t length) {
+    return length + std::max(length / 2, 2u);
   }
 
   // Gives access to raw memory which stores the array's data.
@@ -718,14 +739,14 @@ class WeakArrayList
   static_assert(Smi::IsValid(SizeFor(static_cast<int>(kMaxCapacity))));
 
   static Handle<WeakArrayList> EnsureSpace(
-      Isolate* isolate, Handle<WeakArrayList> array, int length,
+      Isolate* isolate, Handle<WeakArrayList> array, uint32_t length,
       AllocationType allocation = AllocationType::kYoung);
 
   // Returns the number of non-cleaned weak references in the array.
-  int CountLiveWeakReferences() const;
+  uint32_t CountLiveWeakReferences() const;
 
   // Returns the number of non-cleaned elements in the array.
-  int CountLiveElements() const;
+  uint32_t CountLiveElements() const;
 
   // Returns whether an entry was found and removed. Will move the elements
   // around in the array - this method can only be used in cases where the user
@@ -738,13 +759,16 @@ class WeakArrayList
 
   class Iterator;
 
+  static constexpr uint32_t kCapacityOffset = HeapObject::kHeaderSize;
+  static constexpr uint32_t kLengthOffset = kCapacityOffset + kTaggedSize;
+  static constexpr uint32_t kHeaderSize = kLengthOffset + kTaggedSize;
+  static_assert(sizeof(Super::Header) == kHeaderSize);
+
  private:
   static constexpr int OffsetOfElementAt(int index) {
     return kHeaderSize + index * kTaggedSize;
   }
-
-  TQ_OBJECT_CONSTRUCTORS(WeakArrayList)
-};
+} V8_OBJECT_END;
 
 class WeakArrayList::Iterator {
  public:
@@ -755,7 +779,7 @@ class WeakArrayList::Iterator {
   inline Tagged<HeapObject> Next();
 
  private:
-  int index_;
+  uint32_t index_;
   Tagged<WeakArrayList> array_;
   DISALLOW_GARBAGE_COLLECTION(no_gc_)
 };
@@ -779,15 +803,14 @@ V8_OBJECT class ArrayList : public TaggedArrayBase<ArrayList, ArrayListShape> {
 
   template <class IsolateT>
   static inline DirectHandle<ArrayList> New(
-      IsolateT* isolate, int capacity,
+      IsolateT* isolate, uint32_t capacity,
       AllocationType allocation = AllocationType::kYoung);
 
-  // TODO(375937549): Convert usages to uint32_t.
   inline int length() const;
-  inline void set_length(uint32_t value);
-  // The function returns an alias instead of uint32_t to incrementally convert
-  // callsites without missing any implicit casts.
+  // The function returns an alias instead of uint32_t to force conversion at
+  // the callsites without missing any implicit casts.
   inline SafeHeapObjectSize ulength() const;
+  inline void set_length(uint32_t value);
 
   V8_EXPORT_PRIVATE static DirectHandle<ArrayList> Add(
       Isolate* isolate, DirectHandle<ArrayList> array, Tagged<Smi> obj,
@@ -815,7 +838,7 @@ V8_OBJECT class ArrayList : public TaggedArrayBase<ArrayList, ArrayListShape> {
 
  private:
   static DirectHandle<ArrayList> EnsureSpace(
-      Isolate* isolate, DirectHandle<ArrayList> array, int length,
+      Isolate* isolate, DirectHandle<ArrayList> array, uint32_t length,
       AllocationType allocation = AllocationType::kYoung);
 } V8_OBJECT_END;
 
@@ -838,7 +861,7 @@ V8_OBJECT class ByteArray
 
   template <class IsolateT>
   static inline Handle<ByteArray> New(
-      IsolateT* isolate, int capacity,
+      IsolateT* isolate, uint32_t capacity,
       AllocationType allocation = AllocationType::kYoung,
       AllocationAlignment alignment = kTaggedAligned);
 
@@ -847,7 +870,7 @@ V8_OBJECT class ByteArray
 
   // Given the full object size in bytes, return the length that should be
   // passed to New s.t. an object of the same size is created.
-  static constexpr int LengthFor(int size_in_bytes) {
+  static constexpr uint32_t LengthFor(int size_in_bytes) {
     DCHECK(IsAligned(size_in_bytes, kTaggedSize));
     DCHECK_GE(size_in_bytes, sizeof(Header));
     return size_in_bytes - sizeof(Header);
@@ -880,7 +903,7 @@ class TrustedByteArray
 
   template <class IsolateT>
   static inline Handle<TrustedByteArray> New(
-      IsolateT* isolate, int capacity,
+      IsolateT* isolate, uint32_t capacity,
       AllocationType allocation_type = AllocationType::kTrusted);
 
   inline uint32_t get_int(int offset) const;
@@ -911,23 +934,22 @@ class FixedIntegerArrayBase : public Base {
   // {MoreArgs...} allows passing the `AllocationType` if `Base` is `ByteArray`.
   template <typename... MoreArgs>
   static Handle<FixedIntegerArrayBase<T, Base>> New(Isolate* isolate,
-                                                    int length,
+                                                    uint32_t length,
                                                     MoreArgs&&... more_args);
 
   // Get/set the contents of this array.
-  T get(int index) const;
-  void set(int index, T value);
+  T get(uint32_t index) const;
+  void set(uint32_t index, T value);
 
   // Code Generation support.
   static constexpr int OffsetOfElementAt(int index) {
     return sizeof(typename Base::Header) + index * sizeof(T);
   }
 
-  // TODO(375937549): Convert to uint32_t.
-  inline int length() const;
+  inline SafeHeapObjectSize length() const;
 
  protected:
-  Address get_element_address(int index) const;
+  Address get_element_address(uint32_t index) const;
 } V8_OBJECT_END;
 
 using FixedInt8Array = FixedIntegerArrayBase<int8_t, ByteArray>;
@@ -948,43 +970,46 @@ class TrustedFixedAddressArray
   // {MoreArgs...} allows passing the `AllocationType` if `Base` is `ByteArray`.
   template <typename... MoreArgs>
   static inline DirectHandle<TrustedFixedAddressArray> New(
-      Isolate* isolate, int length, MoreArgs&&... more_args);
+      Isolate* isolate, uint32_t length, MoreArgs&&... more_args);
 } V8_OBJECT_END;
 
 V8_OBJECT
 template <class T, class Super>
 class PodArrayBase : public Super {
  public:
-  void copy_out(int index, T* result, int length) {
+  void copy_out(uint32_t index, T* result, uint32_t length) {
     MemCopy(result, &this->values()[index * sizeof(T)], length * sizeof(T));
   }
 
-  void copy_in(int index, const T* buffer, int length) {
+  void copy_in(uint32_t index, const T* buffer, uint32_t length) {
     MemCopy(&this->values()[index * sizeof(T)], buffer, length * sizeof(T));
   }
 
-  bool matches(const T* buffer, int length) {
-    DCHECK_LE(length, this->length());
+  bool matches(const T* buffer, uint32_t length) {
+    DCHECK_LE(length, this->length().value());
     return memcmp(this->begin(), buffer, length * sizeof(T)) == 0;
   }
 
-  bool matches(int offset, const T* buffer, int length) {
-    DCHECK_LE(offset, this->length());
-    DCHECK_LE(offset + length, this->length());
+  bool matches(uint32_t offset, const T* buffer, uint32_t length) {
+    DCHECK_LE(offset, this->length().value());
+    DCHECK_LE(offset + length, this->length().value());
     return memcmp(this->begin() + sizeof(T) * offset, buffer,
                   length * sizeof(T)) == 0;
   }
 
-  T get(int index) {
+  T get(uint32_t index) {
+    DCHECK_LT(index, this->length().value());
     T result;
     copy_out(index, &result, 1);
     return result;
   }
 
-  void set(int index, const T& value) { copy_in(index, &value, 1); }
+  void set(uint32_t index, const T& value) {
+    DCHECK_LT(index, this->length().value());
+    copy_in(index, &value, 1);
+  }
 
-  // TODO(375937549): Convert to uint32_t.
-  inline int length() const;
+  inline SafeHeapObjectSize length() const;
 } V8_OBJECT_END;
 
 // Wrapper class for ByteArray which can store arbitrary C++ classes, as long
@@ -994,10 +1019,10 @@ template <class T>
 class PodArray : public PodArrayBase<T, ByteArray> {
  public:
   static Handle<PodArray<T>> New(
-      Isolate* isolate, int length,
+      Isolate* isolate, uint32_t length,
       AllocationType allocation = AllocationType::kYoung);
   static Handle<PodArray<T>> New(
-      LocalIsolate* isolate, int length,
+      LocalIsolate* isolate, uint32_t length,
       AllocationType allocation = AllocationType::kOld);
 } V8_OBJECT_END;
 
@@ -1006,10 +1031,10 @@ template <class T>
 class TrustedPodArray : public PodArrayBase<T, TrustedByteArray> {
  public:
   static DirectHandle<TrustedPodArray<T>> New(
-      Isolate* isolate, int length,
+      Isolate* isolate, uint32_t length,
       AllocationType allocation = AllocationType::kTrusted);
   static DirectHandle<TrustedPodArray<T>> New(
-      LocalIsolate* isolate, int length,
+      LocalIsolate* isolate, uint32_t length,
       AllocationType allocation = AllocationType::kTrusted);
 } V8_OBJECT_END;
 

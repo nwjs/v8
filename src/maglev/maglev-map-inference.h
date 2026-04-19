@@ -7,15 +7,21 @@
 
 #include <iostream>
 
-#include "src/maglev/maglev-graph-builder.h"
 #include "src/maglev/maglev-known-node-aspects.h"
+#include "src/maglev/maglev-reducer.h"
 
 namespace v8 {
 namespace internal {
 namespace maglev {
 
+#define TRACE(...)                                  \
+  if (V8_UNLIKELY(reducer_->is_tracing())) {        \
+    TraceLogger(reducer_->tracer()) << __VA_ARGS__; \
+  }
+
 // This class is a thin wrapper around fetching and using maps known for
 // `object`.
+template <typename ReducerT>
 class MapInference {
  public:
   enum Variant {
@@ -28,16 +34,16 @@ class MapInference {
     kAll,
   };
 
-  MapInference(MaglevGraphBuilder* builder, ValueNode* object)
-      : MapInference(builder, object,
+  MapInference(ReducerT* reducer, ValueNode* object)
+      : MapInference(reducer, object,
                      V8_LIKELY(v8_flags.maglev_use_unreliable_maps)
                          ? Variant::kAll
                          : Variant::kOnlyFresh) {}
 
-  MapInference(MaglevGraphBuilder* builder, ValueNode* object, Variant variant)
-      : builder_(builder),
+  MapInference(ReducerT* reducer, ValueNode* object, Variant variant)
+      : reducer_(reducer),
         object_(object),
-        node_info_(builder_->known_node_aspects().TryGetInfoFor(object)),
+        node_info_(reducer->known_node_aspects().TryGetInfoFor(object)),
         variant_(variant) {}
 
   bool HaveMaps() const {
@@ -67,10 +73,8 @@ class MapInference {
     // We've recorded stale unstable maps. Insert map checks.
     const PossibleMaps& maps = node_info_->possible_maps();
     if (!maps.is_empty()) {
-      if (V8_UNLIKELY(v8_flags.trace_maglev_graph_building)) {
-        std::cout << "  * MapInference emitting map checks for "
-                  << PrintNodeLabel(object_) << std::endl;
-      }
+      TRACE(TraceColor::kInfo << "  * MapInference emitting map checks for "
+                              << PrintNodeLabel(object_));
 
       // `maps` uses linear storage, but unfortunately we cannot exploit that
       // easily for BuildCheckMaps since it stores ObjectData underneath, which
@@ -82,14 +86,14 @@ class MapInference {
       }
 
       RETURN_IF_ABORT(
-          builder_->BuildCheckMaps(object_, base::VectorOf(maps_vector)));
+          reducer_->BuildCheckMaps(object_, base::VectorOf(maps_vector)));
     }
 
     // Maps are now fresh.
     node_info_->MarkFresh();
 
     // We have unstable maps and must re-enable invalidation tracking.
-    builder_->known_node_aspects().MarkSideEffectsRequireInvalidation();
+    reducer_->known_node_aspects().MarkSideEffectsRequireInvalidation();
 
     return ReduceResult::Done();
   }
@@ -102,11 +106,13 @@ class MapInference {
   }
 
  private:
-  MaglevGraphBuilder* const builder_;
+  ReducerT* const reducer_;
   ValueNode* const object_;
   NodeInfo* const node_info_;
   const Variant variant_;
 };
+
+#undef TRACE
 
 }  // namespace maglev
 }  // namespace internal

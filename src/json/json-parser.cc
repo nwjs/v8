@@ -6,6 +6,9 @@
 
 #include <optional>
 
+#include "hwy/highway.h"
+#include "include/v8config.h"
+#include "src/base/macros.h"
 #include "src/base/small-vector.h"
 #include "src/base/strings.h"
 #include "src/builtins/builtins.h"
@@ -383,7 +386,11 @@ JsonParser<Char>::JsonParser(Isolate* isolate, Handle<String> source,
     DisallowGarbageCollection no_gc;
     isolate->main_thread_local_heap()->AddGCEpilogueCallback(
         UpdatePointersCallback, this);
+    // Keeping the `GetChars()` result is safe because we update the pointer in
+    // the GCEpilogueCallback.
+    START_IGNORE_LIFETIME_SAFETY_WARNINGS();
     chars_ = Cast<SeqString>(*source_)->GetChars(no_gc);
+    END_IGNORE_LIFETIME_SAFETY_WARNINGS();
     chars_may_relocate_ = true;
   }
   cursor_ = chars_ + start;
@@ -993,9 +1000,9 @@ bool JsonParser<Char>::ParseJsonPropertyValue(const JsonString& key) {
 
 namespace {
 
-const uint8_t* GetFastKeyChars(Isolate* isolate, Tagged<String> key,
-                               Tagged<Map> map,
-                               const DisallowGarbageCollection& no_gc) {
+const uint8_t* GetFastKeyChars(
+    Isolate* isolate, Tagged<String> key, Tagged<Map> map,
+    const DisallowGarbageCollection& no_gc V8_LIFETIME_BOUND) {
   DCHECK(InstanceTypeChecker::IsOneByteString(map));
 #if V8_STATIC_ROOTS_BOOL
   ReadOnlyRoots roots(isolate);
@@ -1940,20 +1947,53 @@ void JsonParser<Char>::DecodeString(SinkChar* sink, uint32_t start,
 
 template <typename Char>
 JsonString JsonParser<Char>::ScanJsonString(bool needs_internalization) {
+  namespace hw = hwy::HWY_NAMESPACE;
+
   DisallowGarbageCollection no_gc;
   uint32_t start = position();
   uint32_t offset = start;
   bool has_escape = false;
   base::uc32 bits = 0;
 
+  // SIMD constants for one-byte string scanning, hoisted out of the loop.
+  // Only used in the sizeof(Char)==1 path; dead-store-eliminated for two-byte.
+  [[maybe_unused]] hw::FixedTag<uint8_t, 16> tag;
+  [[maybe_unused]] const size_t stride = hw::Lanes(tag);
+  [[maybe_unused]] const auto mask_0x20 = hw::Set(tag, 0x20);
+  [[maybe_unused]] const auto mask_quote = hw::Set(tag, '"');
+  [[maybe_unused]] const auto mask_backslash = hw::Set(tag, '\\');
+
   while (true) {
-    cursor_ = std::find_if(cursor_, end_, [&bits](Char c) {
-      if (sizeof(Char) == 2 && V8_UNLIKELY(c > unibrow::Latin1::kMaxChar)) {
-        bits |= c;
-        return false;
+    if constexpr (sizeof(Char) == 1) {
+      // SIMD fast path: scan 16 bytes at a time looking for characters that
+      // may terminate a JSON string: '"', '\', or control characters (< 0x20).
+      for (; cursor_ + (stride - 1) < end_; cursor_ += stride) {
+        const auto input =
+            hw::LoadU(tag, reinterpret_cast<const uint8_t*>(cursor_));
+        // TODO(floitsch): use operators for the comparisons when they are
+        // available on RISC-V.
+        const auto result =
+            hw::Or(hw::Or(hw::Lt(input, mask_0x20), hw::Eq(input, mask_quote)),
+                   hw::Eq(input, mask_backslash));
+        if (V8_LIKELY(hw::AllFalse(tag, result))) continue;
+        cursor_ += hw::FindKnownFirstTrue(tag, result);
+        break;
       }
-      return MayTerminateJsonString(character_json_scan_flags[c]);
-    });
+      // Scalar fallback for remaining tail bytes after the last full SIMD
+      // block. When the SIMD loop found a match, *cursor_ is already a
+      // special character and this immediately breaks.
+      for (; cursor_ < end_; ++cursor_) {
+        if (MayTerminateJsonString(character_json_scan_flags[*cursor_])) break;
+      }
+    } else {
+      cursor_ = std::find_if(cursor_, end_, [&bits](Char c) {
+        if (V8_UNLIKELY(c > unibrow::Latin1::kMaxChar)) {
+          bits |= c;
+          return false;
+        }
+        return MayTerminateJsonString(character_json_scan_flags[c]);
+      });
+    }
 
     if (V8_UNLIKELY(is_at_end())) {
       AllowGarbageCollection allow_before_exception;

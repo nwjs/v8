@@ -838,8 +838,7 @@ void Float64Modulus::SetValueLocationConstraints() {
 void Float64Modulus::GenerateCode(MaglevAssembler* masm,
                                   const ProcessingState& state) {
   AllowExternalCallThatCantCauseGC scope(masm);
-  __ PrepareCallCFunction(0, 2);
-  __ CallCFunction(ExternalReference::mod_two_doubles_operation(), 0, 2);
+  __ Float64Mod(f0, f0, f1);
 }
 
 void Float64Negate::SetValueLocationConstraints() {
@@ -1175,11 +1174,11 @@ void GenerateReduceInterruptBudget(MaglevAssembler* masm, Node* node,
                                    ReduceInterruptBudgetType type, int amount) {
   MaglevAssembler::TemporaryRegisterScope temps(masm);
   Register budget = temps.Acquire();
-  __ Ld_w(budget,
-          FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
+  __ Ld_w(budget, FieldMemOperand(feedback_cell,
+                                  offsetof(FeedbackCell, interrupt_budget_)));
   __ Sub_w(budget, budget, Operand(amount));
-  __ St_w(budget,
-          FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
+  __ St_w(budget, FieldMemOperand(feedback_cell,
+                                  offsetof(FeedbackCell, interrupt_budget_)));
 
   ZoneLabelRef done(masm);
   // Scratch register 'budget' is released before going into deferred_code.

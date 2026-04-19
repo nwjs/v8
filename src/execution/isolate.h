@@ -116,6 +116,10 @@ namespace maglev {
 class MaglevConcurrentDispatcher;
 }  // namespace maglev
 
+namespace regexp {
+class Stack;
+}  // namespace regexp
+
 class AddressToIndexHashMap;
 class AstStringConstants;
 class Bootstrapper;
@@ -150,7 +154,6 @@ class OptimizingCompileTaskExecutor;
 class PersistentHandles;
 class PersistentHandlesList;
 class ReadOnlyArtifacts;
-class RegExpStack;
 class RootVisitor;
 class SetupIsolateDelegate;
 class SharedStructTypeRegistry;
@@ -878,12 +881,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return &thread_local_top()->c_function_;
   }
 
-#if defined(DEBUG) || defined(VERIFY_HEAP)
-  // Count the number of active deserializers, so that the heap verifier knows
-  // whether there is currently an active deserialization happening.
-  //
-  // This is needed as the verifier currently doesn't support verifying objects
-  // which are partially deserialized.
+  // Count the number of active deserializers. This is necessary for:
+  // - This is needed as the verifier currently doesn't support verifying
+  //   objects which are partially deserialized.
+  // - The snapshot generator being invoked on GC can trigger DCHECKs where the
+  //   graph is not yet consistent.
   //
   // TODO(leszeks): Make the verifier a bit more deserialization compatible.
   void RegisterDeserializerStarted() { ++num_active_deserializers_; }
@@ -893,11 +895,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool has_active_deserializer() const {
     return num_active_deserializers_.load(std::memory_order_acquire) > 0;
   }
-#else
-  void RegisterDeserializerStarted() {}
-  void RegisterDeserializerFinished() {}
-  bool has_active_deserializer() const { UNREACHABLE(); }
-#endif
 
   // Bottom JS entry.
   Address js_entry_sp() { return thread_local_top()->js_entry_sp_; }
@@ -1298,6 +1295,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return heap()->js_dispatch_table_space();
   }
 
+  inline JSDispatchTable::Space* GetJSDispatchTableSpaceFor(void* owning_slot) {
+    return GetJSDispatchTableSpaceFor(reinterpret_cast<Address>(owning_slot));
+  }
+
   V8_INLINE Address* builtin_table() { return isolate_data_.builtin_table(); }
   V8_INLINE Address* builtin_tier0_table() {
     return isolate_data_.builtin_tier0_table();
@@ -1434,7 +1435,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     builtins_effects_analyzer_ = builtins_effects_analyzer;
   }
 
-  RegExpStack* regexp_stack() const { return regexp_stack_; }
+  regexp::Stack* regexp_stack() const { return regexp_stack_; }
 
   // Either points to jsregexp_static_offsets_vector, or nullptr if the static
   // vector is in use.
@@ -2314,6 +2315,17 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
         &isolate_data_.continuation_preserved_embedder_data_);
   }
 
+  Tagged<Object> current_microtask_native_context() const {
+    return isolate_data_.current_microtask_native_context_;
+  }
+  void set_current_microtask_native_context(Tagged<Object> context) {
+    isolate_data_.current_microtask_native_context_ = context;
+  }
+  Address current_microtask_native_context_address() {
+    return reinterpret_cast<Address>(
+        &isolate_data_.current_microtask_native_context_);
+  }
+
   struct PromiseHookFields {
     using HasContextPromiseHook = base::BitField<bool, 0, 1>;
     using HasIsolatePromiseHook = HasContextPromiseHook::Next<bool, 1>;
@@ -2376,11 +2388,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void SwitchStacks(wasm::StackMemory* from, wasm::StackMemory* to, Address sp,
                     Address fp, Address pc);
 
-  // Retires the stack owned by {continuation}, to be called when returning or
-  // throwing from this continuation.
+  // Retires {stack}, to be called when returning or throwing from this
+  // stack.
   // This updates the {StackMemory} state, removes it from the global
-  // {wasm_stacks_} vector and nulls the EPT entry. This does not update the
-  // {ActiveContinuation} root or the stack limit.
+  // {wasm_stacks_} vector and clears the EPT entry of the {WasmStackObject}.
+  // This does not update the {ActiveContinuation} root or the stack limit.
   void RetireWasmStack(wasm::StackMemory* stack);
 #else
   bool IsOnCentralStack() { return true; }
@@ -2622,16 +2634,14 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   Builtins builtins_;
   BuiltinsEffectsAnalyzer* builtins_effects_analyzer_ = nullptr;
   SetupIsolateDelegate* setup_delegate_ = nullptr;
-#if defined(DEBUG) || defined(VERIFY_HEAP)
   std::atomic<int> num_active_deserializers_;
-#endif
 #ifndef V8_INTL_SUPPORT
   unibrow::Mapping<unibrow::Ecma262UnCanonicalize> jsregexp_uncanonicalize_;
   unibrow::Mapping<unibrow::CanonicalizationRange> jsregexp_canonrange_;
   unibrow::Mapping<unibrow::Ecma262Canonicalize>
       regexp_macro_assembler_canonicalize_;
 #endif  // !V8_INTL_SUPPORT
-  RegExpStack* regexp_stack_ = nullptr;
+  regexp::Stack* regexp_stack_ = nullptr;
   std::vector<int> regexp_indices_;
   // Necessary in order to avoid memory leaks in the presence of
   // TerminateExecution exceptions.

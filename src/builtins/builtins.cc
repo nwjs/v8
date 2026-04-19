@@ -740,18 +740,27 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     case Builtin::kWebAssemblyStringCast:
     case Builtin::kWebAssemblyStringTest:
     case Builtin::kWebAssemblyStringFromWtf16Array:
+    case Builtin::kWebAssemblyStringFromWtf16ArrayShared:
     case Builtin::kWebAssemblyStringFromUtf8Array:
+    case Builtin::kWebAssemblyStringFromUtf8ArrayShared:
     case Builtin::kWebAssemblyStringIntoUtf8Array:
+    case Builtin::kWebAssemblyStringIntoUtf8ArrayShared:
     case Builtin::kWebAssemblyStringToUtf8Array:
+    case Builtin::kWebAssemblyStringToUtf8ArrayShared:
     case Builtin::kWebAssemblyStringToWtf16Array:
+    case Builtin::kWebAssemblyStringToWtf16ArrayShared:
     case Builtin::kWebAssemblyStringFromCharCode:
+    case Builtin::kWebAssemblyStringFromCharCodeShared:
     case Builtin::kWebAssemblyStringFromCodePoint:
+    case Builtin::kWebAssemblyStringFromCodePointShared:
     case Builtin::kWebAssemblyStringCodePointAt:
     case Builtin::kWebAssemblyStringCharCodeAt:
     case Builtin::kWebAssemblyStringLength:
     case Builtin::kWebAssemblyStringMeasureUtf8:
     case Builtin::kWebAssemblyStringConcat:
+    case Builtin::kWebAssemblyStringConcatShared:
     case Builtin::kWebAssemblyStringSubstring:
+    case Builtin::kWebAssemblyStringSubstringShared:
     case Builtin::kWebAssemblyStringEquals:
     case Builtin::kWebAssemblyStringCompare:
     case Builtin::kWebAssemblyConfigureAllPrototypes:
@@ -881,6 +890,10 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     // --js-iterator-sequencing:
     case Builtin::kIteratorConcat:
       RETURN_FLAG_DEPENDENT_BUILTIN_STATE(v8_flags.js_iterator_sequencing);
+
+    // --js-joint-iteration:
+    case Builtin::kIteratorZip:
+      RETURN_FLAG_DEPENDENT_BUILTIN_STATE(v8_flags.js_joint_iteration);
 
     // --js-upsert
     case Builtin::kMapPrototypeGetOrInsert:

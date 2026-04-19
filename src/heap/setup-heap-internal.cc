@@ -325,7 +325,7 @@ void Heap::FinalizePartialMap(Tagged<Map> map) {
 
 AllocationResult Heap::Allocate(DirectHandle<Map> map,
                                 AllocationType allocation_type) {
-  DCHECK(map->instance_type() != MAP_TYPE);
+  DCHECK(!InstanceTypeChecker::IsMap(map->instance_type()));
   int size = map->instance_size();
   Tagged<HeapObject> result;
   AllocationResult allocation = AllocateRaw(size, allocation_type);
@@ -646,8 +646,8 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
                          closure_feedback_cell_array)
     ALLOCATE_VARSIZE_MAP(FEEDBACK_VECTOR_TYPE, feedback_vector)
 
-    ALLOCATE_MAP(FOREIGN_TYPE, Foreign::kSize, foreign)
-    ALLOCATE_MAP(TRUSTED_FOREIGN_TYPE, TrustedForeign::kSize, trusted_foreign)
+    ALLOCATE_MAP(FOREIGN_TYPE, sizeof(Foreign), foreign)
+    ALLOCATE_MAP(TRUSTED_FOREIGN_TYPE, sizeof(TrustedForeign), trusted_foreign)
     ALLOCATE_MAP(MEGA_DOM_HANDLER_TYPE, MegaDomHandler::kSize, mega_dom_handler)
 
     ALLOCATE_VARSIZE_MAP(FIXED_DOUBLE_ARRAY_TYPE, fixed_double_array)
@@ -664,11 +664,11 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
 
     ALLOCATE_VARSIZE_MAP(INSTRUCTION_STREAM_TYPE, instruction_stream)
 
-    ALLOCATE_MAP(CELL_TYPE, Cell::kSize, cell);
+    ALLOCATE_MAP(CELL_TYPE, sizeof(Cell), cell);
     {
       // The invalid_prototype_validity_cell is needed for JSObject maps.
       AllocationResult alloc =
-          AllocateRaw(Cell::kSize, AllocationType::kReadOnly);
+          AllocateRaw(sizeof(Cell), AllocationType::kReadOnly);
       if (!alloc.To(&obj)) return false;
       obj->set_map_after_allocation(isolate(), roots.cell_map(),
                                     SKIP_WRITE_BARRIER);
@@ -681,14 +681,11 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
 
     // The "no closures" and "one closure" FeedbackCell maps need
     // to be marked unstable because their objects can change maps.
-    ALLOCATE_MAP(FEEDBACK_CELL_TYPE, FeedbackCell::kAlignedSize,
-                 no_closures_cell)
+    ALLOCATE_MAP(FEEDBACK_CELL_TYPE, sizeof(FeedbackCell), no_closures_cell)
     roots.no_closures_cell_map()->mark_unstable();
-    ALLOCATE_MAP(FEEDBACK_CELL_TYPE, FeedbackCell::kAlignedSize,
-                 one_closure_cell)
+    ALLOCATE_MAP(FEEDBACK_CELL_TYPE, sizeof(FeedbackCell), one_closure_cell)
     roots.one_closure_cell_map()->mark_unstable();
-    ALLOCATE_MAP(FEEDBACK_CELL_TYPE, FeedbackCell::kAlignedSize,
-                 many_closures_cell)
+    ALLOCATE_MAP(FEEDBACK_CELL_TYPE, sizeof(FeedbackCell), many_closures_cell)
 
     ALLOCATE_VARSIZE_MAP(TRANSITION_ARRAY_TYPE, transition_array)
 
@@ -768,9 +765,9 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
                  atom_regexp_data);
     ALLOCATE_MAP(IR_REG_EXP_DATA_TYPE, IrRegExpData::kSize, ir_regexp_data);
 
-    ALLOCATE_MAP(SOURCE_TEXT_MODULE_TYPE, SourceTextModule::kSize,
+    ALLOCATE_MAP(SOURCE_TEXT_MODULE_TYPE, sizeof(SourceTextModule),
                  source_text_module)
-    ALLOCATE_MAP(SYNTHETIC_MODULE_TYPE, SyntheticModule::kSize,
+    ALLOCATE_MAP(SYNTHETIC_MODULE_TYPE, sizeof(SyntheticModule),
                  synthetic_module)
 
     ALLOCATE_MAP(CONTEXT_CELL_TYPE, sizeof(ContextCell), context_cell)
@@ -997,7 +994,7 @@ bool Heap::CreateImportantReadOnlyObjects() {
     if (!alloc.To(&obj)) return false;
     obj->set_map_after_allocation(isolate(), roots.scope_info_map(),
                                   SKIP_WRITE_BARRIER);
-    int flags = ScopeInfo::IsEmptyBit::encode(true);
+    int flags = 0;
     DCHECK_EQ(ScopeInfo::LanguageModeBit::decode(flags), LanguageMode::kSloppy);
     DCHECK_EQ(ScopeInfo::ReceiverVariableBits::decode(flags),
               VariableAllocationInfo::NONE);
@@ -1451,11 +1448,11 @@ void Heap::CreateInitialMutableObjects() {
 
   // Allocate regexp caches.
   set_string_split_cache(*factory->NewFixedArray(
-      RegExpResultsCache::kRegExpResultsCacheSize, AllocationType::kOld));
+      regexp::ResultsCache::kRegExpResultsCacheSize, AllocationType::kOld));
   set_regexp_multiple_cache(*factory->NewFixedArray(
-      RegExpResultsCache::kRegExpResultsCacheSize, AllocationType::kOld));
+      regexp::ResultsCache::kRegExpResultsCacheSize, AllocationType::kOld));
   set_regexp_match_global_atom_cache(*factory->NewFixedArray(
-      RegExpResultsCache_MatchGlobalAtom::kSize, AllocationType::kOld));
+      regexp::ResultsCache_MatchGlobalAtom::kSize, AllocationType::kOld));
 
   set_detached_contexts(roots.empty_weak_array_list());
 
@@ -1489,6 +1486,7 @@ void Heap::CreateInitialMutableObjects() {
 
   // Protectors
   set_array_buffer_detaching_protector(*factory->NewProtector());
+  set_array_buffer_mutable_protector(*factory->NewProtector());
   set_array_iterator_protector(*factory->NewProtector());
   set_array_species_protector(*factory->NewProtector());
   set_no_date_time_configuration_change_protector(*factory->NewProtector());

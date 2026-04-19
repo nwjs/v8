@@ -30,6 +30,7 @@
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-opcodes.h"
 #include "src/wasm/wasm-subtyping.h"
+#include "src/zone/zone-containers.h"
 
 namespace v8::internal::wasm {
 
@@ -70,7 +71,7 @@ V8_INLINE bool ValidateAssumeTrue(bool condition, const char* message) {
   }                                                                          \
   this->detected_->add_##feat()
 
-static constexpr LoadType GetLoadType(WasmOpcode opcode) {
+inline constexpr LoadType GetLoadType(WasmOpcode opcode) {
   // Hard-code the list of load types. The opcodes are highly unlikely to
   // ever change, and we have some checks here to guard against that.
   static_assert(sizeof(LoadType) == sizeof(uint8_t), "LoadType is compact");
@@ -88,7 +89,7 @@ static constexpr LoadType GetLoadType(WasmOpcode opcode) {
   return kLoadTypes[opcode - kMinOpcode];
 }
 
-static constexpr StoreType GetStoreType(WasmOpcode opcode) {
+inline constexpr StoreType GetStoreType(WasmOpcode opcode) {
   // Hard-code the list of store types. The opcodes are highly unlikely to
   // ever change, and we have some checks here to guard against that.
   static_assert(sizeof(StoreType) == sizeof(uint8_t), "StoreType is compact");
@@ -227,7 +228,7 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
     }
     uint8_t uint_7_mask = 0x7F;
     uint8_t code = static_cast<ValueTypeCode>(heap_index) & uint_7_mask;
-    bool is_shared = false;
+    SharedFlag is_shared = SharedFlag::kNo;
     if (code == kSharedFlagCode) {
       if (!VALIDATE(enabled.has_shared())) {
         DecodeError<ValidationTag>(
@@ -238,12 +239,12 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
       }
       code = decoder->read_u8<ValidationTag>(pc + length, "heap type");
       length++;
-      is_shared = true;
+      is_shared = SharedFlag::kYes;
     }
     switch (code) {
       case kNoFuncCode:
       case kFuncRefCode:
-        if (!VALIDATE(!is_shared)) {
+        if (!VALIDATE(is_shared == SharedFlag::kNo)) {
           DecodeError<ValidationTag>(
               decoder, pc,
               "invalid heap type '%s', shared function references are not "
@@ -271,7 +272,7 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
               "instructions");
           return {kWasmBottom, 0};
         }
-        if (!VALIDATE(!is_shared)) {
+        if (!VALIDATE(is_shared == SharedFlag::kNo)) {
           DecodeError<ValidationTag>(
               decoder, pc,
               "invalid heap type '%s', shared exception references are not "
@@ -293,6 +294,12 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
               HeapType::from_code(code, is_shared).name().c_str());
           return {kWasmBottom, 0};
         }
+        if (!VALIDATE(is_shared == SharedFlag::kNo)) {
+          DecodeError<ValidationTag>(
+              decoder, pc, "shared string type '%s' is not supported.",
+              HeapType::from_code(code, is_shared).name().c_str());
+          return {kWasmBottom, 0};
+        }
         return {HeapType::from_code(code, is_shared), length};
       case kNoContCode:
       case kContRefCode:
@@ -304,7 +311,7 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
               HeapType::from_code(code, is_shared).name().c_str());
           return {kWasmBottom, 0};
         }
-        if (!VALIDATE(!is_shared)) {
+        if (!VALIDATE(is_shared == SharedFlag::kNo)) {
           DecodeError<ValidationTag>(
               decoder, pc,
               "invalid heap type '%s', shared continuation references are not "
@@ -344,7 +351,7 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
     return {kWasmBottom, length};
   }
   // We don't have a module yet, so we can only fill in default values:
-  bool kDefaultShared = false;
+  SharedFlag kDefaultShared = SharedFlag::kNo;
   RefTypeKind kDefaultKind = RefTypeKind::kOther;
   return {HeapType::Index(ModuleTypeIndex{type_index}, kDefaultShared,
                           kDefaultKind, exactness),
@@ -375,7 +382,8 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
     case kNoFuncCode:
     case kExternRefCode:
     case kFuncRefCode:
-      return {ValueType::RefNull(HeapType::from_code(code, false)), 1};
+      return {ValueType::RefNull(HeapType::from_code(code, SharedFlag::kNo)),
+              1};
     case kNoExnCode:
     case kExnRefCode:
       if (!VALIDATE(!detected->has_legacy_eh() ||
@@ -397,13 +405,14 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
             decoder, pc,
             "invalid value type '%sref', enable with "
             "--experimental-wasm-stringref",
-            HeapType::from_code(code, false).name().c_str());
+            HeapType::from_code(code, SharedFlag::kNo).name().c_str());
         return {kWasmBottom, 0};
       }
       // String views are not nullable, so interpret the shorthand accordingly.
-      ValueType type = code == kStringRefCode
-                           ? kWasmStringRef
-                           : ValueType::Ref(HeapType::from_code(code, false));
+      ValueType type =
+          code == kStringRefCode
+              ? kWasmStringRef
+              : ValueType::Ref(HeapType::from_code(code, SharedFlag::kNo));
       return {type, 1};
     }
     case kContRefCode:
@@ -412,7 +421,7 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
         DecodeError<ValidationTag>(
             decoder, pc,
             "invalid value type '%s', enable with --experimental-wasm-wasmfx",
-            HeapType::from_code(code, false).name().c_str());
+            HeapType::from_code(code, SharedFlag::kNo).name().c_str());
         return {kWasmBottom, 0};
       }
       return {code == kContRefCode ? kWasmContRef : kWasmNullContRef, 1};
@@ -659,7 +668,7 @@ struct TypeIndexImmediate {
 
 struct SigIndexImmediate : public TypeIndexImmediate {
   const FunctionSig* sig = nullptr;
-  bool shared = false;
+  SharedFlag shared = SharedFlag::kNo;
 
   template <typename ValidationTag>
   SigIndexImmediate(Decoder* decoder, const uint8_t* pc,
@@ -673,7 +682,7 @@ struct SigIndexImmediate : public TypeIndexImmediate {
 
 struct ContIndexImmediate : public TypeIndexImmediate {
   const ContType* cont_type = nullptr;
-  bool shared = false;
+  SharedFlag shared = SharedFlag::kNo;
 
   template <typename ValidationTag>
   ContIndexImmediate(Decoder* decoder, const uint8_t* pc,
@@ -687,7 +696,7 @@ struct ContIndexImmediate : public TypeIndexImmediate {
 
 struct StructIndexImmediate : public TypeIndexImmediate {
   const StructType* struct_type = nullptr;
-  bool shared = false;
+  SharedFlag shared = SharedFlag::kNo;
 
   template <typename ValidationTag>
   StructIndexImmediate(Decoder* decoder, const uint8_t* pc,
@@ -701,7 +710,7 @@ struct StructIndexImmediate : public TypeIndexImmediate {
 
 struct ArrayIndexImmediate : public TypeIndexImmediate {
   const ArrayType* array_type = nullptr;
-  bool shared = false;
+  SharedFlag shared = SharedFlag::kNo;
 
   template <typename ValidationTag>
   ArrayIndexImmediate(Decoder* decoder, const uint8_t* pc,
@@ -1493,6 +1502,8 @@ struct ControlBase : public PcForErrors<ValidationTag::validate> {
   F(BrOnNonNull, const Value& ref_object, Value* result, uint32_t depth,       \
     bool drop_null_on_fallthrough)                                             \
   F(SimdOp, WasmOpcode opcode, const Value args[], Value* result)              \
+  F(WideOp2, WasmOpcode opcode, const Value& lhs, const Value& rhs,            \
+    Value* result_low, Value* result_high)                                     \
   F(SimdLaneOp, WasmOpcode opcode, const SimdLaneImmediate& imm,               \
     base::Vector<const Value> inputs, Value* result)                           \
   F(Simd8x16ShuffleOp, const Simd128Immediate& imm, const Value& input0,       \
@@ -1722,7 +1733,7 @@ class FastZoneVector {
   bool empty() const { return begin_ == end_; }
 
   T& operator[](uint32_t index) {
-    DCHECK_GE(size(), index);
+    DCHECK_GT(size(), index);
     return begin_[index];
   }
 
@@ -1791,7 +1802,7 @@ class WasmDecoder : public Decoder {
  public:
   WasmDecoder(Zone* zone, const WasmModule* module, WasmEnabledFeatures enabled,
               WasmDetectedFeatures* detected, const FunctionSig* sig,
-              bool is_shared, const uint8_t* start, const uint8_t* end,
+              SharedFlag is_shared, const uint8_t* start, const uint8_t* end,
               uint32_t buffer_offset = 0)
       : Decoder(start, end, buffer_offset),
         zone_(zone),
@@ -1894,7 +1905,8 @@ class WasmDecoder : public Decoder {
       } else {
         DCHECK(!ValidationTag::validate);
       }
-      if (!VALIDATE(!is_shared_ || type.is_shared())) {
+      if (!VALIDATE(is_shared_ == SharedFlag::kNo ||
+                    type.is_shared() == SharedFlag::kYes)) {
         DecodeError(pc + total_length, "local must have shared type");
         return 0;
       }
@@ -2008,7 +2020,8 @@ class WasmDecoder : public Decoder {
     }
     V8_ASSUME(imm.index < num_globals);
     imm.global = &module_->globals[imm.index];
-    if (!VALIDATE(!is_shared_ || imm.global->shared)) {
+    if (!VALIDATE(is_shared_ == SharedFlag::kNo ||
+                  imm.global->shared == SharedFlag::kYes)) {
       DecodeError(pc, "Cannot access non-shared global %d in a shared %s",
                   imm.index,
                   decoding_mode == kConstantExpression ? "constant expression"
@@ -2084,7 +2097,8 @@ class WasmDecoder : public Decoder {
       DecodeError(pc, "function index #%u is out of bounds", imm.index);
       return false;
     }
-    if (is_shared_ && !module_->function_is_shared(imm.index)) {
+    if (is_shared_ == SharedFlag::kYes &&
+        module_->function_is_shared(imm.index) == SharedFlag::kNo) {
       DecodeError(pc, "cannot call non-shared function %u", imm.index);
       return false;
     }
@@ -2314,7 +2328,8 @@ class WasmDecoder : public Decoder {
     }
     imm.table = this->module_->tables.data() + imm.index;
 
-    if (!VALIDATE(!is_shared_ || imm.table->shared)) {
+    if (!VALIDATE(is_shared_ == SharedFlag::kNo ||
+                  imm.table->shared == SharedFlag::kYes)) {
       DecodeError(pc,
                   "cannot reference non-shared table %u from shared function",
                   imm.index);
@@ -2333,7 +2348,9 @@ class WasmDecoder : public Decoder {
       return false;
     }
     V8_ASSUME(imm.index < num_elem_segments);
-    if (!VALIDATE(!is_shared_ || module_->elem_segments[imm.index].shared)) {
+    if (!VALIDATE(is_shared_ == SharedFlag::kNo ||
+                  module_->elem_segments[imm.index].shared ==
+                      SharedFlag::kYes)) {
       DecodeError(
           pc,
           "cannot reference non-shared element segment %u from shared function",
@@ -2384,7 +2401,9 @@ class WasmDecoder : public Decoder {
     }
     // TODO(14616): Data segments aren't available during eager validation.
     // Discussion: github.com/WebAssembly/shared-everything-threads/issues/83
-    if (!VALIDATE(!is_shared_ || module_->data_segments[imm.index].shared)) {
+    if (!VALIDATE(is_shared_ == SharedFlag::kNo ||
+                  module_->data_segments[imm.index].shared ==
+                      SharedFlag::kYes)) {
       DecodeError(
           pc, "cannot refer to non-shared segment %u from a shared function",
           imm.index);
@@ -2670,6 +2689,10 @@ class WasmDecoder : public Decoder {
           case kExprI64UConvertSatF32:
           case kExprI64SConvertSatF64:
           case kExprI64UConvertSatF64:
+          case kExprI64Add128:
+          case kExprI64Sub128:
+          case kExprI64MulWideS:
+          case kExprI64MulWideU:
             return length;
           case kExprMemoryInit: {
             MemoryInitImmediate imm(decoder, pc + length, validate);
@@ -3075,7 +3098,7 @@ class WasmDecoder : public Decoder {
   const WasmEnabledFeatures enabled_;
   WasmDetectedFeatures* detected_;
   const FunctionSig* sig_;
-  bool is_shared_;
+  SharedFlag is_shared_;
   const std::pair<uint32_t, uint32_t>* current_inst_trace_;
 };
 
@@ -4784,8 +4807,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       if (handlers[i].kind == kOnSuspend) {
         Value* tag_params =
             PushValueTypes(handlers[i].tag.tag->sig->parameters());
-        Value* suspend_cont =
-            Push(ValueType::Ref(imm.index, false, RefTypeKind::kCont));
+        Value* suspend_cont = Push(
+            ValueType::Ref(imm.index, SharedFlag::kNo, RefTypeKind::kCont));
         const HandlerCase& handler = handlers[i];
         CALL_INTERFACE_IF_OK_AND_REACHABLE(ResumeHandler, handler, i,
                                            suspend_cont, tag_params);
@@ -6113,7 +6136,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       }
       case kExprArrayLen: {
         NON_CONST_ONLY
-        const bool is_shared = Peek().type.is_shared();
+        const SharedFlag is_shared = Peek().type.is_shared();
         Value array_obj =
             Pop(IndependentHeapType{GenericKind::kArray, kNullable, is_shared});
         Value* value = Push(kWasmI32);
@@ -6204,14 +6227,14 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       case kExprRefI31Shared: {
         CHECK_PROTOTYPE_OPCODE(shared);
         Value input = Pop(kWasmI32);
-        Value* value =
-            Push(IndependentHeapType{GenericKind::kI31, kNonNullable, true});
+        Value* value = Push(IndependentHeapType{GenericKind::kI31, kNonNullable,
+                                                SharedFlag::kYes});
         CALL_INTERFACE_IF_OK_AND_REACHABLE(RefI31, input, value);
         return opcode_length;
       }
       case kExprI31GetS: {
         NON_CONST_ONLY
-        const bool is_shared = Peek().type.is_shared();
+        const SharedFlag is_shared = Peek().type.is_shared();
         Value i31 =
             Pop(IndependentHeapType{GenericKind::kI31, kNullable, is_shared});
         Value* value = Push(kWasmI32);
@@ -6220,7 +6243,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       }
       case kExprI31GetU: {
         NON_CONST_ONLY
-        const bool is_shared = Peek().type.is_shared();
+        const SharedFlag is_shared = Peek().type.is_shared();
         Value i31 =
             Pop(IndependentHeapType{GenericKind::kI31, kNullable, is_shared});
         Value* value = Push(kWasmI32);
@@ -6510,7 +6533,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         return ParseBrOnCast(opcode, opcode_length);
       }
       case kExprAnyConvertExtern: {
-        const bool is_shared = Peek().type.is_shared();
+        const SharedFlag is_shared = Peek().type.is_shared();
         Value extern_val = Pop(
             IndependentHeapType{GenericKind::kExtern, kNullable, is_shared});
         ValueType intern_type = IndependentHeapType{
@@ -6522,7 +6545,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         return opcode_length;
       }
       case kExprExternConvertAny: {
-        const bool is_shared = Peek().type.is_shared();
+        const SharedFlag is_shared = Peek().type.is_shared();
         Value val =
             Pop(IndependentHeapType{GenericKind::kAny, kNullable, is_shared});
         ValueType extern_type =
@@ -6567,6 +6590,15 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     bool null_succeeds = flags.res_is_null;
     ValueType target_type = ValueType::RefMaybeNull(
         target_imm.type, null_succeeds ? kNullable : kNonNullable);
+
+    if (V8_UNLIKELY(this->enabled_.has_stringref())) {
+      if (!VALIDATE(
+              (!src_type.is_string_view() || !src_type.is_nullable()) &&
+              (!target_type.is_string_view() || !target_type.is_nullable()))) {
+        this->DecodeError("nullable string views don't exist");
+        return 0;
+      }
+    }
 
     if (V8_UNLIKELY(this->enabled_.has_custom_descriptors())) {
       // Custom descriptors relaxes the requirement that the target type be a
@@ -7176,7 +7208,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
             Pop(ValueType::RefNull(field.struct_imm.heap_type()));
         Value* value = Push(field_type.Unpacked());
         const bool is_signed = opcode == kExprStructAtomicGetS;
-        if (struct_obj.type.is_shared()) {
+        if (struct_obj.type.is_shared() == SharedFlag::kYes) {
           CALL_INTERFACE_IF_OK_AND_REACHABLE(StructAtomicGet, struct_obj, field,
                                              is_signed, memory_order.order,
                                              value);
@@ -7215,7 +7247,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         Value struct_obj =
             Pop(ValueType::RefNull(field.struct_imm.heap_type()));
         Value* value = Push(field_type.Unpacked());
-        if (struct_obj.type.is_shared()) {
+        if (struct_obj.type.is_shared() == SharedFlag::kYes) {
           CALL_INTERFACE_IF_OK_AND_REACHABLE(StructAtomicGet, struct_obj, field,
                                              true, memory_order.order, value);
         } else {
@@ -7263,7 +7295,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         auto [struct_obj, field_value] =
             Pop(ValueType::RefNull(field.struct_imm.heap_type()),
                 field_type.Unpacked());
-        if (struct_obj.type.is_shared()) {
+        if (struct_obj.type.is_shared() == SharedFlag::kYes) {
           CALL_INTERFACE_IF_OK_AND_REACHABLE(StructAtomicSet, struct_obj, field,
                                              field_value, memory_order.order);
         } else {
@@ -7435,7 +7467,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         auto [array_obj, index] =
             Pop(ValueType::RefNull(imm.heap_type()), kWasmI32);
         Value* value = Push(element_type.Unpacked());
-        if (array_obj.type.is_shared()) {
+        if (array_obj.type.is_shared() == SharedFlag::kYes) {
           CALL_INTERFACE_IF_OK_AND_REACHABLE(ArrayAtomicGet, array_obj, imm,
                                              index, true, memory_order.order,
                                              value);
@@ -7507,7 +7539,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         auto [array_obj, index, value] =
             Pop(ValueType::RefNull(imm.heap_type()), kWasmI32,
                 element_type.Unpacked());
-        if (imm.heap_type().is_shared()) {
+        if (imm.heap_type().is_shared() == SharedFlag::kYes) {
           CALL_INTERFACE_IF_OK_AND_REACHABLE(ArrayAtomicSet, array_obj, imm,
                                              index, value, memory_order.order);
         } else {
@@ -7771,6 +7803,29 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         }
         return DecodeStoreMem(StoreType::kF32StoreF16, 2);
       }
+      case kExprI64Add128:
+      case kExprI64Sub128: {
+        CHECK_PROTOTYPE_OPCODE(wide_arithmetic);
+        // TODO(491766259): Implement wide arithmetic opcodes.
+        this->DecodeError("Wide arithmetic opcodes are not yet implemented.");
+        return 0;
+      }
+      case kExprI64MulWideS:
+      case kExprI64MulWideU: {
+        CHECK_PROTOTYPE_OPCODE(wide_arithmetic);
+#if V8_TARGET_ARCH_X64
+
+        auto [a, b] = Pop(kWasmI64, kWasmI64);
+        Value* result_l = Push(kWasmI64);
+        Value* result_h = Push(kWasmI64);
+        CALL_INTERFACE_IF_OK_AND_REACHABLE(WideOp2, opcode, a, b, result_l,
+                                           result_h);
+        return opcode_length;
+#else
+        this->DecodeError("Wide arithmetic opcodes are not yet implemented.");
+        return 0;
+#endif
+      }
       default:
         this->DecodeError("invalid numeric opcode: 0x%x", opcode);
         return 0;
@@ -7806,7 +7861,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
 
   V8_INLINE Value* Push(Value value) {
     DCHECK_IMPLIES(this->ok(), value.type != kWasmVoid);
-    if (!VALIDATE(!this->is_shared_ || value.type.is_shared())) {
+    if (!VALIDATE(this->is_shared_ == SharedFlag::kNo ||
+                  value.type.is_shared() == SharedFlag::kYes)) {
       this->DecodeError(value.pc(), "%s does not have a shared type",
                         SafeOpcodeNameAt(value.pc()));
       return nullptr;

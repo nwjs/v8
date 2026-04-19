@@ -711,9 +711,9 @@ class InspectorExtension : public InspectorIsolateData::SetupGlobalTask {
     isolate->ThrowError("Getter is called");
   }
 
-  static void AccessorSetter(v8::Local<v8::Name> property,
-                             v8::Local<v8::Value> value,
-                             const v8::PropertyCallbackInfo<void>& info) {
+  static void AccessorSetter(
+      v8::Local<v8::Name> property, v8::Local<v8::Value> value,
+      const v8::PropertyCallbackInfo<v8::Boolean>& info) {
     v8::Isolate* isolate = info.GetIsolate();
     isolate->ThrowError("Setter is called");
   }
@@ -856,7 +856,7 @@ class InspectorExtension : public InspectorIsolateData::SetupGlobalTask {
 };
 
 int InspectorTestMain(int argc, char* argv[]) {
-  v8::V8::InitializeICUDefaultLocation(argv[0]);
+  CHECK(v8::V8::InitializeICUDefaultLocation(argv[0]));
   std::unique_ptr<Platform> platform(platform::NewDefaultPlatform());
   v8::V8::InitializePlatform(platform.get());
   v8_flags.abort_on_contradictory_flags = true;

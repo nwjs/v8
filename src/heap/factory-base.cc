@@ -183,7 +183,7 @@ Handle<FixedArray> FactoryBase<Impl>::NewFixedArray(uint32_t length,
 
 template <typename Impl>
 Handle<TrustedFixedArray> FactoryBase<Impl>::NewTrustedFixedArray(
-    int length, AllocationType allocation) {
+    uint32_t length, AllocationType allocation) {
   DCHECK(allocation == AllocationType::kTrusted ||
          allocation == AllocationType::kSharedTrusted);
 
@@ -195,14 +195,14 @@ Handle<TrustedFixedArray> FactoryBase<Impl>::NewTrustedFixedArray(
 
 template <typename Impl>
 Handle<ProtectedFixedArray> FactoryBase<Impl>::NewProtectedFixedArray(
-    uint32_t length, bool shared) {
+    uint32_t length, SharedFlag shared) {
   if (length == 0) return empty_protected_fixed_array();
   return ProtectedFixedArray::New(isolate(), length, shared);
 }
 
 template <typename Impl>
 Handle<FixedArray> FactoryBase<Impl>::NewFixedArrayWithMap(
-    DirectHandle<Map> map, int length, AllocationType allocation) {
+    DirectHandle<Map> map, uint32_t length, AllocationType allocation) {
   // Zero-length case must be handled outside, where the knowledge about
   // the map is.
   DCHECK_LT(0, length);
@@ -300,13 +300,13 @@ Handle<ProtectedWeakFixedArray> FactoryBase<Impl>::NewProtectedWeakFixedArray(
 
 template <typename Impl>
 Handle<ByteArray> FactoryBase<Impl>::NewByteArray(
-    int length, AllocationType allocation, AllocationAlignment alignment) {
+    uint32_t length, AllocationType allocation, AllocationAlignment alignment) {
   return ByteArray::New(isolate(), length, allocation, alignment);
 }
 
 template <typename Impl>
 Handle<TrustedByteArray> FactoryBase<Impl>::NewTrustedByteArray(
-    int length, AllocationType allocation_type) {
+    uint32_t length, AllocationType allocation_type) {
   if (length == 0) return empty_trusted_byte_array();
   return TrustedByteArray::New(isolate(), length, allocation_type);
 }
@@ -320,7 +320,7 @@ FactoryBase<Impl>::NewDeoptimizationLiteralArray(uint32_t length) {
 
 template <typename Impl>
 DirectHandle<DeoptimizationFrameTranslation>
-FactoryBase<Impl>::NewDeoptimizationFrameTranslation(int length) {
+FactoryBase<Impl>::NewDeoptimizationFrameTranslation(uint32_t length) {
   return TrustedCast<DeoptimizationFrameTranslation>(
       NewTrustedByteArray(length));
 }
@@ -449,7 +449,7 @@ FactoryBase<Impl>::NewSloppyArgumentsElements(
 
 template <typename Impl>
 DirectHandle<ArrayList> FactoryBase<Impl>::NewArrayList(
-    int size, AllocationType allocation) {
+    uint32_t size, AllocationType allocation) {
   return ArrayList::New(isolate(), size, allocation);
 }
 
@@ -686,13 +686,11 @@ DirectHandle<RegExpDataWrapper> FactoryBase<Impl>::NewRegExpDataWrapper() {
 template <typename Impl>
 DirectHandle<RegExpBoilerplateDescription>
 FactoryBase<Impl>::NewRegExpBoilerplateDescription(
-    DirectHandle<RegExpData> data, DirectHandle<String> source,
-    Tagged<Smi> flags) {
+    DirectHandle<RegExpData> data, Tagged<Smi> flags) {
   auto result = NewStructInternal<RegExpBoilerplateDescription>(
       REG_EXP_BOILERPLATE_DESCRIPTION_TYPE, AllocationType::kOld);
   DisallowGarbageCollection no_gc;
   result->set_data(*data);
-  result->set_source(*source);
   result->set_flags(flags.value());
   return direct_handle(result, isolate());
 }
@@ -1350,9 +1348,9 @@ Tagged<HeapObject> FactoryBase<Impl>::AllocateRawArray(
 
 template <typename Impl>
 Tagged<HeapObject> FactoryBase<Impl>::AllocateRawFixedArray(
-    int length, AllocationType allocation) {
-  if (length < 0 || static_cast<uint32_t>(length) > FixedArray::kMaxLength) {
-    base::FatalNoSecurityImpact("Fatal JavaScript invalid size error %d",
+    uint32_t length, AllocationType allocation) {
+  if (length > FixedArray::kMaxLength) {
+    base::FatalNoSecurityImpact("Fatal JavaScript invalid size error %u",
                                 length);
     UNREACHABLE();
   }
@@ -1361,9 +1359,8 @@ Tagged<HeapObject> FactoryBase<Impl>::AllocateRawFixedArray(
 
 template <typename Impl>
 Tagged<HeapObject> FactoryBase<Impl>::AllocateRawWeakArrayList(
-    int capacity, AllocationType allocation) {
-  if (capacity < 0 ||
-      static_cast<uint32_t>(capacity) > WeakArrayList::kMaxCapacity) {
+    uint32_t capacity, AllocationType allocation) {
+  if (capacity > WeakArrayList::kMaxCapacity) {
     base::FatalNoSecurityImpact("Fatal JavaScript invalid size error %d",
                                 capacity);
     UNREACHABLE();

@@ -146,6 +146,8 @@ class Arm64OperandConverter final : public InstructionOperandConverter {
         return InputOperand32(index);
       case kMode_Operand2_R_LSL_I:
         return Operand(InputRegister32(index), LSL, InputInt5(index + 1));
+      case kMode_Operand2_R_UXTW_LSL_I:
+        return Operand(InputRegister32(index), UXTW, InputInt5(index + 1));
       case kMode_Operand2_R_LSR_I:
         return Operand(InputRegister32(index), LSR, InputInt5(index + 1));
       case kMode_Operand2_R_ASR_I:
@@ -176,6 +178,8 @@ class Arm64OperandConverter final : public InstructionOperandConverter {
         return InputOperand64(index);
       case kMode_Operand2_R_LSL_I:
         return Operand(InputRegister64(index), LSL, InputInt6(index + 1));
+      case kMode_Operand2_R_UXTW_LSL_I:
+        return Operand(InputRegister32(index), UXTW, InputInt6(index + 1));
       case kMode_Operand2_R_LSR_I:
         return Operand(InputRegister64(index), LSR, InputInt6(index + 1));
       case kMode_Operand2_R_ASR_I:
@@ -217,6 +221,9 @@ class Arm64OperandConverter final : public InstructionOperandConverter {
       case kMode_Operand2_R_LSL_I:
         return MemOperand(InputRegister(index + 0), InputRegister(index + 1),
                           LSL, InputInt32(index + 2));
+      case kMode_Operand2_R_UXTW_LSL_I:
+        return MemOperand(InputRegister(index + 0), InputRegister32(index + 1),
+                          UXTW, InputInt32(index + 2));
       case kMode_MRI:
         return MemOperand(InputRegister(index + 0), InputInt32(index + 1));
       case kMode_MRR:
@@ -559,9 +566,9 @@ void RecordTrapInfoIfNeeded(Zone* zone, CodeGenerator* codegen,
                             InstructionCode opcode, Instruction* instr,
                             int pc) {
   const MemoryAccessMode access_mode = AccessModeField::decode(opcode);
-  if (access_mode == kMemoryAccessProtectedMemOutOfBounds ||
-      access_mode == kMemoryAccessProtectedNullDereference) {
-    codegen->RecordProtectedInstruction(pc);
+  if (access_mode == kMemoryAccessTrappingMemOutOfBounds ||
+      access_mode == kMemoryAccessTrappingNullDereference) {
+    codegen->RecordTrappingInstruction(pc);
   }
 }
 #else
@@ -1649,8 +1656,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Xar: {
       DCHECK(CpuFeatures::IsSupported(SHA3));
       CpuFeatureScope scope(masm(), SHA3);
-      __ Xar(i.OutputSimd128Register().V2D(), i.InputSimd128Register(0).V2D(),
-             i.InputSimd128Register(1).V2D(), i.InputInt6(2));
+      if (instr->InputAt(1)->IsImmediate() && i.InputInt32(1) == 0) {
+        // Use the pre-assigned fp_zero register for a rotate.
+        __ Xar(i.OutputSimd128Register().V2D(), i.InputSimd128Register(0).V2D(),
+               fp_zero.V2D(), i.InputInt6(2));
+      } else {
+        __ Xar(i.OutputSimd128Register().V2D(), i.InputSimd128Register(0).V2D(),
+               i.InputSimd128Register(1).V2D(), i.InputInt6(2));
+      }
       break;
     }
     case kArm64Sadalp: {

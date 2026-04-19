@@ -225,6 +225,11 @@ declare_args() {
   # the `--trace-turbo` .json file from `mksnapshot`.
   v8_log_builtins_block_count_input = ""
 
+  # This build flag is used to enable block positioning in profile-guided
+  # optimization of builtins based on raw execution counts (as opposed to
+  # branch hints).
+  v8_enable_builtins_block_position = false
+
   # This build flag is used to control whether reorder builtins according to
   # the call graph with C3 algorithm based builtin PGO profiling.
   v8_enable_builtins_reordering = true
@@ -509,9 +514,25 @@ declare_args() {
 
   # Enable compilation of riscv32.
   v8_riscv_enable_deprecated_riscv32 = false
+
+  # Sets the level of logging detail in V8_Fatal.
+  # 0: No file and line and message only if args are provided (for official
+  #    release builds).
+  # 1: Message but no file or line.
+  # 2: Everything (file, line, message).
+  v8_logging_level = ""
 }
 
 # Derived defaults.
+if (v8_logging_level == "") {
+  if (v8_enable_verification_features || v8_dcheck_always_on) {
+    v8_logging_level = 2
+  } else if (is_official_build) {
+    v8_logging_level = 0
+  } else {
+    v8_logging_level = 1
+  }
+}
 if (cppgc_enable_verify_heap == "") {
   cppgc_enable_verify_heap =
       v8_enable_verification_features || v8_dcheck_always_on
@@ -1221,8 +1242,10 @@ config("features") {
   # Only targets in this file and its subdirs can depend on this.
   visibility = [ "./*" ]
 
-  defines =
-      [ "V8_TYPED_ARRAY_MAX_SIZE_IN_HEAP=${v8_typed_array_max_size_in_heap}" ]
+  defines = [
+    "V8_TYPED_ARRAY_MAX_SIZE_IN_HEAP=${v8_typed_array_max_size_in_heap}",
+    "V8_LOGGING_LEVEL=${v8_logging_level}",
+  ]
 
   configs = [
     ":v8_header_features",
@@ -1260,6 +1283,9 @@ config("features") {
   }
   if (v8_log_builtins_block_count_input != "") {
     defines += [ "LOG_BUILTIN_BLOCK_COUNT" ]
+  }
+  if (v8_enable_builtins_block_position) {
+    defines += [ "BUILTIN_BLOCK_POSITION" ]
   }
   if (v8_enable_future) {
     defines += [ "V8_ENABLE_FUTURE" ]
@@ -1778,6 +1804,9 @@ config("toolchain") {
 
   if (is_clang) {
     cflags += [ "-Wunreachable-code" ]
+    if (v8_current_cpu != "ppc64" && v8_current_cpu != "s390x") {
+      cflags += [ "-Wlifetime-safety-permissive" ]
+    }
 
     if ((v8_current_cpu != "x64" && v8_current_cpu != "ia32") ||
         target_os == "chromeos") {
@@ -1895,32 +1924,6 @@ config("always_turbofanimize") {
     configs += [ "//build/config/compiler:optimize_speed" ]
   } else {
     configs += [ "//build/config/compiler:optimize_max" ]
-  }
-}
-
-# Sanitizer defines. V8 will inherit a default `-fsanitize=array-bounds`
-# from Chromium's `//build/config/`, which prevents clean usage of
-# `__has_feature(undefined_behavior_sanitizer)` in the short term,
-# until something like `--lie-about-ubsan-enablement=array-bounds`
-# can be implemented.
-#
-# This config provides a clear signal of "are we sanitizing" tied to
-# GN configuration.
-#
-# See also: https://crbug.com/386992829
-config("sanitizer_defines") {
-  defines = []
-  if (is_asan) {
-    defines += [ "V8_USE_ADDRESS_SANITIZER" ]
-  }
-  if (is_hwasan) {
-    defines += [ "V8_USE_HWADDRESS_SANITIZER" ]
-  }
-  if (is_msan) {
-    defines += [ "V8_USE_MEMORY_SANITIZER" ]
-  }
-  if (is_ubsan) {
-    defines += [ "V8_USE_UNDEFINED_BEHAVIOR_SANITIZER" ]
   }
 }
 
@@ -3849,7 +3852,6 @@ v8_header_set("v8_internal_headers") {
     "src/compiler/operator-properties.h",
     "src/compiler/operator.h",
     "src/compiler/osr.h",
-    "src/compiler/pair-load-store-reducer.h",
     "src/compiler/per-isolate-compiler-cache.h",
     "src/compiler/persistent-map.h",
     "src/compiler/phase.h",
@@ -4514,7 +4516,6 @@ v8_header_set("v8_internal_headers") {
     "src/profiler/cpu-profiler.h",
     "src/profiler/heap-profiler.h",
     "src/profiler/heap-snapshot-common.h",
-    "src/profiler/heap-snapshot-generator-inl.h",
     "src/profiler/heap-snapshot-generator.h",
     "src/profiler/output-stream-writer.h",
     "src/profiler/profile-generator-inl.h",
@@ -4568,10 +4569,8 @@ v8_header_set("v8_internal_headers") {
     "src/sandbox/bytecode-verifier.h",
     "src/sandbox/check.h",
     "src/sandbox/code-entrypoint-tag.h",
-    "src/sandbox/code-pointer-inl.h",
     "src/sandbox/code-pointer-table-inl.h",
     "src/sandbox/code-pointer-table.h",
-    "src/sandbox/code-pointer.h",
     "src/sandbox/code-sandboxing-mode.h",
     "src/sandbox/compactible-external-entity-table-inl.h",
     "src/sandbox/compactible-external-entity-table.h",
@@ -4939,6 +4938,10 @@ v8_header_set("v8_internal_headers") {
       "src/compiler/turboshaft/wasm-revec-phase.h",
       "src/compiler/turboshaft/wasm-revec-reducer.h",
     ]
+  }
+
+  if (v8_enable_builtins_block_position) {
+    sources += [ "src/compiler/backend/block-position.h" ]
   }
 
   if (v8_enable_i18n_support) {
@@ -5467,7 +5470,6 @@ v8_compiler_sources = [
   "src/compiler/operator-properties.cc",
   "src/compiler/operator.cc",
   "src/compiler/osr.cc",
-  "src/compiler/pair-load-store-reducer.cc",
   "src/compiler/pipeline-statistics.cc",
   "src/compiler/pipeline.cc",
   "src/compiler/property-access-builder.cc",
@@ -5681,12 +5683,17 @@ if (v8_enable_wasm_simd256_revec) {
 }
 
 exclude_from_compiler_cluster = [
+  "src/compiler/turboshaft/turbolev-graph-builder.cc",  # Slow.
   "src/compiler/turboshaft/wasm-turboshaft-compiler.cc",  # Pipeline::GenerateWasmCode.
   "src/compiler/bytecode-analysis.cc",  # Top-level 'using incl.
                                         # 'interpreter::Register'.
   "src/compiler/heap-refs.cc",  # Is64() function.
   "src/compiler/wasm-load-elimination.cc",  # MayAlias.
 ]
+
+if (v8_enable_builtins_block_position) {
+  v8_compiler_sources += [ "src/compiler/backend/block-position.cc" ]
+}
 
 # The src/compiler files for use in mksnapshot.
 # - These might be built with additional optimizations if
@@ -6820,11 +6827,10 @@ v8_cluster_source_set("v8_base_without_compiler") {
 
   if (v8_fuzzilli) {
     sources += [
-      "src/fuzzilli/cov.cc",
-      "src/fuzzilli/cov.h",
       "src/fuzzilli/fuzzilli.cc",
       "src/fuzzilli/fuzzilli.h",
     ]
+    public_deps += [ ":fuzzilli_cov" ]
   }
 
   if (v8_dumpling) {
@@ -7061,8 +7067,8 @@ v8_static_lib("v8_libbase") {
     "src/base/compiler-specific.h",
     "src/base/container-utils.h",
     "src/base/contextual.h",
-    "src/base/cpu.cc",
-    "src/base/cpu.h",
+    "src/base/cpu/cpu.cc",
+    "src/base/cpu/cpu.h",
     "src/base/debug/stack_trace.cc",
     "src/base/debug/stack_trace.h",
     "src/base/discriminated-union.h",
@@ -7193,6 +7199,22 @@ v8_static_lib("v8_libbase") {
     "src/base/vlq-base64.h",
     "src/base/vlq.h",
   ]
+
+  if (target_cpu == "x86" || target_cpu == "x64") {
+    sources += [ "src/base/cpu/cpu-x86.cc" ]
+  } else if (target_cpu == "arm" || target_cpu == "arm64") {
+    sources += [ "src/base/cpu/cpu-arm.cc" ]
+  } else if (target_cpu == "riscv64") {
+    sources += [ "src/base/cpu/cpu-riscv.cc" ]
+  } else if (target_cpu == "loong64") {
+    sources += [ "src/base/cpu/cpu-loong64.cc" ]
+  } else if (target_cpu == "mips64" || target_cpu == "mips64el") {
+    sources += [ "src/base/cpu/cpu-mips64.cc" ]
+  } else if (target_cpu == "ppc64") {
+    sources += [ "src/base/cpu/cpu-ppc.cc" ]
+  } else if (target_cpu == "s390x") {
+    sources += [ "src/base/cpu/cpu-s390.cc" ]
+  }
 
   configs = [ ":internal_config_base" ]
 
@@ -8122,11 +8144,19 @@ group("v8_python_base") {
   data = [ ".vpython3" ]
 }
 
+# Enable fallbacks for files that might be hard to access on Clusterfuzz.
+copy("v8_clusterfuzz_fallbacks") {
+  testonly = true
+  sources = [ "test/mjsunit/wasm/wasm-module-builder.js" ]
+  outputs = [ "$root_out_dir/test/mjsunit/wasm/wasm-module-builder.js" ]
+}
+
 group("v8_clusterfuzz") {
   testonly = true
 
   deps = [
     ":d8",
+    ":v8_clusterfuzz_fallbacks",
     ":v8_simple_inspector_fuzzer",
     "tools/clusterfuzz/trials:v8_clusterfuzz_resources",
   ]
@@ -8812,6 +8842,24 @@ if (!build_with_chromium && v8_use_perfetto) {
     ]
   }
 }  # if (!build_with_chromium && v8_use_perfetto)
+
+if (v8_fuzzilli) {
+  v8_source_set("fuzzilli_cov") {
+    visibility = [ "*" ]
+    sources = [
+      "src/fuzzilli/cov.cc",
+      "src/fuzzilli/cov.h",
+    ]
+    configs = [
+      ":internal_config_base",
+      ":internal_config",
+    ]
+    deps = [
+      ":v8_internal_headers",
+      ":v8_libbase",
+    ]
+  }
+}
 
 # GN evaluates each .gn file once per toolchain, so restricting to default
 # toolchain will ensure write_file() is called only once.

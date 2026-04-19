@@ -100,9 +100,10 @@ inline void PutAt(RWDigits Z, Digits A, uint32_t count) {
 // leading zeros.
 class ShiftedDigits : public Digits {
  public:
-  explicit ShiftedDigits(Digits& original, int shift = -1,
-                         bool allow_inplace = false)
-      : Digits(original.digits_, original.len_) {
+  ShiftedDigits(Digits& original, Platform* platform, int shift = -1,
+                bool allow_inplace = false)
+      : Digits(original.digits_, original.len_),
+        storage_(nullptr, Platform::Deleter(platform)) {
     int leading_zeros = CountLeadingZeros(original.msd());
     if (shift < 0) {
       shift = leading_zeros;
@@ -111,15 +112,18 @@ class ShiftedDigits : public Digits {
       len_++;
     }
     shift_ = shift;
-    if (shift == 0) {
+    // For shift == 0, we could always allow in-place handling if we didn't
+    // have to worry about concurrent malicious corruption. The situations
+    // where the source is corruptible are the same where callers don't allow
+    // in-place modification.
+    if (shift == 0 && allow_inplace) {
       inplace_ = true;
       return;
     }
     inplace_ = allow_inplace;
     if (!inplace_) {
-      digit_t* digits = new digit_t[len_];
-      storage_.reset(digits);
-      digits_ = digits;
+      storage_.reset(platform->Allocate(len_));
+      digits_ = storage_.get();
     }
     RWDigits rw_view(digits_, len_);
     LeftShift(rw_view, original, shift_);
@@ -127,14 +131,14 @@ class ShiftedDigits : public Digits {
 
   // For callers that have available scratch memory.
   ShiftedDigits(Digits& original, RWDigits scratch)
-      : Digits(original.digits_, original.len_) {
+      : Digits(scratch.digits_, original.len_),
+        inplace_(false),
+        // Neither {storage_} nor its deleter will be used.
+        storage_(nullptr, Platform::Deleter(nullptr)) {
     DCHECK(scratch.len() >= original.len());
     shift_ = CountLeadingZeros(original.msd());
-    if (shift_ == 0) {
-      inplace_ = true;
-      return;
-    }
-    digits_ = scratch.digits_;
+    // Always make a copy, even when shift_ == 0, to protect against
+    // concurrent in-sandbox mutation.
     RWDigits rw_view(digits_, len_);
     LeftShift(rw_view, original, shift_);
   }
@@ -153,7 +157,7 @@ class ShiftedDigits : public Digits {
  private:
   int shift_;
   bool inplace_;
-  std::unique_ptr<digit_t[]> storage_;
+  std::unique_ptr<digit_t[], Platform::Deleter> storage_;
 };
 
 }  // namespace bigint

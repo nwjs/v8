@@ -46,8 +46,7 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
 
   Handle<ScopeInfo> scope_info =
       factory->NewScopeInfo(ScopeInfo::kVariablePartIndex);
-  int flags = ScopeInfo::IsEmptyBit::encode(true) |
-              ScopeInfo::HasContextCellsBit::encode(true);
+  int flags = ScopeInfo::HasContextCellsBit::encode(true);
   scope_info->set_flags(flags, kRelaxedStore);
   scope_info->set_context_local_count(0);
   scope_info->set_parameter_count(0);
@@ -196,8 +195,7 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
 
   Handle<ScopeInfo> scope_info2 =
       factory->NewScopeInfo(ScopeInfo::kVariablePartIndex);
-  int flags2 = ScopeInfo::IsEmptyBit::encode(true) |
-               ScopeInfo::HasContextCellsBit::encode(false);
+  int flags2 = ScopeInfo::HasContextCellsBit::encode(false);
   scope_info2->set_flags(flags2, kRelaxedStore);
   scope_info2->set_context_local_count(0);
   scope_info2->set_parameter_count(0);
@@ -234,7 +232,9 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
       .DefineNamedOwnProperty(reg, name, define_named_own_slot.ToInt())
       .DefineKeyedOwnProperty(reg, reg, DefineKeyedOwnPropertyFlag::kNoFlags,
                               define_named_own_slot.ToInt())
-      .StoreInArrayLiteral(reg, reg, store_array_element_slot.ToInt());
+      .StoreInArrayLiteral(reg, reg, store_array_element_slot.ToInt())
+      .GetPrivateField(reg, 0, 0, reg, 0)
+      .SetPrivateField(reg, 0, 0, reg, 0);
 
   // Emit Iterator-protocol operations
   builder.GetIterator(reg, load_slot.ToInt(), call_slot.ToInt());

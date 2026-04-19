@@ -92,19 +92,23 @@ RUNTIME_FUNCTION(Runtime_VarargStackOverflow) {
   }
 
   int nargs = args.length();
-  auto maybe_receiver =
-      args.at<JSAny>(nargs - SuperSpreadArgs::kReceiverOffsetFromEnd);
-  auto target =
-      args.at<JSFunction>(nargs - SuperSpreadArgs::kTargetOffsetFromEnd);
+  if (nargs >= SuperSpreadArgs::kNumExtraArgs) {
+    auto maybe_receiver =
+        args.at<JSAny>(nargs - SuperSpreadArgs::kReceiverOffsetFromEnd);
+    auto maybe_target =
+        args.at<JSAny>(nargs - SuperSpreadArgs::kTargetOffsetFromEnd);
 
-  if (v8_flags.superspreading) {
-    if (Handle<JSReceiver> receiver; TryCast(maybe_receiver, &receiver)) {
+    if (v8_flags.superspreading) {
+      if (Handle<JSFunction> target; TryCast(maybe_target, &target)) {
+        if (Handle<JSReceiver> receiver; TryCast(maybe_receiver, &receiver)) {
 #define CASE(Name, Handler)                                      \
   if (target->code(isolate)->builtin_id() == Builtin::k##Name) { \
     return Handler(isolate, args);                               \
   }
       SUPERSPREAD_BUILTINS(CASE)
 #undef CASE
+        }
+      }
     }
   }
   return isolate->StackOverflow();
@@ -527,8 +531,8 @@ RUNTIME_FUNCTION(Runtime_AllocateInSharedHeap) {
 RUNTIME_FUNCTION(Runtime_AllocateByteArray) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
-  int length = args.smi_value_at(0);
-  DCHECK_LT(0, length);
+  uint32_t length = args.positive_smi_value_at(0);
+  DCHECK_LT(0u, length);
   return *isolate->factory()->NewByteArray(length);
 }
 

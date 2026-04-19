@@ -163,7 +163,8 @@ void Serializer::SerializeObject(Handle<HeapObject> obj, SlotType slot_type) {
     // ThinStrings are just an indirection to an internalized string, so elide
     // the indirection and serialize the actual string directly.
     obj = handle(Cast<ThinString>(*obj)->actual(), isolate());
-  } else if (Tagged<Code> code; TryCast(*obj, &code)) {
+  } else if (Is<Code>(*obj)) {
+    Tagged<Code> code = TrustedCast<Code>(*obj);
     // The only expected Code objects here are baseline code and builtins.
     if (code->kind() == CodeKind::BASELINE) {
       // For now just serialize the BytecodeArray instead of baseline code.
@@ -271,8 +272,8 @@ bool Serializer::SerializePendingObject(Tagged<HeapObject> obj) {
 }
 
 bool Serializer::ObjectIsBytecodeHandler(Tagged<HeapObject> obj) const {
-  Tagged<Code> code;
-  if (!TryCast(obj, &code)) return false;
+  if (!Is<Code>(obj)) return false;
+  Tagged<Code> code = TrustedCast<Code>(obj);
   return (code->kind() == CodeKind::BYTECODE_HANDLER);
 }
 
@@ -467,14 +468,18 @@ void Serializer::ObjectSerializer::SerializePrologue(SnapshotSpace space,
                       code_name));
   }
 
-  if (map.SafeEquals(*object_)) {
+  if (IsMetaMap(*object_)) {
     if (map == ReadOnlyRoots(isolate()).meta_map()) {
       DCHECK_EQ(space, SnapshotSpace::kReadOnlyHeap);
       sink_->Put(kNewContextlessMetaMap, "NewContextlessMetaMap");
+      sink_->PutUint30(size >> kObjectAlignmentBits, "ObjectSizeInWords");
+      sink_->PutUint30(map->instance_type(), "MetaMapInstanceType");
     } else {
       DCHECK_EQ(space, SnapshotSpace::kOld);
       DCHECK(IsContext(map->native_context_or_null()));
       sink_->Put(kNewContextfulMetaMap, "NewContextfulMetaMap");
+      sink_->PutUint30(size >> kObjectAlignmentBits, "ObjectSizeInWords");
+      sink_->PutUint30(map->instance_type(), "MetaMapInstanceType");
 
       // Defer serialization of the native context in order to break
       // a potential cycle through the map slot:
@@ -1410,15 +1415,14 @@ void Serializer::ObjectSerializer::OutputRawData(Address up_to) {
       OutputRawWithCustomField(sink_, object_start, base, bytes_to_output,
                                Code::kSelfIndirectPointerOffset,
                                sizeof(field_value), field_value);
-#else
+#endif
       // In this case, instruction_start field contains a raw value that will
       // similarly be recomputed after deserialization, so write zeros to keep
       // the snapshot deterministic.
-      static uint8_t field_value[kSystemPointerSize] = {0};
+      static uint8_t field_value2[kSystemPointerSize] = {0};
       OutputRawWithCustomField(sink_, object_start, base, bytes_to_output,
                                Code::kInstructionStartOffset,
-                               sizeof(field_value), field_value);
-#endif  // V8_ENABLE_SANDBOX
+                               sizeof(field_value2), field_value2);
     } else if (IsSeqString(*object_)) {
       // SeqStrings may contain padding. Serialize the padding bytes as 0s to
       // make the snapshot content deterministic.

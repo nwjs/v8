@@ -599,7 +599,7 @@ bool IC::UpdateHomomorphicIC(const MaybeObjectDirectHandle& new_handler,
   }
 #endif
 
-  int capacity = v8_flags.homomorphic_ic_count;
+  uint32_t capacity = v8_flags.homomorphic_ic_count;
   DCHECK(base::bits::IsPowerOfTwo(capacity));
   DirectHandle<WeakHomomorphicFixedArray> array =
       WeakHomomorphicFixedArray::New(isolate(), capacity, AllocationType::kOld);
@@ -1201,14 +1201,16 @@ MaybeObjectHandle LoadIC::ComputeHandler(LookupIterator* lookup) {
           return MaybeObjectHandle(LoadHandler::LoadFromPrototype(
               isolate(), map, holder, *smi_handler,
               MaybeObjectDirectHandle::Weak(lookup->GetPropertyCell())));
-        } else {
-          smi_handler = LoadHandler::LoadNormal(isolate());
+        }
+        smi_handler =
+            LoadHandler::LoadNormal(isolate(), lookup->dictionary_entry());
+
+        if (holder_is_lookup_start_object) {
           TRACE_HANDLER_STATS(isolate(), LoadIC_LoadNormalDH);
-          if (holder_is_lookup_start_object)
-            return MaybeObjectHandle(smi_handler);
-          TRACE_HANDLER_STATS(isolate(), LoadIC_LoadNormalFromPrototypeDH);
+          return MaybeObjectHandle(smi_handler);
         }
 
+        TRACE_HANDLER_STATS(isolate(), LoadIC_LoadNormalFromPrototypeDH);
         return MaybeObjectHandle(LoadHandler::LoadFromPrototype(
             isolate(), map, holder, *smi_handler));
       }
@@ -1252,11 +1254,16 @@ MaybeObjectHandle LoadIC::ComputeHandler(LookupIterator* lookup) {
               isolate(), map, holder, *smi_handler,
               MaybeObjectDirectHandle::Weak(lookup->GetPropertyCell())));
         }
-        smi_handler = LoadHandler::LoadNormal(isolate());
-        TRACE_HANDLER_STATS(isolate(), LoadIC_LoadNormalDH);
-        if (holder_is_lookup_start_object)
+
+        smi_handler =
+            LoadHandler::LoadNormal(isolate(), lookup->dictionary_entry());
+        if (holder_is_lookup_start_object) {
+          TRACE_HANDLER_STATS(isolate(), LoadIC_LoadNormalDH);
           return MaybeObjectHandle(smi_handler);
+        }
+
         TRACE_HANDLER_STATS(isolate(), LoadIC_LoadNormalFromPrototypeDH);
+
       } else if (lookup->IsElement(*holder)) {
         TRACE_HANDLER_STATS(isolate(), LoadIC_SlowStub);
         return MaybeObjectHandle(LoadHandler::LoadSlow(isolate()));

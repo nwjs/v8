@@ -32,6 +32,8 @@
 #include "src/objects/allocation-site.h"
 #include "src/objects/casting.h"
 #include "src/objects/deoptimization-data.h"
+#include "src/objects/field-type.h"
+#include "src/objects/foreign.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/hole.h"
@@ -58,7 +60,6 @@
 #include "src/objects/trusted-pointer-inl.h"
 #include "src/roots/roots.h"
 #include "src/sandbox/bounded-size-inl.h"
-#include "src/sandbox/code-pointer-inl.h"
 #include "src/sandbox/cppheap-pointer-inl.h"
 #include "src/sandbox/external-pointer-inl.h"
 #include "src/sandbox/indirect-pointer-inl.h"
@@ -624,8 +625,8 @@ DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsJSSegmentDataObjectWithIsWordLike) {
 #endif  // V8_INTL_SUPPORT
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsDeoptimizationData) {
-  Tagged<ProtectedFixedArray> array;
-  if (!TryCast(obj, &array)) return false;
+  if (!Is<ProtectedFixedArray>(obj)) return false;
+  Tagged<ProtectedFixedArray> array = TrustedCast<ProtectedFixedArray>(obj);
 
   // There's no sure way to detect the difference between a fixed array and
   // a deoptimization data array.  Since this is used for asserts we can
@@ -695,6 +696,19 @@ DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsCompilationCacheTable) {
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsMapCache) {
   return IsHashTable(obj, cage_base);
+}
+
+// This should be in objects/map-inl.h, but can't, because of a cyclic
+// dependency.
+bool IsMetaMapMap(Tagged<Map> map) {
+  return InstanceTypeChecker::IsMap(map->instance_type());
+}
+
+DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsMetaMap) {
+  if (!InstanceTypeChecker::IsMap(obj->map(cage_base)->instance_type())) {
+    return false;
+  }
+  return IsMetaMapMap(UncheckedCast<Map>(obj));
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsObjectHashTable) {
@@ -1214,7 +1228,7 @@ void HeapObject::InitSelfIndirectPointerField(
     TrustedPointerPublishingScope* opt_publishing_scope) {
   DCHECK(IsExposedTrustedObject(*this));
   InstanceType instance_type = map()->instance_type();
-  bool shared = HeapLayout::InAnySharedSpace(*this);
+  SharedFlag shared = SharedFlag(HeapLayout::InAnySharedSpace(*this));
   IndirectPointerTag tag =
       IndirectPointerTagFromInstanceType(instance_type, shared);
   i::InitSelfIndirectPointerField(field_address(offset), isolate, *this, tag,
@@ -1233,7 +1247,7 @@ void HeapObjectLayout::InitSelfIndirectPointerField(
     TrustedPointerPublishingScope* opt_publishing_scope) {
   DCHECK(IsExposedTrustedObject(this));
   InstanceType instance_type = map()->instance_type();
-  bool shared = HeapLayout::InAnySharedSpace(this);
+  SharedFlag shared = SharedFlag(HeapLayout::InAnySharedSpace(this));
   IndirectPointerTag tag =
       IndirectPointerTagFromInstanceType(instance_type, shared);
   i::InitSelfIndirectPointerField(reinterpret_cast<Address>(field_ptr), isolate,
@@ -1257,7 +1271,7 @@ inline auto HeapObject::ReadTrustedPointerField(
 }
 
 template <IndirectPointerTagRange tag_range>
-Tagged<Object> HeapObject::ReadMaybeEmptyTrustedPointerField(
+auto HeapObject::ReadMaybeEmptyTrustedPointerField(
     size_t offset, IsolateForSandbox isolate,
     AcquireLoadTag acquire_load) const {
   return TrustedPointerField::ReadMaybeEmptyTrustedPointerField<tag_range>(
@@ -1307,22 +1321,11 @@ void HeapObject::ClearCodePointerField(size_t offset) {
   ClearTrustedPointerField(offset);
 }
 
-Address HeapObject::ReadCodeEntrypointViaCodePointerField(
-    size_t offset, CodeEntrypointTag tag) const {
-  return i::ReadCodeEntrypointViaCodePointerField(field_address(offset), tag);
-}
-
-void HeapObject::WriteCodeEntrypointViaCodePointerField(size_t offset,
-                                                        Address value,
-                                                        CodeEntrypointTag tag) {
-  i::WriteCodeEntrypointViaCodePointerField(field_address(offset), value, tag);
-}
-
 // static
 template <typename ObjectType>
 JSDispatchHandle HeapObject::AllocateAndInstallJSDispatchHandle(
-    ObjectType host, size_t offset, Isolate* isolate, uint16_t parameter_count,
-    DirectHandle<Code> code, WriteBarrierMode mode) {
+    DirectHandle<ObjectType> host, size_t offset, Isolate* isolate,
+    uint16_t parameter_count, DirectHandle<Code> code, WriteBarrierMode mode) {
   JSDispatchTable::Space* space =
       isolate->GetJSDispatchTableSpaceFor(host->field_address(offset));
   JSDispatchHandle handle =
@@ -1333,6 +1336,24 @@ JSDispatchHandle HeapObject::AllocateAndInstallJSDispatchHandle(
   // may access an uninitialized table entry and crash.
   auto location =
       reinterpret_cast<JSDispatchHandle*>(host->field_address(offset));
+  base::AsAtomic32::Release_Store(location, handle);
+  CONDITIONAL_JS_DISPATCH_HANDLE_WRITE_BARRIER(*host, handle, mode);
+
+  return handle;
+}
+
+// static
+template <typename ObjectType>
+JSDispatchHandle HeapObject::AllocateAndInstallJSDispatchHandle(
+    DirectHandle<ObjectType> host, JSDispatchHandle* location, Isolate* isolate,
+    uint16_t parameter_count, DirectHandle<Code> code, WriteBarrierMode mode) {
+  JSDispatchTable::Space* space = isolate->GetJSDispatchTableSpaceFor(location);
+  JSDispatchHandle handle =
+      isolate->factory()->NewJSDispatchHandle(parameter_count, code, space);
+
+  // Use a Release_Store to ensure that the store of the pointer into the table
+  // is not reordered after the store of the handle. Otherwise, other threads
+  // may access an uninitialized table entry and crash.
   base::AsAtomic32::Release_Store(location, handle);
   CONDITIONAL_JS_DISPATCH_HANDLE_WRITE_BARRIER(*host, handle, mode);
 
@@ -2154,12 +2175,12 @@ Relocatable::~Relocatable() {
 
 // Predictably converts HeapObject or Address to uint32 by calculating
 // offset of the address in respective MemoryChunk.
-static inline uint32_t ObjectAddressForHashing(Address object) {
+inline uint32_t ObjectAddressForHashing(Address object) {
   return MemoryChunk::AddressToOffset(object);
 }
 
-static inline DirectHandle<Object> MakeEntryPair(Isolate* isolate, size_t index,
-                                                 DirectHandle<Object> value) {
+inline DirectHandle<Object> MakeEntryPair(Isolate* isolate, size_t index,
+                                          DirectHandle<Object> value) {
   DirectHandle<Object> key = isolate->factory()->SizeToString(index);
   DirectHandle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
   {
@@ -2170,9 +2191,9 @@ static inline DirectHandle<Object> MakeEntryPair(Isolate* isolate, size_t index,
                                                     PACKED_ELEMENTS, 2);
 }
 
-static inline DirectHandle<Object> MakeEntryPair(Isolate* isolate,
-                                                 DirectHandle<Object> key,
-                                                 DirectHandle<Object> value) {
+inline DirectHandle<Object> MakeEntryPair(Isolate* isolate,
+                                          DirectHandle<Object> key,
+                                          DirectHandle<Object> value) {
   DirectHandle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
   {
     entry_storage->set(0, *key, SKIP_WRITE_BARRIER);

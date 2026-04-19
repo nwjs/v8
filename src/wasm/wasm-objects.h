@@ -21,6 +21,7 @@
 #include "src/objects/foreign.h"
 #include "src/objects/js-function.h"
 #include "src/objects/js-objects.h"
+#include "src/objects/managed.h"
 #include "src/objects/objects-body-descriptors.h"
 #include "src/objects/objects.h"
 #include "src/objects/struct.h"
@@ -63,8 +64,6 @@ class WasmTrustedInstanceData;
 class WasmJSFunction;
 class WasmModuleObject;
 
-enum class SharedFlag : uint8_t;
-
 template <typename CppType>
 class Managed;
 template <typename CppType>
@@ -75,29 +74,6 @@ class TrustedManaged;
 #define DECL_OPTIONAL_ACCESSORS(name, type) \
   DECL_GETTER(has_##name, bool)             \
   DECL_ACCESSORS(name, type)
-
-class V8_EXPORT_PRIVATE FunctionTargetAndImplicitArg {
- public:
-  FunctionTargetAndImplicitArg(
-      Isolate* isolate,
-      DirectHandle<WasmTrustedInstanceData> target_instance_data,
-      int target_func_index);
-  // The "implicit_arg" will be a WasmTrustedInstanceData or a WasmImportData.
-  DirectHandle<TrustedObject> implicit_arg() { return implicit_arg_; }
-  WasmCodePointer call_target() { return call_target_; }
-
-#if V8_ENABLE_DRUMBRAKE
-  int target_func_index() { return target_func_index_; }
-#endif  // V8_ENABLE_DRUMBRAKE
-
- private:
-  DirectHandle<TrustedObject> implicit_arg_;
-  WasmCodePointer call_target_;
-
-#if V8_ENABLE_DRUMBRAKE
-  int target_func_index_;
-#endif  // V8_ENABLE_DRUMBRAKE
-};
 
 namespace wasm {
 enum class OnResume : int { kContinue, kThrow };
@@ -169,7 +145,7 @@ enum InternalizeString : bool { kInternalize = true, kNoInternalize = false };
 class WasmModuleObject
     : public TorqueGeneratedWasmModuleObject<WasmModuleObject, JSObject> {
  public:
-  inline wasm::NativeModule* native_module() const;
+  inline Managed<wasm::NativeModule>::Ptr native_module() const;
   inline const std::shared_ptr<wasm::NativeModule>& shared_native_module()
       const;
 
@@ -203,7 +179,7 @@ class WasmModuleObject
   // property lookup anyway.)
   static DirectHandle<String> ExtractUtf8StringFromModuleBytes(
       Isolate*, base::Vector<const uint8_t> wire_bytes, wasm::WireBytesRef,
-      InternalizeString);
+      InternalizeString, SharedFlag shared = SharedFlag::kNo);
 
   TQ_OBJECT_CONSTRUCTORS(WasmModuleObject)
 };
@@ -299,15 +275,6 @@ class WasmTableObject
       DirectHandle<WasmTrustedInstanceData> trusted_instance_data,
       int func_index);
 
-  // This function reads the content of a function table entry and returns it
-  // through the output parameters.
-  static void GetFunctionTableEntry(
-      Isolate* isolate, DirectHandle<WasmTableObject> table, int entry_index,
-      bool* is_valid, bool* is_null,
-      MaybeDirectHandle<WasmTrustedInstanceData>* instance_data,
-      int* function_index,
-      MaybeDirectHandle<WasmJSFunction>* maybe_js_function);
-
  private:
   // {entry} is either {Null} or a {WasmInternalFunction}.
   static void SetFunctionTableEntry(Isolate* isolate,
@@ -361,7 +328,7 @@ class WasmMemoryObject
       Isolate* isolate, DirectHandle<WasmMemoryObject> memory,
       DirectHandle<WasmTrustedInstanceData> trusted_instance_data,
       DirectHandle<WasmTrustedInstanceData> shared_trusted_instance_data,
-      int memory_index_in_instance);
+      uint32_t memory_index_in_instance);
   inline bool has_maximum_pages();
 
   inline bool is_memory64() const;
@@ -453,8 +420,6 @@ class WasmGlobalObject
       MaybeDirectHandle<BufferType> maybe_buffer, wasm::ValueType type,
       int32_t offset, bool is_mutable);
 
-  inline int unsafe_type_size() const;
-
   inline int32_t GetI32() const;
   inline int64_t GetI64() const;
   inline float GetF32() const;
@@ -521,6 +486,7 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   DECL_PROTECTED_POINTER_ACCESSORS(shared_part, WasmTrustedInstanceData)
   DECL_PROTECTED_POINTER_ACCESSORS(dispatch_table0, WasmDispatchTable)
   DECL_PROTECTED_POINTER_ACCESSORS(dispatch_tables, ProtectedFixedArray)
+  inline Tagged<Union<Smi, WasmDispatchTable>> dispatch_table(uint32_t i) const;
   DECL_OPTIONAL_ACCESSORS(tags_table, Tagged<FixedArray>)
   DECL_ACCESSORS(func_refs, Tagged<FixedArray>)
   DECL_ACCESSORS(managed_object_maps, Tagged<FixedArray>)
@@ -545,8 +511,8 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   inline void clear_padding();
 
   inline Tagged<WasmMemoryObject> memory_object(int memory_index) const;
-  inline uint8_t* memory_base(int memory_index) const;
-  inline size_t memory_size(int memory_index) const;
+  inline uint8_t* memory_base(uint32_t memory_index) const;
+  inline size_t memory_size(uint32_t memory_index) const;
 
   inline wasm::NativeModule* native_module() const;
 
@@ -676,7 +642,7 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   static_assert(kProtectedFieldOffsets.size() == kProtectedFieldNames.size(),
                 "every protected field offset needs a name");
 
-  void SetRawMemory(int memory_index, uint8_t* mem_start, size_t mem_size);
+  void SetRawMemory(uint32_t memory_index, uint8_t* mem_start, size_t mem_size);
 
 #if V8_ENABLE_DRUMBRAKE
   // Get the interpreter object associated with the given wasm object.
@@ -689,12 +655,9 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
 
   static DirectHandle<WasmTrustedInstanceData> New(
       Isolate*, DirectHandle<WasmModuleObject>,
-      std::shared_ptr<wasm::NativeModule>, bool shared);
+      std::shared_ptr<wasm::NativeModule>, SharedFlag shared);
 
   WasmCodePointer GetCallTarget(uint32_t func_index);
-
-  inline Tagged<WasmDispatchTable> dispatch_table(uint32_t table_index);
-  inline bool has_dispatch_table(uint32_t table_index);
 
   // Copies table entries. Returns {false} if the ranges are out-of-bounds.
   static bool CopyTableEntries(
@@ -920,9 +883,6 @@ class WasmDispatchTable : public ExposedTrustedObject {
 #endif  // V8_ENABLE_DRUMBRAKE
 
   void Clear(int index, NewOrExistingEntry new_or_existing);
-
-  std::optional<std::shared_ptr<wasm::WasmWrapperHandle>> MaybeGetWrapperHandle(
-      int index);
 
   static void V8_EXPORT_PRIVATE
   AddUse(Isolate* isolate, DirectHandle<WasmDispatchTable> dispatch_table,
@@ -1423,7 +1383,7 @@ class WasmScript : public AllStatic {
 
   // Get a list of all possible breakpoints within a given range of this module.
   V8_EXPORT_PRIVATE static bool GetPossibleBreakpoints(
-      wasm::NativeModule* native_module, const debug::Location& start,
+      const wasm::NativeModule* native_module, const debug::Location& start,
       const debug::Location& end, std::vector<debug::BreakLocation>* locations);
 
   // Return an empty handle if no breakpoint is hit at that location, or a
@@ -1491,10 +1451,6 @@ class WasmObject : public TorqueGeneratedWasmObject<WasmObject, JSReceiver> {
                                                  wasm::CanonicalValueType type,
                                                  uint32_t offset);
 
- private:
-  template <typename ElementType>
-  static ElementType FromNumber(Tagged<Object> value);
-
   TQ_OBJECT_CONSTRUCTORS(WasmObject)
 };
 
@@ -1558,7 +1514,6 @@ int WasmStruct::Size(const wasm::CanonicalStructType* type) {
 
 class WasmArray : public TorqueGeneratedWasmArray<WasmArray, WasmObject> {
  public:
-  static inline wasm::CanonicalTypeIndex type_index(Tagged<Map> map);
   static inline const wasm::CanonicalValueType GcSafeElementType(
       Tagged<Map> map);
 
@@ -1704,7 +1659,7 @@ DirectHandle<Map> CreateArrayMap(Isolate* isolate,
 DirectHandle<Map> CreateFuncRefMap(Isolate* isolate,
                                    wasm::CanonicalTypeIndex type,
                                    DirectHandle<Map> opt_rtt_parent,
-                                   int num_supertypes, bool shared);
+                                   int num_supertypes, SharedFlag shared);
 
 DirectHandle<Map> CreateContRefMap(Isolate* isolate,
                                    wasm::CanonicalTypeIndex type);

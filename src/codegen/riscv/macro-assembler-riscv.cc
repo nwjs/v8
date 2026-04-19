@@ -304,15 +304,24 @@ void MacroAssembler::LoadTrustedPointerField(Register destination,
 void MacroAssembler::LoadTrustedUnknownPointerField(
     Register destination, MemOperand field_operand, Register scratch1,
     Register scratch2,
-    const std::initializer_list<std::tuple<InstanceType, Label*>>& cases) {
+    const std::initializer_list<std::tuple<InstanceType, Label*>>& cases,
+    Label* is_unavailable) {
   ASM_CODE_COMMENT(this);
   DCHECK(!AreAliased(destination, scratch1, scratch2));
-  Label done;
+  Label zero_and_fallthrough, done;
+
+  // The label is_unavailable will be used if the field is null (with enabled
+  // sandbox) or a Smi (with disabled sandbox). In these two cases, if the
+  // label is a nullptr, then we zero the destination register and fall through.
+  if (!is_unavailable) is_unavailable = &zero_and_fallthrough;
 
 #ifdef V8_ENABLE_SANDBOX
   {
     Register handle = scratch1;
     Lw(handle, field_operand);
+
+    static_assert(kNullIndirectPointerHandle == 0);
+    Branch(is_unavailable, eq, handle, Operand(zero_reg));
 
     bool handles_code_case = false;
     constexpr int kCodePointerHandleMarkerBit = 0;
@@ -334,7 +343,7 @@ void MacroAssembler::LoadTrustedUnknownPointerField(
       }
     }
     if (!handles_code_case) {
-      Branch(&done, ne, scratch2, Operand(zero_reg));
+      Branch(&zero_and_fallthrough, ne, scratch2, Operand(zero_reg));
     }
 
     ResolveTrustedPointerHandle(destination, handle,
@@ -342,6 +351,7 @@ void MacroAssembler::LoadTrustedUnknownPointerField(
   }
 #else
   LoadTaggedField(destination, field_operand);
+  JumpIfSmi(destination, is_unavailable);
 #endif  // V8_ENABLE_SANDBOX
 
 #if V8_STATIC_ROOTS_BOOL
@@ -364,8 +374,11 @@ void MacroAssembler::LoadTrustedUnknownPointerField(
   }
 #endif  // V8_STATIC_ROOTS_BOOL
 
-  bind(&done);
+  Branch(&done);
+
+  bind(&zero_and_fallthrough);
   mv(destination, zero_reg);
+  bind(&done);
 }
 
 void MacroAssembler::StoreTrustedPointerField(Register value,
@@ -443,26 +456,6 @@ void MacroAssembler::ResolveCodePointerHandle(Register destination,
   // The LSB is used as marking bit by the code pointer table, so here we have
   // to set it using a bitwise OR as it may or may not be set.
   Or(destination, destination, Operand(kHeapObjectTag));
-}
-
-void MacroAssembler::LoadCodeEntrypointViaCodePointer(Register destination,
-                                                      MemOperand field_operand,
-                                                      CodeEntrypointTag tag) {
-  DCHECK_NE(tag, kInvalidEntrypointTag);
-  ASM_CODE_COMMENT(this);
-  UseScratchRegisterScope temps(this);
-  Register scratch = temps.Acquire();
-  LoadCodePointerTableBase(scratch);
-  Lwu(destination, field_operand);
-  SrlWord(destination, destination, kCodePointerHandleShift);
-  SllWord(destination, destination, kCodePointerTableEntrySizeLog2);
-  AddWord(scratch, scratch, destination);
-  LoadWord(destination,
-           MemOperand(scratch, kCodePointerTableEntryEntrypointOffset));
-  if (tag != 0) {
-    li(scratch, Operand(tag));
-    Xor(destination, destination, scratch);
-  }
 }
 
 void MacroAssembler::LoadCodePointerTableBase(Register destination) {
@@ -2912,6 +2905,95 @@ void MacroAssembler::MultiPopFPU(DoubleRegList regs) {
     }
   }
   AddWord(sp, sp, stack_offset);
+}
+
+void MacroAssembler::SaveVectorRegisters(const Simd128RegList& reg_list) {
+  // Check if the machine has simd128 support. Otherwise, the
+  // vector registers might not exist and accessing them would SIGILL.
+  Label not_simd, done;
+  ASM_CODE_COMMENT(this);
+  bool generating_builtins =
+      isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
+  if (generating_builtins) {
+    li(kScratchReg, ExternalReference::supports_wasm_simd_128_address());
+    Lb(kScratchReg, MemOperand(kScratchReg, 0));
+    // If != 0, then simd is available.
+    Branch(&not_simd, eq, kScratchReg, Operand(zero_reg),
+           Label::Distance::kNear);
+
+    // Since the builtins are compiled into a snapshot, we can't query the
+    // actual hardware vector length. This means that we are not allowed to use
+    // 'VU.SetSimd128'. Instead we manually set the vector length to 16 entries
+    // of 8 bits each.
+    VU.set(16, E8, m1);
+    for (VRegister vector_reg : reg_list) {
+      SubWord(sp, sp, Operand(kSimd128Size));
+      vs(vector_reg, sp, 0, E8);
+    }
+    Branch(&done);
+    bind(&not_simd);
+    SubWord(sp, sp, Operand(reg_list.Count() * kSimd128Size));
+    bind(&done);
+  } else {
+    // If we're not generating builtins, we can assume that the machine has
+    // simd128 support, since otherwise we wouldn't be able to run the code at
+    // all.
+    if (CpuFeatures::SupportsWasmSimd128()) {
+      VU.SetSimd128(E8);
+      for (VRegister vector_reg : reg_list) {
+        SubWord(sp, sp, Operand(kSimd128Size));
+        vs(vector_reg, sp, 0, E8);
+      }
+    } else {
+      SubWord(sp, sp,
+              Operand(-static_cast<int32_t>(reg_list.Count()) * kSimd128Size));
+    }
+  }
+}
+
+void MacroAssembler::RestoreVectorRegisters(const Simd128RegList& reg_list) {
+  // Check if the machine has simd128 support. Otherwise, the
+  // vector registers might not exist and accessing them would SIGILL.
+  Label not_simd, done;
+  ASM_CODE_COMMENT(this);
+  bool generating_builtins =
+      isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
+  if (generating_builtins) {
+    li(kScratchReg, ExternalReference::supports_wasm_simd_128_address());
+    Lb(kScratchReg, MemOperand(kScratchReg, 0));
+    // If != 0, then simd is available.
+    Branch(&not_simd, eq, kScratchReg, Operand(zero_reg),
+           Label::Distance::kNear);
+
+    // Since the builtins are compiled into a snapshot, we can't query the
+    // actual hardware vector length. This means that we are not allowed to use
+    // 'VU.SetSimd128'. Instead we manually set the vector length to 16 entries
+    // of 8 bits each.
+    VU.set(16, E8, m1);
+    for (VRegister vector_reg : base::Reversed(reg_list)) {
+      vl(vector_reg, sp, 0, E8);
+      AddWord(sp, sp, Operand(kSimd128Size));
+    }
+
+    Branch(&done);
+    bind(&not_simd);
+    AddWord(sp, sp, Operand(reg_list.Count() * kSimd128Size));
+    bind(&done);
+  } else {
+    // If we're not generating builtins, we can assume that the machine has
+    // simd128 support, since otherwise we wouldn't be able to run the code at
+    // all.
+    if (CpuFeatures::SupportsWasmSimd128()) {
+      VU.SetSimd128(E8);
+      for (VRegister vector_reg : base::Reversed(reg_list)) {
+        vl(vector_reg, sp, 0, E8);
+        AddWord(sp, sp, Operand(kSimd128Size));
+      }
+    } else {
+      AddWord(sp, sp,
+              Operand(static_cast<int32_t>(reg_list.Count()) * kSimd128Size));
+    }
+  }
 }
 
 #if V8_TARGET_ARCH_RISCV32
@@ -5436,7 +5518,6 @@ void MacroAssembler::StoreReturnAddressAndCall(Register target) {
   bind(&start);
   LoadAddress(ra, &end);
   StoreWord(ra, MemOperand(sp));      // Reserved in EnterExitFrame.
-  AddWord(sp, sp, -kCArgsSlotsSize);  // Preserves stack alignment.
 
   // Call the C routine.
   Mv(t6, target);  // Function pointer in 't6' to conform to ABI for PIC.
@@ -6527,6 +6608,7 @@ void MacroAssembler::EmitDecrementCounter(StatsCounter* counter, int value,
 void MacroAssembler::Trap() { stop(); }
 void MacroAssembler::DebugBreak() { stop(); }
 
+#ifdef V8_ENABLE_DEBUG_CODE
 void MacroAssembler::Assert(Condition cc, AbortReason reason, Register rs,
                             Operand rt) {
   if (v8_flags.debug_code) Check(cc, reason, rs, rt);
@@ -6564,8 +6646,6 @@ void MacroAssembler::AssertJSAny(Register object, Register map_tmp,
   bind(&ok);
 }
 
-#ifdef V8_ENABLE_DEBUG_CODE
-
 void MacroAssembler::AssertZeroExtended(Register int32_register) {
   if (!v8_flags.slow_debug_code) return;
   ASM_CODE_COMMENT(this);
@@ -6580,6 +6660,20 @@ void MacroAssembler::AssertSignExtended(Register int32_register) {
          int32_register, Operand(kMaxInt));
   Assert(Condition::ge, AbortReason::k32BitValueInRegisterIsNotSignExtended,
          int32_register, Operand(kMinInt));
+}
+
+void MacroAssembler::AssertMap(Register object) {
+  if (!v8_flags.debug_code) return;
+  ASM_CODE_COMMENT(this);
+  AssertNotSmi(object, AbortReason::kOperandIsNotAMap);
+
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.Acquire();
+  Label ConditionMet, Done;
+  MacroAssembler::JumpIfObjectType(&Done, Condition::kEqual, object, MAP_TYPE,
+                                   temp);
+  Abort(AbortReason::kOperandIsNotAMap);
+  bind(&Done);
 }
 
 void MacroAssembler::AssertRange(Condition cond, AbortReason reason,
@@ -6717,7 +6811,7 @@ void MacroAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
     // The entry references a CodeWrapper object. Unwrap it now.
     LoadCodePointerField(
         scratch_and_result,
-        FieldMemOperand(scratch_and_result, CodeWrapper::kCodeOffset));
+        FieldMemOperand(scratch_and_result, offsetof(CodeWrapper, code_)));
 
     // marked for deoptimization?
     UseScratchRegisterScope temps(this);
@@ -7286,7 +7380,6 @@ int MacroAssembler::CalculateStackPassedDWords(int num_gp_arguments,
   if (num_fp_arguments > kRegisterPassedArguments) {
     stack_passed_dwords += num_fp_arguments - kRegisterPassedArguments;
   }
-  stack_passed_dwords += kCArgSlotCount;
   return stack_passed_dwords;
 }
 
@@ -7524,13 +7617,15 @@ void MacroAssembler::LoadCodeInstructionStart(Register destination,
                                               Register code_object,
                                               CodeEntrypointTag tag) {
   ASM_CODE_COMMENT(this);
-#ifdef V8_ENABLE_SANDBOX
-  LoadCodeEntrypointViaCodePointer(
-      destination,
-      FieldMemOperand(code_object, Code::kSelfIndirectPointerOffset), tag);
-#else
   LoadWord(destination,
            FieldMemOperand(code_object, Code::kInstructionStartOffset));
+#ifdef V8_ENABLE_SANDBOX
+  if (tag != 0) {
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
+    li(scratch, Operand(tag));
+    Xor(destination, destination, scratch);
+  }
 #endif
 }
 
@@ -8182,7 +8277,7 @@ void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
   // Load the feedback vector from the closure.
   LoadTaggedField(dst,
                   FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  LoadTaggedField(dst, FieldMemOperand(dst, FeedbackCell::kValueOffset));
+  LoadTaggedField(dst, FieldMemOperand(dst, offsetof(FeedbackCell, value_)));
 
   // Check if feedback vector is valid.
   LoadTaggedField(scratch, FieldMemOperand(dst, HeapObject::kMapOffset));

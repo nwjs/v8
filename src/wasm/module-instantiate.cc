@@ -4,9 +4,10 @@
 
 #include "src/wasm/module-instantiate.h"
 
+#include <optional>
+
 #include "src/api/api-inl.h"
 #include "src/asmjs/asm-js.h"
-#include "src/base/atomicops.h"
 #include "src/codegen/compiler.h"
 #include "src/compiler/fast-api-calls.h"
 #include "src/compiler/wasm-compiler.h"
@@ -28,7 +29,6 @@
 #include "src/wasm/wasm-code-pointer-table-inl.h"
 #include "src/wasm/wasm-constants.h"
 #include "src/wasm/wasm-engine.h"
-#include "src/wasm/wasm-external-refs.h"
 #include "src/wasm/wasm-import-wrapper-cache.h"
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-objects-inl.h"
@@ -154,26 +154,24 @@ bool IsFastCallSupportedSignature(const v8::CFunctionInfo* sig) {
 }
 #endif
 
-bool IsSupportedWasmFastApiFunction(Isolate* isolate,
-                                    const wasm::CanonicalSig* expected_sig,
-                                    Tagged<SharedFunctionInfo> shared,
-                                    ReceiverKind receiver_kind,
-                                    int* out_index) {
+std::optional<CFunctionWithSignature> FindSupportedWasmFastApiFunction(
+    Isolate* isolate, const wasm::CanonicalSig* expected_sig,
+    Tagged<SharedFunctionInfo> shared,
+    Tagged<FunctionTemplateInfo> api_func_data, ReceiverKind receiver_kind,
+    bool* out_is_first = nullptr) {
 #ifdef V8_ENABLE_TURBOFAN
-  if (!shared->IsApiFunction()) {
-    return false;
-  }
-  if (shared->api_func_data()->GetCFunctionsCount() == 0) {
-    return false;
+  const int c_funcs_count = api_func_data->GetCFunctionsCount();
+  if (c_funcs_count == 0) {
+    return std::nullopt;
   }
   if (receiver_kind == ReceiverKind::kAnyReceiver &&
-      !shared->api_func_data()->accept_any_receiver()) {
-    return false;
+      !api_func_data->accept_any_receiver()) {
+    return std::nullopt;
   }
   if (receiver_kind == ReceiverKind::kAnyReceiver &&
-      !IsUndefined(shared->api_func_data()->signature())) {
+      !IsUndefined(api_func_data->signature())) {
     // TODO(wasm): CFunctionInfo* signature check.
-    return false;
+    return std::nullopt;
   }
 
   const auto log_imported_function_mismatch = [&shared, isolate](
@@ -198,13 +196,13 @@ bool IsSupportedWasmFastApiFunction(Isolate* isolate,
     // that case we use the "slow" path making a normal Wasm->JS call and
     // calling the "slow" callback specified in FunctionTemplate::New().
     log_imported_function_mismatch(0, "too many return values");
-    return false;
+    return std::nullopt;
   }
 
-  for (int c_func_id = 0, end = shared->api_func_data()->GetCFunctionsCount();
-       c_func_id < end; ++c_func_id) {
-    const CFunctionInfo* info =
-        shared->api_func_data()->GetCSignature(isolate, c_func_id);
+  for (int c_func_id = 0; c_func_id < c_funcs_count; ++c_func_id) {
+    const CFunctionWithSignature c_func =
+        api_func_data->GetCFunction(isolate, c_func_id);
+    const CFunctionInfo* info = c_func.signature;
     if (!IsFastCallSupportedSignature(info)) {
       log_imported_function_mismatch(c_func_id,
                                      "signature not supported by the fast API");
@@ -277,11 +275,13 @@ bool IsSupportedWasmFastApiFunction(Isolate* isolate,
     if (param_mismatch) {
       continue;
     }
-    *out_index = c_func_id;
-    return true;
+    if (out_is_first) {
+      *out_is_first = c_func_id == 0;
+    }
+    return c_func;
   }
 #endif
-  return false;
+  return std::nullopt;
 }
 
 bool ResolveBoundJSFastApiFunction(const wasm::CanonicalSig* expected_sig,
@@ -310,15 +310,18 @@ bool ResolveBoundJSFastApiFunction(const wasm::CanonicalSig* expected_sig,
     return false;
   }
 
-  DirectHandle<SharedFunctionInfo> shared(target->shared(), isolate);
-  int api_function_index = -1;
+  Tagged<SharedFunctionInfo> shared = target->shared();
+  if (!shared->IsApiFunction()) {
+    return false;
+  }
+  bool c_func_is_first = false;
   // The fast API call wrapper currently does not support function overloading.
   // Therefore, if the matching function is not function 0, the fast API cannot
   // be used.
-  return IsSupportedWasmFastApiFunction(isolate, expected_sig, *shared,
-                                        ReceiverKind::kAnyReceiver,
-                                        &api_function_index) &&
-         api_function_index == 0;
+  return FindSupportedWasmFastApiFunction(
+             isolate, expected_sig, shared, shared->api_func_data(),
+             ReceiverKind::kAnyReceiver, &c_func_is_first) &&
+         c_func_is_first;
 }
 
 bool IsStringRef(wasm::CanonicalValueType type) {
@@ -450,51 +453,53 @@ WellKnownImport CheckForWellKnownImport(
   if (!IsJSFunction(bound_this)) return kGeneric;
   sfi = Cast<JSFunction>(bound_this)->shared();
   Isolate* isolate = Isolate::Current();
-  int out_api_function_index = -1;
-  if (v8_flags.wasm_fast_api &&
-      IsSupportedWasmFastApiFunction(isolate, sig, sfi,
-                                     ReceiverKind::kFirstParamIsReceiver,
-                                     &out_api_function_index)) {
-    Tagged<FunctionTemplateInfo> func_data = sfi->api_func_data();
-    NativeModule* native_module = trusted_instance_data->native_module();
-    if (!native_module->TrySetFastApiCallTarget(
-            func_index,
-            func_data->GetCFunction(isolate, out_api_function_index))) {
-      return kGeneric;
-    }
+  if (v8_flags.wasm_fast_api && sfi->IsApiFunction()) {
+    Tagged<FunctionTemplateInfo> api_func_data = sfi->api_func_data();
+    std::optional<CFunctionWithSignature> c_function =
+        FindSupportedWasmFastApiFunction(isolate, sig, sfi, api_func_data,
+                                         ReceiverKind::kFirstParamIsReceiver);
+    if (c_function) {
+      NativeModule* native_module = trusted_instance_data->native_module();
+      if (!native_module->TrySetFastApiCallTarget(func_index,
+                                                  c_function->address)) {
+        return kGeneric;
+      }
 #ifdef V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
-    Address c_functions[] = {func_data->GetCFunction(isolate, 0)};
-    const v8::CFunctionInfo* const c_signatures[] = {
-        func_data->GetCSignature(isolate, 0)};
-    isolate->simulator_data()->RegisterFunctionsAndSignatures(c_functions,
-                                                              c_signatures, 1);
+      const CFunctionWithSignature c_function_0 =
+          api_func_data->GetCFunction(isolate, 0);
+      Address c_functions[] = {c_function_0.address};
+      const v8::CFunctionInfo* const c_signatures[] = {c_function_0.signature};
+      isolate->simulator_data()->RegisterFunctionsAndSignatures(
+          c_functions, c_signatures, 1);
 #endif  //  V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
-    // Store the signature of the C++ function in the native_module. We check
-    // first if the signature already exists in the native_module such that we
-    // do not create a copy of the signature unnecessarily. Since
-    // `has_fast_api_signature` and `set_fast_api_signature` don't happen
-    // atomically, it is still possible that multiple copies of the signature
-    // get created. However, the `TrySetFastApiCallTarget` above guarantees that
-    // if there are concurrent calls to `set_cast_api_signature`, then all calls
-    // would store the same signature to the native module.
-    if (!native_module->has_fast_api_signature(func_index)) {
-      base::MutexGuard lock{&native_module->module()->signature_storage_mutex};
-      native_module->set_fast_api_signature(
-          func_index,
-          GetFunctionSigForFastApiImport(
-              &native_module->module()->signature_storage,
-              func_data->GetCSignature(isolate, out_api_function_index)));
-    }
+      // Store the signature of the C++ function in the native_module. We check
+      // first if the signature already exists in the native_module such that we
+      // do not create a copy of the signature unnecessarily. Since
+      // `has_fast_api_signature` and `set_fast_api_signature` don't happen
+      // atomically, it is still possible that multiple copies of the signature
+      // get created. However, the `TrySetFastApiCallTarget` above guarantees
+      // that if there are concurrent calls to `set_cast_api_signature`, then
+      // all calls would store the same signature to the native module.
+      if (!native_module->has_fast_api_signature(func_index)) {
+        base::MutexGuard lock{
+            &native_module->module()->signature_storage_mutex};
+        native_module->set_fast_api_signature(
+            func_index, GetFunctionSigForFastApiImport(
+                            &native_module->module()->signature_storage,
+                            c_function->signature));
+      }
 
-    DirectHandle<HeapObject> js_signature(sfi->api_func_data()->signature(),
-                                          isolate);
-    DirectHandle<Object> callback_data(
-        sfi->api_func_data()->callback_data(kAcquireLoad), isolate);
-    DirectHandle<WasmFastApiCallData> fast_api_call_data =
-        isolate->factory()->NewWasmFastApiCallData(js_signature, callback_data);
-    trusted_instance_data->well_known_imports()->set(func_index,
-                                                     *fast_api_call_data);
-    return WellKnownImport::kFastAPICall;
+      DirectHandle<HeapObject> js_signature(api_func_data->signature(),
+                                            isolate);
+      DirectHandle<Object> callback_data(
+          api_func_data->callback_data(kAcquireLoad), isolate);
+      DirectHandle<WasmFastApiCallData> fast_api_call_data =
+          isolate->factory()->NewWasmFastApiCallData(js_signature,
+                                                     callback_data);
+      trusted_instance_data->well_known_imports()->set(func_index,
+                                                       *fast_api_call_data);
+      return WellKnownImport::kFastAPICall;
+    }
   }
   if (!sfi->HasBuiltinId()) return kGeneric;
   switch (sfi->builtin_id()) {
@@ -866,8 +871,8 @@ class InstanceBuilder {
   // new {Zone} each time.
   Zone init_expr_zone_;
 
-  DirectHandle<WasmTrustedInstanceData> trusted_data(bool shared) const {
-    return shared ? shared_trusted_data_ : trusted_data_;
+  DirectHandle<WasmTrustedInstanceData> trusted_data(SharedFlag shared) const {
+    return shared == SharedFlag::kYes ? shared_trusted_data_ : trusted_data_;
   }
 
   std::string ImportName(uint32_t index) {
@@ -1118,7 +1123,7 @@ Maybe<bool> InstanceBuilder::Build_Phase1(
   //--------------------------------------------------------------------------
   TRACE("New module instantiation for %p\n", native_module_.get());
   trusted_data_ = WasmTrustedInstanceData::New(
-      isolate_, untrusted_module_object_, native_module_, false);
+      isolate_, untrusted_module_object_, native_module_, SharedFlag::kNo);
   bool shared = module_->has_shared_part;
   if (shared) {
     // For now, allocate the shared part in non-shared space. We do not need it
@@ -1126,7 +1131,7 @@ Maybe<bool> InstanceBuilder::Build_Phase1(
     // TODO(42204563): This will change once we introduce shared globals,
     // tables, or functions.
     shared_trusted_data_ = WasmTrustedInstanceData::New(
-        isolate_, untrusted_module_object_, native_module_, false);
+        isolate_, untrusted_module_object_, native_module_, SharedFlag::kNo);
     trusted_data_->set_shared_part(*shared_trusted_data_);
   }
 
@@ -1303,9 +1308,11 @@ Maybe<bool> InstanceBuilder::Build_Phase1(
               ? DirectHandle<HeapObject>{isolate_->factory()->wasm_null()}
               : DirectHandle<HeapObject>{isolate_->factory()->null_value()},
           table.address_type, &dispatch_table);
-      (table.shared ? shared_tables : tables)->set(i, *table_obj);
+      (table.shared == SharedFlag::kYes ? shared_tables : tables)
+          ->set(i, *table_obj);
       if (!dispatch_table.is_null()) {
-        (table.shared ? shared_dispatch_tables : dispatch_tables)
+        (table.shared == SharedFlag::kYes ? shared_dispatch_tables
+                                          : dispatch_tables)
             ->set(i, *dispatch_table);
         if (i == 0) {
           trusted_data(table.shared)->set_dispatch_table0(*dispatch_table);
@@ -1339,16 +1346,18 @@ Maybe<bool> InstanceBuilder::Build_Phase1(
                    AllocationType::kSharedOld)
              : DirectHandle<FixedArray>();
   for (uint32_t index = 0; index < module_->types.size(); index++) {
-    bool map_is_shared = module_->types[index].is_shared;
-    CreateMapForType(isolate_, module_, ModuleTypeIndex{index},
-                     map_is_shared ? shared_maps : non_shared_maps);
+    SharedFlag map_is_shared = module_->types[index].is_shared;
+    CreateMapForType(
+        isolate_, module_, ModuleTypeIndex{index},
+        map_is_shared == SharedFlag::kYes ? shared_maps : non_shared_maps);
   }
   trusted_data_->set_managed_object_maps(*non_shared_maps);
   if (shared) shared_trusted_data_->set_managed_object_maps(*shared_maps);
 #if DEBUG
   for (uint32_t i = 0; i < module_->types.size(); i++) {
     DirectHandle<FixedArray> maps =
-        module_->types[i].is_shared ? shared_maps : non_shared_maps;
+        module_->types[i].is_shared == SharedFlag::kYes ? shared_maps
+                                                        : non_shared_maps;
     Tagged<Object> o = maps->get(i);
     DCHECK(IsMap(o));
     Tagged<Map> map = Cast<Map>(o);
@@ -1421,7 +1430,8 @@ Maybe<bool> InstanceBuilder::Build_Phase1(
       // uninitialized.
       bool is_declarative = module_->elem_segments[i].status ==
                             WasmElemSegment::kStatusDeclarative;
-      (module_->elem_segments[i].shared ? shared_elements : elements)
+      (module_->elem_segments[i].shared == SharedFlag::kYes ? shared_elements
+                                                            : elements)
           ->set(i, is_declarative
                        ? Cast<Object>(*isolate_->factory()->empty_fixed_array())
                        : *isolate_->factory()->undefined_value());
@@ -1452,7 +1462,8 @@ Maybe<bool> InstanceBuilder::Build_Phase1(
     if (start_function_.is_null()) {
       // TODO(clemensb): Don't generate an exported function for the start
       // function. Use CWasmEntry instead.
-      bool function_is_shared = module_->type(function.sig_index).is_shared;
+      SharedFlag function_is_shared =
+          module_->type(function.sig_index).is_shared;
       DirectHandle<WasmFuncRef> func_ref =
           WasmTrustedInstanceData::GetOrCreateFuncRef(
               isolate_, trusted_data(function_is_shared), start_index,
@@ -1502,9 +1513,8 @@ void InstanceBuilder::Build_Phase1_Infallible() {
     const WasmTable& table = module_->tables[i];
     DirectHandle<WasmTrustedInstanceData> data_part =
         trusted_data(table.shared);
-    Tagged<Object> maybe_dispatch_table = data_part->dispatch_tables()->get(i);
     Tagged<WasmDispatchTable> dispatch_table;
-    if (!TryCast(maybe_dispatch_table, &dispatch_table)) {
+    if (!TryCast(data_part->dispatch_table(i), &dispatch_table)) {
       continue;  // Not a function table.
     }
     DirectHandle<WasmDispatchTable> dispatch_table_handle{dispatch_table,
@@ -1649,39 +1659,53 @@ MaybeDirectHandle<Object> InstanceBuilder::LookupImportAsm(
   // which is indicated by the asm.js spec in section 7 ("Linking") as well.
   PropertyKey key(isolate_, Cast<Name>(import_name));
   LookupIterator it(isolate_, ffi_.ToHandleChecked(), key);
-  switch (it.state()) {
-    case LookupIterator::ACCESS_CHECK:
-    case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
-    case LookupIterator::INTERCEPTOR:
-    case LookupIterator::JSPROXY:
-    case LookupIterator::WASM_OBJECT:
-    case LookupIterator::ACCESSOR:
-    case LookupIterator::TRANSITION:
-      thrower_->LinkError("%s: not a data property",
-                          ImportName(index, import_name).c_str());
-      return {};
-    case LookupIterator::NOT_FOUND:
-      // Accepting missing properties as undefined does not cause any
-      // observable difference from JavaScript semantics, we are lenient.
-      return isolate_->factory()->undefined_value();
-    case LookupIterator::DATA: {
-      DirectHandle<Object> value = it.GetDataValue();
-      // For legacy reasons, we accept functions for imported globals (see
-      // {ProcessImportedGlobal}), but only if we can easily determine that
-      // their Number-conversion is side effect free and returns NaN (which is
-      // the case as long as "valueOf" (or others) are not overwritten).
-      if (IsJSFunction(*value) &&
-          module_->import_table[index].kind == kExternalGlobal &&
-          !HasDefaultToNumberBehaviour(isolate_, Cast<JSFunction>(value))) {
-        thrower_->LinkError("%s: function has special ToNumber behaviour",
+  for (;; it.Next()) {
+    switch (it.state()) {
+      case LookupIterator::ACCESS_CHECK:
+      case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
+      case LookupIterator::INTERCEPTOR:
+      case LookupIterator::JSPROXY:
+      case LookupIterator::WASM_OBJECT:
+      case LookupIterator::ACCESSOR:
+      case LookupIterator::TRANSITION:
+        thrower_->LinkError("%s: not a data property",
                             ImportName(index, import_name).c_str());
         return {};
+      case LookupIterator::NOT_FOUND:
+        // Accepting missing properties as undefined does not cause any
+        // observable difference from JavaScript semantics, we are lenient.
+        return isolate_->factory()->undefined_value();
+      case LookupIterator::DATA: {
+        DirectHandle<Object> value = it.GetDataValue();
+        // For legacy reasons, we accept functions for imported globals (see
+        // {ProcessImportedGlobal}), but only if we can easily determine that
+        // their Number-conversion is side effect free and returns NaN (which
+        // is the case as long as "valueOf" (or others) are not overwritten).
+        if (IsJSFunction(*value) &&
+            module_->import_table[index].kind == kExternalGlobal &&
+            !HasDefaultToNumberBehaviour(isolate_, Cast<JSFunction>(value))) {
+          thrower_->LinkError("%s: function has special ToNumber behaviour",
+                              ImportName(index, import_name).c_str());
+          return {};
+        }
+        return value;
       }
-      return value;
+      case LookupIterator::MODULE_NAMESPACE: {
+        // Deferred module namespaces trigger evaluation on property access,
+        // which is an observable side-effect. Treat as non-data property.
+        DirectHandle<JSModuleNamespace> ns = it.GetHolder<JSModuleNamespace>();
+        if (IsJSDeferredModuleNamespace(*ns)) {
+          thrower_->LinkError("%s: not a data property",
+                              ImportName(index, import_name).c_str());
+          return {};
+        }
+        // For regular module namespaces, continue the iteration to look up
+        // the property in the namespace's exports.
+        continue;
+      }
+      case LookupIterator::STRING_LOOKUP_START_OBJECT:
+        UNREACHABLE();
     }
-    case LookupIterator::MODULE_NAMESPACE:
-    case LookupIterator::STRING_LOOKUP_START_OBJECT:
-      UNREACHABLE();
   }
 }
 
@@ -1750,28 +1774,54 @@ void InstanceBuilder::WriteGlobalValue(const WasmGlobal& global,
 // Returns the name, Builtin ID, and "length" (in the JSFunction sense, i.e.
 // number of parameters) for the function representing the given import.
 std::tuple<const char*, Builtin, int> NameBuiltinLength(WellKnownImport wki) {
-#define CASE(CamelName, name, length) \
-  case WellKnownImport::k##CamelName: \
-    return std::make_tuple(name, Builtin::kWebAssembly##CamelName, length)
+#define CASE(WKICamelName, BuiltinCamelName, name, length)                \
+  case WellKnownImport::k##WKICamelName:                                  \
+    return std::make_tuple(name, Builtin::kWebAssembly##BuiltinCamelName, \
+                           length)
   switch (wki) {
-    CASE(ConfigureAllPrototypes, "configureAll", 4);
-    CASE(StringCast, "cast", 1);
-    CASE(StringCharCodeAt, "charCodeAt", 2);
-    CASE(StringCodePointAt, "codePointAt", 2);
-    CASE(StringCompare, "compare", 2);
-    CASE(StringConcat, "concat", 2);
-    CASE(StringEquals, "equals", 2);
-    CASE(StringFromCharCode, "fromCharCode", 1);
-    CASE(StringFromCodePoint, "fromCodePoint", 1);
-    CASE(StringFromUtf8Array, "decodeStringFromUTF8Array", 3);
-    CASE(StringFromWtf16Array, "fromCharCodeArray", 3);
-    CASE(StringIntoUtf8Array, "encodeStringIntoUTF8Array", 3);
-    CASE(StringLength, "length", 1);
-    CASE(StringMeasureUtf8, "measureStringAsUTF8", 1);
-    CASE(StringSubstring, "substring", 3);
-    CASE(StringTest, "test", 1);
-    CASE(StringToUtf8Array, "encodeStringToUTF8Array", 1);
-    CASE(StringToWtf16Array, "intoCharCodeArray", 3);
+    CASE(ConfigureAllPrototypes, ConfigureAllPrototypes, "configureAll", 4);
+    CASE(StringCast, StringCast, "cast", 1);
+    CASE(StringCastShared, StringCast, "cast", 1);
+    CASE(StringCharCodeAt, StringCharCodeAt, "charCodeAt", 2);
+    CASE(StringCharCodeAtShared, StringCharCodeAt, "charCodeAt", 2);
+    CASE(StringCodePointAt, StringCodePointAt, "codePointAt", 2);
+    CASE(StringCodePointAtShared, StringCodePointAt, "codePointAt", 2);
+    CASE(StringCompare, StringCompare, "compare", 2);
+    CASE(StringCompareShared, StringCompare, "compare", 2);
+    CASE(StringConcat, StringConcat, "concat", 2);
+    CASE(StringConcatShared, StringConcatShared, "concat", 2);
+    CASE(StringEquals, StringEquals, "equals", 2);
+    CASE(StringEqualsShared, StringEquals, "equals", 2);
+    CASE(StringFromCharCode, StringFromCharCode, "fromCharCode", 1);
+    CASE(StringFromCharCodeShared, StringFromCharCodeShared, "fromCharCode", 1);
+    CASE(StringFromCodePoint, StringFromCodePoint, "fromCodePoint", 1);
+    CASE(StringFromCodePointShared, StringFromCodePointShared, "fromCodePoint",
+         1);
+    CASE(StringFromUtf8Array, StringFromUtf8Array, "decodeStringFromUTF8Array",
+         3);
+    CASE(StringFromUtf8ArrayShared, StringFromUtf8ArrayShared,
+         "decodeStringFromUTF8Array", 3);
+    CASE(StringFromWtf16Array, StringFromWtf16Array, "fromCharCodeArray", 3);
+    CASE(StringFromWtf16ArrayShared, StringFromWtf16ArrayShared,
+         "fromCharCodeArray", 3);
+    CASE(StringIntoUtf8Array, StringIntoUtf8Array, "encodeStringIntoUTF8Array",
+         3);
+    CASE(StringIntoUtf8ArrayShared, StringIntoUtf8ArrayShared,
+         "encodeStringIntoUTF8Array", 3);
+    CASE(StringLength, StringLength, "length", 1);
+    CASE(StringLengthShared, StringLength, "length", 1);
+    CASE(StringMeasureUtf8, StringMeasureUtf8, "measureStringAsUTF8", 1);
+    CASE(StringMeasureUtf8Shared, StringMeasureUtf8, "measureStringAsUTF8", 1);
+    CASE(StringSubstring, StringSubstring, "substring", 3);
+    CASE(StringSubstringShared, StringSubstringShared, "substring", 3);
+    CASE(StringTest, StringTest, "test", 1);
+    CASE(StringTestShared, StringTest, "test", 1);
+    CASE(StringToUtf8Array, StringToUtf8Array, "encodeStringToUTF8Array", 1);
+    CASE(StringToUtf8ArrayShared, StringToUtf8ArrayShared,
+         "encodeStringToUTF8Array", 1);
+    CASE(StringToWtf16Array, StringToWtf16Array, "intoCharCodeArray", 3);
+    CASE(StringToWtf16ArrayShared, StringToWtf16ArrayShared,
+         "intoCharCodeArray", 3);
     default:
       UNREACHABLE();  // Only call this for compile-time imports.
   }
@@ -1814,9 +1864,10 @@ void InstanceBuilder::SanitizeImports() {
         import.module_name.length() == magic_string_constants.size() &&
         std::equal(magic_string_constants.begin(), magic_string_constants.end(),
                    wire_bytes_.begin() + import.module_name.offset())) {
+      SharedFlag shared = module_->globals[import.index].type.is_shared();
       DirectHandle<String> value =
           WasmModuleObject::ExtractUtf8StringFromModuleBytes(
-              isolate_, wire_bytes_, import.field_name, kNoInternalize);
+              isolate_, wire_bytes_, import.field_name, kNoInternalize, shared);
       sanitized_imports_[index] = value;
       continue;
     }
@@ -1865,7 +1916,7 @@ bool InstanceBuilder::ProcessImportedFunction(int import_index,
   const WasmImport& import = module_->import_table[import_index];
   uint32_t func_index = import.index;
   const WasmFunction& wasm_func = module_->functions[func_index];
-  bool function_is_shared = module_->type(wasm_func.sig_index).is_shared;
+  SharedFlag function_is_shared = module_->type(wasm_func.sig_index).is_shared;
   DirectHandle<WasmTrustedInstanceData> trusted_instance_data =
       trusted_data(function_is_shared);
   // Function imports must be callable.
@@ -2396,12 +2447,12 @@ bool InstanceBuilder::ProcessImportedMemories(
         return false;
       }
     }
-    if (memory->is_shared != backing_store->is_shared()) {
+    if ((memory->is_shared == SharedFlag::kYes) != backing_store->is_shared()) {
       thrower_->LinkError(
           "%s: mismatch in shared state of memory, declared = %d, imported = "
           "%d",
-          ImportName(import_index).c_str(), memory->is_shared,
-          backing_store->is_shared());
+          ImportName(import_index).c_str(),
+          memory->is_shared == SharedFlag::kYes, backing_store->is_shared());
       return false;
     }
 
@@ -2415,8 +2466,9 @@ bool InstanceBuilder::ProcessImportedMemories(
 template <typename T>
 T* InstanceBuilder::GetRawUntaggedGlobalPtr(const WasmGlobal& global) {
   DCHECK(!global.type.is_ref());
-  DirectHandle<ByteArray> buffer =
-      global.shared ? shared_untagged_globals_ : untagged_globals_;
+  DirectHandle<ByteArray> buffer = global.shared == SharedFlag::kYes
+                                       ? shared_untagged_globals_
+                                       : untagged_globals_;
   return reinterpret_cast<T*>(
       buffer->address() + ByteArray::OffsetOfElementAt(global.index_in_buffer));
 }
@@ -2433,7 +2485,8 @@ void InstanceBuilder::InitGlobals() {
     if (MaybeMarkError(result, thrower_)) return;
 
     if (global.type.is_ref()) {
-      (global.shared ? shared_tagged_globals_ : tagged_globals_)
+      (global.shared == SharedFlag::kYes ? shared_tagged_globals_
+                                         : tagged_globals_)
           ->set(global.index_in_buffer, *to_value(result).to_ref());
     } else {
       to_value(result).CopyTo(GetRawUntaggedGlobalPtr<uint8_t>(global));
@@ -2449,11 +2502,10 @@ MaybeDirectHandle<WasmMemoryObject> InstanceBuilder::AllocateMemory(
   int maximum_pages = memory.has_maximum_pages
                           ? static_cast<int>(memory.maximum_pages)
                           : WasmMemoryObject::kNoMaximum;
-  auto shared = memory.is_shared ? SharedFlag::kShared : SharedFlag::kNotShared;
 
   MaybeDirectHandle<WasmMemoryObject> maybe_memory_object =
-      WasmMemoryObject::New(isolate_, initial_pages, maximum_pages, shared,
-                            memory.address_type);
+      WasmMemoryObject::New(isolate_, initial_pages, maximum_pages,
+                            memory.is_shared, memory.address_type);
   if (maybe_memory_object.is_null()) {
     thrower_->RangeError(
         "Out of memory: Cannot allocate Wasm memory for new instance");
@@ -2520,7 +2572,7 @@ void InstanceBuilder::ProcessExports() {
     switch (exp.kind) {
       case kExternalFunction: {
         // Wrap and export the code as a JSFunction.
-        bool shared = module_->function_is_shared(exp.index);
+        SharedFlag shared = module_->function_is_shared(exp.index);
         DirectHandle<WasmFuncRef> func_ref =
             WasmTrustedInstanceData::GetOrCreateFuncRef(
                 isolate_, trusted_data(shared), exp.index, kPrecreateExternal);
@@ -2543,7 +2595,7 @@ void InstanceBuilder::ProcessExports() {
         break;
       }
       case kExternalTable: {
-        bool shared = module_->tables[exp.index].shared;
+        SharedFlag shared = module_->tables[exp.index].shared;
         DirectHandle<WasmTrustedInstanceData> data = trusted_data(shared);
         value = direct_handle(Cast<JSAny>(data->tables()->get(exp.index)),
                               isolate_);
@@ -2783,9 +2835,9 @@ ValueOrError ConsumeElementSegmentEntry(
   }
 
   auto sig = FixedSizeSignature<ValueType>::Returns(segment.type);
-  constexpr bool kIsShared = false;  // TODO(14616): Is this correct?
+  // TODO(14616): Consider shared element segments.
   FunctionBody body(&sig, decoder.pc_offset(), decoder.pc(), decoder.end(),
-                    kIsShared);
+                    SharedFlag::kNo);
   WasmDetectedFeatures detected;
   ValueOrError result;
   {
@@ -2822,10 +2874,11 @@ std::optional<MessageTemplate> InitializeElementSegment(
     DirectHandle<WasmTrustedInstanceData> trusted_instance_data,
     DirectHandle<WasmTrustedInstanceData> shared_trusted_instance_data,
     uint32_t segment_index, PrecreateExternal precreate_external_functions) {
-  bool shared =
+  SharedFlag shared =
       trusted_instance_data->module()->elem_segments[segment_index].shared;
   DirectHandle<WasmTrustedInstanceData> data =
-      shared ? shared_trusted_instance_data : trusted_instance_data;
+      shared == SharedFlag::kYes ? shared_trusted_instance_data
+                                 : trusted_instance_data;
   if (!IsUndefined(data->element_segments()->get(segment_index))) return {};
 
   const NativeModule* native_module = data->native_module();
@@ -2854,13 +2907,14 @@ std::optional<MessageTemplate> InitializeElementSegment(
       auto [function_index, length] =
           decoder.read_u32v<Decoder::NoValidationTag>(pc, "function index");
       pc += length;
-      bool function_is_shared =
+      SharedFlag function_is_shared =
           module->type(module->functions[function_index].sig_index).is_shared;
       DirectHandle<WasmFuncRef> value =
           WasmTrustedInstanceData::GetOrCreateFuncRef(
               isolate,
-              function_is_shared ? shared_trusted_instance_data
-                                 : trusted_instance_data,
+              function_is_shared == SharedFlag::kYes
+                  ? shared_trusted_instance_data
+                  : trusted_instance_data,
               function_index, precreate_external_functions);
       result->set(static_cast<int>(i), *value);
     }

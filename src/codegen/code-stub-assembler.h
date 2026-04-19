@@ -43,6 +43,7 @@
 #include "src/objects/tagged-index.h"
 #include "src/objects/tagged.h"
 #include "src/objects/templates.h"
+#include "src/objects/trusted-pointer.h"
 #include "src/roots/roots.h"
 #include "torque-generated/exported-macros-assembler.h"
 
@@ -217,12 +218,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<JSReceiver> HeapObjectToConstructor(TNode<HeapObject> heap_object,
                                             Label* fail) {
     GotoIfNot(IsConstructor(heap_object), fail);
-    return CAST(heap_object);
-  }
-
-  TNode<JSFunction> HeapObjectToJSFunctionWithPrototypeSlot(
-      TNode<HeapObject> heap_object, Label* fail) {
-    GotoIfNot(IsJSFunctionWithPrototypeSlot(heap_object), fail);
     return CAST(heap_object);
   }
 
@@ -1011,8 +1006,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Load a trusted pointer field.
   // When the sandbox is enabled, these are indirect pointers using the trusted
   // pointer table. Otherwise they are regular tagged fields.
-  TNode<TrustedObject> LoadTrustedPointerFromObject(
-      TNode<HeapObject> object, int offset, IndirectPointerTagRange tag_range);
+  template <IndirectPointerTagRange tag_range>
+  inline TNode<TrustedTypeFor<tag_range>> LoadTrustedPointerFromObject(
+      TNode<HeapObject> object, int field_offset);
 
   void LoadTrustedUnknownPointerFromObject(
       TNode<HeapObject> object, int offset, TVariable<Object>* value_out,
@@ -1061,21 +1057,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<UintPtrT> ComputeCodePointerTableEntryOffset(
       TNode<IndirectPointerHandleT> handle);
 
-  // Load the pointer to a Code's entrypoint via code pointer.
-  // Only available when the sandbox is enabled as it requires the code pointer
-  // table.
-  TNode<RawPtrT> LoadCodeEntrypointViaCodePointerField(TNode<HeapObject> object,
-                                                       int offset,
-                                                       CodeEntrypointTag tag) {
-    return LoadCodeEntrypointViaCodePointerField(object, IntPtrConstant(offset),
-                                                 tag);
-  }
-  TNode<RawPtrT> LoadCodeEntrypointViaCodePointerField(TNode<HeapObject> object,
-                                                       TNode<IntPtrT> offset,
-                                                       CodeEntrypointTag tag);
-  TNode<RawPtrT> LoadCodeEntryFromIndirectPointerHandle(
-      TNode<IndirectPointerHandleT> handle, CodeEntrypointTag tag);
-
   // Load the value of Code pointer table corresponding to
   // IsolateGroup::current()->code_pointer_table_.
   // Only available when the sandbox is enabled.
@@ -1085,21 +1066,36 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<JSDispatchHandleT> InvalidDispatchHandleConstant();
 
-  TNode<Object> LoadProtectedPointerField(TNode<TrustedObject> object,
-                                          TNode<IntPtrT> offset) {
-    return CAST(LoadProtectedPointerFromObject(
-        object, IntPtrSub(offset, IntPtrConstant(kHeapObjectTag))));
+  template <typename T>
+  TNode<T> LoadProtectedPointerField(TNode<TrustedObject> object,
+                                     TNode<IntPtrT> offset) {
+    if constexpr (is_subtype_v<T, Union<Smi, TrustedObject>>) {
+      return TrustedCast<T>(
+          LoadProtectedPointerFromObject(
+              object, IntPtrSub(offset, IntPtrConstant(kHeapObjectTag))),
+          "loaded from trusted object");
+    } else {
+      return Cast(LoadProtectedPointerFromObject(
+          object, IntPtrSub(offset, IntPtrConstant(kHeapObjectTag))));
+    }
   }
-  TNode<Object> LoadProtectedPointerField(TNode<TrustedObject> object,
-                                          int offset) {
-    return CAST(LoadProtectedPointerFromObject(
-        object, IntPtrConstant(offset - kHeapObjectTag)));
+  template <typename T>
+  TNode<T> LoadProtectedPointerField(TNode<TrustedObject> object, int offset) {
+    if constexpr (is_subtype_v<T, Union<Smi, TrustedObject>>) {
+      return TrustedCast<T>(
+          LoadProtectedPointerFromObject(
+              object, IntPtrConstant(offset - kHeapObjectTag)),
+          "loaded from trusted object");
+    } else {
+      return Cast(LoadProtectedPointerFromObject(
+          object, IntPtrConstant(offset - kHeapObjectTag)));
+    }
   }
 
   TNode<RawPtrT> LoadForeignForeignAddressPtr(TNode<Foreign> object,
                                               ExternalPointerTag tag) {
-    return LoadExternalPointerFromObject(object, Foreign::kForeignAddressOffset,
-                                         tag);
+    return LoadExternalPointerFromObject(
+        object, offsetof(Foreign, foreign_address_), tag);
   }
 
   TNode<RawPtrT> LoadFunctionTemplateInfoJsCallbackPtr(
@@ -1135,44 +1131,34 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
 #if V8_ENABLE_WEBASSEMBLY
   // Returns WasmTrustedInstanceData|Smi.
-  TNode<Object> LoadInstanceDataFromWasmImportData(
+  TNode<Union<Smi, WasmTrustedInstanceData>> LoadInstanceDataFromWasmImportData(
       TNode<WasmImportData> import_data) {
-    return LoadProtectedPointerField(
+    return LoadProtectedPointerField<Union<Smi, WasmTrustedInstanceData>>(
         import_data, WasmImportData::kProtectedInstanceDataOffset);
   }
 
   // Returns WasmImportData or WasmTrustedInstanceData.
   TNode<Union<WasmImportData, WasmTrustedInstanceData>>
   LoadImplicitArgFromWasmInternalFunction(TNode<WasmInternalFunction> object) {
-    TNode<Object> obj = LoadProtectedPointerField(
+    return LoadProtectedPointerField<
+        Union<WasmImportData, WasmTrustedInstanceData>>(
         object, WasmInternalFunction::kProtectedImplicitArgOffset);
-    CSA_DCHECK(this, TaggedIsNotSmi(obj));
-    TNode<HeapObject> implicit_arg = CAST(obj);
-    CSA_DCHECK(
-        this,
-        Word32Or(HasInstanceType(implicit_arg, WASM_TRUSTED_INSTANCE_DATA_TYPE),
-                 HasInstanceType(implicit_arg, WASM_IMPORT_DATA_TYPE)));
-    return CAST(implicit_arg);
   }
 
-  TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFuncRef(
-      TNode<WasmFuncRef> func_ref) {
-    return CAST(LoadTrustedPointerFromObject(
-        func_ref, WasmFuncRef::kTrustedInternalOffset,
-        kWasmInternalFunctionIndirectPointerTag));
-  }
+  inline TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFuncRef(
+      TNode<WasmFuncRef> func_ref);
 
   TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFunctionData(
       TNode<WasmFunctionData> data) {
-    return CAST(LoadProtectedPointerField(
-        data, WasmFunctionData::kProtectedInternalOffset));
+    return LoadProtectedPointerField<WasmInternalFunction>(
+        data, WasmFunctionData::kProtectedInternalOffset);
   }
 
   TNode<WasmTrustedInstanceData>
   LoadWasmTrustedInstanceDataFromWasmExportedFunctionData(
       TNode<WasmExportedFunctionData> data) {
-    return CAST(LoadProtectedPointerField(
-        data, WasmExportedFunctionData::kProtectedInstanceDataOffset));
+    return LoadProtectedPointerField<WasmTrustedInstanceData>(
+        data, WasmExportedFunctionData::kProtectedInstanceDataOffset);
   }
 
   // Dynamically allocates a buffer of size `size` in C++ on the cppgc heap.
@@ -1744,17 +1730,19 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Map> LoadJSArrayElementsMap(TNode<Int32T> kind,
                                     TNode<NativeContext> native_context);
 
-  TNode<BoolT> IsJSFunctionWithPrototypeSlot(TNode<HeapObject> object);
   TNode<Uint32T> LoadFunctionKind(TNode<JSFunction> function);
   TNode<BoolT> IsGeneratorFunction(TNode<JSFunction> function);
-  void BranchIfHasPrototypeProperty(TNode<JSFunction> function,
-                                    TNode<Int32T> function_map_bit_field,
-                                    Label* if_true, Label* if_false);
   void GotoIfPrototypeRequiresRuntimeLookup(TNode<JSFunction> function,
                                             TNode<Map> map, Label* runtime);
+
+  TNode<Union<JSReceiver, Map, TheHole>> LoadJSFunctionPrototypeOrInitialMap(
+      TNode<JSFunction> function);
+  void StoreJSFunctionPrototypeOrInitialMap(
+      TNode<JSFunction> function, TNode<Union<JSReceiver, Map, TheHole>> value);
+
   // Load the "prototype" property of a JSFunction.
-  TNode<HeapObject> LoadJSFunctionPrototype(TNode<JSFunction> function,
-                                            Label* if_bailout);
+  TNode<JSPrototype> LoadJSFunctionPrototype(TNode<JSFunction> function,
+                                             Label* if_bailout);
 
   TNode<Object> LoadSharedFunctionInfoUntrustedData(
       TNode<SharedFunctionInfo> sfi);
@@ -2269,6 +2257,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                                  Label* if_bailout);
   TNode<NativeContext> GetCreationContext(TNode<JSReceiver> receiver,
                                           Label* if_bailout);
+  // Like GetCreationContext but DCHECKs instead of branching.
+  TNode<NativeContext> GetCreationContextUnchecked(TNode<JSReceiver> receiver);
   TNode<NativeContext> GetFunctionRealm(TNode<Context> context,
                                         TNode<JSReceiver> receiver,
                                         Label* if_bailout);
@@ -2876,7 +2866,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                     ElementsKind kind);
   TNode<BoolT> IsFixedArrayWithKindOrEmpty(TNode<FixedArrayBase> object,
                                            ElementsKind kind);
-  TNode<BoolT> IsFunctionWithPrototypeSlotMap(TNode<Map> map);
   TNode<BoolT> IsHashTable(TNode<HeapObject> object);
   TNode<BoolT> IsEphemeronHashTable(TNode<HeapObject> object);
   TNode<BoolT> IsHeapNumberInstanceType(TNode<Int32T> instance_type);
@@ -2896,8 +2885,19 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsJSArrayIterator(TNode<HeapObject> object);
   TNode<BoolT> IsJSAsyncGeneratorObject(TNode<HeapObject> object);
   TNode<BoolT> IsFunctionInstanceType(TNode<Int32T> instance_type);
+  TNode<BoolT> IsJSFunctionWithoutPrototypeInstanceType(
+      TNode<Int32T> instance_type);
+  TNode<BoolT> IsJSFunctionWithPrototypeInstanceType(
+      TNode<Int32T> instance_type);
   TNode<BoolT> IsJSFunctionInstanceType(TNode<Int32T> instance_type);
+#if V8_ENABLE_WEBASSEMBLY
+  TNode<BoolT> IsWasmObjectInstanceType(TNode<Int32T> instance_type);
+#endif
+  TNode<BoolT> IsJSFunctionWithoutPrototypeMap(TNode<Map> map);
+  TNode<BoolT> IsJSFunctionWithPrototypeMap(TNode<Map> map);
   TNode<BoolT> IsJSFunctionMap(TNode<Map> map);
+  TNode<BoolT> IsJSFunctionWithoutPrototype(TNode<HeapObject> object);
+  TNode<BoolT> IsJSFunctionWithPrototype(TNode<HeapObject> object);
   TNode<BoolT> IsJSFunction(TNode<HeapObject> object);
   TNode<BoolT> IsJSBoundFunction(TNode<HeapObject> object);
   TNode<BoolT> IsJSGeneratorObject(TNode<HeapObject> object);
@@ -2950,6 +2950,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsJSSharedStruct(TNode<Object> object);
   TNode<BoolT> IsJSWrappedFunction(TNode<HeapObject> object);
   TNode<BoolT> IsMap(TNode<HeapObject> object);
+  TNode<BoolT> IsMapInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsName(TNode<HeapObject> object);
   TNode<BoolT> IsNameInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsNullOrJSReceiver(TNode<HeapObject> object);
@@ -4168,6 +4169,49 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void GenerateStrictEqualAndTryPatchCode(TNode<Object> lhs, TNode<Object> rhs,
                                           TNode<Int32T> current_type_feedback,
                                           TNode<UintPtrT> feedback_offset);
+  void GenerateEqualAndTryPatchCode(TNode<Object> lhs, TNode<Object> rhs,
+                                    TNode<Int32T> current_type_feedback,
+                                    TNode<UintPtrT> feedback_offset);
+  void GenerateSmiEqual(TNode<Object> lhs, TNode<Object> rhs,
+                        TNode<UintPtrT> feedback_offset,
+                        Builtin fallback_builtin);
+  void GenerateNumberEqual(TNode<Object> lhs, TNode<Object> rhs,
+                           TNode<UintPtrT> feedback_offset,
+                           Builtin fallback_builtin);
+  void GenerateStringEqual(TNode<Object> lhs, TNode<Object> rhs,
+                           TNode<UintPtrT> feedback_offset,
+                           Builtin fallback_builtin);
+
+  using TypeCheckHelper = std::function<TNode<BoolT>(TNode<HeapObject>)>;
+  void GenerateTypedTaggedEqual(TNode<Object> lhs, TNode<Object> rhs,
+                                TNode<UintPtrT> feedback_offset,
+                                TypeCheckHelper type_check_helper,
+                                Builtin fallback_builtin,
+                                TNode<Int32T> type_feedback);
+  void GenerateRelationalCompareAndTryPatchCode(
+      TNode<Object> lhs, TNode<Object> rhs, TNode<Int32T> operation_type,
+      TNode<Int32T> current_type_feedback, TNode<UintPtrT> feedback_offset);
+
+#define DECLARE_RELATIONAL_COMPARE_GENERATOR(Name)                           \
+  void Generate##Name##AndTryPatchCode(TNode<Object> lhs, TNode<Object> rhs, \
+                                       TNode<Int32T> current_type_feedback,  \
+                                       TNode<UintPtrT> feedback_offset);
+
+  DECLARE_RELATIONAL_COMPARE_GENERATOR(LessThan)
+  DECLARE_RELATIONAL_COMPARE_GENERATOR(LessThanOrEqual)
+  DECLARE_RELATIONAL_COMPARE_GENERATOR(GreaterThan)
+  DECLARE_RELATIONAL_COMPARE_GENERATOR(GreaterThanOrEqual)
+#undef DECLARE_RELATIONAL_COMPARE_GENERATOR
+
+  void GenerateSmiRelationalCompare(Operation op, TNode<Object> lhs,
+                                    TNode<Object> rhs,
+                                    TNode<UintPtrT> feedback_offset,
+                                    Builtin fallback_builtin);
+
+  void GenerateNumberRelationalCompare(Operation op, TNode<Object> lhs,
+                                       TNode<Object> rhs,
+                                       TNode<UintPtrT> feedback_offset,
+                                       Builtin fallback_builtin);
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
 
   TNode<Boolean> Equal(TNode<Object> lhs, TNode<Object> rhs,
@@ -4277,20 +4321,24 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void StoreJSArrayBufferViewByteOffset(
       TNode<JSArrayBufferView> array_buffer_view, TNode<UintPtrT> value);
 
-  // JSTypedArray helpers
-  TNode<UintPtrT> LoadJSTypedArrayLength(TNode<JSTypedArray> typed_array);
+  TNode<UintPtrT> LoadJSTypedArrayLength(
+      TNode<JSTypedArray> typed_array,
+      std::optional<TNode<Int32T>> elements_kind = std::nullopt);
   TNode<UintPtrT> LoadJSTypedArrayLengthAndValidate(
-      TNode<JSTypedArray> typed_array, TypedArrayAccessMode mode, Label* fail);
+      TNode<JSTypedArray> typed_array, TypedArrayAccessMode mode, Label* fail,
+      std::optional<TNode<Int32T>> elements_kind = std::nullopt);
   TNode<UintPtrT> LoadJSTypedArrayLengthAndValidate(
       TNode<JSTypedArray> typed_array, TNode<JSArrayBuffer> buffer,
-      TypedArrayAccessMode mode, bool is_resizable, Label* fail);
+      TypedArrayAccessMode mode, bool is_resizable, Label* fail,
+      std::optional<TNode<Int32T>> elements_kind = std::nullopt);
 
   // Helper for length tracking JSTypedArrays and JSTypedArrays backed by
   // ResizableArrayBuffer.
 
   TNode<UintPtrT> LoadVariableLengthJSTypedArrayLength(
       TNode<JSTypedArray> array, TNode<JSArrayBuffer> buffer,
-      TypedArrayAccessMode mode, Label* fail);
+      TypedArrayAccessMode mode, Label* fail,
+      std::optional<TNode<Int32T>> elements_kind = std::nullopt);
 
   TNode<UintPtrT> LoadVariableLengthJSTypedArrayByteLength(
       TNode<Context> context, TNode<JSTypedArray> array,

@@ -13,6 +13,24 @@
 
 namespace v8::internal {
 
+const char* ToString(Script::Type type) {
+  switch (type) {
+    case Script::Type::kNative:
+      return "native";
+    case Script::Type::kExtension:
+      return "extension";
+    case Script::Type::kNormal:
+      return "normal";
+#if V8_ENABLE_WEBASSEMBLY
+    case Script::Type::kWasm:
+      return "wasm";
+#endif  // V8_ENABLE_WEBASSEMBLY
+    case Script::Type::kInspector:
+      return "inspector";
+  }
+  UNREACHABLE();
+}
+
 template <typename IsolateT>
 MaybeHandle<SharedFunctionInfo> Script::FindSharedFunctionInfo(
     DirectHandle<Script> script, IsolateT* isolate,
@@ -420,7 +438,7 @@ bool Script::GetPositionInfo(int position, PositionInfo* info,
   // For wasm, we use the byte offset as the column.
   if (type() == Script::Type::kWasm) {
     DCHECK_LE(0, position);
-    wasm::NativeModule* native_module = wasm_native_module();
+    Managed<wasm::NativeModule>::Ptr native_module = wasm_native_module();
     const wasm::WasmModule* module = native_module->module();
     if (module->functions.empty()) return false;
     info->line = 0;

@@ -3664,51 +3664,6 @@ V8_WARN_UNUSED_RESULT Maybe<temporal_rs::TimeZone> ToRustTimeZone(
                                tz, TimeZoneProvider()));
 }
 
-// Partial implementation:
-//
-// https://tc39.es/proposal-temporal/#sec-temporal-handledatetimetemporaldatetime
-Maybe<int64_t> GetEpochMillisecondsForDateTime(
-    Isolate* isolate, const temporal_rs::PlainDateTime& date,
-    std::string_view time_zone) {
-  temporal_rs::TimeZone tz;
-  MOVE_RETURN_ON_EXCEPTION(isolate, tz, ToRustTimeZone(isolate, time_zone));
-
-  //  2. Let epochNs be ? GetEpochNanosecondsFor(dateTimeFormat.[[TimeZone]],
-  //  isoDateTime, compatible).
-  std::unique_ptr<temporal_rs::ZonedDateTime> zdt;
-  MOVE_RETURN_ON_EXCEPTION(
-      isolate, zdt,
-      ExtractRustResult(isolate,
-                        date.to_zoned_date_time_with_provider(
-                            tz, temporal_rs::Disambiguation::Compatible,
-                            TimeZoneProvider())));
-  return Just(zdt->epoch_milliseconds());
-}
-
-// Partial implementation:
-//
-// https://tc39.es/proposal-temporal/#sec-temporal-handledatetimetemporaldate
-// https://tc39.es/proposal-temporal/#sec-temporal-handledatetimetemporalmonthday
-// https://tc39.es/proposal-temporal/#sec-temporal-handledatetimetemporalyearmonth
-Maybe<int64_t> GetEpochMillisecondsForDate(
-    Isolate* isolate, const temporal_rs::PlainDate& date,
-    std::string_view time_zone, const temporal_rs::PlainTime* time = nullptr) {
-  temporal_rs::TimeZone tz;
-  MOVE_RETURN_ON_EXCEPTION(isolate, tz, ToRustTimeZone(isolate, time_zone));
-
-  // 2. Let isoDateTime be CombineISODateAndTimeRecord(temporalDate.[[ISODate]],
-  // NoonTimeRecord()).
-  // 3. Let epochNs be ? GetEpochNanosecondsFor(dateTimeFormat.[[TimeZone]],
-  // isoDateTime, compatible).
-
-  std::unique_ptr<temporal_rs::ZonedDateTime> zdt;
-  MOVE_RETURN_ON_EXCEPTION(
-      isolate, zdt,
-      ExtractRustResult(isolate, date.to_zoned_date_time_with_provider(
-                                     tz, time, TimeZoneProvider())));
-  return Just(zdt->epoch_milliseconds());
-}
-
 }  // namespace temporal
 
 // https://tc39.es/proposal-temporal/#sec-temporal.duration
@@ -3721,7 +3676,7 @@ MaybeDirectHandle<JSTemporalDuration> JSTemporalDuration::Constructor(
     DirectHandle<Object> milliseconds, DirectHandle<Object> microseconds,
     DirectHandle<Object> nanoseconds) {
   // 1. If NewTarget is undefined, then
-  if (IsUndefined(*new_target)) {
+  if (IsUndefined(*new_target, isolate)) {
     // a. Throw a TypeError exception.
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kMethodInvokedOnWrongType,
@@ -4233,7 +4188,7 @@ MaybeDirectHandle<JSTemporalPlainDate> JSTemporalPlainDate::Constructor(
     DirectHandle<Object> iso_month_obj, DirectHandle<Object> iso_day_obj,
     DirectHandle<Object> calendar_like) {
   // 1. If NewTarget is undefined, then
-  if (IsUndefined(*new_target)) {
+  if (IsUndefined(*new_target, isolate)) {
     // a. Throw a TypeError exception.
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kMethodInvokedOnWrongType,
@@ -4572,10 +4527,9 @@ MaybeDirectHandle<String> JSTemporalPlainDate::ToLocaleString(
 #endif  // V8_INTL_SUPPORT
 }
 
-Maybe<int64_t> JSTemporalPlainDate::GetEpochMillisecondsFor(
-    Isolate* isolate, std::string_view time_zone) {
-  return temporal::GetEpochMillisecondsForDate(
-      isolate, *this->wrapped_rust().get(), time_zone);
+Maybe<int64_t> JSTemporalPlainDate::GetEpochMillisecondsForUtc(
+    Isolate* isolate) {
+  return ExtractRustResult(isolate, this->wrapped_rust()->epoch_ms_for_utc());
 }
 
 // https://tc39.es/proposal-temporal/#sec-temporal-createtemporaldatetime
@@ -4588,7 +4542,7 @@ MaybeDirectHandle<JSTemporalPlainDateTime> JSTemporalPlainDateTime::Constructor(
     DirectHandle<Object> microsecond_obj, DirectHandle<Object> nanosecond_obj,
     DirectHandle<Object> calendar_like) {
   // 1. If NewTarget is undefined, then
-  if (IsUndefined(*new_target)) {
+  if (IsUndefined(*new_target, isolate)) {
     // a. Throw a TypeError exception.
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kMethodInvokedOnWrongType,
@@ -5063,10 +5017,8 @@ MaybeDirectHandle<JSTemporalPlainTime> JSTemporalPlainDateTime::ToPlainTime(
 
 // https://tc39.es/proposal-temporal/#sec-temporal-handledatetimetemporaldate
 V8_WARN_UNUSED_RESULT Maybe<int64_t>
-JSTemporalPlainDateTime::GetEpochMillisecondsFor(Isolate* isolate,
-                                                 std::string_view time_zone) {
-  return temporal::GetEpochMillisecondsForDateTime(isolate, *wrapped_rust(),
-                                                   time_zone);
+JSTemporalPlainDateTime::GetEpochMillisecondsForUtc(Isolate* isolate) {
+  return ExtractRustResult(isolate, this->wrapped_rust()->epoch_ms_for_utc());
 }
 
 // https://tc39.es/proposal-temporal/#sec-temporal.plainmonthday
@@ -5076,7 +5028,7 @@ MaybeDirectHandle<JSTemporalPlainMonthDay> JSTemporalPlainMonthDay::Constructor(
     DirectHandle<Object> iso_day_obj, DirectHandle<Object> calendar_like,
     DirectHandle<Object> reference_iso_year_obj) {
   // 1. If NewTarget is undefined, then
-  if (IsUndefined(*new_target)) {
+  if (IsUndefined(*new_target, isolate)) {
     // a. Throw a TypeError exception.
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kMethodInvokedOnWrongType,
@@ -5273,15 +5225,9 @@ MaybeDirectHandle<String> JSTemporalPlainMonthDay::ToLocaleString(
 }
 
 // https://tc39.es/proposal-temporal/#sec-temporal-handledatetimetemporalmonthday
-Maybe<int64_t> JSTemporalPlainMonthDay::GetEpochMillisecondsFor(
-    Isolate* isolate, std::string_view time_zone) {
-  temporal_rs::TimeZone tz;
-  MOVE_RETURN_ON_EXCEPTION(isolate, tz,
-                           temporal::ToRustTimeZone(isolate, time_zone));
-
-  return ExtractRustResult(
-      isolate,
-      this->wrapped_rust()->epoch_ms_for_with_provider(tz, TimeZoneProvider()));
+Maybe<int64_t> JSTemporalPlainMonthDay::GetEpochMillisecondsForUtc(
+    Isolate* isolate) {
+  return ExtractRustResult(isolate, this->wrapped_rust()->epoch_ms_for_utc());
 }
 
 MaybeDirectHandle<JSTemporalPlainYearMonth>
@@ -5291,7 +5237,7 @@ JSTemporalPlainYearMonth::Constructor(
     DirectHandle<Object> iso_month_obj, DirectHandle<Object> calendar_like,
     DirectHandle<Object> reference_iso_day_obj) {
   // 1. If NewTarget is undefined, then
-  if (IsUndefined(*new_target)) {
+  if (IsUndefined(*new_target, isolate)) {
     // a. Throw a TypeError exception.
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kMethodInvokedOnWrongType,
@@ -5555,15 +5501,9 @@ MaybeDirectHandle<String> JSTemporalPlainYearMonth::ToLocaleString(
 }
 
 // https://tc39.es/proposal-temporal/#sec-temporal-handledatetimetemporalyearmonth
-Maybe<int64_t> JSTemporalPlainYearMonth::GetEpochMillisecondsFor(
-    Isolate* isolate, std::string_view time_zone) {
-  temporal_rs::TimeZone tz;
-  MOVE_RETURN_ON_EXCEPTION(isolate, tz,
-                           temporal::ToRustTimeZone(isolate, time_zone));
-
-  return ExtractRustResult(
-      isolate,
-      this->wrapped_rust()->epoch_ms_for_with_provider(tz, TimeZoneProvider()));
+Maybe<int64_t> JSTemporalPlainYearMonth::GetEpochMillisecondsForUtc(
+    Isolate* isolate) {
+  return ExtractRustResult(isolate, this->wrapped_rust()->epoch_ms_for_utc());
 }
 
 // https://tc39.es/proposal-temporal/#sec-temporal.plainyearmonth.prototype.tojson
@@ -5582,7 +5522,7 @@ MaybeDirectHandle<JSTemporalPlainTime> JSTemporalPlainTime::Constructor(
     DirectHandle<Object> millisecond_obj, DirectHandle<Object> microsecond_obj,
     DirectHandle<Object> nanosecond_obj) {
   // 1. If NewTarget is undefined, then
-  if (IsUndefined(*new_target)) {
+  if (IsUndefined(*new_target, isolate)) {
     // a. Throw a TypeError exception.
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kMethodInvokedOnWrongType,
@@ -5988,25 +5928,10 @@ MaybeDirectHandle<String> JSTemporalPlainTime::ToLocaleString(
 #endif  // V8_INTL_SUPPORT
 }
 
-// https://tc39.es/proposal-temporal/#sec-temporal-handledatetimetemporaldate
-Maybe<int64_t> JSTemporalPlainTime::GetEpochMillisecondsFor(
-    Isolate* isolate, std::string_view time_zone) {
-  // 1. Let isoDate be CreateISODateRecord(1970, 1, 1).
-
-  std::unique_ptr<temporal_rs::PlainDate> pd;
-  MOVE_RETURN_ON_EXCEPTION(
-      isolate, pd,
-      ExtractRustResult(isolate,
-                        temporal_rs::PlainDate::try_new(
-                            1970, 1, 1, temporal_rs::AnyCalendarKind::Iso)));
-
-  // 2. Let isoDateTime be CombineISODateAndTimeRecord(isoDate,
-  // temporalTime.[[Time]]).
-  // 3. Let epochNs be ? GetEpochNanosecondsFor(dateTimeFormat.[[TimeZone]],
-  // isoDateTime, compatible).
-
-  return temporal::GetEpochMillisecondsForDate(isolate, *pd, time_zone,
-                                               wrapped_rust().get());
+// https://tc39.es/proposal-temporal/#sec-temporal-handledatetimetemporaltime
+Maybe<int64_t> JSTemporalPlainTime::GetEpochMillisecondsForUtc(
+    Isolate* isolate) {
+  return ExtractRustResult(isolate, this->wrapped_rust()->epoch_ms_for_utc());
 }
 
 // https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime
@@ -6016,7 +5941,7 @@ MaybeDirectHandle<JSTemporalZonedDateTime> JSTemporalZonedDateTime::Constructor(
     DirectHandle<Object> epoch_nanoseconds_obj,
     DirectHandle<Object> time_zone_like, DirectHandle<Object> calendar_like) {
   // 1. If NewTarget is undefined, throw a TypeError exception.
-  if (IsUndefined(*new_target)) {
+  if (IsUndefined(*new_target, isolate)) {
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kMethodInvokedOnWrongType,
                                  isolate->factory()->NewStringFromAsciiChecked(
@@ -6693,7 +6618,7 @@ MaybeDirectHandle<JSTemporalInstant> JSTemporalInstant::Constructor(
     DirectHandle<HeapObject> new_target,
     DirectHandle<Object> epoch_nanoseconds_obj) {
   // 1. If NewTarget is undefined, then
-  if (IsUndefined(*new_target)) {
+  if (IsUndefined(*new_target, isolate)) {
     // a. Throw a TypeError exception.
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kMethodInvokedOnWrongType,

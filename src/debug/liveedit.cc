@@ -831,23 +831,16 @@ MaybeDirectHandle<ScopeInfo> DetermineOuterScopeInfo(
     Isolate* isolate, DirectHandle<Script> script) {
   if (!script->has_eval_from_shared()) return kNullMaybeHandle;
   DCHECK_EQ(script->compilation_type(), Script::CompilationType::kEval);
-  Tagged<ScopeInfo> scope_info = script->eval_from_shared()->scope_info();
-  // Sloppy eval compiles use the ScopeInfo of the context. Let's find it.
-  while (!scope_info->IsEmpty()) {
-    if (scope_info->HasContext()) {
+  if (script->has_eval_from_scope_info()) {
+    Tagged<ScopeInfo> scope_info =
+        Cast<ScopeInfo>(script->eval_from_scope_info());
 #ifdef DEBUG
-      Tagged<ScopeInfo> other_scope_info =
-          FindOuterScopeInfoFromScriptSfi(isolate, script);
-      DCHECK_IMPLIES(!other_scope_info.is_null(),
-                     scope_info == other_scope_info);
+    Tagged<ScopeInfo> other_scope_info =
+        FindOuterScopeInfoFromScriptSfi(isolate, script);
+    DCHECK_IMPLIES(!other_scope_info.is_null(), scope_info == other_scope_info);
 #endif
-      return direct_handle(scope_info, isolate);
-    } else if (!scope_info->HasOuterScopeInfo()) {
-      break;
-    }
-    scope_info = scope_info->OuterScopeInfo();
+    return direct_handle(scope_info, isolate);
   }
-
   return kNullMaybeHandle;
 }
 
@@ -887,6 +880,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
   UnoptimizedCompileState new_compile_state;
   UnoptimizedCompileFlags new_flags =
       UnoptimizedCompileFlags::ForScriptCompile(isolate, *new_script);
+  new_flags.set_is_hoisted_in_context(flags.is_hoisted_in_context());
   new_flags.set_is_eager(true);
   ParseInfo new_parse_info(isolate, new_flags, &new_compile_state,
                            &reusable_state);
@@ -1029,7 +1023,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
           *isolate->factory()->many_closures_cell());
       auto code = handle(new_sfi->GetCode(isolate), isolate);
       JSFunction::AllocateDispatchHandle(
-          js_function, isolate,
+          direct_handle(js_function), isolate,
           new_sfi->internal_formal_parameter_count_with_receiver(), code);
       js_function->set_shared(*new_sfi);
 

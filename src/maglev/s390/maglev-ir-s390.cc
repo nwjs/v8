@@ -404,24 +404,11 @@ void Int32MultiplyWithOverflow::GenerateCode(MaglevAssembler* masm,
 
   MaglevAssembler::TemporaryRegisterScope temps(masm);
   Register temp = temps.AcquireScratch();
-  Condition cond = overflow;
-  if (!CpuFeatures::IsSupported(MISC_INSTR_EXT2)) {
-    DCHECK(!AreAliased(r0, temp));
-    __ lgfr(r0, left);
-    __ lgfr(temp, right);
-    __ MulS64(r0, temp);
-  }
   __ Or(temp, left, right);
   __ MulS32(out, left, right);
-  if (!CpuFeatures::IsSupported(MISC_INSTR_EXT2)) {
-    // Test whether {high} is a sign-extension of {result}.
-    __ LoadS32(out, out);
-    __ CmpU64(r0, out);
-    cond = ne;
-  }
   DCHECK_REGLIST_EMPTY(RegList{temp, out} &
                        GetGeneralRegistersUsedAsInputs(eager_deopt_info()));
-  __ EmitEagerDeoptIf(cond, DeoptimizeReason::kOverflow, this);
+  __ EmitEagerDeoptIf(overflow, DeoptimizeReason::kOverflow, this);
 
   // Making sure that the 32-bit output is zero-extended.
   __ LoadU32(out, out);
@@ -1063,11 +1050,13 @@ void GenerateReduceInterruptBudget(MaglevAssembler* masm, Node* node,
                                    ReduceInterruptBudgetType type, int amount) {
   MaglevAssembler::TemporaryRegisterScope temps(masm);
   Register budget = temps.AcquireScratch();
-  __ LoadU32(budget, FieldMemOperand(feedback_cell,
-                                     FeedbackCell::kInterruptBudgetOffset));
+  __ LoadU32(budget,
+             FieldMemOperand(feedback_cell,
+                             offsetof(FeedbackCell, interrupt_budget_)));
   __ SubS32(budget, Operand(amount));
-  __ StoreU32(budget, FieldMemOperand(feedback_cell,
-                                      FeedbackCell::kInterruptBudgetOffset));
+  __ StoreU32(budget,
+              FieldMemOperand(feedback_cell,
+                              offsetof(FeedbackCell, interrupt_budget_)));
   ZoneLabelRef done(masm);
   __ JumpToDeferredIf(lt, HandleInterruptsAndTiering, done, node, type, budget);
   __ bind(*done);

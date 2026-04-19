@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 
+#include "include/v8-script.h"
 #include "src/api/api-inl.h"
 #include "src/asmjs/asm-js.h"
 #include "src/ast/prettyprinter.h"
@@ -1071,6 +1072,9 @@ bool CompileTurbofan_NotConcurrent(Isolate* isolate,
         isolate, *compilation_info->closure(), compilation_info->osr_offset(),
         *compilation_info->code(),
         compilation_info->function_context_specializing());
+  } else if (!compilation_info->function_context_specializing()) {
+    compilation_info->shared_info()->set_function_context_independent_compiled(
+        true);
   }
   job->RecordFunctionCompilation(LogEventListener::CodeTag::kFunction, isolate);
   return true;
@@ -1791,7 +1795,8 @@ class MergeAssumptionChecker final : public ObjectVisitor {
                     &eval_from_shared_or_wrapped_arguments)) {
           visited_.insert(eval_from_shared_or_wrapped_arguments);
         }
-      } else if (Tagged<BytecodeArray> bytes; TryCast(current, &bytes)) {
+      } else if (Is<BytecodeArray>(current)) {
+        auto bytes = TrustedCast<BytecodeArray>(current);
         Tagged<HeapObject> constants = bytes->constant_pool();
         QueueVisit(constants, kConstantPool);
       }
@@ -1827,7 +1832,10 @@ class MergeAssumptionChecker final : public ObjectVisitor {
         } else if (IsScopeInfo(obj)) {
           CHECK((current_object_kind_ == kConstantPool && !is_weak) ||
                 (current_object_kind_ == kNormalObject && !is_weak) ||
-                (current_object_kind_ == kScriptInfosList && is_weak));
+                (current_object_kind_ == kScriptInfosList && is_weak) ||
+                (IsScript(host) &&
+                 current.address() ==
+                     host.address() + Script::kEvalFromScopeInfoOffset));
         } else if (IsScript(obj)) {
           CHECK(IsSharedFunctionInfo(host) &&
                 current == MaybeObjectSlot(host.address() +
@@ -1998,7 +2006,7 @@ void BackgroundCompileTask::Run(
     }
     parser.DeserializeScopeChain(
         isolate, &info, maybe_outer_scope_info,
-        Scope::DeserializationMode::kIncludingVariables);
+        Scope::DeserializationMode::kIncludingVariables, script_);
   }
 
   parser.ParseOnBackground(isolate, &info, script_, start_position_,
@@ -2760,12 +2768,6 @@ bool BackgroundCompileTask::FinalizeFunction(
   DirectHandle<SharedFunctionInfo> input_shared_info =
       input_shared_info_.ToHandleChecked();
 
-  // The UncompiledData on the input SharedFunctionInfo will have a pointer to
-  // the LazyCompileDispatcher Job that launched this task, which will now be
-  // considered complete, so clear that regardless of whether the finalize
-  // succeeds or not.
-  input_shared_info->ClearUncompiledDataJobPointer(isolate);
-
   // We might not have been able to finalize all jobs on the background
   // thread (e.g. asm.js jobs), so finalize those deferred jobs now.
   if (FinalizeDeferredUnoptimizedCompilationJobs(
@@ -2791,15 +2793,6 @@ bool BackgroundCompileTask::FinalizeFunction(
   input_shared_info->CopyFrom(*result, isolate);
 
   return true;
-}
-
-void BackgroundCompileTask::AbortFunction() {
-  // The UncompiledData on the input SharedFunctionInfo will have a pointer to
-  // the LazyCompileDispatcher Job that launched this task, which is about to be
-  // deleted, so clear that to avoid the SharedFunctionInfo from pointing to
-  // deallocated memory.
-  input_shared_info_.ToHandleChecked()->ClearUncompiledDataJobPointer(
-      isolate_for_local_isolate_);
 }
 
 void BackgroundCompileTask::ReportStatistics(Isolate* isolate) {
@@ -3069,7 +3062,7 @@ bool Compiler::Compile(Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
     // Log lazy function compilation.
     DirectHandle<ArrayList> list;
     if (IsUndefined(script->compiled_lazy_function_positions())) {
-      constexpr int kInitialLazyFunctionPositionListSize = 100;
+      constexpr uint32_t kInitialLazyFunctionPositionListSize = 100;
       list = ArrayList::New(isolate, kInitialLazyFunctionPositionListSize);
     } else {
       list = direct_handle(
@@ -3397,6 +3390,10 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
       }
     }
     script->set_eval_from_position(eval_position);
+    if (!maybe_outer_scope_info.is_null()) {
+      script->set_eval_from_scope_info(
+          *maybe_outer_scope_info.ToHandleChecked());
+    }
 
     if (!v8::internal::CompileToplevel(&parse_info, script,
                                        maybe_outer_scope_info, isolate,
@@ -3591,6 +3588,7 @@ struct ScriptCompileTimerScope {
     kNoCacheBecauseResourceWithNoCacheHandler,
     kHitIsolateCacheWhenStreamingSource,
     kNoCacheBecauseStaticCodeCache,
+    kNoCacheBecauseInlineScriptCacheTooCold,
     kCount
   };
 
@@ -3699,6 +3697,8 @@ struct ScriptCompileTimerScope {
         return CacheBehaviour::kProduceCodeCache;
       case ScriptCompiler::kNoCacheBecauseStaticCodeCache:
         return CacheBehaviour::kNoCacheBecauseStaticCodeCache;
+      case ScriptCompiler::kNoCacheBecauseInlineScriptCacheTooCold:
+        return CacheBehaviour::kNoCacheBecauseInlineScriptCacheTooCold;
       }
     UNREACHABLE();
   }
@@ -3733,6 +3733,7 @@ struct ScriptCompileTimerScope {
         return isolate_->counters()
             ->compile_script_no_cache_because_script_too_small();
       case CacheBehaviour::kNoCacheBecauseCacheTooCold:
+      case CacheBehaviour::kNoCacheBecauseInlineScriptCacheTooCold:
         return isolate_->counters()
             ->compile_script_no_cache_because_cache_too_cold();
 
@@ -4506,6 +4507,8 @@ void Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
               isolate, *compilation_info->closure(),
               compilation_info->osr_offset(), *compilation_info->code(),
               compilation_info->function_context_specializing());
+        } else if (!compilation_info->function_context_specializing()) {
+          shared->set_function_context_independent_compiled(true);
         }
         CompilerTracer::TraceCompletedJob(isolate, compilation_info);
         if (IsOSR(osr_offset)) {
@@ -4585,6 +4588,8 @@ void Compiler::FinalizeMaglevCompilationJob(maglev::MaglevCompilationJob* job,
     if (IsOSR(osr_offset)) {
       OptimizedOSRCodeCache::Insert(isolate, *function, osr_offset, *code,
                                     job->specialize_to_function_context());
+    } else if (!job->specialize_to_function_context()) {
+      shared->set_function_context_independent_compiled(true);
     }
 
     RecordMaglevFunctionCompilation(isolate, function,

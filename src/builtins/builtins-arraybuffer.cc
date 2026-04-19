@@ -108,9 +108,7 @@ Tagged<Object> ConstructBuffer(Isolate* isolate,
   // JSArrayBuffer to avoid a complex dance during setup. We then always create
   // the AB before throwing a possible error as the creation is observable.
   const SharedFlag shared =
-      *target != target->native_context()->array_buffer_fun()
-          ? SharedFlag::kShared
-          : SharedFlag::kNotShared;
+      SharedFlag(*target != target->native_context()->array_buffer_fun());
   const ResizableFlag resizable = max_length.is_null()
                                       ? ResizableFlag::kNotResizable
                                       : ResizableFlag::kResizable;
@@ -313,11 +311,7 @@ static Tagged<Object> SliceHelper(BuiltinArguments args, Isolate* isolate,
   CHECK_SHARED(is_shared, new_array_buffer, kMethodName);
 
   if (to_immutable) {
-    new_array_buffer->set_is_immutable(true);
-    if (auto backing_store = new_array_buffer->GetBackingStore()) {
-      backing_store->set_is_immutable(true);
-    }
-    DCHECK(!new_array_buffer->was_detached());
+    new_array_buffer->MakeImmutable(isolate);
 
     // * If IsDetachedBuffer(O) is true, throw a TypeError exception.
     // * Let fromBuf be O.[[ArrayBufferData]].
@@ -818,10 +812,7 @@ Tagged<Object> ArrayBufferTransfer(Isolate* isolate,
   }
 
   if (preserve_resizability == kToImmutable) {
-    result_buffer->set_is_immutable(true);
-    if (auto backing_store = result_buffer->GetBackingStore()) {
-      backing_store->set_is_immutable(true);
-    }
+    result_buffer->MakeImmutable(isolate);
   }
 
   // 16. Return newBuffer.

@@ -191,14 +191,6 @@ void RegExpBoilerplateDescription::set_data(Tagged<RegExpData> value,
   data_.store(this, value, mode);
 }
 
-Tagged<String> RegExpBoilerplateDescription::source() const {
-  return source_.load();
-}
-void RegExpBoilerplateDescription::set_source(Tagged<String> value,
-                                              WriteBarrierMode mode) {
-  source_.store(this, value, mode);
-}
-
 int RegExpBoilerplateDescription::flags() const {
   return flags_.load().value();
 }
@@ -206,7 +198,31 @@ void RegExpBoilerplateDescription::set_flags(int value) {
   flags_.store(this, Smi::FromInt(value));
 }
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(PrototypeSharedClosureInfo)
+Tagged<ObjectBoilerplateDescription>
+PrototypeSharedClosureInfo::boilerplate_description() const {
+  return boilerplate_description_.load();
+}
+void PrototypeSharedClosureInfo::set_boilerplate_description(
+    Tagged<ObjectBoilerplateDescription> value, WriteBarrierMode mode) {
+  boilerplate_description_.store(this, value, mode);
+}
+
+Tagged<ClosureFeedbackCellArray>
+PrototypeSharedClosureInfo::closure_feedback_cell_array() const {
+  return closure_feedback_cell_array_.load();
+}
+void PrototypeSharedClosureInfo::set_closure_feedback_cell_array(
+    Tagged<ClosureFeedbackCellArray> value, WriteBarrierMode mode) {
+  closure_feedback_cell_array_.store(this, value, mode);
+}
+
+Tagged<Context> PrototypeSharedClosureInfo::context() const {
+  return context_.load();
+}
+void PrototypeSharedClosureInfo::set_context(Tagged<Context> value,
+                                             WriteBarrierMode mode) {
+  context_.store(this, value, mode);
+}
 
 }  // namespace v8::internal
 

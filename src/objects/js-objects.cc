@@ -584,6 +584,9 @@ Tagged<String> JSReceiver::class_name() {
     if (IsJSSharedArray(*this)) return roots.SharedArray_string();
     if (IsJSAtomicsMutex(*this)) return roots.AtomicsMutex_string();
     if (IsJSAtomicsCondition(*this)) return roots.AtomicsCondition_string();
+#if V8_ENABLE_WEBASSEMBLY
+    if (IsWasmObject(*this)) return roots.Object_string();
+#endif
     // Other shared values are primitives.
     UNREACHABLE();
   }
@@ -824,7 +827,7 @@ Tagged<Object> SetHashAndUpdateProperties(Tagged<HeapObject> properties,
 
   if (IsPropertyArray(properties)) {
     Cast<PropertyArray>(properties)->SetHash(hash);
-    DCHECK_LT(0, Cast<PropertyArray>(properties)->length());
+    DCHECK_LT(0, Cast<PropertyArray>(properties)->length().value());
     return properties;
   }
 
@@ -883,7 +886,7 @@ void JSReceiver::SetIdentityHash(int hash) {
 
 void JSReceiver::SetProperties(Tagged<HeapObject> properties) {
   DCHECK_IMPLIES(IsPropertyArray(properties) &&
-                     Cast<PropertyArray>(properties)->length() == 0,
+                     Cast<PropertyArray>(properties)->length().value() == 0,
                  properties == GetReadOnlyRoots().empty_property_array());
   DisallowGarbageCollection no_gc;
   int hash = GetIdentityHashHelper(*this);
@@ -2525,8 +2528,7 @@ static const char* NonAPIInstanceTypeToString(InstanceType instance_type) {
 }
 
 // LINT.IfChange(get_header_size)
-int JSObject::GetHeaderSize(InstanceType type,
-                            bool function_has_prototype_slot) {
+int JSObject::GetHeaderSize(InstanceType type) {
   switch (type) {
     case JS_SPECIAL_API_OBJECT_TYPE:
     case JS_API_OBJECT_TYPE:
@@ -2560,6 +2562,8 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSGlobalObject::kHeaderSize;
     case JS_BOUND_FUNCTION_TYPE:
       return JSBoundFunction::kHeaderSize;
+    case JS_FUNCTION_WITHOUT_PROTOTYPE_TYPE:
+      return JSFunctionWithoutPrototype::kHeaderSize;
     case JS_FUNCTION_TYPE:
     case JS_CLASS_CONSTRUCTOR_TYPE:
     case JS_PROMISE_CONSTRUCTOR_TYPE:
@@ -2569,7 +2573,7 @@ int JSObject::GetHeaderSize(InstanceType type,
   case TYPE##_TYPED_ARRAY_CONSTRUCTOR_TYPE:
       TYPED_ARRAYS(TYPED_ARRAY_CONSTRUCTORS_SWITCH)
 #undef TYPED_ARRAY_CONSTRUCTORS_SWITCH
-      return JSFunction::GetHeaderSize(function_has_prototype_slot);
+      return JSFunctionWithPrototype::kHeaderSize;
     case JS_PRIMITIVE_WRAPPER_TYPE:
       return JSPrimitiveWrapper::kHeaderSize;
     case JS_DATE_TYPE:
@@ -2639,6 +2643,8 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSIteratorFlatMapHelper::kHeaderSize;
     case JS_ITERATOR_CONCAT_HELPER_TYPE:
       return JSIteratorConcatHelper::kHeaderSize;
+    case JS_ITERATOR_ZIP_HELPER_TYPE:
+      return JSIteratorZipHelper::kHeaderSize;
     case JS_MODULE_NAMESPACE_TYPE:
       return JSModuleNamespace::kHeaderSize;
     case JS_DEFERRED_MODULE_NAMESPACE_TYPE:
@@ -2928,12 +2934,11 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
       break;
     }
     case JS_REG_EXP_TYPE: {
+      Isolate* isolate = Isolate::Current();
       accumulator->Add("<JSRegExp");
       Tagged<JSRegExp> regexp = Cast<JSRegExp>(*this);
-      if (IsString(regexp->source())) {
-        accumulator->Add(" ");
-        Cast<String>(regexp->source())->StringShortPrint(accumulator);
-      }
+      accumulator->Add(" ");
+      Cast<String>(regexp->source(isolate))->StringShortPrint(accumulator);
       accumulator->Add(">");
 
       break;
@@ -2946,6 +2951,7 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
       TYPED_ARRAYS(TYPED_ARRAY_CONSTRUCTORS_SWITCH)
 #undef TYPED_ARRAY_CONSTRUCTORS_SWITCH
     case JS_CLASS_CONSTRUCTOR_TYPE:
+    case JS_FUNCTION_WITHOUT_PROTOTYPE_TYPE:
     case JS_FUNCTION_TYPE: {
       Tagged<JSFunction> function = Cast<JSFunction>(*this);
       std::unique_ptr<char[]> fun_name = function->shared()->DebugNameCStr();
@@ -3200,8 +3206,9 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
     // can also simply set the map (modulo a special case for mutable
     // double boxes).
     FieldIndex index = FieldIndex::ForDetails(*new_map, details);
-    if (index.is_inobject() || index.outobject_array_index() <
-                                   object->property_array(isolate)->length()) {
+    if (index.is_inobject() ||
+        static_cast<uint32_t>(index.outobject_array_index()) <
+            object->property_array(isolate)->length().value()) {
       // Allocate HeapNumbers for double fields.
       if (index.is_double()) {
         auto value = isolate->factory()->NewHeapNumberWithHoleNaN();
@@ -3258,12 +3265,14 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
 
   int total_size = number_of_fields + unused;
   int external = total_size - inobject;
+  DCHECK_GE(external, 0);
   DirectHandle<PropertyArray> array =
-      isolate->factory()->NewPropertyArray(external);
+      isolate->factory()->NewPropertyArray(static_cast<uint32_t>(external));
 
   // We use this array to temporarily store the inobject properties.
+  DCHECK_GE(inobject, 0);
   DirectHandle<FixedArray> inobject_props =
-      isolate->factory()->NewFixedArray(inobject);
+      isolate->factory()->NewFixedArray(static_cast<uint32_t>(inobject));
 
   DirectHandle<DescriptorArray> old_descriptors(
       old_map->instance_descriptors(isolate), isolate);
@@ -3605,11 +3614,13 @@ void JSObject::AllocateStorageForMap(Isolate* isolate,
 
   DirectHandle<DescriptorArray> descriptors(map->instance_descriptors(isolate),
                                             isolate);
+  DCHECK_GE(inobject, 0);
   DirectHandle<FixedArray> storage =
-      isolate->factory()->NewFixedArray(inobject);
+      isolate->factory()->NewFixedArray(static_cast<uint32_t>(inobject));
 
+  DCHECK_GE(external, 0);
   DirectHandle<PropertyArray> array =
-      isolate->factory()->NewPropertyArray(external);
+      isolate->factory()->NewPropertyArray(static_cast<uint32_t>(external));
 
   for (InternalIndex i : map->IterateOwnDescriptors()) {
     PropertyDetails details = descriptors->GetDetails(i);
@@ -4036,8 +4047,8 @@ void JSObject::MigrateSlowToFast(DirectHandle<JSObject> object,
   }
 
   // Allocate the property array for the fields.
-  DirectHandle<PropertyArray> fields =
-      factory->NewPropertyArray(number_of_allocated_fields);
+  DirectHandle<PropertyArray> fields = factory->NewPropertyArray(
+      static_cast<uint32_t>(number_of_allocated_fields));
 
   bool is_transitionable_elements_kind =
       IsTransitionableFastElementsKind(old_map->elements_kind());
@@ -5240,7 +5251,8 @@ bool JSObject::UnregisterPrototypeUser(DirectHandle<Map> user,
                                          isolate);
   DirectHandle<WeakArrayList> prototype_users(
       Cast<WeakArrayList>(proto_info->prototype_users()), isolate);
-  DCHECK_EQ(prototype_users->Get(slot), MakeWeak(*user));
+  DCHECK_GE(slot, 0);
+  DCHECK_EQ(prototype_users->Get(static_cast<uint32_t>(slot)), MakeWeak(*user));
   PrototypeUsers::MarkSlotEmpty(*prototype_users, slot);
   if (v8_flags.trace_prototype_users) {
     PrintF("Unregistering %p as a user of prototype %p.\n",
@@ -5319,8 +5331,9 @@ void InvalidatePrototypeChainsInternal(Tagged<Map> map) {
     }
     Tagged<WeakArrayList> prototype_users =
         Cast<WeakArrayList>(proto_info->prototype_users());
+    const uint32_t prototype_users_len = prototype_users->length().value();
     // For now, only maps register themselves as users.
-    for (int i = PrototypeUsers::kFirstIndex; i < prototype_users->length();
+    for (uint32_t i = PrototypeUsers::kFirstIndex; i < prototype_users_len;
          ++i) {
       Tagged<HeapObject> heap_object;
       if (prototype_users->Get(i).GetHeapObjectIfWeak(&heap_object) &&
@@ -5783,8 +5796,6 @@ Tagged<Object> JSObject::RawFastPropertyAtCompareAndSwap(
                                                        new_value, tag);
       });
 }
-
-bool JSGlobalProxy::IsDetached() { return !GetCreationContext().has_value(); }
 
 void JSGlobalObject::InvalidatePropertyCell(DirectHandle<JSGlobalObject> global,
                                             DirectHandle<Name> name) {

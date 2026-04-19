@@ -18,7 +18,7 @@
 #endif
 
 #include "src/base/bits.h"
-#include "src/base/cpu.h"
+#include "src/base/cpu/cpu.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/deoptimizer/deoptimizer.h"
@@ -5215,6 +5215,60 @@ void Assembler::negq(Register dst, Operand src) {
                                    kFlagUpdate, kNewDataDest);
   emit(0xF7);
   emit_operand(0x3, src);
+}
+
+void Assembler::shift(Register dst, Register src, Immediate shift_amount,
+                      int subcode, int size) {
+  EnsureSpace ensure_space(this);
+  VexW w = size == kInt64Size ? kW1 : kW0;
+  DCHECK(size == kInt64Size ? is_uint6(shift_amount.value_)
+                            : is_uint5(shift_amount.value_));
+  emit_legacy_extended_evex_prefix(dst, rax /* dummy*/, src, kNoPrefix, w,
+                                   kFlagUpdate, kNewDataDest);
+  if (shift_amount.value_ == 1) {
+    emit(0xD1);
+    emit_modrm(subcode, src);
+  } else {
+    emit(0xC1);
+    emit_modrm(subcode, src);
+    emit(shift_amount.value_);
+  }
+}
+
+void Assembler::shift(Register dst, Operand src, Immediate shift_amount,
+                      int subcode, int size) {
+  EnsureSpace ensure_space(this);
+  VexW w = size == kInt64Size ? kW1 : kW0;
+  DCHECK(size == kInt64Size ? is_uint6(shift_amount.value_)
+                            : is_uint5(shift_amount.value_));
+  emit_legacy_extended_evex_prefix(dst, rax /* dummy*/, src, kNoPrefix, w,
+                                   kFlagUpdate, kNewDataDest);
+  if (shift_amount.value_ == 1) {
+    emit(0xD1);
+    emit_operand(subcode, src);
+  } else {
+    emit(0xC1);
+    emit_operand(subcode, src);
+    emit(shift_amount.value_);
+  }
+}
+
+void Assembler::shift(Register dst, Register src, int subcode, int size) {
+  EnsureSpace ensure_space(this);
+  VexW w = size == kInt64Size ? kW1 : kW0;
+  emit_legacy_extended_evex_prefix(dst, rax /* dummy*/, src, kNoPrefix, w,
+                                   kFlagUpdate, kNewDataDest);
+  emit(0xD3);
+  emit_modrm(subcode, src);
+}
+
+void Assembler::shift(Register dst, Operand src, int subcode, int size) {
+  EnsureSpace ensure_space(this);
+  VexW w = size == kInt64Size ? kW1 : kW0;
+  emit_legacy_extended_evex_prefix(dst, rax /* dummy*/, src, kNoPrefix, w,
+                                   kFlagUpdate, kNewDataDest);
+  emit(0xD3);
+  emit_operand(subcode, src);
 }
 #endif  // V8_ENABLE_APX_F
 

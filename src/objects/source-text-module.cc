@@ -793,7 +793,9 @@ void SourceTextModule::GatherAvailableAncestors(
     worklist.pop();
 
     // 1. For each Module m of module.[[AsyncParentModules]], do
-    for (int i = module->AsyncParentModuleCount(); i-- > 0;) {
+    const uint32_t module_count = module->AsyncParentModuleCount();
+    DCHECK_LE(module_count, kMaxInt);
+    for (int i = static_cast<int>(module_count); i-- > 0;) {
       Handle<SourceTextModule> m = module->GetAsyncParentModule(isolate, i);
 
       // a. If execList does not contain m and
@@ -1031,6 +1033,9 @@ Maybe<bool> SourceTextModule::AsyncModuleExecutionFulfilled(
       MaybeDirectHandle<Object> exception;
       // ii. If result is an abrupt completion, then
       if (!ExecuteModule(isolate, m, &exception).ToHandle(&unused_result)) {
+        DCHECK_IMPLIES(exception.IsEmpty(),
+                       isolate->is_execution_terminating());
+        if (isolate->is_execution_terminating()) return {};
         // 1. Perform AsyncModuleExecutionRejected(m, result.[[Value]]).
         AsyncModuleExecutionRejected(isolate, m, exception.ToHandleChecked());
       } else {  // iii. Else,
@@ -1100,7 +1105,8 @@ void SourceTextModule::AsyncModuleExecutionRejected(
   }
 
   // 8. For each Cyclic Module Record m of module.[[AsyncParentModules]], do
-  for (int i = 0; i < module->AsyncParentModuleCount(); i++) {
+  const uint32_t module_count = module->AsyncParentModuleCount();
+  for (uint32_t i = 0; i < module_count; i++) {
     // a. Perform AsyncModuleExecutionRejected(m, error).
     DirectHandle<SourceTextModule> m = module->GetAsyncParentModule(isolate, i);
     AsyncModuleExecutionRejected(isolate, m, exception);
@@ -1583,7 +1589,7 @@ void SourceTextModule::InnerGetStalledTopLevelAwaitModule(
   // it's what we are looking for. Add it to the results.
   if (!HasPendingAsyncDependencies() && HasAsyncEvaluationOrdinal()) {
     DCHECK(HasAsyncEvaluationOrdinal());
-    result->push_back(direct_handle(*this, isolate));
+    result->push_back(direct_handle(Tagged<SourceTextModule>(this), isolate));
     return;
   }
   // The module isn't what we are looking for, continue looking in the graph.

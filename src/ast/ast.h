@@ -1253,16 +1253,21 @@ class LiteralProperty : public ZoneObject {
 // Property is used for passing information
 // about an object literal's properties from the parser
 // to the code generator.
+#define OBJECT_LITERAL_PROPERTY_KIND_LIST(V)                                   \
+  V(CONSTANT)             /* Property with constant value (compile time). */   \
+  V(COMPUTED)             /* Property with computed value (execution time). */ \
+  V(MATERIALIZED_LITERAL) /* Property value is a materialized literal. */      \
+  V(GETTER)                                                                    \
+  V(SETTER)    /* Property is an accessor function. */                         \
+  V(PROTOTYPE) /* Property is __proto__. */                                    \
+  V(SPREAD)
+
 class ObjectLiteralProperty final : public LiteralProperty {
  public:
   enum Kind : uint8_t {
-    CONSTANT,              // Property with constant value (compile time).
-    COMPUTED,              // Property with computed value (execution time).
-    MATERIALIZED_LITERAL,  // Property value is a materialized literal.
-    GETTER,
-    SETTER,     // Property is an accessor function.
-    PROTOTYPE,  // Property is __proto__.
-    SPREAD
+#define DEFINE_KIND(kind) kind,
+    OBJECT_LITERAL_PROPERTY_KIND_LIST(DEFINE_KIND)
+#undef DEFINE_KIND
   };
 
   Kind kind() const { return kind_; }
@@ -1271,6 +1276,36 @@ class ObjectLiteralProperty final : public LiteralProperty {
 
   void set_emit_store(bool emit_store);
   bool emit_store() const;
+
+  // For the first instance of a property name in an object literal (by
+  // insertion order), this is the index of the last instance. The last
+  // instance is the one that provides the value actually serialized into the
+  // boilerplate.
+  void set_last_instance_index(int index) {
+    DCHECK(is_first_instance_of_key());
+    value_index_ = index;
+  }
+  int last_instance_index() const {
+    DCHECK(is_first_instance_of_key());
+    return value_index_;
+  }
+
+  void set_is_first_instance_of_key(bool is_first) {
+    is_first_instance_of_key_ = is_first;
+  }
+  bool is_first_instance_of_key() const { return is_first_instance_of_key_; }
+
+  // For an instance of a property name in an object literal, this indicates
+  // whether the last instance of this property name is an accessor that can
+  // still be paired with a complementary accessor earlier in the object
+  // literal.
+  void set_is_complementary_accessor_candidate(bool is_candidate) {
+    DCHECK(!is_candidate || kind() == GETTER || kind() == SETTER);
+    is_complementary_accessor_candidate_ = is_candidate;
+  }
+  bool is_complementary_accessor_candidate() const {
+    return is_complementary_accessor_candidate_;
+  }
 
   bool IsNullPrototype() const {
     return IsPrototype() && value()->IsNullLiteral();
@@ -1287,7 +1322,10 @@ class ObjectLiteralProperty final : public LiteralProperty {
                         Expression* value, bool is_computed_name);
 
   Kind kind_;
-  bool emit_store_;
+  bool emit_store_ = true;
+  bool is_first_instance_of_key_ = true;
+  bool is_complementary_accessor_candidate_ = false;
+  int value_index_ = -1;
 };
 
 // class for build object boilerplate
@@ -1539,12 +1577,11 @@ class VariableProxy final : public Expression {
     bit_field_ = IsNewTargetField::update(bit_field_, true);
   }
 
-  bool is_inside_try_catch_with_outer_generator() const {
-    return IsInsideTryCatchWithOuterGeneratorField::decode(bit_field_);
+  bool is_inside_try_catch() const {
+    return IsInsideTryCatchField::decode(bit_field_);
   }
-  void set_is_inside_try_catch_with_outer_generator() {
-    bit_field_ =
-        IsInsideTryCatchWithOuterGeneratorField::update(bit_field_, true);
+  void set_is_inside_try_catch() {
+    bit_field_ = IsInsideTryCatchField::update(bit_field_, true);
   }
 
   HoleCheckMode hole_check_mode() const {
@@ -1616,7 +1653,7 @@ class VariableProxy final : public Expression {
                   IsResolvedField::encode(false) |
                   IsRemovedFromUnresolvedField::encode(false) |
                   IsHomeObjectField::encode(false) |
-                  IsInsideTryCatchWithOuterGeneratorField::encode(false) |
+                  IsInsideTryCatchField::encode(false) |
                   HoleCheckModeField::encode(HoleCheckMode::kElided);
   }
 
@@ -1627,10 +1664,8 @@ class VariableProxy final : public Expression {
   using IsRemovedFromUnresolvedField = IsResolvedField::Next<bool, 1>;
   using IsNewTargetField = IsRemovedFromUnresolvedField::Next<bool, 1>;
   using IsHomeObjectField = IsNewTargetField::Next<bool, 1>;
-  using IsInsideTryCatchWithOuterGeneratorField =
-      IsHomeObjectField::Next<bool, 1>;
-  using HoleCheckModeField =
-      IsInsideTryCatchWithOuterGeneratorField::Next<HoleCheckMode, 1>;
+  using IsInsideTryCatchField = IsHomeObjectField::Next<bool, 1>;
+  using HoleCheckModeField = IsInsideTryCatchField::Next<HoleCheckMode, 1>;
 
   union {
     const AstRawString* raw_name_;  // if !is_resolved_

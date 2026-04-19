@@ -7,6 +7,7 @@
 
 #include "include/v8-initialization.h"
 #include "src/base/bounds.h"
+#include "src/base/small-vector.h"
 #include "src/codegen/handler-table.h"
 #include "src/codegen/safepoint-table.h"
 #include "src/common/assert-scope.h"
@@ -452,7 +453,7 @@ class V8_EXPORT_PRIVATE FrameSummary {
     JavaScriptFrameSummary(Isolate* isolate, Tagged<Object> receiver,
                            Tagged<JSFunction> function,
                            Tagged<AbstractCode> abstract_code, int code_offset,
-                           bool is_constructor, Tagged<FixedArray> parameters);
+                           bool is_constructor);
 
     void EnsureSourcePositionsAvailable();
     bool AreSourcePositionsAvailable() const;
@@ -462,7 +463,6 @@ class V8_EXPORT_PRIVATE FrameSummary {
     Handle<AbstractCode> abstract_code() const { return abstract_code_; }
     int code_offset() const { return code_offset_; }
     bool is_constructor() const { return is_constructor_; }
-    DirectHandle<FixedArray> parameters() const { return parameters_; }
     bool is_subject_to_debugging() const;
     int SourcePosition() const;
     int SourceStatementPosition() const;
@@ -476,7 +476,6 @@ class V8_EXPORT_PRIVATE FrameSummary {
     Handle<AbstractCode> abstract_code_;
     int code_offset_;
     bool is_constructor_;
-    Handle<FixedArray> parameters_;
   };
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -640,7 +639,7 @@ class V8_EXPORT_PRIVATE FrameSummary {
 // The functions are ordered bottom-to-top (i.e. summaries.last() is the
 // top-most activation; caller comes before callee).
 struct FrameSummaries {
-  std::vector<FrameSummary> frames;
+  base::SmallVector<FrameSummary, 3> frames;
   bool top_frame_is_construct_call = false;
 
   FrameSummaries() = default;
@@ -734,7 +733,6 @@ class CommonFrameWithJSLinkage : public CommonFrame {
   virtual Tagged<Object> receiver() const;
   virtual Tagged<Object> GetParameter(int index) const;
   virtual uint32_t ComputeParametersCount() const;
-  DirectHandle<FixedArray> GetParameters(bool never_allocate) const;
   virtual uint32_t GetActualArgumentCount() const;
 
   Tagged<HeapObject> unchecked_code() const override;
@@ -1583,6 +1581,7 @@ class WasmLiftoffSetupFrame : public TypedFrame {
 
   FullObjectSlot wasm_instance_data_slot() const;
 
+  Address CallingPC() const;
   int GetDeclaredFunctionIndex() const;
 
   wasm::NativeModule* GetNativeModule() const;

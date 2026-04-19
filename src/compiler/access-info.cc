@@ -49,13 +49,13 @@ bool CanInlinePropertyAccess(MapRef map, AccessMode access_mode) {
       return access_mode == AccessMode::kLoad &&
              map.object()->is_prototype_map();
     }
-    return !map.object()->has_named_interceptor() &&
+    return !map.has_named_interceptor() &&
            // TODO(verwaest): Allowlist contexts to which we have access.
            !map.is_access_check_needed();
   }
 #if V8_ENABLE_WEBASSEMBLY
   if (IsWasmObjectMap(*map.object())) {
-    DCHECK(!map.object()->has_named_interceptor());
+    DCHECK(!map.has_named_interceptor());
     DCHECK(!map.is_access_check_needed());
     // Accesses to Wasm objects all go through the prototype chain, but
     // we can't express that in this helper function.
@@ -557,7 +557,7 @@ std::optional<ElementAccessInfo> AccessInfoFactory::ComputeElementAccessInfo(
         if (!trap_value.AsHeapObject().IsJSFunction()) return {};
 
         SharedFunctionInfoRef sfi = trap_value.AsJSFunction().shared(broker());
-        Tagged<Object> trusted_data =
+        Tagged<Union<Smi, TrustedObject>> trusted_data =
             sfi.object()->GetTrustedData(broker()->local_isolate_or_isolate());
         Tagged<WasmExportedFunctionData> wasm_data;
         if (!TryCast(trusted_data, &wasm_data)) return {};

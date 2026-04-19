@@ -24,17 +24,32 @@ class StructBodyDescriptor;
 
 #include "torque-generated/src/objects/literal-objects-tq.inc"
 
-class PrototypeSharedClosureInfo
-    : public TorqueGeneratedPrototypeSharedClosureInfo<
-          PrototypeSharedClosureInfo, Struct> {
+V8_OBJECT class PrototypeSharedClosureInfo : public StructLayout {
  public:
+  inline Tagged<ObjectBoilerplateDescription> boilerplate_description() const;
+  inline void set_boilerplate_description(
+      Tagged<ObjectBoilerplateDescription> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<ClosureFeedbackCellArray> closure_feedback_cell_array() const;
+  inline void set_closure_feedback_cell_array(
+      Tagged<ClosureFeedbackCellArray> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<Context> context() const;
+  inline void set_context(Tagged<Context> value,
+                          WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
   DECL_PRINTER(PrototypeSharedClosureInfo)
   DECL_VERIFIER(PrototypeSharedClosureInfo)
 
   using BodyDescriptor = StructBodyDescriptor;
 
-  TQ_OBJECT_CONSTRUCTORS(PrototypeSharedClosureInfo)
-};
+ public:
+  TaggedMember<ObjectBoilerplateDescription> boilerplate_description_;
+  TaggedMember<ClosureFeedbackCellArray> closure_feedback_cell_array_;
+  TaggedMember<Context> context_;
+} V8_OBJECT_END;
 
 class ObjectBoilerplateDescriptionShape final : public AllStatic {
  public:
@@ -139,10 +154,6 @@ V8_OBJECT class RegExpBoilerplateDescription : public StructLayout {
   inline void set_data(Tagged<RegExpData> value,
                        WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  inline Tagged<String> source() const;
-  inline void set_source(Tagged<String> value,
-                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
-
   inline int flags() const;
   inline void set_flags(int value);
 
@@ -157,14 +168,13 @@ V8_OBJECT class RegExpBoilerplateDescription : public StructLayout {
   friend struct ObjectTraits<RegExpBoilerplateDescription>;
 
   TrustedPointerMember<RegExpData, kRegExpDataIndirectPointerTag> data_;
-  TaggedMember<String> source_;
   TaggedMember<Smi> flags_;
 } V8_OBJECT_END;
 
 template <>
 struct ObjectTraits<RegExpBoilerplateDescription> {
   using BodyDescriptor = StackedBodyDescriptor<
-      FixedBodyDescriptor<offsetof(RegExpBoilerplateDescription, source_),
+      FixedBodyDescriptor<offsetof(RegExpBoilerplateDescription, flags_),
                           sizeof(RegExpBoilerplateDescription),
                           sizeof(RegExpBoilerplateDescription)>,
       WithStrongTrustedPointer<offsetof(RegExpBoilerplateDescription, data_),

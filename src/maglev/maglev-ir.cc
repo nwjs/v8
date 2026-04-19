@@ -705,7 +705,7 @@ Tribool ValueNode::IsTheHole() const {
   }
   if (const LoadTaggedField* load = TryCast<LoadTaggedField>()) {
     // Modules variables can be the hole.
-    if (load->offset() == Cell::kValueOffset) {
+    if (load->offset() == offsetof(Cell, maybe_value_)) {
       return Tribool::kMaybe;
     }
     return Tribool::kFalse;
@@ -715,6 +715,9 @@ Tribool ValueNode::IsTheHole() const {
       return Tribool::kFalse;
     }
     return Tribool::kMaybe;
+  }
+  if (Is<Identity>()) {
+    return UnwrapIdentities()->IsTheHole();
   }
   if (const Phi* phi = TryCast<Phi>()) {
     if (!phi->is_loop_phi() && !phi->is_exception_phi()) {
@@ -4673,6 +4676,11 @@ void Abort::GenerateCode(MaglevAssembler* masm, const ProcessingState& state) {
   __ Trap();
 }
 
+void Trap::SetValueLocationConstraints() {}
+void Trap::GenerateCode(MaglevAssembler* masm, const ProcessingState& state) {
+  __ Trap();
+}
+
 void LogicalNot::SetValueLocationConstraints() {
   // MaglevAssembler::IsRootConstant (used in GenerateCode below) does not
   // support constant inputs (which UseAny allows). Constants should have been
@@ -5705,6 +5713,20 @@ void StringSlice::GenerateCode(MaglevAssembler* masm,
   __ LoadRoot(kReturnRegister0, RootIndex::kempty_string);
 
   __ bind(&done_all);
+}
+
+void StringIndexOf::SetValueLocationConstraints() {
+  using D = CallInterfaceDescriptorFor<Builtin::kStringIndexOf>::type;
+  UseFixed(StringInput(), D::GetRegisterParameter(0));
+  UseFixed(SearchStringInput(), D::GetRegisterParameter(1));
+  UseFixed(PositionInput(), D::GetRegisterParameter(2));
+  DefineAsFixed(this, kReturnRegister0);
+}
+
+void StringIndexOf::GenerateCode(MaglevAssembler* masm,
+                                 const ProcessingState& state) {
+  __ CallBuiltin<Builtin::kStringIndexOf>(StringInput(), SearchStringInput(),
+                                          PositionInput());
 }
 
 void StringConcat::SetValueLocationConstraints() {

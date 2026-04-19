@@ -1190,8 +1190,10 @@ void Debug::RecordWasmScriptWithBreakpoints(DirectHandle<Script> script) {
   }
   {
     DisallowGarbageCollection no_gc;
-    for (int idx = wasm_scripts_with_break_points_->length() - 1; idx >= 0;
-         --idx) {
+    const uint32_t wasm_scripts_len =
+        wasm_scripts_with_break_points_->length().value();
+    DCHECK_LE(wasm_scripts_len, kMaxInt);
+    for (int idx = static_cast<int>(wasm_scripts_len) - 1; idx >= 0; --idx) {
       Tagged<HeapObject> wasm_script;
       if (wasm_scripts_with_break_points_->Get(idx).GetHeapObject(
               &wasm_script) &&
@@ -1223,8 +1225,10 @@ void Debug::ClearAllBreakPoints() {
   // Clear all wasm breakpoints.
   if (!wasm_scripts_with_break_points_.is_null()) {
     DisallowGarbageCollection no_gc;
-    for (int idx = wasm_scripts_with_break_points_->length() - 1; idx >= 0;
-         --idx) {
+    const uint32_t wasm_scripts_len =
+        wasm_scripts_with_break_points_->length().value();
+    DCHECK_LE(wasm_scripts_len, kMaxInt);
+    for (int idx = static_cast<int>(wasm_scripts_len) - 1; idx >= 0; --idx) {
       Tagged<HeapObject> raw_wasm_script;
       if (wasm_scripts_with_break_points_->Get(idx).GetHeapObject(
               &raw_wasm_script)) {
@@ -1499,7 +1503,8 @@ void Debug::PrepareStep(StepAction step_action) {
 #endif  // V8_ENABLE_DRUMBRAKE
     // Handle stepping in wasm.
     WasmFrame* wasm_frame = WasmFrame::cast(frame);
-    auto* debug_info = wasm_frame->native_module()->GetDebugInfo();
+    wasm::NativeModule* native_module = wasm_frame->native_module();
+    wasm::DebugInfo* debug_info = native_module->GetDebugInfo();
     if (debug_info->PrepareStep(wasm_frame)) {
       UpdateHookOnFunctionCall();
       return;
@@ -1534,23 +1539,28 @@ void Debug::PrepareStep(StepAction step_action) {
           // by some other async function, should resume the latter. The return
           // value here is either a JSPromise or a JSGeneratorObject (for the
           // initial yield of async generators).
-          DirectHandle<JSReceiver> return_value(
-              Cast<JSReceiver>(thread_local_.return_value_), isolate_);
-          DirectHandle<Object> awaited_by_holder = JSReceiver::GetDataProperty(
-              isolate_, return_value,
-              isolate_->factory()->promise_awaited_by_symbol());
-          if (IsWeakFixedArray(*awaited_by_holder, isolate_)) {
-            auto weak_fixed_array = Cast<WeakFixedArray>(awaited_by_holder);
-            if (weak_fixed_array->ulength().value() == 1 &&
-                weak_fixed_array->get(0).IsWeak()) {
-              DirectHandle<HeapObject> awaited_by(
-                  weak_fixed_array->get(0).GetHeapObjectAssumeWeak(isolate_),
-                  isolate_);
-              if (IsJSGeneratorObject(*awaited_by)) {
-                DCHECK(!has_suspended_generator());
-                thread_local_.suspended_generator_ = *awaited_by;
-                ClearStepping();
-                return;
+          // It's possible to change the return value to something else though
+          // via the Chrome DevTools Protocol, so double-check first.
+          if (IsJSReceiver(thread_local_.return_value_)) {
+            DirectHandle<JSReceiver> return_value(
+                Cast<JSReceiver>(thread_local_.return_value_), isolate_);
+            DirectHandle<Object> awaited_by_holder =
+                JSReceiver::GetDataProperty(
+                    isolate_, return_value,
+                    isolate_->factory()->promise_awaited_by_symbol());
+            if (IsWeakFixedArray(*awaited_by_holder, isolate_)) {
+              auto weak_fixed_array = Cast<WeakFixedArray>(awaited_by_holder);
+              if (weak_fixed_array->ulength().value() == 1 &&
+                  weak_fixed_array->get(0).IsWeak()) {
+                DirectHandle<HeapObject> awaited_by(
+                    weak_fixed_array->get(0).GetHeapObjectAssumeWeak(isolate_),
+                    isolate_);
+                if (IsJSGeneratorObject(*awaited_by)) {
+                  DCHECK(!has_suspended_generator());
+                  thread_local_.suspended_generator_ = *awaited_by;
+                  ClearStepping();
+                  return;
+                }
               }
             }
           }
@@ -1573,7 +1583,8 @@ void Debug::PrepareStep(StepAction step_action) {
           }
           // Handle stepping out into Wasm.
           WasmFrame* wasm_frame = WasmFrame::cast(frames_it.frame());
-          auto* debug_info = wasm_frame->native_module()->GetDebugInfo();
+          wasm::NativeModule* native_module = wasm_frame->native_module();
+          wasm::DebugInfo* debug_info = native_module->GetDebugInfo();
           if (debug_info->IsFrameBlackboxed(wasm_frame)) continue;
           debug_info->PrepareStepOutTo(wasm_frame);
           return;
@@ -2422,7 +2433,8 @@ DirectHandle<FixedArray> Debug::GetLoadedScripts() {
     return factory->empty_fixed_array();
   }
   auto array = Cast<WeakArrayList>(factory->script_list());
-  Handle<FixedArray> results = factory->NewFixedArray(array->length());
+  const uint32_t array_length = array->length().value();
+  Handle<FixedArray> results = factory->NewFixedArray(array_length);
   int length = 0;
   {
     Script::Iterator iterator(isolate_);

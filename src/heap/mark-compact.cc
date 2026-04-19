@@ -443,6 +443,11 @@ void MarkCompactCollector::StartMarking(
   heap_->young_external_pointer_space()->StartCompactingIfNeeded();
   heap_->old_external_pointer_space()->StartCompactingIfNeeded();
   heap_->cpp_heap_pointer_space()->StartCompactingIfNeeded();
+  if (heap_->isolate()->owns_shareable_data()) {
+    heap_->isolate()
+        ->shared_external_pointer_space()
+        ->StartCompactingIfNeeded();
+  }
 #endif  // V8_COMPRESS_POINTERS
 
   // CppHeap's marker must be initialized before the V8 marker to allow
@@ -1530,8 +1535,8 @@ class ProfilingMigrationObserver final : public MigrationObserver {
               CodeMoveEvent(TrustedCast<InstructionStream>(src),
                             TrustedCast<InstructionStream>(dst)));
     } else if ((dest == OLD_SPACE || dest == TRUSTED_SPACE)) {
-      Tagged<BytecodeArray> bytecode_array;
-      if (TryCast(dst, &bytecode_array)) {
+      if (Is<BytecodeArray>(dst)) {
+        Tagged<BytecodeArray> bytecode_array = TrustedCast<BytecodeArray>(dst);
         // TODO(saelo): remove `dest == OLD_SPACE` once BytecodeArrays are
         // allocated in trusted space.
         PROFILE(
@@ -2522,8 +2527,9 @@ void MarkCompactCollector::RetainMaps() {
       !heap_->ShouldReduceMemory() && v8_flags.retain_maps_for_n_gc != 0;
 
   for (Tagged<WeakArrayList> retained_maps : heap_->FindAllRetainedMaps()) {
-    DCHECK_EQ(0, retained_maps->length() % 2);
-    for (int i = 0; i < retained_maps->length(); i += 2) {
+    const uint32_t retained_maps_len = retained_maps->length().value();
+    DCHECK_EQ(0, retained_maps_len % 2);
+    for (uint32_t i = 0; i < retained_maps_len; i += 2) {
       Tagged<MaybeObject> value = retained_maps->Get(i);
       Tagged<HeapObject> map_heap_object;
       if (!value.GetHeapObjectIfWeak(&map_heap_object)) {
@@ -2847,11 +2853,20 @@ class FullStringForwardingTableCleaner final
            v8_flags.transition_strings_during_gc_with_stack);
     StringForwardingTable* forwarding_table =
         isolate_->string_forwarding_table();
+#ifdef V8_COMPRESS_POINTERS
+    // Black allocate EPT entries for external strings, since marking is already
+    // finished when we transition strings. We only transition strings that are
+    // alive.
+    isolate_->shared_external_pointer_space()->set_allocate_black(true);
+#endif  // V8_COMPRESS_POINTERS
     forwarding_table->IterateElements(
         [&](StringForwardingTable::Record* record) {
           TransitionStrings(record);
         });
     forwarding_table->Reset();
+#ifdef V8_COMPRESS_POINTERS
+    isolate_->shared_external_pointer_space()->set_allocate_black(false);
+#endif  // V8_COMPRESS_POINTERS
   }
 
   // When performing GC with a stack, we conservatively assume that
@@ -3063,7 +3078,8 @@ void MarkCompactCollector::ClearNonLiveReferences() {
   Isolate* const isolate = heap_->isolate();
   std::atomic<int> string_table_removed_count{0};
 
-  if (isolate->OwnsStringTables()) {
+  if (isolate->is_shared_space_isolate() ||
+      V8_UNLIKELY(v8_flags.always_use_string_forwarding_table)) {
     TRACE_GC(heap_->tracer(),
              GCTracer::Scope::MC_CLEAR_STRING_FORWARDING_TABLE);
     // Clear string forwarding table. Live strings are transitioned to
@@ -3089,6 +3105,17 @@ void MarkCompactCollector::ClearNonLiveReferences() {
         MarkingHelper::IsUnmarkedAndNotAlwaysLive(
             heap_, marking_state_, Cast<HeapObject>(maybe_caller_context))) {
       isolate->clear_topmost_script_having_context();
+    }
+  }
+
+  {
+    // Clear the EnqueueMicrotask cache if the NativeContext is not alive.
+    Tagged<Object> cached_context = isolate->current_microtask_native_context();
+    if (cached_context.IsHeapObject() &&
+        MarkingHelper::IsUnmarkedAndNotAlwaysLive(
+            heap_, marking_state_, Cast<HeapObject>(cached_context))) {
+      isolate->set_current_microtask_native_context(Smi::zero());
+      isolate->isolate_data()->set_current_microtask_queue(nullptr);
     }
   }
 
@@ -5791,7 +5818,7 @@ void MarkCompactCollector::UpdatePointersAfterEvacuation() {
     // All entries are objects in shared space (unless
     // --always-use-forwarding-table), so we only need to update pointers during
     // a shared GC.
-    if (heap_->isolate()->OwnsStringTables() ||
+    if (heap_->isolate()->is_shared_space_isolate() ||
         V8_UNLIKELY(v8_flags.always_use_string_forwarding_table)) {
       heap_->isolate()->string_forwarding_table()->UpdateAfterFullEvacuation();
     }
@@ -5897,7 +5924,8 @@ void MarkCompactCollector::UpdatePointersInPointerTables() {
         if (!relocated_object.is_null()) {
           DCHECK_EQ(handle, relocated_object->self_indirect_pointer_handle());
           auto instance_type = relocated_object->map()->instance_type();
-          bool shared = HeapLayout::InAnySharedSpace(relocated_object);
+          SharedFlag shared =
+              SharedFlag(HeapLayout::InAnySharedSpace(relocated_object));
           auto tag = IndirectPointerTagFromInstanceType(instance_type, shared);
           tpt->Set(handle, relocated_object.ptr(), tag);
         }
@@ -5912,7 +5940,8 @@ void MarkCompactCollector::UpdatePointersInPointerTables() {
         if (!relocated_object.is_null()) {
           DCHECK_EQ(handle, relocated_object->self_indirect_pointer_handle());
           auto instance_type = relocated_object->map()->instance_type();
-          bool shared = HeapLayout::InAnySharedSpace(relocated_object);
+          SharedFlag shared =
+              SharedFlag(HeapLayout::InAnySharedSpace(relocated_object));
           auto tag = IndirectPointerTagFromInstanceType(instance_type, shared);
           DCHECK(IsSharedTrustedPointerType(tag));
           stpt->Set(handle, relocated_object.ptr(), tag);

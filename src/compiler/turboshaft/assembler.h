@@ -722,11 +722,12 @@ class LoopLabel : public LabelBase<true, Ts...> {
       SourceLocation bind_location = SourceLocation::CurrentIfDebug()) {
 #ifdef DEBUG
     if (loop_header_data_.block->IsBound()) {
-      V8_Fatal(bind_location.FileName(), static_cast<int>(bind_location.Line()),
-               "TSA: Trying to BIND a Label that is already bound. The Label "
-               "is defined here: %s, line %d",
-               loop_header_data_.def_location.FileName(),
-               static_cast<int>(loop_header_data_.def_location.Line()));
+      FATAL_WITH_LOC(
+          bind_location,
+          "TSA: Trying to BIND a Label that is already bound. The Label "
+          "is defined here: %s, line %d",
+          loop_header_data_.def_location.FileName(),
+          static_cast<int>(loop_header_data_.def_location.Line()));
     }
 #endif
     if (!assembler.Bind(loop_header_data_.block, bind_location)) {
@@ -1191,6 +1192,15 @@ class GraphEmitter : public Next {
   using node_t = OpIndex;
   using block_t = Block;
 
+  // By default, source positions are copied from the origin operation, but
+  // reducers can override this method to provide custom source position
+  // mapping.
+  SourcePosition GetSourcePositionFor(OpIndex index) {
+    OpIndex origin = Asm().output_graph().operation_origins()[index];
+    return origin.valid() ? Asm().input_graph().source_positions()[origin]
+                          : SourcePosition::Unknown();
+  }
+
   template <class Op, class... Args>
   OpIndex Emit(Args... args) {
     static_assert((std::is_base_of_v<Operation, Op>));
@@ -1200,6 +1210,13 @@ class GraphEmitter : public Next {
     Op& op = Asm().output_graph().template Add<Op>(args...);
     Asm().output_graph().operation_origins()[result] =
         Asm().current_operation_origin();
+    // During graph building, the input graph's source positions are empty
+    // and the origin might not be a valid OpIndex. So we only track source
+    // positions if the input graph already has them.
+    if (!Asm().input_graph().source_positions().empty()) {
+      Asm().output_graph().source_positions()[result] =
+          Asm().GetSourcePositionFor(result);
+    }
 #ifdef DEBUG
     if (v8_flags.turboshaft_trace_intermediate_reductions) {
       std::cout << std::setw(Asm().intermediate_tracing_depth()) << ' ' << "["
@@ -4715,6 +4732,11 @@ class AssemblerOpInterface : public Next {
                                             right_high, kind);
   }
 
+  V<Tuple<Word64, Word64>> Word64MulWide(V<Word64> left, V<Word64> right,
+                                         Word64MulWideOp::Kind kind) {
+    return ReduceIfReachableWord64MulWide(left, right, kind);
+  }
+
   V<Word32> StringAt(V<String> string, V<WordPtr> position,
                      StringAtOp::Kind kind) {
     return ReduceIfReachableStringAt(string, position, kind);
@@ -5075,7 +5097,7 @@ class AssemblerOpInterface : public Next {
     return ReduceIfReachableWasmTypeCast(object, rtt, config);
   }
 
-  V<Object> AnyConvertExtern(V<Object> input, bool is_shared) {
+  V<Object> AnyConvertExtern(V<Object> input, SharedFlag is_shared) {
     return ReduceIfReachableAnyConvertExtern(input, is_shared);
   }
 
@@ -5088,6 +5110,13 @@ class AssemblerOpInterface : public Next {
     requires(is_subtype_v<T, Object>)
   {
     return ReduceIfReachableWasmTypeAnnotation(value, type);
+  }
+
+  // Identity operation that carries a pre-call FrameState for JS-to-Wasm
+  // wrapper inlining.
+  V<Object> ProcessWasmArgument(V<Object> value,
+                                V<turboshaft::FrameState> frame_state) {
+    return ReduceIfReachableProcessWasmArgument(value, frame_state);
   }
 
   V<Any> StructGet(V<WasmStructNullable> object, const wasm::StructType* type,
@@ -5144,19 +5173,26 @@ class AssemblerOpInterface : public Next {
   }
 
   V<Word32> ArrayLength(V<WasmArrayNullable> array, CheckForNull null_check) {
-    return ReduceIfReachableArrayLength(array, null_check);
+    return ReduceIfReachableArrayLength(
+        array, OptionalV<turboshaft::FrameState>{}, null_check);
+  }
+
+  V<Word32> ArrayLength(V<WasmArrayNullable> array,
+                        OptionalV<turboshaft::FrameState> frame_state,
+                        CheckForNull null_check) {
+    return ReduceIfReachableArrayLength(array, frame_state, null_check);
   }
 
   V<WasmArray> WasmAllocateArray(V<Map> rtt, ConstOrV<Word32> length,
                                  const wasm::ArrayType* array_type,
-                                 bool is_shared) {
+                                 SharedFlag is_shared) {
     return ReduceIfReachableWasmAllocateArray(rtt, resolve(length), array_type,
                                               is_shared);
   }
 
   V<WasmStruct> WasmAllocateStruct(V<Map> rtt,
                                    const wasm::StructType* struct_type,
-                                   bool is_shared) {
+                                   SharedFlag is_shared) {
     return ReduceIfReachableWasmAllocateStruct(rtt, struct_type, is_shared);
   }
 
@@ -5560,28 +5596,29 @@ class AssemblerOpInterface : public Next {
 
  private:
 #ifdef DEBUG
-#define REDUCE_OP(Op)                                                        \
-  template <class... Args>                                                   \
-  V8_INLINE OpIndex ReduceIfReachable##Op(Args... args) {                    \
-    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {            \
-      if (V8_UNLIKELY(!Asm().conceptually_in_a_block())) {                   \
-        const auto location = SourceLocation::Current();                     \
-        V8_Fatal(location.FileName(), static_cast<int>(location.Line()),     \
-                 "TSA: Trying to emit an operation while no Block/Label is " \
-                 "bound. Most likely you are missing to Bind/BIND a new "    \
-                 "Block/Label after an unconditional jump.");                \
-      }                                                                      \
-      return OpIndex::Invalid();                                             \
-    }                                                                        \
-    OpIndex result = Asm().Reduce##Op(args...);                              \
-    if constexpr (!IsBlockTerminator(Opcode::k##Op)) {                       \
-      if (Asm().current_block() == nullptr) {                                \
-        /* The input operation was not a block terminator, but a reducer     \
-         * lowered it into a block terminator. */                            \
-        Asm().set_conceptually_in_a_block(true);                             \
-      }                                                                      \
-    }                                                                        \
-    return result;                                                           \
+#define REDUCE_OP(Op)                                                    \
+  template <class... Args>                                               \
+  V8_INLINE OpIndex ReduceIfReachable##Op(Args... args) {                \
+    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {        \
+      if (V8_UNLIKELY(!Asm().conceptually_in_a_block())) {               \
+        const auto location = SourceLocation::Current();                 \
+        FATAL_WITH_LOC(                                                  \
+            location,                                                    \
+            "TSA: Trying to emit an operation while no Block/Label is "  \
+            "bound. Most likely you are missing to Bind/BIND a new "     \
+            "Block/Label after an unconditional jump.");                 \
+      }                                                                  \
+      return OpIndex::Invalid();                                         \
+    }                                                                    \
+    OpIndex result = Asm().Reduce##Op(args...);                          \
+    if constexpr (!IsBlockTerminator(Opcode::k##Op)) {                   \
+      if (Asm().current_block() == nullptr) {                            \
+        /* The input operation was not a block terminator, but a reducer \
+         * lowered it into a block terminator. */                        \
+        Asm().set_conceptually_in_a_block(true);                         \
+      }                                                                  \
+    }                                                                    \
+    return result;                                                       \
   }
 #else
 #define REDUCE_OP(Op)                                                        \
@@ -5760,8 +5797,8 @@ class Assembler : public AssemblerData,
 #ifdef DEBUG
     // Did you forget to terminate the previous block?
     if (V8_UNLIKELY(current_block_ != nullptr)) {
-      V8_Fatal(
-          bind_location.FileName(), static_cast<int>(bind_location.Line()),
+      FATAL_WITH_LOC(
+          bind_location,
           "TSA: Cannot bind a new Block/Label without terminating the previous "
           "block. Most likely you are missing an unconditional Goto/GOTO.");
     }

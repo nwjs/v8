@@ -18,22 +18,13 @@ bool kAdvancedAlgorithmsEnabledInLibrary = false;
 #endif  // V8_ADVANCED_BIGINT_ALGORITHMS
 #endif  // DEBUG
 
-ProcessorImpl::ProcessorImpl(Platform* platform) : platform_(platform) {}
-
-ProcessorImpl::~ProcessorImpl() { delete platform_; }
-
 Status ProcessorImpl::get_and_clear_status() {
   Status result = status_;
   status_ = Status::kOk;
   return result;
 }
 
-Processor* Processor::New(Platform* platform) {
-  ProcessorImpl* impl = new ProcessorImpl(platform);
-  return static_cast<Processor*>(impl);
-}
-
-void Processor::Destroy() { delete static_cast<ProcessorImpl*>(this); }
+void Processor::Destroy() { delete this; }
 
 void ProcessorImpl::Multiply(RWDigits Z, Digits X, Digits Y) {
   X.Normalize();
@@ -90,7 +81,7 @@ Status Processor::DivideLarge(RWDigits& Q, Digits& A, Digits& B) {
   if (B.len() < config::kBarrettThreshold || A.len() == B.len()) {
     impl->DivideBurnikelZiegler(Q, R0, A, B);
   } else {
-    ScratchDigits R(B.len());
+    ScratchDigits R(B.len(), platform());
     impl->DivideBarrett(Q, R, A, B);
   }
 #endif
@@ -109,7 +100,7 @@ Status Processor::ModuloLarge(RWDigits& R, Digits& A, Digits& B) {
   }
   CHECK(A.len() < kMaxNumDigits);
   uint32_t q_len = DivideResultLength(A, B);
-  ScratchDigits Q(q_len);
+  ScratchDigits Q(q_len, platform());
 #if !V8_ADVANCED_BIGINT_ALGORITHMS
   impl->DivideBurnikelZiegler(Q, R, A, B);
 #else
@@ -122,14 +113,31 @@ Status Processor::ModuloLarge(RWDigits& R, Digits& A, Digits& B) {
   return impl->get_and_clear_status();
 }
 
+RWDigits& Processor::AllocateCachedInverseFor(Digits& divisor) {
+  uint32_t divisor_len = divisor.len();
+  uint32_t inverse_len = divisor_len + 1;
+  uint32_t len = divisor_len + inverse_len;
+  if (len > cached_inverse_allocated_length_) {
+    cached_inverse_storage_.reset(platform_->Allocate(len));
+    cached_inverse_allocated_length_ = len;
+  }
+  cached_divisor_ = RWDigits(cached_inverse_storage_.get(), divisor_len);
+  for (uint32_t i = 0; i < divisor_len; i++) cached_divisor_[i] = divisor[i];
+  cached_inverse_ =
+      RWDigits(cached_inverse_storage_.get() + divisor_len, inverse_len);
+  return cached_inverse_;
+}
+
 void ProcessorImpl::CachedMod_MakeInverse(Digits& B) {
   uint32_t n = B.len();
-  uint32_t inv_len = n + 1;
-  RWDigits& Inv = AllocateCachedInverse(inv_len);
+  RWDigits& Inv = AllocateCachedInverseFor(B);
+  // Use the cached copy of B now, just to prevent any confusion arising
+  // from concurrent mutation.
+  Digits& cached_B = GetCachedDivisor();
   // We can't use {GetSmallScratch()} here, because {DivideSchoolbook} already
   // does that (usually). It's fine because we don't expect to call this
   // function very often.
-  ScratchDigits A(n * 2);
+  ScratchDigits A(n * 2, platform());
   // The idea is to set A = 1 << 2*n, and then compute Inv = A / B. However,
   // having that lone "1" bit in A's top digit is inefficient and far-reaching:
   // it requires us to make Inv bigger too. So we use a trick: first we
@@ -141,9 +149,9 @@ void ProcessorImpl::CachedMod_MakeInverse(Digits& B) {
   // A to all 1-bits (effectively: -x ≈ ~x + 0.99999...).
   uint32_t i = 0;
   for (; i < n; i++) A[i] = ~digit_t{0};
-  for (; i < A.len(); i++) A[i] = ~B[i - n];
+  for (; i < A.len(); i++) A[i] = ~cached_B[i - n];
   RWDigits R(nullptr, 0);
-  DivideSchoolbook(Inv, R, A, B);
+  DivideSchoolbook(Inv, R, A, cached_B);
   Add((Inv + n), 1);
 
   // If we add 1 here, we increase our chances of getting lucky in the

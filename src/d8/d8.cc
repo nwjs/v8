@@ -35,7 +35,7 @@
 #include "include/v8-profiler.h"
 #include "include/v8-wasm.h"
 #include "src/api/api-inl.h"
-#include "src/base/cpu.h"
+#include "src/base/cpu/cpu.h"
 #include "src/base/fpu.h"
 #include "src/base/hashing.h"
 #include "src/base/logging.h"
@@ -97,7 +97,9 @@
 #endif  // V8_OS_POSIX
 
 #ifdef V8_FUZZILLI
-#include "src/fuzzilli/cov.h"
+// gn check complains when not using the v8_fuzzilli arg since the public dep.
+// is added conditionally
+#include "src/fuzzilli/cov.h"  // nogncheck
 #include "src/fuzzilli/fuzzilli.h"
 #endif  // V8_FUZZILLI
 
@@ -1053,7 +1055,7 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
   if (!maybe_result.ToLocal(&result)) {
     if (try_catch.HasTerminated()) {
       // Re-request terminate execution as it's been cleared, so
-      // Shell::FinishExecution doesn't waste time draining all enqueued tasks
+      // Shell::FinishExecuting doesn't waste time draining all enqueued tasks
       // and microtasks.
       isolate->TerminateExecution();
       return true;
@@ -1862,15 +1864,21 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
 
     module_data->origin = absolute_path;
 
-    MaybeLocal<Value> maybe_result;
     if (root_module
             ->InstantiateModule(realm, ResolveModuleCallback,
                                 ResolveModuleSourceCallback)
             .FromMaybe(false)) {
-      maybe_result = root_module->Evaluate(realm);
-      CHECK(!maybe_result.IsEmpty());
-      global_result_promise.Reset(isolate,
-                                  maybe_result.ToLocalChecked().As<Promise>());
+      Local<Value> result;
+      if (root_module->Evaluate(realm).ToLocal(&result)) {
+        global_result_promise.Reset(isolate, result.As<Promise>());
+      } else {
+        CHECK(try_catch.HasTerminated());
+        // Re-request terminate execution as it's been cleared, so
+        // Shell::FinishExecuting doesn't waste time draining all enqueued tasks
+        // and microtasks.
+        isolate->TerminateExecution();
+        return true;
+      }
     }
   }
 
@@ -1883,13 +1891,22 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
   }
 
   // Loop until module execution finishes
-  while (isolate->HasPendingBackgroundTasks() ||
-         (i::ValueHelper::HandleAsValue(global_result_promise)->State() ==
-              Promise::kPending &&
-          reinterpret_cast<i::Isolate*>(isolate)
-                  ->default_microtask_queue()
-                  ->size() > 0)) {
+  while (!try_catch.HasTerminated() &&
+         (isolate->HasPendingBackgroundTasks() ||
+          (i::ValueHelper::HandleAsValue(global_result_promise)->State() ==
+               Promise::kPending &&
+           reinterpret_cast<i::Isolate*>(isolate)
+                   ->default_microtask_queue()
+                   ->size() > 0))) {
     Shell::CompleteMessageLoop(isolate);
+  }
+
+  if (try_catch.HasTerminated()) {
+    // Re-request terminate execution as it's been cleared, so
+    // Shell::FinishExecuting doesn't waste time draining all enqueued tasks
+    // and microtasks.
+    isolate->TerminateExecution();
+    return true;
   }
 
   {
@@ -2496,6 +2513,7 @@ void Shell::DisposeRealm(const v8::FunctionCallbackInfo<v8::Value>& info,
   PerIsolateData* data = PerIsolateData::Get(isolate);
   Local<Context> context = data->realms_[index].Get(isolate);
   data->realms_[index].Reset();
+  context->DetachGlobal();
   // ContextDisposedNotification expects the disposed context to be entered.
   v8::Context::Scope scope(context);
   isolate->ContextDisposedNotification(v8::ContextDependants::kSomeDependants);
@@ -2684,7 +2702,7 @@ void Shell::RealmSharedGet(Local<Name> property,
 }
 
 void Shell::RealmSharedSet(Local<Name> property, Local<Value> value,
-                           const PropertyCallbackInfo<void>& info) {
+                           const PropertyCallbackInfo<Boolean>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   Isolate* isolate = info.GetIsolate();
   PerIsolateData* data = PerIsolateData::Get(isolate);
@@ -2982,10 +3000,11 @@ void Shell::WasmSerializeModule(
   i::DirectHandle<i::WasmModuleObject> module_obj =
       i::Cast<i::WasmModuleObject>(Utils::OpenHandle(*info[0]));
 
-  i::wasm::NativeModule* native_module = module_obj->native_module();
+  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+      module_obj->native_module();
   DCHECK(!native_module->compilation_state()->failed());
 
-  i::wasm::WasmSerializer wasm_serializer(native_module);
+  i::wasm::WasmSerializer wasm_serializer(native_module.raw());
 
   // The content of the serialized byte buffer is nondeterministic (depends
   // e.g. on timing, but also on the platform and on enabled features).
@@ -3388,6 +3407,7 @@ void Shell::ExecuteFile(const v8::FunctionCallbackInfo<v8::Value>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   Isolate* isolate = info.GetIsolate();
   for (int i = 0; i < info.Length(); i++) {
+    if (isolate->IsExecutionTerminating()) return;
     HandleScope handle_scope(isolate);
     String::Utf8Value file_name(isolate, info[i]);
     if (*file_name == nullptr) {
@@ -4856,7 +4876,8 @@ void WriteWasmLcovData(v8::Isolate* isolate, const char* file) {
     debug::Coverage::ScriptData script_data = coverage.GetScriptData(i_script);
     Local<debug::Script> script = script_data.GetScript();
     auto wasm_script = Utils::OpenDirectHandle(*script);
-    i::wasm::NativeModule* native_module = wasm_script->wasm_native_module();
+    i::Managed<i::wasm::NativeModule>::Ptr native_module =
+        wasm_script->wasm_native_module();
     const i::wasm::WasmModule* wasm_module = native_module->module();
 
     constexpr int kMaxDisasmFileNameSize = 33;
@@ -6493,6 +6514,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
     check_flag_is_not_specified(options.trace_enabled);
     check_flag_is_not_specified(options.trace_config);
     check_flag_is_not_specified(options.trace_path);
+    // Inspector security bugs must be shown through the embedder (i.e. Chrome,
+    // or content_shell).
     check_flag_is_not_specified(options.enable_inspector);
     check_flag_is_not_specified(options.lcov_file);
     check_flag_is_not_specified(options.simulate_errors);
@@ -7178,7 +7201,10 @@ int Shell::Main(int argc, char* argv[]) {
 
   base::FlushDenormalsScope denormals_scope(options.flush_denormals);
 
-  v8::V8::InitializeICUDefaultLocation(argv[0], options.icu_data_file);
+  if (!v8::V8::InitializeICUDefaultLocation(argv[0], options.icu_data_file)) {
+    fprintf(stderr, "%s: Failed to initialize ICU\n", argv[0]);
+    return 1;
+  }
 
 #ifdef V8_OS_DARWIN
   if (options.apply_priority) {
@@ -7367,6 +7393,12 @@ int Shell::Main(int argc, char* argv[]) {
             "V8 is running with an unsupported configuration. Important "
             "subsystems are mocked or disabled. Bugs reported under this "
             "configuration will be considered invalid.\n");
+  }
+
+  if (i::v8_flags.developer_only_features) {
+    fprintf(stderr,
+            "V8 is running with developer-only features enabled. Stability and "
+            "security will suffer.\n");
   }
 
   Isolate* isolate = Isolate::New(create_params);
@@ -7594,6 +7626,8 @@ int Shell::Main(int argc, char* argv[]) {
   }
   utf8_filenames.clear();
 #endif
+
+  Shell::array_buffer_allocator = nullptr;
 
   return result;
 }

@@ -843,8 +843,9 @@ filegroup(
         "src/base/compiler-specific.h",
         "src/base/container-utils.h",
         "src/base/contextual.h",
-        "src/base/cpu.cc",
-        "src/base/cpu.h",
+        "src/base/cpu/cpu.cc",
+        "src/base/cpu/cpu.h",
+        "src/base/cpu/cpu-helper.h",
         "src/base/debug/stack_trace.cc",
         "src/base/debug/stack_trace.h",
         "src/base/discriminated-union.h",
@@ -996,6 +997,25 @@ filegroup(
             "src/base/platform/platform-win32.cc",
             "src/base/platform/platform-win32.h",
             "src/base/win32-headers.h",
+        ],
+    }) + select({
+        "@v8//bazel/config:v8_target_x64": [
+            "src/base/cpu/cpu-x86.cc",
+        ],
+        "@v8//bazel/config:v8_target_ia32": [
+            "src/base/cpu/cpu-x86.cc",
+        ],
+        "@v8//bazel/config:v8_target_arm64": [
+            "src/base/cpu/cpu-arm.cc",
+        ],
+        "@v8//bazel/config:v8_target_arm": [
+            "src/base/cpu/cpu-arm.cc",
+        ],
+        "@v8//bazel/config:v8_target_ppc64le": [
+            "src/base/cpu/cpu-ppc.cc",
+        ],
+        "@v8//bazel/config:v8_target_riscv64": [
+            "src/base/cpu/cpu-riscv.cc",
         ],
     }),
     visibility = ["//visibility:public"],
@@ -2404,7 +2424,6 @@ filegroup(
         "src/profiler/heap-snapshot-common.h",
         "src/profiler/heap-snapshot-generator.cc",
         "src/profiler/heap-snapshot-generator.h",
-        "src/profiler/heap-snapshot-generator-inl.h",
         "src/profiler/output-stream-writer.h",
         "src/profiler/profile-generator.cc",
         "src/profiler/profile-generator.h",
@@ -2551,8 +2570,6 @@ filegroup(
         "src/sandbox/trusted-pointer-table.cc",
         "src/sandbox/trusted-pointer-table.h",
         "src/sandbox/trusted-pointer-table-inl.h",
-        "src/sandbox/code-pointer.h",
-        "src/sandbox/code-pointer-inl.h",
         "src/sandbox/code-sandboxing-mode.h",
         "src/sandbox/compactible-external-entity-table-inl.h",
         "src/sandbox/compactible-external-entity-table.h",
@@ -3473,8 +3490,6 @@ filegroup(
         "src/compiler/operator-properties.h",
         "src/compiler/osr.cc",
         "src/compiler/osr.h",
-        "src/compiler/pair-load-store-reducer.cc",
-        "src/compiler/pair-load-store-reducer.h",
         "src/compiler/per-isolate-compiler-cache.h",
         "src/compiler/persistent-map.h",
         "src/compiler/phase.h",

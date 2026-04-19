@@ -91,6 +91,15 @@ Maybe<bool> AlwaysSharedSpaceJSObject::DefineOwnProperty(
     if (Object::SameValue(*desc->value(), *current.value())) {
       return Just(true);
     }
+
+    // If the property is read-only, we cannot overwrite it with a different
+    // value (which we know it is because of the SameValue check above).
+    if (it.property_details().IsReadOnly()) {
+      RETURN_FAILURE(
+          isolate, GetShouldThrow(isolate, should_throw),
+          NewTypeError(MessageTemplate::kRedefineDisallowed, it.GetName()));
+    }
+
     return Object::SetDataProperty(&it, desc->value());
   }
   return Just(true);
@@ -185,8 +194,8 @@ DirectHandle<Map> JSSharedStruct::CreateInstanceMap(
   // Calculate the size for instances.
   int instance_size;
   int in_object_properties;
-  JSFunction::CalculateInstanceSizeHelper(JS_SHARED_STRUCT_TYPE, false, 0,
-                                          num_fields, &instance_size,
+  JSFunction::CalculateInstanceSizeHelper(JS_SHARED_STRUCT_TYPE, 0, num_fields,
+                                          &instance_size,
                                           &in_object_properties);
 
   // Create the DescriptorArray if there are fields or elements.
