@@ -7,7 +7,6 @@
 #include "src/base/platform/platform.h"
 #include "src/execution/frames.h"
 #include "src/execution/simulator.h"
-#include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-objects.h"
 
 namespace v8::internal::wasm {
@@ -28,6 +27,11 @@ StackMemory::~StackMemory() {
     delete segment;
     segment = next_segment;
   }
+}
+
+Address StackMemory::limit() const {
+  return reinterpret_cast<uintptr_t>(active_segment_ ? active_segment_->limit_
+                                                     : limit_);
 }
 
 void* StackMemory::jslimit() const {
@@ -171,6 +175,11 @@ bool StackMemory::Grow(Address current_fp, size_t min_size) {
            active_segment_->size_, active_segment_->limit_,
            active_segment_->limit_ + active_segment_->size_);
   }
+#if V8_TARGET_OS_WIN
+  base::Stack::SetCurrentThreadStackBounds(
+      reinterpret_cast<uintptr_t>(active_segment_->limit_),
+      active_segment_->base());
+#endif
   return true;
 }
 
@@ -186,6 +195,11 @@ Address StackMemory::Shrink() {
            active_segment_->limit_,
            active_segment_->limit_ + active_segment_->size_);
   }
+#if V8_TARGET_OS_WIN
+  base::Stack::SetCurrentThreadStackBounds(
+      reinterpret_cast<uintptr_t>(active_segment_->limit_),
+      active_segment_->base());
+#endif
   return old_fp;
 }
 
