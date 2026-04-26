@@ -39,7 +39,7 @@ class V8_EXPORT External : public Value {
    * \return The new External object.
    */
   static Local<External> New(Isolate* isolate, void* value,
-                             ExternalPointerTypeTag tag);
+                             ExternalPointerTypeTag tag = kExternalPointerTypeTagDefault);
   V8_INLINE static External* Cast(Data* value) {
 #ifdef V8_ENABLE_CHECKS
     CheckCast(value);
@@ -55,7 +55,7 @@ class V8_EXPORT External : public Value {
    * used.
    * \return The value of the external pointer.
    */
-  void* Value(ExternalPointerTypeTag tag) const;
+  void* Value(ExternalPointerTypeTag tag = kExternalPointerTypeTagDefault) const;
 
  private:
   static void CheckCast(v8::Data* obj);
