@@ -469,7 +469,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(RegExpSplit, 3, 1)                              \
   F(RegExpStringFromFlags, 1, 1)                    \
   F(StringReplaceNonGlobalRegExpWithFunction, 3, 1) \
-  F(StringSplit, 3, 1)                              \
+  F(StringSplit, 4, 1)                              \
   F(RegExpExec, 4, 1)                               \
   F(RegExpExperimentalOneshotExec, 4, 1)
 
@@ -587,6 +587,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(MajorGCForCompilerTesting, 0, 1)                                     \
   F(GetAbstractModuleSource, 0, 1)                                       \
   F(GetBytecode, 1, 1)                                                   \
+  F(ExhaustInterruptBudget, 1, 1)                                        \
   F(GetCallable, 1, 1)                                                   \
   F(GetFeedback, 1, 1)                                                   \
   F(GetFunctionForCurrentFrame, 0, 1)                                    \
@@ -702,7 +703,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(TypedArraySortFast, 1, 1)
 
 #if V8_ENABLE_DRUMBRAKE
-#define FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I) F(WasmRunInterpreter, 3, 1)
+#define FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I) F(WasmRunInterpreter, 4, 1)
 #else
 #define FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I)
 #endif  // V8_ENABLE_DRUMBRAKE
@@ -716,8 +717,8 @@ constexpr bool CanTriggerGC(T... properties) {
   F(ThrowWasmStackOverflow, 0, 1)                                \
   F(WasmI32AtomicWait, 4, 1)                                     \
   F(WasmI64AtomicWait, 5, 1)                                     \
-  F(WasmManagedObjectWait, 4, 1)                                 \
-  F(WasmAllocateWaitQueue, 2, 1)                                 \
+  F(WasmManagedObjectWait, 5, 1)                                 \
+  F(WasmWaitqueueNew, 0, 1)                                      \
   F(WasmMemoryGrow, 2, 1)                                        \
   F(WasmStackGuard, 1, 1)                                        \
   F(WasmStackGuardLoop, 0, 1)                                    \
@@ -755,6 +756,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(WasmAllocateBoundContinuation, 2, 1)                         \
   F(ClearWasmSuspenderResumeField, 1, 1)                         \
   F(WasmCastToSpecialPrimitiveArray, 2, 1)                       \
+  F(WasmStringAdd_CheckNone_Shared, 2, 1)                        \
   F(WasmStringNewSegmentWtf8, 5, 1)                              \
   F(WasmStringNewWtf8, 5, 1)                                     \
   F(WasmStringNewWtf8Array, 5, 1)                                \
@@ -773,6 +775,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(WasmStringFromCodePoint, 2, 1)                               \
   F(WasmStringHash, 1, 1, RuntimeCallProperty::kCannotTriggerGC) \
   F(WasmSubstring, 3, 1)                                         \
+  F(WasmSubstringShared, 3, 1)                                   \
   F(WasmConfigureAllPrototypes, 4, 1)                            \
   F(WasmConfigureAllPrototypesOpt, 3, 1)                         \
   F(DebugCollectWasmCoverage, 0, 1)                              \
@@ -790,7 +793,6 @@ constexpr bool CanTriggerGC(T... properties) {
   F(GetWasmExceptionTagId, 2, 1)                                \
   F(GetWasmExceptionValues, 1, 1)                               \
   F(GetWasmRecoveredTrapCount, 0, 1)                            \
-  F(HasUnoptimizedJSToJSWrapper, 1, 1)                          \
   F(HasUnoptimizedWasmToJSWrapper, 1, 1)                        \
   F(IsAsmWasmCode, 1, 1)                                        \
   F(IsLiftoffFunction, 1, 1)                                    \

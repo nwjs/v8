@@ -47,7 +47,7 @@ TNode<JSArrayBuffer> TypedArrayBuiltinsAssembler::AllocateEmptyOnHeapBuffer(
   TNode<JSArrayBuffer> buffer = UncheckedCast<JSArrayBuffer>(
       Allocate(JSArrayBuffer::kSizeWithEmbedderFields));
   StoreMapNoWriteBarrier(buffer, map);
-  StoreObjectFieldNoWriteBarrier(buffer, JSArray::kPropertiesOrHashOffset,
+  StoreObjectFieldNoWriteBarrier(buffer, offsetof(JSArray, properties_or_hash_),
                                  empty_fixed_array);
   StoreObjectFieldNoWriteBarrier(buffer, JSArray::kElementsOffset,
                                  empty_fixed_array);
@@ -58,11 +58,11 @@ TNode<JSArrayBuffer> TypedArrayBuiltinsAssembler::AllocateEmptyOnHeapBuffer(
   //  - Set backing_store to null/Tagged<Smi>(0).
   //  - Set extension to null.
   //  - Set all embedder fields to Tagged<Smi>(0).
-  if (FIELD_SIZE(JSArrayBuffer::kOptionalPaddingOffset) != 0) {
-    DCHECK_EQ(4, FIELD_SIZE(JSArrayBuffer::kOptionalPaddingOffset));
-    StoreObjectFieldNoWriteBarrier(
-        buffer, JSArrayBuffer::kOptionalPaddingOffset, Int32Constant(0));
-  }
+#if TAGGED_SIZE_8_BYTES
+  static_assert(FIELD_SIZE(JSArrayBuffer::kOptionalPaddingOffset) == 4);
+  StoreObjectFieldNoWriteBarrier(buffer, JSArrayBuffer::kOptionalPaddingOffset,
+                                 Int32Constant(0));
+#endif
   int32_t bitfield_value = (1 << JSArrayBuffer::IsExternalBit::kShift) |
                            (1 << JSArrayBuffer::IsDetachableBit::kShift);
   StoreObjectFieldNoWriteBarrier(buffer, JSArrayBuffer::kBitFieldOffset,

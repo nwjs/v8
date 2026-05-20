@@ -44,8 +44,7 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
                               HashSeed(isolate()));
   DeclarationScope scope(zone(), &ast_factory);
 
-  Handle<ScopeInfo> scope_info =
-      factory->NewScopeInfo(ScopeInfo::kVariablePartIndex);
+  Handle<ScopeInfo> scope_info = factory->NewScopeInfo(0);
   int flags = ScopeInfo::HasContextCellsBit::encode(true);
   scope_info->set_flags(flags, kRelaxedStore);
   scope_info->set_context_local_count(0);
@@ -193,8 +192,7 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
       .StoreContextSlot(Register::current_context(), &fun_var3, 0)
       .PopContext(reg);
 
-  Handle<ScopeInfo> scope_info2 =
-      factory->NewScopeInfo(ScopeInfo::kVariablePartIndex);
+  Handle<ScopeInfo> scope_info2 = factory->NewScopeInfo(0);
   int flags2 = ScopeInfo::HasContextCellsBit::encode(false);
   scope_info2->set_flags(flags2, kRelaxedStore);
   scope_info2->set_context_local_count(0);
@@ -215,6 +213,23 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
       .PushContext(reg)
       .LoadContextSlot(Register::current_context(), &fun2_var1, 0)
       .PopContext(reg);
+
+  Handle<ScopeInfo> scope_info3 = factory->NewScopeInfo(0);
+  int flags3 = ScopeInfo::IsHoistedInContextBit::encode(true);
+  scope_info3->set_flags(flags3, kRelaxedStore);
+  scope_info3->set_context_local_count(0);
+  scope_info3->set_parameter_count(0);
+  scope_info3->set_position_info_start(0);
+  scope_info3->set_position_info_end(0);
+  DeclarationScope fun_scope3(zone(), ScopeType::FUNCTION_SCOPE, &ast_factory,
+                              scope_info3);
+  EXPECT_TRUE(fun_scope3.is_hoisted_in_context());
+
+  int flags4 = ScopeInfo::IsHoistedInContextBit::encode(false);
+  scope_info3->set_flags(flags4, kRelaxedStore);
+  DeclarationScope fun_scope4(zone(), ScopeType::FUNCTION_SCOPE, &ast_factory,
+                              scope_info3);
+  EXPECT_FALSE(fun_scope4.is_hoisted_in_context());
 
   // Emit load / store property operations.
   builder.LoadNamedProperty(reg, name, load_slot.ToInt())
@@ -674,7 +689,7 @@ TEST_F(BytecodeArrayBuilderTest, Constants) {
 }
 
 TEST_F(BytecodeArrayBuilderTest, ForwardJumps) {
-  static const int kFarJumpDistance = 256 + 22;
+  static const int kFarJumpDistance = 256 + 20;
 
   BytecodeArrayBuilder builder(zone(), 1, 1);
 
@@ -710,14 +725,14 @@ TEST_F(BytecodeArrayBuilderTest, ForwardJumps) {
       .JumpIfTrue(ToBooleanMode::kConvertToBoolean, &far3)
       .BinaryOperation(Token::kAdd, reg, 4)
       .JumpIfFalse(ToBooleanMode::kConvertToBoolean, &far4);
-  for (int i = 0; i < kFarJumpDistance - 24; i++) {
+  for (int i = 0; i < kFarJumpDistance - 22; i++) {
     builder.Debugger();
   }
   builder.Bind(&far0).Bind(&far1).Bind(&far2).Bind(&far3).Bind(&far4);
   builder.Return();
 
   Handle<BytecodeArray> array = builder.ToBytecodeArray(isolate());
-  DCHECK_EQ(array->length(), 52 + kFarJumpDistance - 24 + 1);
+  DCHECK_EQ(array->length(), 48 + kFarJumpDistance - 22 + 1);
 
   BytecodeArrayIterator iterator(array);
 
@@ -725,14 +740,14 @@ TEST_F(BytecodeArrayBuilderTest, ForwardJumps) {
   iterator.Advance();
 
   CHECK_EQ(iterator.current_bytecode(), Bytecode::kJump);
-  CHECK_EQ(iterator.GetUnsignedImmediateOperand(0), 24);
+  CHECK_EQ(iterator.GetUnsignedImmediateOperand(0), 22);
   iterator.Advance();
 
   // Ignore compare operation.
   iterator.Advance();
 
   CHECK_EQ(iterator.current_bytecode(), Bytecode::kJumpIfTrue);
-  CHECK_EQ(iterator.GetUnsignedImmediateOperand(0), 18);
+  CHECK_EQ(iterator.GetUnsignedImmediateOperand(0), 17);
   iterator.Advance();
 
   // Ignore compare operation.
@@ -769,7 +784,7 @@ TEST_F(BytecodeArrayBuilderTest, ForwardJumps) {
 
   CHECK_EQ(iterator.current_bytecode(), Bytecode::kJumpIfTrueConstant);
   CHECK_EQ(*(iterator.GetConstantForOperand(0, isolate())),
-           Smi::FromInt(kFarJumpDistance - 6));
+           Smi::FromInt(kFarJumpDistance - 5));
   iterator.Advance();
 
   // Ignore compare operation.
@@ -777,7 +792,7 @@ TEST_F(BytecodeArrayBuilderTest, ForwardJumps) {
 
   CHECK_EQ(iterator.current_bytecode(), Bytecode::kJumpIfFalseConstant);
   CHECK_EQ(*(iterator.GetConstantForOperand(0, isolate())),
-           Smi::FromInt(kFarJumpDistance - 12));
+           Smi::FromInt(kFarJumpDistance - 10));
   iterator.Advance();
 
   // Ignore add operation.
@@ -785,7 +800,7 @@ TEST_F(BytecodeArrayBuilderTest, ForwardJumps) {
 
   CHECK_EQ(iterator.current_bytecode(), Bytecode::kJumpIfToBooleanTrueConstant);
   CHECK_EQ(*(iterator.GetConstantForOperand(0, isolate())),
-           Smi::FromInt(kFarJumpDistance - 17));
+           Smi::FromInt(kFarJumpDistance - 15));
   iterator.Advance();
 
   // Ignore add operation.
@@ -794,7 +809,7 @@ TEST_F(BytecodeArrayBuilderTest, ForwardJumps) {
   CHECK_EQ(iterator.current_bytecode(),
            Bytecode::kJumpIfToBooleanFalseConstant);
   CHECK_EQ(*(iterator.GetConstantForOperand(0, isolate())),
-           Smi::FromInt(kFarJumpDistance - 22));
+           Smi::FromInt(kFarJumpDistance - 20));
   iterator.Advance();
 }
 

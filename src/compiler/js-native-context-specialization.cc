@@ -35,6 +35,7 @@
 #include "src/heap/factory.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
+#include "src/ic/handler-configuration.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/heap-number.h"
@@ -983,9 +984,10 @@ FieldAccess ForPropertyCellValue(MachineRepresentation representation,
     kind = kPointerWriteBarrier;
   }
   MachineType r = MachineType::TypeForRepresentation(representation);
-  FieldAccess access = {
-      kTaggedBase, PropertyCell::kValueOffset, name.object(), map, type, r,
-      kind, "PropertyCellValue"};
+  FieldAccess access = {kTaggedBase,   offsetof(PropertyCell, value_),
+                        name.object(), map,
+                        type,          r,
+                        kind,          "PropertyCellValue"};
   return access;
 }
 
@@ -1802,6 +1804,85 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
   return Replace(value);
 }
 
+Reduction JSNativeContextSpecialization::ReduceHomomorphicAccess(
+    Node* node, Node* value, HomomorphicPropertyAccessFeedback const& feedback,
+    AccessMode access_mode, Node* key) {
+  DCHECK(node->opcode() == IrOpcode::kJSLoadNamed ||
+         node->opcode() == IrOpcode::kJSLoadProperty);
+  if (access_mode != AccessMode::kLoad) return NoChange();
+
+  Node* effect = NodeProperties::GetEffectInput(node);
+  Node* control = NodeProperties::GetControlInput(node);
+
+  Node* lookup_start_object = NodeProperties::GetValueInput(node, 0);
+
+  Tagged<Smi> handler = feedback.handler();
+  bool is_inobject = LoadHandler::IsInobjectBits::decode(handler.value());
+  bool is_double = LoadHandler::IsDoubleBits::decode(handler.value());
+  int offset_in_words =
+      LoadHandler::StorageOffsetInWordsBits::decode(handler.value());
+  int descriptor_index =
+      LoadHandler::DescriptorIndexBits::decode(handler.value());
+
+  if (descriptor_index == LoadHandler::kArrayLengthFieldDescriptorIndex) {
+    // Emit Smi check
+    lookup_start_object = effect = graph()->NewNode(
+        simplified()->CheckHeapObject(), lookup_start_object, effect, control);
+
+    // Emit instance type check for JS_ARRAY_TYPE
+    Node* receiver_map = effect =
+        graph()->NewNode(simplified()->LoadField(AccessBuilder::ForMap()),
+                         lookup_start_object, effect, control);
+    Node* receiver_instance_type = effect = graph()->NewNode(
+        simplified()->LoadField(AccessBuilder::ForMapInstanceType()),
+        receiver_map, effect, control);
+    Node* check =
+        graph()->NewNode(simplified()->NumberEqual(), receiver_instance_type,
+                         jsgraph()->ConstantNoHole(JS_ARRAY_TYPE));
+    effect = graph()->NewNode(
+        simplified()->CheckIf(DeoptimizeReason::kWrongInstanceType), check,
+        effect, control);
+
+    // Load JSArray length
+    Node* result_value = effect = graph()->NewNode(
+        simplified()->LoadField(AccessBuilder::ForJSArrayLength()),
+        lookup_start_object, effect, control);
+
+    ReplaceWithValue(node, result_value, effect, control);
+    return Replace(result_value);
+  }
+
+  CHECK_EQ(feedback.homomorphic_array().length().value(),
+           static_cast<uint32_t>(v8_flags.homomorphic_ic_count));
+  Node* check =
+      graph()->NewNode(simplified()->CheckHomomorphic(
+                           feedback.name(), feedback.homomorphic_array(),
+                           handler.value(), true, FeedbackSource()),
+                       lookup_start_object, effect, control);
+  effect = check;
+
+  Node* holder = lookup_start_object;
+  if (!is_inobject) {
+    holder = effect = graph()->NewNode(
+        simplified()->LoadField(AccessBuilder::ForJSObjectPropertiesOrHash()),
+        holder, effect, control);
+  }
+
+  Node* result = effect = graph()->NewNode(
+      simplified()->LoadField(
+          AccessBuilder::ForJSObjectOffset(kTaggedSize * offset_in_words)),
+      holder, effect, control);
+
+  if (is_double) {
+    result = effect = graph()->NewNode(
+        simplified()->LoadField(AccessBuilder::ForHeapNumberValue()), result,
+        effect, control);
+  }
+
+  ReplaceWithValue(node, result, effect, control);
+  return Changed(result);
+}
+
 Reduction JSNativeContextSpecialization::ReduceJSLoadNamed(Node* node) {
   JSLoadNamedNode n(node);
   NamedAccess const& p = n.Parameters();
@@ -2509,8 +2590,8 @@ Reduction JSNativeContextSpecialization::ReducePropertyAccess(
          node->opcode() == IrOpcode::kJSDefineKeyedOwnProperty);
   DCHECK_GE(node->op()->ControlOutputCount(), 1);
 
-  ProcessedFeedback const* feedback =
-      &broker()->GetFeedbackForPropertyAccess(source, access_mode, static_name);
+  ProcessedFeedback const* feedback = &broker()->GetFeedbackForPropertyAccess(
+      source, access_mode, static_name, v8_flags.homomorphic_ic);
 
   if (feedback->kind() == ProcessedFeedback::kElementAccess &&
       feedback->AsElementAccess().transition_groups().empty()) {
@@ -2532,6 +2613,10 @@ Reduction JSNativeContextSpecialization::ReducePropertyAccess(
     case ProcessedFeedback::kNamedAccess:
       return ReduceNamedAccess(node, value, feedback->AsNamedAccess(),
                                access_mode, key);
+    case ProcessedFeedback::kHomomorphicPropertyAccess:
+      return ReduceHomomorphicAccess(node, value,
+                                     feedback->AsHomomorphicPropertyAccess(),
+                                     access_mode, key);
     case ProcessedFeedback::kMegaDOMPropertyAccess:
       DCHECK_EQ(access_mode, AccessMode::kLoad);
       DCHECK_NULL(key);
@@ -2622,7 +2707,7 @@ Reduction JSNativeContextSpecialization::ReduceJSLoadPropertyWithEnumeratedKey(
   // uninitialized state. So If the graph is as below, we can firstly do a map
   // check on {object} and then turn the {JSLoadProperty} into the
   // {LoadFieldByIndex}. This is also safe when the bytecode has never been
-  // profiled. When it happens to pass the the map check, we can use the fast
+  // profiled. When it happens to pass the map check, we can use the fast
   // path. Otherwise it will trigger a deoptimization.
 
   // object     receiver
@@ -2668,7 +2753,8 @@ Reduction JSNativeContextSpecialization::ReduceJSLoadPropertyWithEnumeratedKey(
     PropertyAccess const& p = n.Parameters();
 
     ProcessedFeedback const& feedback = broker()->GetFeedbackForPropertyAccess(
-        FeedbackSource(p.feedback()), AccessMode::kLoad, std::nullopt);
+        FeedbackSource(p.feedback()), AccessMode::kLoad, std::nullopt,
+        v8_flags.homomorphic_ic);
     // When the feedback is uninitialized, it is either a load from a
     // {GetEnumeratedKeyedProperty} which always hits the enum cache, or a keyed
     // load that had never been reached. In either case, we can check the map
@@ -3156,6 +3242,10 @@ JSNativeContextSpecialization::BuildPropertyStore(
         value = effect =
             graph()->NewNode(simplified()->CheckNumber(FeedbackSource()), value,
                              effect, control);
+        if (access_info.IsFastDataConstant()) {
+          value = graph()->NewNode(jsgraph()->simplified()->NumberSilenceNaN(),
+                                   value);
+        }
         if (access_info.HasTransitionMap()) {
           // Allocate a HeapNumber for the new property.
           AllocationBuilder a(jsgraph(), broker(), effect, control);
@@ -3355,13 +3445,6 @@ JSNativeContextSpecialization::BuildPrototypeProxyElementAccess(
   Node* proxy_target =
       jsgraph()->ConstantNoHole(access_info.target().value(), broker());
   Node* feedback = jsgraph()->UndefinedConstant();
-  // We can use a dummy receiver so long as we only support Wasm functions
-  // that disregard the call's receiver anyway.
-  DCHECK(!TrustedCast<WasmExportedFunctionData>(
-              Cast<JSFunction>(access_info.accessor().value().object())
-                  ->shared()
-                  ->GetTrustedData(isolate()))
-              ->receiver_is_first_param());
   Node* call_receiver = jsgraph()->UndefinedConstant();
   ConvertReceiverMode receiver_mode = ConvertReceiverMode::kNullOrUndefined;
   // If the Wasm function takes the index as an {externref}, it can observe

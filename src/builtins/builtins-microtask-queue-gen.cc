@@ -431,7 +431,8 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
       ScopedExceptionHandler handler(this, &if_exception, &var_exception);
       // 1. SetGeneratorNotAwaiting
       StoreObjectFieldNoWriteBarrier(
-          generator, JSAsyncGeneratorObject::kIsAwaitingOffset, SmiConstant(0));
+          generator, offsetof(JSAsyncGeneratorObject, is_awaiting_),
+          SmiConstant(0));
       // 2. AsyncGeneratorResolve(generator, value, false)
       CallBuiltin(Builtin::kAsyncGeneratorResolve, microtask_context, generator,
                   value, FalseConstant());
@@ -446,7 +447,7 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
     {
       ScopedExceptionHandler handler(this, &if_exception, &var_exception);
       StoreObjectFieldNoWriteBarrier(generator,
-                                     JSGeneratorObject::kResumeModeOffset,
+                                     offsetof(JSGeneratorObject, resume_mode_),
                                      SmiConstant(JSGeneratorObject::kNext));
       CallBuiltin(Builtin::kResumeGeneratorTrampoline, microtask_context, value,
                   generator);

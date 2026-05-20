@@ -192,73 +192,8 @@ class MachineOptimizationReducer : public Next {
                 reducer_list_contains<ReducerList, GraphVisitor>::value);
 #endif
 
-  V<Any> REDUCE(Phi)(base::Vector<const OpIndex> inputs,
-                     RegisterRepresentation rep) {
-    LABEL_BLOCK(no_change) { return Next::ReducePhi(inputs, rep); }
-
-    if (ShouldSkipOptimizationStep()) goto no_change;
-
-    // Reduces `(f > 0) ? f : -f` to `fabs(f)`.
-    //
-    // This optimization is unsafe for WebAssembly because it violates strict
-    // IEEE-754 NaN sign rules for comparisons and absolute values.
-    // So, for the conditional (x < 0) ? -x : x where x is -NaN:
-    //   - The condition -NaN < 0 evaluates to false.
-    //   - The expression returns the false branch, which is x (i.e. -NaN).
-    //   - Optimizing to `fabs` would flip the sign of -NaN, violating the WASM
-    //     spec. Since `fabs` always returns a positive value.
-    // In JS, this is allowed as the ECMAScript spec is lax about NaN signs for
-    // `Math.abs`. It treats any NaN representation as equivalent.
-    if (__ data()->is_wasm()) goto no_change;
-
-    if (rep != RegisterRepresentation::Float64() || inputs.size() != 2) {
-      goto no_change;
-    }
-
-    Block* current = __ current_block();
-    if (!current || current->PredecessorCount() != 2) goto no_change;
-
-    Block* pred1 = current->LastPredecessor();
-    Block* pred0 = pred1->NeighboringPredecessor();
-    if (pred0->PredecessorCount() != 1 || pred1->PredecessorCount() != 1) {
-      goto no_change;
-    }
-
-    Block* dom = pred0->LastPredecessor();
-    if (dom != pred1->LastPredecessor()) goto no_change;
-
-    const Operation& last = dom->LastOperation(__ output_graph());
-    const BranchOp* branch = last.TryCast<BranchOp>();
-    if (!branch) goto no_change;
-
-    const Operation& cond_op = __ Get(branch->condition());
-    const ComparisonOp* cond =
-        cond_op.TryCast<Opmask::kFloat64SignedLessThan>();
-    if (!cond) goto no_change;
-
-    V<Float64> f0 = cond->left<Float64>();
-    if (!matcher_.MatchFloat(cond->right<Float64>(), 0.0)) goto no_change;
-
-    auto IsNegateOf = [&](V<Float64> input, V<Float64> operand) {
-      const Operation& op = __ Get(input);
-      if (const FloatUnaryOp* u = op.TryCast<Opmask::kFloat64Negate>()) {
-        return u->input() == operand;
-      }
-      return false;
-    };
-
-    const bool pred0_is_true = (pred0 == branch->if_true);
-    V<Float64> vtrue = pred0_is_true ? inputs[0] : inputs[1];
-    V<Float64> vfalse = pred0_is_true ? inputs[1] : inputs[0];
-    if (IsNegateOf(vtrue, f0) && vfalse == f0) {
-      // TODO(dmercadier): in-place override the Branch of the dominator into a
-      // Goto to the current block so that the diamond gets dead-code eliminated
-      // sooner.
-      return __ Float64Abs(f0);
-    }
-
-    goto no_change;
-  }
+  // TODO(mslekova): Implement ReduceSelect and ReducePhi,
+  // by reducing `(f > 0) ? f : -f` to `fabs(f)`.
 
   V<Untagged> REDUCE(Change)(V<Untagged> input, ChangeOp::Kind kind,
                              ChangeOp::Assumption assumption,
@@ -730,7 +665,10 @@ class MachineOptimizationReducer : public Next {
               matcher_.MatchFloat32Constant(rhs, &k) && std::isnormal(k) &&
               k != 0 && std::isfinite(k) &&
               base::bits::IsPowerOfTwo(base::Double(k).Significand())) {
-            return __ FloatMul(lhs, __ FloatConstant(1.0 / k, rep), rep);
+            const float recip = 1.0f / k;
+            if (std::isnormal(recip)) {
+              return __ FloatMul(lhs, __ FloatConstant(recip, rep), rep);
+            }
           }
         } else {
           DCHECK_EQ(rep, FloatRepresentation::Float64());
@@ -738,7 +676,10 @@ class MachineOptimizationReducer : public Next {
               matcher_.MatchFloat64Constant(rhs, &k) && std::isnormal(k) &&
               k != 0 && std::isfinite(k) &&
               base::bits::IsPowerOfTwo(base::Double(k).Significand())) {
-            return __ FloatMul(lhs, __ FloatConstant(1.0 / k, rep), rep);
+            const double recip = 1.0 / k;
+            if (std::isnormal(recip)) {
+              return __ FloatMul(lhs, __ FloatConstant(recip, rep), rep);
+            }
           }
         }
       }
@@ -1340,6 +1281,120 @@ class MachineOptimizationReducer : public Next {
 #endif  // V8_ENABLE_WEBASSEMBLY
 #endif  // V8_TARGET_ARCH_ARM64
 
+  std::optional<V<Word>> TryReduceRorInTree(V<Word> left, V<Word> right,
+                                            WordBinopOp::Kind kind,
+                                            WordRepresentation rep) {
+    // Traces tree of XOR or OR operations to find pairs of shifts that form
+    // a rotation, and reduces them.
+    //
+    // Examples for 32-bit with another operand 'z':
+    //   ((x << y) ^ z) ^ (x >>> (32 - y))  =>  (x ror (32 - y)) ^ z
+    //   ((x << y) | z) | (x >>> (32 - y))  =>  (x ror (32 - y)) | z
+
+    DCHECK(kind == WordBinopOp::Kind::kBitwiseXor ||
+           kind == WordBinopOp::Kind::kBitwiseOr);
+
+    constexpr size_t kMaxOperands = 8;
+    base::SmallVector<OpIndex, kMaxOperands> operands;
+    base::SmallVector<OpIndex, kMaxOperands> worklist;
+
+    worklist.push_back(left);
+    worklist.push_back(right);
+
+    bool has_shl = false;
+    bool has_shr = false;
+
+    // Searching for a tree of XORs (or ORs).
+    while (!worklist.empty() && operands.size() < kMaxOperands) {
+      OpIndex current_op = worklist.back();
+      worklist.pop_back();
+
+      const auto* binop = matcher_.TryCast<WordBinopOp>(current_op);
+      if (binop != nullptr && binop->kind == kind) {
+        worklist.push_back(binop->right());
+        worklist.push_back(binop->left());
+      } else {
+        operands.push_back(current_op);
+
+        if (const auto* shift = matcher_.TryCast<ShiftOp>(current_op)) {
+          if (shift->kind == ShiftOp::Kind::kShiftLeft) has_shl = true;
+          if (shift->kind == ShiftOp::Kind::kShiftRightLogical) has_shr = true;
+        }
+      }
+    }
+
+    if (!has_shl || !has_shr) {
+      return {};
+    }
+
+    if (operands.size() <= 2) {
+      return {};
+    }
+
+    // Find a rotation pair and combine it with the remaining operands. We
+    // reduce at most one pair at a time, as the rest will be caught when
+    // reducing the combined result.
+    for (size_t i = 0; i < operands.size(); ++i) {
+      OpIndex op1 = operands[i];
+      const auto* s1 = matcher_.TryCast<ShiftOp>(op1);
+      if (s1 == nullptr) {
+        continue;
+      }
+
+      for (size_t j = i + 1; j < operands.size(); ++j) {
+        OpIndex op2 = operands[j];
+        const auto* s2 = matcher_.TryCast<ShiftOp>(op2);
+        if (s2 == nullptr) {
+          continue;
+        }
+
+        const ShiftOp* shl_node = nullptr;
+        const ShiftOp* shr_node = nullptr;
+        if (s1->kind == ShiftOp::Kind::kShiftLeft &&
+            s2->kind == ShiftOp::Kind::kShiftRightLogical) {
+          shl_node = s1;
+          shr_node = s2;
+        } else if (s1->kind == ShiftOp::Kind::kShiftRightLogical &&
+                   s2->kind == ShiftOp::Kind::kShiftLeft) {
+          shl_node = s2;
+          shr_node = s1;
+        } else {
+          continue;
+        }
+
+        if (shl_node->left() != shr_node->left()) {
+          continue;
+        }
+
+        uint32_t l, r;
+        if (matcher_.MatchIntegralWord32Constant(shl_node->right(), &l) &&
+            matcher_.MatchIntegralWord32Constant(shr_node->right(), &r)) {
+          // Rotation requires that the effective shift amounts (masked by
+          // bit_width - 1) sum to the bit_width. This ensures that they are
+          // complementary and non-zero.
+          uint32_t mask = rep.bit_width() - 1;
+          if ((l & mask) + (r & mask) == rep.bit_width()) {
+            V<Word> ror =
+                __ RotateRight(shl_node->left(), shr_node->right(), rep);
+            V<Word> result = ror;
+            for (size_t k = 0; k < operands.size(); ++k) {
+              if (k == i || k == j) continue;
+              result = __ WordBinop(result, operands[k], kind, rep);
+            }
+
+            // Combine remaining worklist items to preserve expression.
+            while (!worklist.empty()) {
+              result = __ WordBinop(result, worklist.back(), kind, rep);
+              worklist.pop_back();
+            }
+            return result;
+          }
+        }
+      }
+    }
+    return {};
+  }
+
   std::optional<V<Word>> TryReduceToRor(V<Word> left, V<Word> right,
                                         WordBinopOp::Kind kind,
                                         WordRepresentation rep) {
@@ -1353,11 +1408,16 @@ class MachineOptimizationReducer : public Next {
     // Note the side condition for XOR: the optimization doesn't hold for
     // an effective rotation amount of 0.
 
-    if (!(kind == any_of(WordBinopOp::Kind::kBitwiseOr,
-                         WordBinopOp::Kind::kBitwiseXor))) {
+    if (kind !=
+        any_of(WordBinopOp::Kind::kBitwiseOr, WordBinopOp::Kind::kBitwiseXor)) {
       return {};
     }
+    // Try chain optimization if we detect a potential chain.
+    if (auto ror = TryReduceRorInTree(left, right, kind, rep)) {
+      return ror;
+    }
 
+    // Direct pair reduction otherwise.
     const ShiftOp* high = matcher_.TryCast<ShiftOp>(left);
     if (!high) return {};
     const ShiftOp* low = matcher_.TryCast<ShiftOp>(right);
@@ -2300,14 +2360,21 @@ class MachineOptimizationReducer : public Next {
   V<Simd128> REDUCE(Simd128ReplaceLane)(V<Simd128> into, V<Any> new_lane,
                                         Simd128ReplaceLaneOp::Kind kind,
                                         uint8_t lane) {
+    LABEL_BLOCK(no_change) {
+      return Next::ReduceSimd128ReplaceLane(into, new_lane, kind, lane);
+    }
     if (kind == Simd128ReplaceLaneOp::Kind::kF16x8) {
       // Not supported yet.
-      return Next::ReduceSimd128ReplaceLane(into, new_lane, kind, lane);
+      goto no_change;
     }
 
     if (const Simd128ExtractLaneOp* extract =
             matcher_.TryCast<Simd128ExtractLaneOp>(new_lane)) {
       Simd128ExtractLaneOp::Kind extract_kind = extract->kind;
+      if (extract_kind == Simd128ExtractLaneOp::Kind::kF16x8) {
+        // Not supported yet.
+        goto no_change;
+      }
       int extract_bytes =
           ElementSizeInBytes(Simd128ExtractLaneOp::element_rep(extract_kind));
       int replace_bytes =
@@ -2343,7 +2410,7 @@ class MachineOptimizationReducer : public Next {
                                   from_lane);
       }
     }
-    return Next::ReduceSimd128ReplaceLane(into, new_lane, kind, lane);
+    goto no_change;
   }
 
   V<Any> REDUCE(Simd128ExtractLane)(V<Simd128> input,

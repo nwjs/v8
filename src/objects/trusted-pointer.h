@@ -30,7 +30,6 @@ class WasmInternalFunction;
 class WasmSuspenderObject;
 class WasmFunctionData;
 class WasmExportedFunctionData;
-class WasmJSFunctionData;
 class WasmCapiFunctionData;
 
 template <typename T, IndirectPointerTagRange kTagRange>
@@ -55,7 +54,6 @@ namespace detail {
   IF_WASM(V, kWasmFunctionDataIndirectPointerTagRange, WasmFunctionData)    \
   IF_WASM(V, kWasmExportedFunctionDataIndirectPointerTag,                   \
           WasmExportedFunctionData)                                         \
-  IF_WASM(V, kWasmJSFunctionDataIndirectPointerTag, WasmJSFunctionData)     \
   IF_WASM(V, kWasmCapiFunctionDataIndirectPointerTag, WasmCapiFunctionData)
 
 template <IndirectPointerTagRange tag_range>
@@ -81,7 +79,7 @@ using TrustedTypeFor = typename detail::TrustedPointerType<tag_range>::type;
 // pointers from HeapObjects.
 //
 // A pointer to a trusted object. When the sandbox is enabled, these are
-// indirect pointers using the the TrustedPointerTable (TPT). When the sandbox
+// indirect pointers using the TrustedPointerTable (TPT). When the sandbox
 // is disabled, they are regular tagged pointers. They must always point to an
 // ExposedTrustedObject as (only) these objects can be referenced through the
 // trusted pointer table.
@@ -163,6 +161,7 @@ class TrustedPointerMember
                                              Tagged<T> value);
 
   inline bool is_empty() const;
+  inline bool is_unpublished(IsolateForSandbox isolate) const;
   inline void clear(HeapObjectLayout* host);
 
  private:
@@ -176,6 +175,8 @@ class TrustedPointerMember
   using Base = TaggedMember<T>;
 #endif
 };
+
+using CodePointerMember = TrustedPointerMember<Code, kCodeIndirectPointerTag>;
 
 }  // namespace internal
 }  // namespace v8

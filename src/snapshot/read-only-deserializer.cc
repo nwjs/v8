@@ -345,14 +345,10 @@ class ObjectPostProcessor final {
   }
   void PostProcessJSExternalObject(Tagged<JSExternalObject> o) {
     DecodeExternalPointerSlot(
-        o, o->RawExternalPointerField(
-               JSExternalObject::kValueOffset,
-               {kFirstExternalTypeTag, kLastExternalTypeTag}));
+        o, ExternalPointerSlot(&o->value_, kExternalObjectValueTagRange));
   }
   void PostProcessFunctionTemplateInfo(Tagged<FunctionTemplateInfo> o) {
-    DecodeExternalPointerSlot(
-        o, o->RawExternalPointerField(FunctionTemplateInfo::kCallbackOffset,
-                                      kFunctionTemplateInfoCallbackTag));
+    DecodeExternalPointerSlot(o, ExternalPointerSlot(&o->callback_));
     if (USE_SIMULATOR_BOOL) {
       o->RestoreCallbackRedirectionAfterDeserialization(isolate_);
     }

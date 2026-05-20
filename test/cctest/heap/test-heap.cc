@@ -74,6 +74,7 @@
 #include "src/objects/js-collection-inl.h"
 #include "src/objects/managed-inl.h"
 #include "src/objects/objects-inl.h"
+#include "src/objects/objects.h"
 #include "src/objects/slots.h"
 #include "src/objects/transitions.h"
 #include "src/regexp/regexp.h"
@@ -106,7 +107,7 @@ static void CheckMap(Tagged<Map> map, int type, int instance_size) {
 TEST(HeapMaps) {
   CcTest::InitializeVM();
   ReadOnlyRoots roots(CcTest::heap());
-  CheckMap(roots.meta_map(), MAP_TYPE, Map::kSize);
+  CheckMap(roots.meta_map(), MAP_TYPE, kVariableSizeSentinel);
   CheckMap(roots.heap_number_map(), HEAP_NUMBER_TYPE, sizeof(HeapNumber));
   CheckMap(roots.fixed_array_map(), FIXED_ARRAY_TYPE, kVariableSizeSentinel);
   CheckMap(roots.hash_table_map(), HASH_TABLE_TYPE, kVariableSizeSentinel);
@@ -881,6 +882,78 @@ TEST(JSObjectMaps) {
   CHECK(*initial_map != obj->map());
 }
 
+// Checks that extended Maps handling works as expected regarding Map
+// transitions, object creation and so on.
+TEST(JSInterceptorMap) {
+  CcTest::InitializeVM();
+  Isolate* isolate = CcTest::i_isolate();
+  Factory* factory = isolate->factory();
+  Heap* heap = CcTest::heap();
+
+  HandleScope sc(isolate);
+
+  DirectHandle<InterceptorInfo> named_interceptor =
+      factory->NewInterceptorInfo(InterceptorKind::kNamed);
+  DirectHandle<InterceptorInfo> indexed_interceptor =
+      factory->NewInterceptorInfo(InterceptorKind::kIndexed);
+
+  DirectHandle<Map> last_map;
+  {
+    HandleScope sc1(isolate);
+
+    const size_t N = 100;
+    DirectHandleVector<JSObject> objects(isolate);
+    objects.reserve(N);
+    DirectHandle<JSInterceptorMap> map;
+
+    for (size_t i = 0; i < N; i++) {
+      if (i % 10 == 0) {
+        // Create a fresh map every now and then.
+        const int inobject_properties = 2;
+        map = Cast<JSInterceptorMap>(factory->NewExtendedMapWithMetaMap(
+            isolate->meta_map(), ExtendedMapKind::kJSInterceptorMap,
+            JS_OBJECT_TYPE,
+            JSObject::kHeaderSize + inobject_properties * kTaggedSize,
+            TERMINAL_FAST_ELEMENTS_KIND, inobject_properties));
+        map->clear_extended_padding();
+        map->set_named_interceptor(*named_interceptor);
+        map->set_indexed_interceptor(*indexed_interceptor);
+      }
+
+      Handle<JSObject> obj = factory->NewJSObjectFromMap(map);
+      Object::SetProperty(isolate, obj, factory->a_string(), obj).Check();
+      Object::SetProperty(isolate, obj, factory->b_string(), obj).Check();
+      Object::SetProperty(isolate, obj, factory->c_string(), obj).Check();
+      Object::SetProperty(isolate, obj, factory->d_string(), obj).Check();
+
+#ifdef VERIFY_HEAP
+      obj->HeapObjectVerify(isolate);
+      obj->map()->HeapObjectVerify(isolate);
+#endif  // VERIFY_HEAP
+      objects.emplace_back(obj);
+      if (i == N / 2) {
+        InvokeMajorGC(heap);
+        InvokeMajorGC(heap);
+      }
+    }
+
+    InvokeMajorGC(heap);
+    InvokeMajorGC(heap);
+    last_map = sc1.CloseAndEscape(map);
+  }
+  InvokeMajorGC(heap);
+  InvokeMajorGC(heap);
+
+  CHECK(IsJSObjectMap(*last_map));
+  CHECK(last_map->is_extended_map());
+
+  CHECK_EQ(UncheckedCast<ExtendedMap>(last_map)->map_kind(),
+           ExtendedMapKind::kJSInterceptorMap);
+  DirectHandle<JSInterceptorMap> map = Cast<JSInterceptorMap>(last_map);
+  CHECK_EQ(map->named_interceptor(), *named_interceptor);
+  CHECK_EQ(map->indexed_interceptor(), *indexed_interceptor);
+}
+
 TEST(JSArray) {
   CcTest::InitializeVM();
   Isolate* isolate = CcTest::i_isolate();
@@ -1251,6 +1324,76 @@ TEST(TestMultiReferencedBytecodeFlushing) {
 
 TEST(TestMultiReferencedBytecodeFlushingWithSparkplug) {
   TestMultiReferencedBytecodeFlushing(/*sparkplug_compile=*/true);
+}
+
+TEST(TestMultiReferencedBytecodeFlushingBothOld) {
+#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+  v8_flags.turbofan = false;
+  i::v8_flags.optimize_for_size = false;
+#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+#ifdef V8_ENABLE_SPARKPLUG
+  v8_flags.always_sparkplug = false;
+  v8_flags.flush_baseline_code = true;
+#endif  // V8_ENABLE_SPARKPLUG
+  i::v8_flags.flush_bytecode = true;
+  i::v8_flags.allow_natives_syntax = true;
+
+  ManualGCScope manual_gc_scope;
+  CcTest::InitializeVM();
+  v8::Isolate* isolate = CcTest::isolate();
+  Isolate* i_isolate = CcTest::i_isolate();
+  Heap* heap = CcTest::heap();
+  Factory* factory = i_isolate->factory();
+
+  {
+    v8::HandleScope scope(isolate);
+    v8::Context::New(isolate)->Enter();
+    const char* source =
+        "function foo() {"
+        "  var x = 42;"
+        "  var y = 42;"
+        "  var z = x + y;"
+        "};"
+        "foo()";
+    IndirectHandle<String> foo_name = factory->InternalizeUtf8String("foo");
+
+    // This compile will add the code to the compilation cache.
+    {
+      v8::HandleScope new_scope(isolate);
+      CompileRun(source);
+    }
+
+    // Check function is compiled.
+    IndirectHandle<Object> func_value =
+        Object::GetProperty(i_isolate, i_isolate->global_object(), foo_name)
+            .ToHandleChecked();
+    CHECK(IsJSFunction(*func_value));
+    IndirectHandle<JSFunction> function = Cast<JSFunction>(func_value);
+    IndirectHandle<SharedFunctionInfo> shared(function->shared(), i_isolate);
+    CHECK(shared->is_compiled());
+
+    // Make a copy of the SharedFunctionInfo which points to the same bytecode.
+    IndirectHandle<SharedFunctionInfo> copy =
+        i_isolate->factory()->CloneSharedFunctionInfo(shared);
+
+    // Verify that both SFIs share the same BytecodeArray.
+    CHECK_EQ(shared->GetBytecodeArray(i_isolate),
+             copy->GetBytecodeArray(i_isolate));
+
+    i::SharedFunctionInfo::EnsureOldForTesting(*shared);
+    i::SharedFunctionInfo::EnsureOldForTesting(*copy);
+
+    {
+      // We need to invoke GC without stack, otherwise some objects may not be
+      // reclaimed because of conservative stack scanning.
+      DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
+      heap::InvokeMajorGC(heap);
+    }
+
+    // Both should be decompiled (flushed) because both were old.
+    CHECK(!shared->is_compiled());
+    CHECK(!copy->is_compiled());
+  }
 }
 
 HEAP_TEST(Regress10560) {
@@ -1990,9 +2133,7 @@ TEST(TestSizeOfRegExpCode) {
 
   LocalContext context;
 
-  // Adjust source below and this check to match
-  // RegExp::kRegExpTooLargeToOptimize.
-  CHECK_EQ(i::RegExp::kRegExpTooLargeToOptimize, 20 * KB);
+  CHECK_EQ(i::RegExp::kMaxOptimizedPatternLength, 20 * KB);
 
   // Compile a regexp that is much larger if we are using regexp optimizations.
   CompileRun(
@@ -4519,7 +4660,7 @@ TEST(ObjectsInEagerlyDeoptimizedCodeAreWeak) {
     code = handle(bar->code(isolate), isolate);
     CompileRun("%DeoptimizeFunction(bar);");
     CHECK(code->marked_for_deoptimization());
-    CHECK(!code->SafeEquals(bar->code(isolate)));
+    CHECK(!(*code).SafeEquals(bar->code(isolate)));
     code = scope.CloseAndEscape(code);
   }
 
@@ -6369,8 +6510,9 @@ TEST(RememberedSet_RemoveStaleOnScavenge) {
   arr->set(1, ReadOnlyRoots(CcTest::heap()).undefined_value());
   DirectHandle<FixedArrayBase> tail(heap->LeftTrimFixedArray(*arr, 1), isolate);
 
-  // None of the actions above should have updated the remembered set.
-  CHECK_EQ(3, GetRememberedSetSize<OLD_TO_NEW>(*tail));
+  // The first slot should be removed from the remembered set since the length
+  // is now in that place and represented as a uint32_t.
+  CHECK_EQ(2, GetRememberedSetSize<OLD_TO_NEW>(*tail));
 
   // Run GC to promote the remaining young object and fixup the stale entries in
   // the remembered set.
@@ -7139,7 +7281,7 @@ UNINITIALIZED_TEST(HugeHeapLimit) {
   v8::Isolate* isolate = v8::Isolate::New(create_params);
   Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
 #ifdef V8_COMPRESS_POINTERS
-  size_t kExpectedHeapLimit = Heap::AllocatorLimitOnMaxOldGenerationSize(0);
+  size_t kExpectedHeapLimit = Heap::kAllocatorLimitOnMaxOldGenerationSize;
 #else
   size_t kExpectedHeapLimit = size_t{4} * GB;
 #endif
@@ -7150,7 +7292,7 @@ UNINITIALIZED_TEST(HugeHeapLimit) {
 #endif
 
 UNINITIALIZED_TEST(HeapLimit) {
-  uint64_t kMemoryGB = 8;
+  uint64_t kMemoryGB = 16;
   v8_flags.high_end_android_physical_memory_threshold =
       static_cast<unsigned int>(kMemoryGB);
   v8::Isolate::CreateParams create_params;
@@ -7161,7 +7303,7 @@ UNINITIALIZED_TEST(HeapLimit) {
 #if defined(V8_TARGET_ARCH_64_BIT)
   // Because we explicitly set --high_end_android_physical_memory_threshold,
   // Android has the same expected heap limit.
-  size_t kExpectedHeapLimit = size_t{2} * GB;
+  size_t kExpectedHeapLimit = size_t{4} * GB;
 #else
   size_t kExpectedHeapLimit = size_t{1} * GB;
 #endif

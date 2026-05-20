@@ -150,7 +150,7 @@ class MaglevGraphBuilder {
   IntPtrConstant* GetIntPtrConstant(intptr_t constant) {
     return graph()->GetIntPtrConstant(constant);
   }
-  Uint32Constant* GetUint32Constant(int constant) {
+  Uint32Constant* GetUint32Constant(uint32_t constant) {
     return graph()->GetUint32Constant(constant);
   }
   Float64Constant* GetFloat64Constant(double constant) {
@@ -455,12 +455,12 @@ class MaglevGraphBuilder {
   MaybeReduceResult TrySpecializeLoadContextSlotToFunctionContext(
       ValueNode* context, int index, VariableMode mode,
       MaybeAssignedFlag assigned);
-  ValueNode* TrySpecializeLoadContextSlot(ValueNode* context, int index,
+  ValueNode* TrySpecializeLoadContextCell(ValueNode* context, int index,
                                           MaybeAssignedFlag assigned);
   ReduceResult LoadAndCacheContextSlot(ValueNode* context, int index,
                                        ContextMode context_mode,
                                        compiler::ScopeInfoRef scope_info);
-  MaybeReduceResult TrySpecializeStoreContextSlot(ValueNode* context, int index,
+  MaybeReduceResult TrySpecializeStoreContextCell(ValueNode* context, int index,
                                                   ValueNode* value,
                                                   MaybeAssignedFlag assigned);
   ReduceResult StoreAndCacheContextSlot(ValueNode* context, int index,
@@ -590,6 +590,19 @@ class MaglevGraphBuilder {
     DCHECK_NOT_NULL(current_interpreter_frame_.get(src));
 
     current_interpreter_frame_.set(dst, current_interpreter_frame_.get(src));
+
+    compiler::OptionalScopeInfoRef src_scope_info;
+    if (src == interpreter::Register::virtual_accumulator()) {
+      src_scope_info = accumulator_scope_info_;
+    } else {
+      src_scope_info = register_scope_infos_[src];
+    }
+
+    if (dst == interpreter::Register::virtual_accumulator()) {
+      accumulator_scope_info_ = src_scope_info;
+    } else {
+      register_scope_infos_[dst] = src_scope_info;
+    }
   }
 
   ReduceResult GetTaggedValue(ValueNode* value,
@@ -893,6 +906,7 @@ class MaglevGraphBuilder {
   V(ArrayPrototypeValues)                      \
   V(ArrayPrototypePush)                        \
   V(ArrayPrototypePop)                         \
+  V(ArrayPrototypeSort)                        \
   V(BooleanConstructor)                        \
   V(DataViewPrototypeGetByteLength)            \
   V(DataViewPrototypeGetInt8)                  \
@@ -931,6 +945,9 @@ class MaglevGraphBuilder {
   V(MathClz32)                                 \
   V(MathMin)                                   \
   V(MathMax)                                   \
+  V(MathImul)                                  \
+  V(MathFround)                                \
+  V(MathTrunc)                                 \
   V(SetPrototypeHas)                           \
   V(StringConstructor)                         \
   V(StringFromCharCode)                        \
@@ -938,6 +955,7 @@ class MaglevGraphBuilder {
   V(StringPrototypeCharCodeAt)                 \
   V(StringPrototypeCodePointAt)                \
   V(StringPrototypeSlice)                      \
+  V(StringPrototypeSubstring)                  \
   V(StringPrototypeStartsWith)                 \
   V(StringPrototypeIndexOf)                    \
   V(StringPrototypeIncludes)                   \
@@ -1085,7 +1103,9 @@ class MaglevGraphBuilder {
   MaybeReduceResult TryBuildCallKnownApiFunction(
       compiler::JSFunctionRef function, compiler::SharedFunctionInfoRef shared,
       CallArguments& args);
-  compiler::HolderLookupResult TryInferApiHolderValue(
+  // Returns either a result or nullopt. The latter case must be treated like
+  // IsDoneWithAbort.
+  std::optional<compiler::HolderLookupResult> TryInferApiHolderValue(
       compiler::FunctionTemplateInfoRef function_template_info,
       ValueNode* receiver);
   MaybeReduceResult TryReduceCallForApiFunction(

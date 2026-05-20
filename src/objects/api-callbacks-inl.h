@@ -15,6 +15,7 @@
 #include "src/objects/name.h"
 #include "src/objects/oddball.h"
 #include "src/objects/templates.h"
+#include "src/utils/memcopy.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -62,6 +63,29 @@ Tagged<Object> AccessCheckInfo::data() const { return data_.load(); }
 void AccessCheckInfo::set_data(Tagged<Object> value, WriteBarrierMode mode) {
   data_.store(this, value, mode);
 }
+
+// AccessorInfo.
+Tagged<Object> AccessorInfo::data() const { return data_.load(); }
+void AccessorInfo::set_data(Tagged<Object> value, WriteBarrierMode mode) {
+  data_.store(this, value, mode);
+}
+
+Tagged<Name> AccessorInfo::name() const { return name_.load(); }
+void AccessorInfo::set_name(Tagged<Name> value, WriteBarrierMode mode) {
+  name_.store(this, value, mode);
+}
+
+uint32_t AccessorInfo::flags() const { return flags_; }
+void AccessorInfo::set_flags(uint32_t value) { flags_ = value; }
+
+// InterceptorInfo.
+Tagged<Object> InterceptorInfo::data() const { return data_.load(); }
+void InterceptorInfo::set_data(Tagged<Object> value, WriteBarrierMode mode) {
+  data_.store(this, value, mode);
+}
+
+uint32_t InterceptorInfo::flags() const { return flags_; }
+void InterceptorInfo::set_flags(uint32_t value) { flags_ = value; }
 
 REDIRECTED_CALLBACK_ACCESSORS_MAYBE_READ_ONLY_HOST(
     AccessorInfo, getter, Address, kGetterOffset, kAccessorInfoGetterTag,
@@ -114,7 +138,7 @@ void AccessorInfo::RestoreCallbackRedirectionAfterDeserialization(
 
 void AccessorInfo::clear_padding() {
   if (FIELD_SIZE(kOptionalPaddingOffset) == 0) return;
-  memset(reinterpret_cast<void*>(address() + kOptionalPaddingOffset), 0,
+  Memset(reinterpret_cast<uint8_t*>(address() + kOptionalPaddingOffset), 0,
          FIELD_SIZE(kOptionalPaddingOffset));
 }
 
@@ -225,7 +249,7 @@ void InterceptorInfo::RestoreCallbackRedirectionAfterDeserialization(
 
 void InterceptorInfo::clear_padding() {
   if (FIELD_SIZE(kOptionalPaddingOffset) == 0) return;
-  memset(reinterpret_cast<void*>(address() + kOptionalPaddingOffset), 0,
+  Memset(reinterpret_cast<uint8_t*>(address() + kOptionalPaddingOffset), 0,
          FIELD_SIZE(kOptionalPaddingOffset));
 }
 

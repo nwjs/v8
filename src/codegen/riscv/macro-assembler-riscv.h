@@ -546,7 +546,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   template <typename... Rs>
   void pop_helper(Register r, Rs... rs) {
     pop_helper(rs...);
-    LoadWord(r, MemOperand(sp, sizeof...(rs) * kSystemPointerSize));
+    if (r != zero_reg) {
+      LoadWord(r, MemOperand(sp, sizeof...(rs) * kSystemPointerSize));
+    }
   }
 
   void pop_helper() {}
@@ -908,22 +910,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   template <int NBYTES, bool LOAD_SIGNED>
   void LoadNBytesOverwritingBaseReg(const MemOperand& rs, Register scratch0,
                                     Register scratch1);
-  // load/store macros
-  void Ulh(Register rd, const MemOperand& rs);
-  void Ulhu(Register rd, const MemOperand& rs);
-  void Ush(Register rd, const MemOperand& rs);
-
-  void Ulw(Register rd, const MemOperand& rs);
-  void Usw(Register rd, const MemOperand& rs);
-
-  void Uld(Register rd, const MemOperand& rs);
-  void Usd(Register rd, const MemOperand& rs);
-
-  void ULoadFloat(FPURegister fd, const MemOperand& rs);
-  void UStoreFloat(FPURegister fd, const MemOperand& rs);
-
-  void ULoadDouble(FPURegister fd, const MemOperand& rs);
-  void UStoreDouble(FPURegister fd, const MemOperand& rs);
 
   using Trapper = std::function<void(int)>;
 
@@ -954,6 +940,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 #undef ATOMIC_BINOP32
 #undef ATOMIC_BINOP64
 
+  // load/store macros
   void Lb(Register rd, const MemOperand& rs, Trapper&& trapper = [](int){});
   void Lbu(Register rd, const MemOperand& rs, Trapper&& trapper = [](int){});
   void Sb(Register rd, const MemOperand& rs, Trapper&& trapper = [](int){});
@@ -966,7 +953,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Sw(Register rd, const MemOperand& rs, Trapper&& trapper = [](int){});
 
 #if V8_TARGET_ARCH_RISCV64
-  void Ulwu(Register rd, const MemOperand& rs);
   void Lwu(Register rd, const MemOperand& rs, Trapper&& trapper = [](int){});
   void Ld(Register rd, const MemOperand& rs, Trapper&& trapper = [](int){});
   void Sd(Register rd, const MemOperand& rs, Trapper&& trapper = [](int){});
@@ -1092,15 +1078,47 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void InsertLowWordF64(FPURegister dst, Register src_low);
 
   void LoadFPRImmediate(FPURegister dst, float imm) {
+    ASM_CODE_COMMENT(this);
+    if (CpuFeatures::IsSupported(ZFA)) {
+      int imm5 = GetImm5ForFLIS(imm);
+      if (imm5 >= 0) {
+        fli_s(dst, static_cast<uint8_t>(imm5));
+        return;
+      }
+    }
     LoadFPRImmediate(dst, base::bit_cast<uint32_t>(imm));
   }
   void LoadFPRImmediate(FPURegister dst, double imm) {
+    ASM_CODE_COMMENT(this);
+    if (CpuFeatures::IsSupported(ZFA)) {
+      int imm5 = GetImm5ForFLID(imm);
+      if (imm5 >= 0) {
+        fli_d(dst, static_cast<uint8_t>(imm5));
+        return;
+      }
+    }
     LoadFPRImmediate(dst, base::bit_cast<uint64_t>(imm));
   }
   void LoadFPRImmediate(FPURegister dst, Float32 imm) {
+    ASM_CODE_COMMENT(this);
+    if (CpuFeatures::IsSupported(ZFA)) {
+      int imm5 = GetImm5ForFLIS(imm.get_scalar());
+      if (imm5 >= 0) {
+        fli_s(dst, static_cast<uint8_t>(imm5));
+        return;
+      }
+    }
     LoadFPRImmediate(dst, imm.get_bits());
   }
   void LoadFPRImmediate(FPURegister dst, Float64 imm) {
+    ASM_CODE_COMMENT(this);
+    if (CpuFeatures::IsSupported(ZFA)) {
+      int imm5 = GetImm5ForFLID(imm.get_scalar());
+      if (imm5 >= 0) {
+        fli_d(dst, static_cast<uint8_t>(imm5));
+        return;
+      }
+    }
     LoadFPRImmediate(dst, imm.get_bits());
   }
   void LoadFPRImmediate(FPURegister dst, uint32_t src);
@@ -1156,6 +1174,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void LoadFeedbackVector(Register dst, Register closure, Register scratch,
                           Label* fbv_undef);
+  void LoadFeedbackCell(Register dst, Register closure);
+  void LoadFeedbackVectorFromCell(Register dst, Register feedback_cell,
+                                  Register scratch, Label* fbv_undef);
 
   void LoadInterpreterDataBytecodeArray(Register destination,
                                         Register interpreter_data);
@@ -1443,13 +1464,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // Retrieve the Code object referenced by the given code pointer handle.
   void ResolveCodePointerHandle(Register destination, Register handle);
 
-  // Load the pointer to a Code's entrypoint via a code pointer.
-  // Only available when the sandbox is enabled as it requires the code pointer
-  // table.
-  void LoadCodeEntrypointViaCodePointer(Register destination,
-                                        MemOperand field_operand,
-                                        CodeEntrypointTag tag);
-
   // Load the value of Code pointer table corresponding to
   // IsolateGroup::current()->code_pointer_table_.
   // Only available when the sandbox is enabled.
@@ -1656,9 +1670,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // ---------------------------------------------------------------------------
   // Pseudo-instructions.
-
-  void LoadWordPair(Register rd, const MemOperand& rs);
-  void StoreWordPair(Register rd, const MemOperand& rs);
 
   void Madd_s(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft);
   void Madd_d(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft);

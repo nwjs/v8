@@ -8,6 +8,7 @@
 #include <optional>
 #include <type_traits>
 
+#include "include/v8config.h"
 #include "src/ic/call-optimization.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/feedback-vector.h"
@@ -35,6 +36,7 @@ class JSTypedArray;
 class NativeContext;
 class ScriptContextTable;
 class Tuple2;
+class GlobalDictionary;
 template <typename>
 class Signature;
 
@@ -275,6 +277,8 @@ struct ref_traits<OrderedNameDictionary> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<SwissNameDictionary> : public ref_traits<HeapObject> {};
 template <>
+struct ref_traits<GlobalDictionary> : public ref_traits<HeapObject> {};
+template <>
 struct ref_traits<InterceptorInfo> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<ArrayList> : public ref_traits<HeapObject> {};
@@ -335,7 +339,7 @@ class OptionalRef {
   // the full statement.
   class ArrowOperatorHelper {
    public:
-    TRef* operator->() { return &object_; }
+    TRef* operator->() V8_LIFETIME_BOUND { return &object_; }
 
    private:
     friend class OptionalRef<TRef>;
@@ -381,7 +385,7 @@ class OptionalRef {
   }
 
  private:
-  explicit OptionalRef(ObjectData* data) : data_(data) {
+  explicit OptionalRef(ObjectData* data V8_LIFETIME_BOUND) : data_(data) {
     CHECK_NOT_NULL(data_);
   }
   ObjectData* data_ = nullptr;
@@ -408,7 +412,8 @@ HEAP_BROKER_OBJECT_LIST(V)
 
 class V8_EXPORT_PRIVATE ObjectRef {
  public:
-  explicit ObjectRef(ObjectData* data, bool check_type = true) : data_(data) {
+  explicit ObjectRef(ObjectData* data V8_LIFETIME_BOUND, bool check_type = true)
+      : data_(data) {
     CHECK_NOT_NULL(data_);
   }
 
@@ -542,21 +547,22 @@ class HeapObjectType {
 
 // Constructors are carefully defined such that we do a type check on
 // the outermost Ref class in the inheritance chain only.
-#define DEFINE_REF_CONSTRUCTOR(Name, Base)                     \
-  explicit Name##Ref(ObjectData* data, bool check_type = true) \
-      : Base(data, false) {                                    \
-    if (check_type) {                                          \
-      CHECK(Is##Name());                                       \
-    }                                                          \
+#define DEFINE_REF_CONSTRUCTOR(Name, Base)               \
+  explicit Name##Ref(ObjectData* data V8_LIFETIME_BOUND, \
+                     bool check_type = true)             \
+      : Base(data, false) {                              \
+    if (check_type) {                                    \
+      CHECK(Is##Name());                                 \
+    }                                                    \
   }
 
-class HeapObjectRef : public ObjectRef {
+class V8_EXPORT_PRIVATE HeapObjectRef : public ObjectRef {
  public:
   DEFINE_REF_CONSTRUCTOR(HeapObject, ObjectRef)
 
   IndirectHandle<HeapObject> object() const;
 
-  V8_EXPORT_PRIVATE MapRef map(JSHeapBroker* broker) const;
+  MapRef map(JSHeapBroker* broker) const;
 
   // Only for use in special situations where we need to read the object's
   // current map (instead of returning the cached map). Use with care.
@@ -849,7 +855,7 @@ class NativeContextRef : public ContextRef {
   bool GlobalIsDetached(JSHeapBroker* broker) const;
 };
 
-class NameRef : public HeapObjectRef {
+class V8_EXPORT_PRIVATE NameRef : public HeapObjectRef {
  public:
   DEFINE_REF_CONSTRUCTOR(Name, HeapObjectRef)
 

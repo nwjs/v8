@@ -371,12 +371,6 @@ ExternalReference ExternalReference::interpreter_dispatch_table_address(
   return ExternalReference(isolate->interpreter()->dispatch_table_address());
 }
 
-ExternalReference ExternalReference::interpreter_dispatch_counters(
-    Isolate* isolate) {
-  return ExternalReference(
-      isolate->interpreter()->bytecode_dispatch_counters_table());
-}
-
 ExternalReference
 ExternalReference::address_of_interpreter_entry_trampoline_instruction_start(
     Isolate* isolate) {
@@ -657,6 +651,7 @@ FUNCTION_REFERENCE(wasm_word32_rol, wasm::word32_rol_wrapper)
 FUNCTION_REFERENCE(wasm_word32_ror, wasm::word32_ror_wrapper)
 FUNCTION_REFERENCE(wasm_word64_rol, wasm::word64_rol_wrapper)
 FUNCTION_REFERENCE(wasm_word64_ror, wasm::word64_ror_wrapper)
+FUNCTION_REFERENCE(wasm_int128_add, wasm::wasm_int128_add_wrapper)
 FUNCTION_REFERENCE(wasm_f64x2_ceil, wasm::f64x2_ceil_wrapper)
 FUNCTION_REFERENCE(wasm_f64x2_floor, wasm::f64x2_floor_wrapper)
 FUNCTION_REFERENCE(wasm_f64x2_trunc, wasm::f64x2_trunc_wrapper)
@@ -712,10 +707,9 @@ FUNCTION_REFERENCE_WITH_TYPE(wasm_string_to_f64, wasm::flat_string_to_f64,
 
 int32_t (&futex_emulation_wake)(void*, uint32_t) = FutexEmulation::Wake;
 FUNCTION_REFERENCE(wasm_atomic_notify, futex_emulation_wake)
-int32_t (&futex_emulation_managed_object_wait)(Address, int32_t,
-                                               uint32_t) = FutexEmulation::Wake;
-FUNCTION_REFERENCE(wasm_managed_object_notify,
-                   futex_emulation_managed_object_wait)
+int32_t (&futex_emulation_waitqueue_wait)(Address,
+                                          uint32_t) = FutexEmulation::Wake;
+FUNCTION_REFERENCE(wasm_waitqueue_notify, futex_emulation_waitqueue_wait)
 #define V(Name) RAW_FUNCTION_REFERENCE(wasm_##Name, wasm::Name)
 WASM_JS_EXTERNAL_REFERENCE_LIST(V)
 #undef V
@@ -1155,6 +1149,14 @@ FUNCTION_REFERENCE(re_atom_exec_raw, RegExp::AtomExecRaw)
 FUNCTION_REFERENCE(allocate_regexp_result_vector,
                    regexp::ResultVector::Allocate)
 FUNCTION_REFERENCE(free_regexp_result_vector, regexp::ResultVector::Free)
+
+#ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
+ExternalReference ExternalReference::address_of_trace_regexp_exec() {
+  return ExternalReference(&v8_flags.trace_regexp_exec);
+}
+FUNCTION_REFERENCE(address_of_regexp_trace_begin, RegExp::TraceExecutionBegin)
+FUNCTION_REFERENCE(address_of_regexp_trace_end, RegExp::TraceExecutionEnd)
+#endif  // V8_ENABLE_REGEXP_DIAGNOSTICS
 
 FUNCTION_REFERENCE(
     re_case_insensitive_compare_unicode,
@@ -1640,6 +1642,16 @@ ExternalReference ExternalReference::cpu_features() {
 ExternalReference ExternalReference::promise_hook_flags_address(
     Isolate* isolate) {
   return ExternalReference(isolate->promise_hook_flags_address());
+}
+
+ExternalReference
+ExternalReference::compare_operation_feedback_transition_table() {
+  return ExternalReference(CompareOperationFeedback::GetTransitionMapAddress());
+}
+
+ExternalReference ExternalReference::compare_operation_feedback_encode_table() {
+  return ExternalReference(
+      CompareOperationFeedback::GetFeedbackEncodeTableAddress());
 }
 
 ExternalReference ExternalReference::promise_hook_address(Isolate* isolate) {

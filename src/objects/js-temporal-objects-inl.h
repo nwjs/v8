@@ -28,25 +28,29 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-temporal-objects-tq-inl.inc"
-
 // temporal_rs object getters
-ACCESSORS(JSTemporalInstant, instant, Tagged<Managed<temporal_rs::Instant>>,
-          kInstantOffset)
-ACCESSORS(JSTemporalDuration, duration, Tagged<Managed<temporal_rs::Duration>>,
-          kDurationOffset)
-ACCESSORS(JSTemporalPlainDate, date, Tagged<Managed<temporal_rs::PlainDate>>,
-          kDateOffset)
-ACCESSORS(JSTemporalPlainDateTime, date_time,
-          Tagged<Managed<temporal_rs::PlainDateTime>>, kDateTimeOffset)
-ACCESSORS(JSTemporalPlainMonthDay, month_day,
-          Tagged<Managed<temporal_rs::PlainMonthDay>>, kMonthDayOffset)
-ACCESSORS(JSTemporalPlainTime, time, Tagged<Managed<temporal_rs::PlainTime>>,
-          kTimeOffset)
-ACCESSORS(JSTemporalPlainYearMonth, year_month,
-          Tagged<Managed<temporal_rs::PlainYearMonth>>, kYearMonthOffset)
-ACCESSORS(JSTemporalZonedDateTime, zoned_date_time,
-          Tagged<Managed<temporal_rs::ZonedDateTime>>, kZonedDateTimeOffset)
+#define DEFINE_TEMPORAL_ACCESSORS(JSType, field, RustType_)         \
+  inline Tagged<Managed<RustType_>> JSType::field() const {         \
+    return field##_.load();                                         \
+  }                                                                 \
+  inline void JSType::set_##field(Tagged<Managed<RustType_>> value, \
+                                  WriteBarrierMode mode) {          \
+    field##_.store(this, value, mode);                              \
+  }
+
+DEFINE_TEMPORAL_ACCESSORS(JSTemporalInstant, instant, temporal_rs::Instant)
+DEFINE_TEMPORAL_ACCESSORS(JSTemporalDuration, duration, temporal_rs::Duration)
+DEFINE_TEMPORAL_ACCESSORS(JSTemporalPlainDate, date, temporal_rs::PlainDate)
+DEFINE_TEMPORAL_ACCESSORS(JSTemporalPlainDateTime, date_time,
+                          temporal_rs::PlainDateTime)
+DEFINE_TEMPORAL_ACCESSORS(JSTemporalPlainMonthDay, month_day,
+                          temporal_rs::PlainMonthDay)
+DEFINE_TEMPORAL_ACCESSORS(JSTemporalPlainTime, time, temporal_rs::PlainTime)
+DEFINE_TEMPORAL_ACCESSORS(JSTemporalPlainYearMonth, year_month,
+                          temporal_rs::PlainYearMonth)
+DEFINE_TEMPORAL_ACCESSORS(JSTemporalZonedDateTime, zoned_date_time,
+                          temporal_rs::ZonedDateTime)
+#undef DEFINE_TEMPORAL_ACCESSORS
 
 #define DEFINE_CTOR_HELPER(JSType, snake_case)                              \
   inline DirectHandle<JSFunction> JSType::GetConstructorTarget(             \
@@ -68,14 +72,13 @@ DEFINE_CTOR_HELPER(JSTemporalZonedDateTime, zoned_date_time)
 
 // Paired with DECL_ACCESSORS_FOR_RUST_WRAPPER
 // Can be omitted and overridden if needed.
-#define DEFINE_ACCESSORS_FOR_RUST_WRAPPER(field, JSType)                      \
-  inline void JSType::initialize_with_wrapped_rust_value(                     \
-      Tagged<Managed<JSType::RustType>> handle) {                             \
-    this->set_##field(handle);                                                \
-  }                                                                           \
-  inline const std::shared_ptr<const JSType::RustType> JSType::wrapped_rust() \
-      const {                                                                 \
-    return this->field()->get();                                              \
+#define DEFINE_ACCESSORS_FOR_RUST_WRAPPER(field, JSType)               \
+  inline void JSType::initialize_with_wrapped_rust_value(              \
+      Tagged<Managed<JSType::RustType>> handle) {                      \
+    this->set_##field(handle);                                         \
+  }                                                                    \
+  inline Managed<JSType::RustType>::Ptr JSType::wrapped_rust() const { \
+    return this->field()->ptr();                                       \
   }
 
 DEFINE_ACCESSORS_FOR_RUST_WRAPPER(instant, JSTemporalInstant)

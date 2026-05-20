@@ -39,15 +39,6 @@ namespace compiler {
 
 using namespace turboshaft;  // NOLINT(build/namespaces)
 
-namespace {
-// Here we really want the raw Bits of the mask, but the `.bits()` method is
-// not constexpr, and so users of this constant need to call it.
-// TODO(turboshaft): EffectDimensions could probably be defined via
-// base::Flags<> instead, which should solve this.
-constexpr EffectDimensions kTurboshaftEffectLevelMask =
-    OpEffects().CanReadMemory().produces;
-}
-
 InstructionSelector::InstructionSelector(
     Zone* zone, size_t node_count, Linkage* linkage,
     InstructionSequence* sequence, Graph* schedule,
@@ -1017,6 +1008,7 @@ Instruction* InstructionSelector::EmitWithContinuation(
     continuation_inputs_.push_back(g.Label(cont->false_block()));
   } else if (cont->IsDeoptimize()) {
     int immediate_args_count = 0;
+    DCHECK_LE(input_count, DeoptFrameStateOffsetField::kMax);
     opcode |= DeoptImmedArgsCountField::encode(immediate_args_count) |
               DeoptFrameStateOffsetField::encode(static_cast<int>(input_count));
     AppendDeoptimizeArguments(&continuation_inputs_, cont->reason(),
@@ -1443,8 +1435,7 @@ bool increment_effect_level_for_node(InstructionSelector* selector,
     // would prevent covering in the ISEL.
     return false;
   }
-  return (op.Effects().consumes.bits() & kTurboshaftEffectLevelMask.bits()) !=
-         0;
+  return op.Effects().can_write() || op.Effects().can_allocate;
 }
 }  // namespace
 
@@ -2079,13 +2070,15 @@ void InstructionSelector::VisitProjection(OpIndex node) {
   const Operation& value_op = this->Get(projection.input());
   if (value_op.Is<OverflowCheckedBinopOp>() ||
       value_op.Is<OverflowCheckedUnaryOp>() || value_op.Is<TryChangeOp>() ||
-      value_op.Is<Word32PairBinopOp>() || value_op.Is<Word64MulWideOp>()) {
+      value_op.Is<Word32PairBinopOp>()) {
     if (projection.index == 0u) {
       EmitIdentity(node);
     } else {
       DCHECK_EQ(1u, projection.index);
       MarkAsUsed(projection.input());
     }
+  } else if (value_op.Is<Word64Add128Op>() || value_op.Is<Word64MulWideOp>()) {
+    MarkAsUsed(projection.input());
   } else if (value_op.Is<DidntThrowOp>()) {
     // Nothing to do here?
   } else if (value_op.Is<CallOp>()) {
@@ -2858,6 +2851,9 @@ void InstructionSelector::VisitNode(OpIndex node) {
             case multi(Rep::Float64(), Rep::Word64(), true, A::kNoOverflow):
             case multi(Rep::Float64(), Rep::Word64(), true, A::kNoAssumption):
               return VisitTruncateFloat64ToInt64(node);
+            case multi(Rep::Float64(), Rep::Word64(), false, A::kNoOverflow):
+            case multi(Rep::Float64(), Rep::Word64(), false, A::kNoAssumption):
+              return VisitChangeFloat64ToUint64(node);
             default:
               // Invalid combination.
               UNREACHABLE();
@@ -3265,6 +3261,10 @@ void InstructionSelector::VisitNode(OpIndex node) {
         }
       }
       UNREACHABLE();
+    }
+    case Opcode::kWord64Add128: {
+      MarkPairProjectionsAsWord64(node);
+      return VisitUint64Add128(node);
     }
     case Opcode::kWord64MulWide: {
       const Word64MulWideOp& wideop = op.Cast<Word64MulWideOp>();

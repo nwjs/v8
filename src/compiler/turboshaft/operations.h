@@ -18,6 +18,7 @@
 #include "src/base/macros.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/small-vector.h"
+#include "src/base/string-format.h"
 #include "src/base/template-utils.h"
 #include "src/base/vector.h"
 #include "src/codegen/external-reference.h"
@@ -48,6 +49,8 @@ class HeapObject;
 }  // namespace v8::internal
 namespace v8::internal::compiler {
 class CallDescriptor;
+class NameRef;
+class WeakHomomorphicFixedArrayRef;
 class JSWasmCallParameters;
 class DeoptimizeParameters;
 class FrameStateInfo;
@@ -232,6 +235,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(CheckedClosure)                             \
   V(WordBinopDeoptOnOverflow)                   \
   V(CheckEqualsInternalizedString)              \
+  V(CheckHomomorphic)                           \
   V(CheckMaps)                                  \
   V(CompareMaps)                                \
   V(Float64Is)                                  \
@@ -290,6 +294,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(WordBinop)                               \
   V(FloatBinop)                              \
   V(Word32PairBinop)                         \
+  V(Word64Add128)                            \
   V(Word64MulWide)                           \
   V(OverflowCheckedBinop)                    \
   V(WordUnary)                               \
@@ -1840,6 +1845,34 @@ struct Word64MulWideOp : FixedArityOperationT<2, Word64MulWideOp> {
   void PrintOptions(std::ostream& os) const;
 };
 
+struct Word64Add128Op : FixedArityOperationT<4, Word64Add128Op> {
+  static constexpr OpEffects effects = OpEffects();
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Word64(),
+                     RegisterRepresentation::Word64()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      const ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Word64(),
+                          MaybeRegisterRepresentation::Word64(),
+                          MaybeRegisterRepresentation::Word64(),
+                          MaybeRegisterRepresentation::Word64()>();
+  }
+
+  V<Word64> left_low() const { return input<Word64>(0); }
+  V<Word64> left_high() const { return input<Word64>(1); }
+  V<Word64> right_low() const { return input<Word64>(2); }
+  V<Word64> right_high() const { return input<Word64>(3); }
+
+  Word64Add128Op(V<Word64> al, V<Word64> ah, V<Word64> bl, V<Word64> bh)
+      : Base(al, ah, bl, bh) {}
+
+  auto options() const { return std::tuple{}; }
+  void PrintOptions(std::ostream& os) const {}
+};
+
 struct WordBinopDeoptOnOverflowOp
     : FixedArityOperationT<3, WordBinopDeoptOnOverflowOp> {
   enum class Kind : uint8_t {
@@ -2389,6 +2422,8 @@ struct ChangeOrDeoptOp : FixedArityOperationT<2, ChangeOrDeoptOp> {
     kUint64ToInt64,
     kFloat64ToInt32,
     kFloat64ToUint32,
+    kInt32ToUint64,
+    kFloat64ToUint64,
     kFloat64ToAdditiveSafeInteger,
     kFloat64ToInt64,
     kFloat64NotHole,
@@ -2410,6 +2445,8 @@ struct ChangeOrDeoptOp : FixedArityOperationT<2, ChangeOrDeoptOp> {
       case Kind::kInt64ToAdditiveSafeInteger:
       case Kind::kFloat64ToAdditiveSafeInteger:
       case Kind::kFloat64ToInt64:
+      case Kind::kInt32ToUint64:
+      case Kind::kFloat64ToUint64:
         return RepVector<RegisterRepresentation::Word64()>();
       case Kind::kFloat64NotHole:
         return RepVector<RegisterRepresentation::Float64()>();
@@ -2420,6 +2457,7 @@ struct ChangeOrDeoptOp : FixedArityOperationT<2, ChangeOrDeoptOp> {
       ZoneVector<MaybeRegisterRepresentation>& storage) const {
     switch (kind) {
       case Kind::kUint32ToInt32:
+      case Kind::kInt32ToUint64:
         return MaybeRepVector<MaybeRegisterRepresentation::Word32()>();
       case Kind::kInt64ToInt32:
       case Kind::kInt64ToAdditiveSafeInteger:
@@ -2430,6 +2468,7 @@ struct ChangeOrDeoptOp : FixedArityOperationT<2, ChangeOrDeoptOp> {
       case Kind::kFloat64ToUint32:
       case Kind::kFloat64ToAdditiveSafeInteger:
       case Kind::kFloat64ToInt64:
+      case Kind::kFloat64ToUint64:
       case Kind::kFloat64NotHole:
         return MaybeRepVector<MaybeRegisterRepresentation::Float64()>();
     }
@@ -2646,12 +2685,14 @@ struct PhiOp : OperationT<PhiOp> {
   explicit PhiOp(base::Vector<const OpIndex> inputs, RegisterRepresentation rep)
       : Base(CheckPhiInputCount(inputs)), rep(rep) {}
 
-  static base::Vector<const OpIndex> CheckPhiInputCount(
+  static V8_INLINE base::Vector<const OpIndex> CheckPhiInputCount(
       base::Vector<const OpIndex> inputs) {
-    // We add an additional CHECK specifically for Phi, to prevent Wasm from
-    // passing too many inputs, e.g. as part of a br_table operation.
-    CHECK_LE(inputs.size(),
-             std::numeric_limits<decltype(PhiOp::input_count)>::max());
+    // We check the phi input count explicitly to prevent Wasm from passing too
+    // many inputs, e.g. as part of a br_table operation.
+    if (V8_UNLIKELY(inputs.size() >
+                    std::numeric_limits<decltype(PhiOp::input_count)>::max())) {
+      V8::FatalProcessOutOfMemory(nullptr, "Too many phi inputs");
+    }
     return inputs;
   }
 
@@ -5369,6 +5410,7 @@ struct ConvertJSPrimitiveToUntaggedOrDeoptOp
     kInt32,
     kAdditiveSafeInteger,
     kInt64,
+    kUint64,
     kFloat64,
 #ifdef V8_ENABLE_UNDEFINED_DOUBLE
     kHoleyFloat64,
@@ -5398,6 +5440,7 @@ struct ConvertJSPrimitiveToUntaggedOrDeoptOp
         return RepVector<RegisterRepresentation::Word32()>();
       case UntaggedKind::kAdditiveSafeInteger:
       case UntaggedKind::kInt64:
+      case UntaggedKind::kUint64:
         return RepVector<RegisterRepresentation::Word64()>();
       case UntaggedKind::kFloat64:
 #ifdef V8_ENABLE_UNDEFINED_DOUBLE
@@ -6676,6 +6719,47 @@ struct CheckMapsOp : OperationT<CheckMapsOp> {
   }
 };
 
+struct CheckHomomorphicOp : FixedArityOperationT<2, CheckHomomorphicOp> {
+  NameRef name;
+  WeakHomomorphicFixedArrayRef homomorphic_array;
+  int handler_value;
+  bool check_heap_object;
+  FeedbackSource feedback;
+
+  static constexpr OpEffects effects =
+      OpEffects().CanDependOnChecks().CanDeopt().CanReadHeapMemory();
+  base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+  }
+
+  V<Object> heap_object() const { return Base::input<Object>(0); }
+  V<FrameState> frame_state() const { return Base::input<FrameState>(1); }
+
+  CheckHomomorphicOp(V<Object> heap_object, V<FrameState> frame_state,
+                     NameRef name,
+                     WeakHomomorphicFixedArrayRef homomorphic_array,
+                     int handler_value, bool check_heap_object,
+                     const FeedbackSource& feedback)
+      : Base(heap_object, frame_state),
+        name(name),
+        homomorphic_array(homomorphic_array),
+        handler_value(handler_value),
+        check_heap_object(check_heap_object),
+        feedback(feedback) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(Get(graph, frame_state()).Is<FrameStateOp>());
+  }
+
+  auto options() const {
+    return std::tuple{name, homomorphic_array, handler_value, check_heap_object,
+                      feedback};
+  }
+};
+
 // AssumeMaps are inserted after CheckMaps have been lowered, in order to keep
 // map information around and easily accessible for subsequent optimization
 // passes (Load Elimination for instance can then use those AssumeMap to
@@ -7349,7 +7433,7 @@ struct IsNullOp : FixedArityOperationT<1, IsNullOp> {
 
 // Traps on a null input, otherwise returns the input, type-cast to the
 // respective non-nullable type.
-struct AssertNotNullOp : FixedArityOperationT<1, AssertNotNullOp> {
+struct AssertNotNullOp : OperationT<AssertNotNullOp> {
   wasm::ValueType type;
   TrapId trap_id;
 
@@ -7358,9 +7442,26 @@ struct AssertNotNullOp : FixedArityOperationT<1, AssertNotNullOp> {
       OpEffects().CanDependOnChecks().CanLeaveCurrentFunction();
 
   V<Object> object() const { return input<Object>(0); }
+  OptionalV<FrameState> frame_state() const {
+    return input_count > 1 ? input<FrameState>(1)
+                           : OptionalV<FrameState>::Nullopt();
+  }
 
-  AssertNotNullOp(V<Object> object, wasm::ValueType type, TrapId trap_id)
-      : Base(object), type(type), trap_id(trap_id) {}
+  AssertNotNullOp(V<Object> object, OptionalV<FrameState> frame_state,
+                  wasm::ValueType type, TrapId trap_id)
+      : Base(1 + frame_state.valid()), type(type), trap_id(trap_id) {
+    input(0) = object;
+    if (frame_state.valid()) {
+      input(1) = frame_state.value();
+    }
+  }
+
+  static AssertNotNullOp& New(Graph* graph, V<Object> object,
+                              OptionalV<FrameState> frame_state,
+                              wasm::ValueType type, TrapId trap_id) {
+    return Base::New(graph, 1 + frame_state.valid(), object, frame_state, type,
+                     trap_id);
+  }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     return RepVector<RegisterRepresentation::Tagged()>();
@@ -7376,6 +7477,11 @@ struct AssertNotNullOp : FixedArityOperationT<1, AssertNotNullOp> {
   }
 
   auto options() const { return std::tuple{type, trap_id}; }
+
+  template <typename Fn, typename Mapper>
+  V8_INLINE auto Explode(Fn fn, Mapper& mapper) const {
+    return fn(mapper.Map(object()), mapper.Map(frame_state()), type, trap_id);
+  }
 };
 
 // The runtime type (RTT) is a value representing a concrete type (in this case
@@ -7453,27 +7559,42 @@ struct WasmTypeCheckOp : OperationT<WasmTypeCheckOp> {
 
 struct WasmTypeCastOp : OperationT<WasmTypeCastOp> {
   WasmTypeCheckConfig config;
+  bool has_rtt;
+  bool has_frame_state;
 
   static constexpr OpEffects effects =
       OpEffects().CanLeaveCurrentFunction().CanDependOnChecks();
 
   WasmTypeCastOp(V<Object> object, OptionalV<Map> rtt,
-                 WasmTypeCheckConfig config)
-      : Base(1 + rtt.valid()), config(config) {
+                 WasmTypeCheckConfig config, OptionalV<FrameState> frame_state)
+      : Base(1 + rtt.valid() + frame_state.valid()),
+        config(config),
+        has_rtt(rtt.valid()),
+        has_frame_state(frame_state.valid()) {
     input(0) = object;
-    if (rtt.valid()) {
-      input(1) = rtt.value();
+    int idx = 1;
+    if (has_rtt) {
+      input(idx++) = rtt.value();
+    }
+    if (has_frame_state) {
+      input(idx++) = frame_state.value();
     }
   }
 
   template <typename Fn, typename Mapper>
   V8_INLINE auto Explode(Fn fn, Mapper& mapper) const {
-    return fn(mapper.Map(object()), mapper.Map(rtt()), config);
+    return fn(mapper.Map(object()), mapper.Map(rtt()), config,
+              mapper.Map(frame_state()));
   }
 
   V<Object> object() const { return Base::input<Object>(0); }
   OptionalV<Map> rtt() const {
-    return input_count > 1 ? input<Map>(1) : OptionalV<Map>::Nullopt();
+    return has_rtt ? input<Map>(1) : OptionalV<Map>::Nullopt();
+  }
+  OptionalV<FrameState> frame_state() const {
+    int idx = 1 + (has_rtt ? 1 : 0);
+    return has_frame_state ? input<FrameState>(idx)
+                           : OptionalV<FrameState>::Nullopt();
   }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
@@ -7482,18 +7603,18 @@ struct WasmTypeCastOp : OperationT<WasmTypeCastOp> {
 
   base::Vector<const MaybeRegisterRepresentation> inputs_rep(
       ZoneVector<MaybeRegisterRepresentation>& storage) const {
-    return input_count > 1
-               ? MaybeRepVector<MaybeRegisterRepresentation::Tagged(),
-                                MaybeRegisterRepresentation::Tagged()>()
-               : MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+    return has_rtt ? MaybeRepVector<MaybeRegisterRepresentation::Tagged(),
+                                    MaybeRegisterRepresentation::Tagged()>()
+                   : MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
   }
-
 
   auto options() const { return std::tuple{config}; }
 
   static WasmTypeCastOp& New(Graph* graph, V<Object> object, OptionalV<Map> rtt,
-                             WasmTypeCheckConfig config) {
-    return Base::New(graph, 1 + rtt.valid(), object, rtt, config);
+                             WasmTypeCheckConfig config,
+                             OptionalV<FrameState> frame_state) {
+    return Base::New(graph, 1 + rtt.valid() + frame_state.valid(), object, rtt,
+                     config, frame_state);
   }
 
   void Validate(const Graph& graph) const { DCHECK(config.is_valid()); }
@@ -7565,13 +7686,20 @@ struct ProcessWasmArgumentOp : FixedArityOperationT<2, ProcessWasmArgumentOp> {
 
 struct AnyConvertExternOp : FixedArityOperationT<1, AnyConvertExternOp> {
   SharedFlag is_shared;
+  bool is_nullable;
 
   static constexpr OpEffects effects =
       SmiValuesAre31Bits() ? OpEffects().CanReadMemory()
                            : OpEffects().CanReadMemory().CanAllocate();
 
-  explicit AnyConvertExternOp(V<Object> object, SharedFlag is_shared)
-      : Base(object), is_shared(is_shared) {}
+  explicit AnyConvertExternOp(V<Object> object, SharedFlag is_shared,
+                              bool is_nullable)
+      : Base(object), is_shared(is_shared), is_nullable(is_nullable) {}
+
+  void PrintOptions(std::ostream& os) const {
+    os << "[" << (is_shared == SharedFlag::kYes ? "shared" : "non-shared")
+       << ", " << (is_nullable ? "nullable" : "non-nullable") << "]";
+  }
 
   V<Object> object() const { return Base::input<Object>(0); }
 
@@ -7584,13 +7712,20 @@ struct AnyConvertExternOp : FixedArityOperationT<1, AnyConvertExternOp> {
     return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
   }
 
-  auto options() const { return std::tuple(is_shared); }
+  auto options() const { return std::tuple(is_shared, is_nullable); }
 };
 
 struct ExternConvertAnyOp : FixedArityOperationT<1, ExternConvertAnyOp> {
+  bool is_nullable;
+
   static constexpr OpEffects effects = OpEffects();
 
-  explicit ExternConvertAnyOp(V<Object> object) : Base(object) {}
+  explicit ExternConvertAnyOp(V<Object> object, bool is_nullable)
+      : Base(object), is_nullable(is_nullable) {}
+
+  void PrintOptions(std::ostream& os) const {
+    os << "[" << (is_nullable ? "nullable" : "non-nullable") << "]";
+  }
 
   V<Object> object() const { return Base::input<Object>(0); }
 
@@ -7603,11 +7738,10 @@ struct ExternConvertAnyOp : FixedArityOperationT<1, ExternConvertAnyOp> {
     return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
   }
 
-
-  auto options() const { return std::tuple(); }
+  auto options() const { return std::tuple(is_nullable); }
 };
 
-struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
+struct StructGetOp : OperationT<StructGetOp> {
   // We represent `ref.get_desc` as a special form of StructGetOp, because
   // the concept is so similar: have an object, load a value from it.
   static constexpr int kDescFieldIndex = -1;
@@ -7636,19 +7770,39 @@ struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
     return result;
   }
 
-  StructGetOp(V<WasmStructNullable> object, const wasm::StructType* type,
-              wasm::ModuleTypeIndex type_index, int field_index, bool is_signed,
-              CheckForNull null_check,
+  StructGetOp(V<WasmStructNullable> object, OptionalV<FrameState> frame_state,
+              const wasm::StructType* type, wasm::ModuleTypeIndex type_index,
+              int field_index, bool is_signed, CheckForNull null_check,
               std::optional<AtomicMemoryOrder> memory_order)
-      : Base(object),
+      : Base(1 + frame_state.valid()),
         is_signed(is_signed),
         null_check(null_check),
         type(type),
         type_index(type_index),
         field_index(field_index),
-        memory_order(memory_order) {}
+        memory_order(memory_order) {
+    input(0) = object;
+    if (frame_state.valid()) {
+      input(1) = frame_state.value();
+    }
+  }
+
+  static StructGetOp& New(Graph* graph, V<WasmStructNullable> object,
+                          OptionalV<FrameState> frame_state,
+                          const wasm::StructType* type,
+                          wasm::ModuleTypeIndex type_index, int field_index,
+                          bool is_signed, CheckForNull null_check,
+                          std::optional<AtomicMemoryOrder> memory_order) {
+    return Base::New(graph, 1 + frame_state.valid(), object, frame_state, type,
+                     type_index, field_index, is_signed, null_check,
+                     memory_order);
+  }
 
   V<WasmStructNullable> object() const { return input<WasmStructNullable>(0); }
+  OptionalV<FrameState> frame_state() const {
+    return input_count > 1 ? input<FrameState>(1)
+                           : OptionalV<FrameState>::Nullopt();
+  }
 
   bool is_atomic() const { return memory_order.has_value(); }
   bool is_get_desc() const { return field_index == kDescFieldIndex; }
@@ -7682,10 +7836,16 @@ struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
                       is_signed, null_check, memory_order};
   }
 
+  template <typename Fn, typename Mapper>
+  V8_INLINE auto Explode(Fn fn, Mapper& mapper) const {
+    return fn(mapper.Map(object()), mapper.Map(frame_state()), type, type_index,
+              field_index, is_signed, null_check, memory_order);
+  }
+
   void PrintOptions(std::ostream& os) const;
 };
 
-struct StructSetOp : FixedArityOperationT<2, StructSetOp> {
+struct StructSetOp : OperationT<StructSetOp> {
   CheckForNull null_check;
   const wasm::StructType* type;
   // TODO(jkummerow): If we stored the ValueType here, that would save a few
@@ -7709,20 +7869,43 @@ struct StructSetOp : FixedArityOperationT<2, StructSetOp> {
   }
 
   StructSetOp(V<WasmStructNullable> object, V<Any> value,
-              const wasm::StructType* type, wasm::ModuleTypeIndex type_index,
-              int field_index, CheckForNull null_check,
+              OptionalV<FrameState> frame_state, const wasm::StructType* type,
+              wasm::ModuleTypeIndex type_index, int field_index,
+              CheckForNull null_check,
               std::optional<AtomicMemoryOrder> memory_order,
               WriteBarrierKind write_barrier)
-      : Base(object, value),
+      : Base(2 + frame_state.valid()),
         null_check(null_check),
         type(type),
         type_index(type_index),
         field_index(field_index),
         memory_order(memory_order),
-        write_barrier(write_barrier) {}
+        write_barrier(write_barrier) {
+    input(0) = object;
+    input(1) = value;
+    if (frame_state.valid()) {
+      input(2) = frame_state.value();
+    }
+  }
+
+  static StructSetOp& New(Graph* graph, V<WasmStructNullable> object,
+                          V<Any> value, OptionalV<FrameState> frame_state,
+                          const wasm::StructType* type,
+                          wasm::ModuleTypeIndex type_index, int field_index,
+                          CheckForNull null_check,
+                          std::optional<AtomicMemoryOrder> memory_order,
+                          WriteBarrierKind write_barrier) {
+    return Base::New(graph, 2 + frame_state.valid(), object, value, frame_state,
+                     type, type_index, field_index, null_check, memory_order,
+                     write_barrier);
+  }
 
   V<WasmStructNullable> object() const { return input<WasmStructNullable>(0); }
   V<Any> value() const { return input(1); }
+  OptionalV<FrameState> frame_state() const {
+    return input_count > 2 ? input<FrameState>(2)
+                           : OptionalV<FrameState>::Nullopt();
+  }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
 
@@ -7741,6 +7924,13 @@ struct StructSetOp : FixedArityOperationT<2, StructSetOp> {
   auto options() const {
     return std::tuple{type,       type_index,   field_index,
                       null_check, memory_order, write_barrier};
+  }
+
+  template <typename Fn, typename Mapper>
+  V8_INLINE auto Explode(Fn fn, Mapper& mapper) const {
+    return fn(mapper.Map(object()), mapper.Map(value()),
+              mapper.Map(frame_state()), type, type_index, field_index,
+              null_check, memory_order, write_barrier);
   }
 
   void PrintOptions(std::ostream& os) const;
@@ -7831,7 +8021,6 @@ struct StructAtomicRMWOp : OperationT<StructAtomicRMWOp> {
     DCHECK_LT(field_index, type->field_count());
     DCHECK(type->field(field_index) == wasm::kWasmI32 ||
            type->field(field_index) == wasm::kWasmI64 ||
-           type->field(field_index) == wasm::kWasmWaitQueue ||
            (type->field(field_index).is_ref() &&
             (bin_op == BinOp::kExchange || bin_op == BinOp::kCompareExchange)));
     DCHECK_EQ(bin_op == BinOp::kCompareExchange, expected().valid());
@@ -9744,6 +9933,7 @@ std::ostream& operator<<(std::ostream& os, Simd256TernaryOp::Kind kind);
   V(I16x16)                              \
   V(I32x8)                               \
   V(I64x4)                               \
+  V(F16x16)                              \
   V(F32x8)                               \
   V(F64x4)
 
@@ -9771,6 +9961,7 @@ struct Simd256SplatOp : FixedArityOperationT<1, Simd256SplatOp> {
         return MaybeRepVector<RegisterRepresentation::Word32()>();
       case Kind::kI64x4:
         return MaybeRepVector<RegisterRepresentation::Word64()>();
+      case Kind::kF16x16:
       case Kind::kF32x8:
         return MaybeRepVector<RegisterRepresentation::Float32()>();
       case Kind::kF64x4:
@@ -10175,6 +10366,8 @@ inline size_t input_count(const ElementsTransitionWithMultipleSources) {
 }
 inline size_t input_count(const FeedbackSource) { return 0; }
 inline size_t input_count(const ZoneRefSet<Map>) { return 0; }
+inline size_t input_count(const NameRef) { return 0; }
+inline size_t input_count(const WeakHomomorphicFixedArrayRef) { return 0; }
 inline size_t input_count(ConstantOp::Storage) { return 0; }
 inline size_t input_count(Type) { return 0; }
 inline size_t input_count(base::Vector<const RegisterRepresentation>) {

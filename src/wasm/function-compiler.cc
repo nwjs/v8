@@ -206,13 +206,12 @@ void WasmCompilationUnit::CompileWasmFunction(NativeModule* native_module,
 }
 
 JSToWasmWrapperCompilationUnit::JSToWasmWrapperCompilationUnit(
-    Isolate* isolate, const CanonicalSig* sig, bool receiver_is_first_param)
+    Isolate* isolate, const CanonicalSig* sig)
     : isolate_(isolate),
       sig_(sig),
-      receiver_is_first_param_(receiver_is_first_param),
-      job_(v8_flags.wasm_jitless ? nullptr
-                                 : compiler::NewJSToWasmCompilationJob(
-                                       isolate, sig, receiver_is_first_param)) {
+      job_(v8_flags.wasm_jitless
+               ? nullptr
+               : compiler::NewJSToWasmCompilationJob(isolate, sig)) {
   if (!v8_flags.wasm_jitless) {
     OptimizedCompilationInfo* info =
         static_cast<compiler::turboshaft::TurboshaftCompilationJob*>(job_.get())
@@ -228,8 +227,8 @@ JSToWasmWrapperCompilationUnit::JSToWasmWrapperCompilationUnit(
 JSToWasmWrapperCompilationUnit::~JSToWasmWrapperCompilationUnit() = default;
 
 void JSToWasmWrapperCompilationUnit::Execute() {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-               "wasm.CompileJSToWasmWrapper");
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+              "wasm.CompileJSToWasmWrapper");
   if (!v8_flags.wasm_jitless) {
     CompilationJob::Status status = job_->ExecuteJob(nullptr);
     CHECK_EQ(status, CompilationJob::SUCCEEDED);
@@ -240,7 +239,7 @@ DirectHandle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
 #if V8_ENABLE_DRUMBRAKE
   if (v8_flags.wasm_jitless) {
     return isolate_->builtins()->code_handle(
-        Builtin::kGenericJSToWasmInterpreterWrapper);
+        Builtin::kJSToWasmInterpreterWrapper);
   }
 #endif  // V8_ENABLE_DRUMBRAKE
 
@@ -257,8 +256,7 @@ DirectHandle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
                                       Cast<AbstractCode>(code), name));
   }
   // Install the compiled wrapper in the cache now.
-  WasmExportWrapperCache::Put(isolate_, sig_->index(), receiver_is_first_param_,
-                              code);
+  WasmExportWrapperCache::Put(isolate_, sig_->index(), code);
   Counters* counters = isolate_->counters();
   counters->wasm_generated_code_size()->Increment(code->body_size());
   counters->wasm_reloc_size()->Increment(code->relocation_size());
@@ -268,9 +266,9 @@ DirectHandle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
 
 // static
 DirectHandle<Code> JSToWasmWrapperCompilationUnit::CompileJSToWasmWrapper(
-    Isolate* isolate, const CanonicalSig* sig, bool receiver_is_first_param) {
+    Isolate* isolate, const CanonicalSig* sig) {
   // Run the compilation unit synchronously.
-  JSToWasmWrapperCompilationUnit unit(isolate, sig, receiver_is_first_param);
+  JSToWasmWrapperCompilationUnit unit(isolate, sig);
   unit.Execute();
   return unit.Finalize();
 }

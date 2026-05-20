@@ -12,7 +12,6 @@
 #include "src/heap/mutable-page.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
-#include "src/wasm/object-access.h"
 #include "src/wasm/simd-shuffle.h"
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
@@ -315,9 +314,10 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
     LoadInstanceDataFromFrame(instance_data);
   }
 
-  constexpr int kArrayOffset = wasm::ObjectAccess::ToTagged(
-      WasmTrustedInstanceData::kTieringBudgetArrayOffset);
-  LoadU64(budget_array, MemOperand(instance_data, kArrayOffset), r0);
+  LoadU64(budget_array,
+          FieldMemOperand(instance_data,
+                          WasmTrustedInstanceData::kTieringBudgetArrayOffset),
+          r0);
 
   int budget_arr_offset = kInt32Size * declared_func_index;
   // Pick a random register from kLiftoffAssemblerGpCacheRegs.
@@ -429,13 +429,13 @@ void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
   DCHECK_LE(0, offset);
   switch (size) {
     case 1:
-      LoadU8(dst, MemOperand(instance, offset), r0);
+      LoadU8(dst, FieldMemOperand(instance, offset), r0);
       break;
     case 4:
-      LoadU32(dst, MemOperand(instance, offset), r0);
+      LoadU32(dst, FieldMemOperand(instance, offset), r0);
       break;
     case 8:
-      LoadU64(dst, MemOperand(instance, offset), r0);
+      LoadU64(dst, FieldMemOperand(instance, offset), r0);
       break;
     default:
       UNIMPLEMENTED();
@@ -445,7 +445,7 @@ void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
 void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      Register instance,
                                                      int offset) {
-  LoadTaggedField(dst, MemOperand(instance, offset), r0);
+  LoadTaggedField(dst, FieldMemOperand(instance, offset), r0);
 }
 
 void LiftoffAssembler::ResetOSRTarget() {}
@@ -492,9 +492,9 @@ void LiftoffAssembler::AtomicLoadTaggedPointer(Register dst, Register src_addr,
 }
 
 void LiftoffAssembler::LoadProtectedPointer(Register dst, Register src_addr,
-                                            int32_t offset) {
+                                            int32_t field_offset) {
   static_assert(!V8_ENABLE_SANDBOX_BOOL);
-  LoadTaggedPointer(dst, src_addr, no_reg, offset);
+  LoadTaggedField(dst, FieldMemOperand(src_addr, field_offset), r0);
 }
 
 void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
@@ -1142,8 +1142,13 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
   }
 
   if (v8_flags.disable_write_barriers) return;
-  // Emit the write barrier.
+  // We only need a write barrier if the CAS was successful.
+  // The AtomicCompareExchange above leaves the condition flags from the
+  // final comparison.
   Label exit;
+  bne(&exit);
+
+  // Emit the write barrier.
   JumpIfSmi(new_value.gp(), &exit);
   CheckPageFlag(dst_addr, ip, MemoryChunk::kPointersFromHereAreInterestingMask,
                 to_condition(kZero), &exit);
@@ -1706,6 +1711,10 @@ void LiftoffAssembler::emit_i32_remu(Register dst, Register lhs, Register rhs,
   beq(trap_div_by_zero);
   ModU32(dst, lhs, rhs);
 }
+
+void LiftoffAssembler::emit_i64_mul_wide_s() { UNIMPLEMENTED(); }
+
+void LiftoffAssembler::emit_i64_mul_wide_u() { UNIMPLEMENTED(); }
 
 bool LiftoffAssembler::emit_i64_divs(LiftoffRegister dst, LiftoffRegister lhs,
                                      LiftoffRegister rhs,

@@ -118,6 +118,8 @@ class Managed : public Foreign {
   // went out of scope and GC happened.
   class Ptr final {
    public:
+    V8_INLINE Ptr() = default;
+
     V8_INLINE Ptr(Ptr&& other) V8_NOEXCEPT = default;
     Ptr(const Ptr&) = delete;
     V8_INLINE Ptr& operator=(Ptr&& other) V8_NOEXCEPT = default;
@@ -138,9 +140,21 @@ class Managed : public Foreign {
       return ptr_.get();
     }
 
-    V8_INLINE std::shared_ptr<CppType> as_shared_ptr() { return ptr_; }
+    // Only use these when necessary, since unlike `std::shared_ptr` the `Ptr`
+    // class uses "lifetimebound" annotations for static analysis.
+    V8_INLINE std::shared_ptr<CppType> as_shared_ptr() & { return ptr_; }
+    V8_INLINE std::shared_ptr<CppType> as_shared_ptr() && {
+      return std::move(ptr_);
+    }
 
+    V8_INLINE void Reset() { ptr_.reset(); }
+
+    V8_INLINE explicit operator bool() const { return ptr_ != nullptr; }
     V8_INLINE bool operator==(std::nullptr_t) const { return ptr_ == nullptr; }
+    V8_INLINE bool operator==(const Ptr&) const = default;
+    V8_INLINE bool operator==(const std::shared_ptr<CppType>& other) const {
+      return ptr_ == other;
+    }
 
    private:
     friend class Managed;
@@ -151,22 +165,12 @@ class Managed : public Foreign {
     std::shared_ptr<CppType> ptr_;
   };
 
-  // Deprecated. Get a raw pointer to the C++ object.
-  // TODO(crbug/485286897): Prefer `raw(no_gc)` or `ptr()`.
-  V8_INLINE CppType* raw() { return GetSharedPtrPtr(GetDestructor())->get(); }
-
   // Get a raw pointer to the C++ object. The returned pointer is only valid as
   // long as no GC happens; prefer `ptr()` unless on performance-critical code
   // paths.
   V8_INLINE CppType* raw(
       const DisallowGarbageCollection& no_gc V8_LIFETIME_BOUND) {
     return GetSharedPtrPtr(GetDestructor())->get();
-  }
-
-  // Deprecated. Get a reference to the shared pointer to the C++ object.
-  // TODO(crbug/485286897): Prefer `raw(no_gc)` or `ptr()`.
-  V8_INLINE const std::shared_ptr<CppType>& get() {
-    return *GetSharedPtrPtr(GetDestructor());
   }
 
   // Get the wrapper that exposes access to the C++ object.

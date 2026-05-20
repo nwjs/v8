@@ -157,6 +157,10 @@ MemOperand MacroAssembler::ExternalReferenceAsOperand(
 }
 
 void MacroAssembler::GetLabelAddress(Register dest, Label* target) {
+  // It's important that we don't emit the constant pool in between the
+  // `mov_label_offset` and the following `add`.
+  BlockConstPoolScope block_const_pool_scope(this);
+
   // This should be just a
   //    add(dest, pc, branch_offset(target));
   // but current implementation of Assembler::bind_to()/target_at_put() add
@@ -2361,13 +2365,16 @@ void MacroAssembler::LoadMap(Register destination, Register object) {
   ldr(destination, FieldMemOperand(object, HeapObject::kMapOffset));
 }
 
-void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
-                                        Register scratch, Label* fbv_undef) {
-  Label done;
-
-  // Load the feedback vector from the closure.
+void MacroAssembler::LoadFeedbackCell(Register dst, Register closure) {
   ldr(dst, FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  ldr(dst, FieldMemOperand(dst, offsetof(FeedbackCell, value_)));
+}
+
+void MacroAssembler::LoadFeedbackVectorFromCell(Register dst,
+                                                Register feedback_cell,
+                                                Register scratch,
+                                                Label* fbv_undef) {
+  Label done;
+  ldr(dst, FieldMemOperand(feedback_cell, offsetof(FeedbackCell, value_)));
 
   // Check if feedback vector is valid.
   ldr(scratch, FieldMemOperand(dst, HeapObject::kMapOffset));
@@ -2380,6 +2387,12 @@ void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
   b(fbv_undef);
 
   bind(&done);
+}
+
+void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
+                                        Register scratch, Label* fbv_undef) {
+  LoadFeedbackCell(dst, closure);
+  LoadFeedbackVectorFromCell(dst, dst, scratch, fbv_undef);
 }
 
 void MacroAssembler::LoadInterpreterDataBytecodeArray(

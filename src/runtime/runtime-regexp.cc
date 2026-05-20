@@ -56,7 +56,8 @@ uint32_t GetArgcForReplaceCallable(uint32_t num_captures,
 template <typename Matcher, typename = std::enable_if<std::is_invocable_r_v<
                                 bool, Matcher, Tagged<String>>>>
 int LookupNamedCapture(Matcher name_matches,
-                       Tagged<FixedArray> capture_name_map, int* index_in_out) {
+                       Tagged<TrustedFixedArray> capture_name_map,
+                       int* index_in_out) {
   int index_in_val = *index_in_out;
   DCHECK_GE(index_in_val, 0);
   // TODO(jgruber): Sort capture_name_map and do binary search via
@@ -165,7 +166,7 @@ class CompiledReplacement {
 
   template <typename Char>
   bool ParseReplacementPattern(base::Vector<Char> characters,
-                               Tagged<FixedArray> capture_name_map,
+                               Tagged<TrustedFixedArray> capture_name_map,
                                int capture_count, int subject_length) {
     // Equivalent to String::GetSubstitution, except that this method converts
     // the replacement string into an internal representation that avoids
@@ -354,15 +355,13 @@ bool CompiledReplacement::Compile(Isolate* isolate,
     String::FlatContent content = replacement->GetFlatContent(no_gc);
     DCHECK(content.IsFlat());
 
-    Tagged<FixedArray> capture_name_map;
+    Tagged<TrustedFixedArray> capture_name_map;
     if (capture_count > 0) {
       // capture_count > 0 implies IrRegExpData. Since capture_count is in
       // trusted space, this is not a SBXCHECK.
       Tagged<IrRegExpData> re_data = TrustedCast<IrRegExpData>(*regexp_data);
-
-      Tagged<Object> maybe_capture_name_map = re_data->capture_name_map();
-      if (IsFixedArray(maybe_capture_name_map)) {
-        capture_name_map = Cast<FixedArray>(maybe_capture_name_map);
+      if (re_data->has_capture_name_map()) {
+        capture_name_map = re_data->capture_name_map();
       }
     }
 
@@ -439,13 +438,13 @@ void CompiledReplacement::Apply(ReplacementStringBuilder* builder,
 
 void FindOneByteStringIndices(base::Vector<const uint8_t> subject,
                               uint8_t pattern, std::vector<int>* indices,
-                              unsigned int limit) {
+                              unsigned int limit, int start_index = 0) {
   DCHECK_LT(0, limit);
   // Collect indices of pattern in subject using memchr.
   // Stop after finding at most limit values.
   const uint8_t* subject_start = subject.begin();
   const uint8_t* subject_end = subject_start + subject.length();
-  const uint8_t* pos = subject_start;
+  const uint8_t* pos = subject_start + start_index;
   while (limit > 0) {
     pos = reinterpret_cast<const uint8_t*>(
         memchr(pos, pattern, subject_end - pos));
@@ -458,12 +457,12 @@ void FindOneByteStringIndices(base::Vector<const uint8_t> subject,
 
 void FindTwoByteStringIndices(const base::Vector<const base::uc16> subject,
                               base::uc16 pattern, std::vector<int>* indices,
-                              unsigned int limit) {
+                              unsigned int limit, int start_index = 0) {
   DCHECK_LT(0, limit);
   const base::uc16* subject_start = subject.begin();
   const base::uc16* subject_end = subject_start + subject.length();
-  for (const base::uc16* pos = subject_start; pos < subject_end && limit > 0;
-       pos++) {
+  for (const base::uc16* pos = subject_start + start_index;
+       pos < subject_end && limit > 0; pos++) {
     if (*pos == pattern) {
       indices->push_back(static_cast<int>(pos - subject_start));
       limit--;
@@ -475,12 +474,13 @@ template <typename SubjectChar, typename PatternChar>
 void FindStringIndices(Isolate* isolate,
                        base::Vector<const SubjectChar> subject,
                        base::Vector<const PatternChar> pattern,
-                       std::vector<int>* indices, unsigned int limit) {
+                       std::vector<int>* indices, unsigned int limit,
+                       int start_index = 0) {
   DCHECK_LT(0, limit);
   // Collect indices of pattern in subject.
   // Stop after finding at most limit values.
   int pattern_length = pattern.length();
-  int index = 0;
+  int index = start_index;
   StringSearch<PatternChar, SubjectChar> search(isolate, pattern);
   while (limit > 0) {
     index = search.Search(subject, index);
@@ -493,7 +493,15 @@ void FindStringIndices(Isolate* isolate,
 
 void FindStringIndicesDispatch(Isolate* isolate, Tagged<String> subject,
                                Tagged<String> pattern,
-                               std::vector<int>* indices, unsigned int limit) {
+                               std::vector<int>* indices, unsigned int limit,
+                               int first_index = -1) {
+  int start_index = 0;
+  if (first_index >= 0) {
+    indices->push_back(first_index);
+    limit--;
+    if (limit == 0) return;
+    start_index = first_index + pattern->length();
+  }
   {
     DisallowGarbageCollection no_gc;
     String::FlatContent subject_content = subject->GetFlatContent(no_gc);
@@ -508,14 +516,15 @@ void FindStringIndicesDispatch(Isolate* isolate, Tagged<String> subject,
             pattern_content.ToOneByteVector();
         if (pattern_vector.length() == 1) {
           FindOneByteStringIndices(subject_vector, pattern_vector[0], indices,
-                                   limit);
+                                   limit, start_index);
         } else {
           FindStringIndices(isolate, subject_vector, pattern_vector, indices,
-                            limit);
+                            limit, start_index);
         }
       } else {
         FindStringIndices(isolate, subject_vector,
-                          pattern_content.ToUC16Vector(), indices, limit);
+                          pattern_content.ToUC16Vector(), indices, limit,
+                          start_index);
       }
     } else {
       base::Vector<const base::uc16> subject_vector =
@@ -525,20 +534,20 @@ void FindStringIndicesDispatch(Isolate* isolate, Tagged<String> subject,
             pattern_content.ToOneByteVector();
         if (pattern_vector.length() == 1) {
           FindTwoByteStringIndices(subject_vector, pattern_vector[0], indices,
-                                   limit);
+                                   limit, start_index);
         } else {
           FindStringIndices(isolate, subject_vector, pattern_vector, indices,
-                            limit);
+                            limit, start_index);
         }
       } else {
         base::Vector<const base::uc16> pattern_vector =
             pattern_content.ToUC16Vector();
         if (pattern_vector.length() == 1) {
           FindTwoByteStringIndices(subject_vector, pattern_vector[0], indices,
-                                   limit);
+                                   limit, start_index);
         } else {
           FindStringIndices(isolate, subject_vector, pattern_vector, indices,
-                            limit);
+                            limit, start_index);
         }
       }
     }
@@ -841,10 +850,11 @@ StringReplaceGlobalRegExpWithEmptyString(
 
 RUNTIME_FUNCTION(Runtime_StringSplit) {
   HandleScope handle_scope(isolate);
-  DCHECK_EQ(3, args.length());
+  DCHECK_EQ(4, args.length());
   DirectHandle<String> subject = args.at<String>(0);
   DirectHandle<String> pattern = args.at<String>(1);
   uint32_t limit = NumberToUint32(args[2]);
+  int first_index = NumberToInt32(args[3]);
   CHECK_LT(0, limit);
 
   int subject_length = subject->length();
@@ -875,7 +885,8 @@ RUNTIME_FUNCTION(Runtime_StringSplit) {
 
   std::vector<int>* indices = GetRewoundRegexpIndicesList(isolate);
 
-  FindStringIndicesDispatch(isolate, *subject, *pattern, indices, limit);
+  FindStringIndicesDispatch(isolate, *subject, *pattern, indices, limit,
+                            first_index);
 
   if (static_cast<uint32_t>(indices->size()) < limit) {
     indices->push_back(subject_length);
@@ -1023,15 +1034,15 @@ RUNTIME_FUNCTION(Runtime_RegExpExperimentalOneshotExec) {
 
 RUNTIME_FUNCTION(Runtime_RegExpBuildIndices) {
   HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-  DirectHandle<RegExpMatchInfo> match_info = args.at<RegExpMatchInfo>(1);
-  DirectHandle<Object> maybe_names = args.at(2);
-#ifdef DEBUG
+  DCHECK_EQ(2, args.length());
   DirectHandle<JSRegExp> regexp = args.at<JSRegExp>(0);
+  DirectHandle<RegExpMatchInfo> match_info = args.at<RegExpMatchInfo>(1);
+#ifdef DEBUG
   DCHECK(regexp->flags() & JSRegExp::kHasIndices);
 #endif
 
-  return *JSRegExpResultIndices::BuildIndices(isolate, match_info, maybe_names);
+  return *JSRegExpResultIndices::BuildIndices(
+      isolate, match_info, direct_handle(regexp->data(isolate), isolate));
 }
 
 namespace {
@@ -1047,11 +1058,11 @@ class MatchInfoBackedMatch : public String::Match {
 
     if (RegExpData::TypeSupportsCaptures(regexp_data->type_tag())) {
       DCHECK(Is<IrRegExpData>(*regexp_data));
-      Tagged<Object> o =
-          TrustedCast<IrRegExpData>(regexp_data)->capture_name_map();
-      has_named_captures_ = IsFixedArray(o);
+      DirectHandle<IrRegExpData> re_data =
+          TrustedCast<IrRegExpData>(regexp_data);
+      has_named_captures_ = re_data->has_capture_name_map();
       if (has_named_captures_) {
-        capture_name_map_ = direct_handle(Cast<FixedArray>(o), isolate);
+        capture_name_map_ = direct_handle(re_data->capture_name_map(), isolate);
       }
     } else {
       has_named_captures_ = false;
@@ -1121,7 +1132,7 @@ class MatchInfoBackedMatch : public String::Match {
   DirectHandle<RegExpMatchInfo> match_info_;
 
   bool has_named_captures_;
-  DirectHandle<FixedArray> capture_name_map_;
+  DirectHandle<TrustedFixedArray> capture_name_map_;
 };
 
 class VectorBackedMatch : public String::Match {
@@ -1217,7 +1228,7 @@ class VectorBackedMatch : public String::Match {
 template <typename FunctionType,
           typename = std::enable_if_t<std::is_function_v<Tagged<Object>(int)>>>
 DirectHandle<JSObject> ConstructNamedCaptureGroupsObject(
-    Isolate* isolate, DirectHandle<FixedArray> capture_map,
+    Isolate* isolate, DirectHandle<TrustedFixedArray> capture_map,
     const FunctionType& f_get_capture) {
   DirectHandle<JSObject> groups =
       isolate->factory()->NewJSObjectWithNullProto();
@@ -1323,6 +1334,13 @@ static Tagged<UnionOf<ExceptionHole, Null, FixedArray>> SearchRegExpMultiple(
   // Two smis before and after the match, for very long strings.
   static const uint32_t kMaxBuilderEntriesPerRegExpMatch = 5;
 
+  DirectHandle<IrRegExpData> re_data;
+  bool has_named_captures = false;
+  // has_capture can only be true for IrRegExp.
+  if (has_capture) {
+    re_data = TrustedCast<IrRegExpData>(regexp_data);
+    has_named_captures = re_data->has_capture_name_map();
+  }
   while (true) {
     int32_t* current_match = runner.FetchNext();
     if (current_match == nullptr) break;
@@ -1351,12 +1369,6 @@ static Tagged<UnionOf<ExceptionHole, Null, FixedArray>> SearchRegExpMultiple(
         // subject, i.e., 3 + capture count in total. If the RegExp contains
         // named captures, they are also passed as the last argument.
 
-        // has_capture can only be true for IrRegExp.
-        Tagged<IrRegExpData> re_data = TrustedCast<IrRegExpData>(*regexp_data);
-        DirectHandle<Object> maybe_capture_map(re_data->capture_name_map(),
-                                               isolate);
-        const bool has_named_captures = IsFixedArray(*maybe_capture_map);
-
         const int argc =
             has_named_captures ? 4 + capture_count : 3 + capture_count;
 
@@ -1383,8 +1395,8 @@ static Tagged<UnionOf<ExceptionHole, Null, FixedArray>> SearchRegExpMultiple(
         elements->set(cursor++, *subject);
 
         if (has_named_captures) {
-          DirectHandle<FixedArray> capture_map =
-              Cast<FixedArray>(maybe_capture_map);
+          DirectHandle<TrustedFixedArray> capture_map(
+              re_data->capture_name_map(), isolate);
           DirectHandle<JSObject> groups = ConstructNamedCaptureGroupsObject(
               isolate, capture_map, [=](int ix) { return elements->get(ix); });
           elements->set(cursor++, *groups);
@@ -1651,13 +1663,12 @@ RUNTIME_FUNCTION(Runtime_StringReplaceNonGlobalRegExpWithFunction) {
   const int m = match_indices->number_of_capture_registers() / 2;
 
   bool has_named_captures = false;
-  DirectHandle<FixedArray> capture_map;
+  DirectHandle<TrustedFixedArray> capture_map;
   if (m > 1) {
-    Tagged<Object> maybe_capture_map =
-        SbxCast<IrRegExpData>(data)->capture_name_map();
-    if (IsFixedArray(maybe_capture_map)) {
+    DirectHandle<IrRegExpData> re_data = SbxCast<IrRegExpData>(data);
+    if (re_data->has_capture_name_map()) {
       has_named_captures = true;
-      capture_map = direct_handle(Cast<FixedArray>(maybe_capture_map), isolate);
+      capture_map = direct_handle(re_data->capture_name_map(), isolate);
     }
   }
 
@@ -1753,7 +1764,7 @@ RUNTIME_FUNCTION(Runtime_RegExpSplit) {
   DirectHandle<Object> flags_obj;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, flags_obj,
-      JSObject::GetProperty(isolate, recv, factory->flags_string()));
+      JSReceiver::GetProperty(isolate, recv, factory->flags_string()));
 
   DirectHandle<String> flags;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, flags,

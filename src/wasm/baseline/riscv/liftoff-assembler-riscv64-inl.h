@@ -277,8 +277,8 @@ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
 }
 
 void LiftoffAssembler::LoadProtectedPointer(Register dst, Register src_addr,
-                                            int32_t offset_imm) {
-  LoadProtectedPointerField(dst, MemOperand{src_addr, offset_imm});
+                                            int32_t field_offset) {
+  LoadProtectedPointerField(dst, FieldMemOperand(src_addr, field_offset));
 }
 
 void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
@@ -1036,8 +1036,14 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
         result.gp(), StoreType::kI64Store, trapping_load_pc, pinned);
   }
   if (v8_flags.disable_write_barriers) return;
-  // Emit the write barrier.
+
+  // We only need a write barrier if the CAS was successful.
+  // For RISC-V, we need to explicitly compare result with expected to check
+  // if the CAS succeeded.
   Label exit;
+  Branch(&exit, ne, result.gp(), Operand(expected.gp()));
+
+  // Emit the write barrier.
   JumpIfSmi(new_value.gp(), &exit);
   CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask,
                 kZero, &exit);
@@ -1120,7 +1126,6 @@ void LiftoffAssembler::MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
     case kTop:
     case kBottom:
     case kF16:
-    case kWaitQueue:
       UNREACHABLE();
   }
 }
@@ -1327,6 +1332,10 @@ void LiftoffAssembler::emit_i32_remu(Register dst, Register lhs, Register rhs,
   MacroAssembler::Branch(trap_div_by_zero, eq, rhs, Operand(zero_reg));
   MacroAssembler::Modu32(dst, lhs, rhs);
 }
+
+void LiftoffAssembler::emit_i64_mul_wide_s() { UNIMPLEMENTED(); }
+
+void LiftoffAssembler::emit_i64_mul_wide_u() { UNIMPLEMENTED(); }
 
 #define I32_BINOP(name, instruction)                                 \
   void LiftoffAssembler::emit_i32_##name(Register dst, Register lhs, \

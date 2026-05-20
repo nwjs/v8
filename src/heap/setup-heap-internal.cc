@@ -45,6 +45,7 @@
 #include "src/objects/script.h"
 #include "src/objects/shared-function-info.h"
 #include "src/objects/smi.h"
+#include "src/objects/sort-state.h"
 #include "src/objects/source-text-module.h"
 #include "src/objects/string.h"
 #include "src/objects/synthetic-module.h"
@@ -152,11 +153,8 @@ constexpr bool is_important_struct(InstanceType type) {
 
 template <typename StructType>
 constexpr int StructSize() {
-  if constexpr (std::is_base_of_v<StructLayout, StructType>) {
-    return sizeof(StructType);
-  } else {
-    return StructType::kSize;
-  }
+  static_assert(std::is_base_of_v<Struct, StructType>);
+  return sizeof(StructType);
 }
 
 using AllocationSiteWithoutWeakNext = AllocationSite;
@@ -270,7 +268,7 @@ AllocationResult Heap::AllocateMap(AllocationType allocation_type,
                                    SKIP_WRITE_BARRIER);
   Tagged<Map> map = isolate()->factory()->InitializeMap(
       Cast<Map>(result), instance_type, instance_size, elements_kind,
-      inobject_properties, roots);
+      inobject_properties, roots, /*during_bootstrap=*/true);
 
   return AllocationResult::FromObject(map);
 }
@@ -320,7 +318,7 @@ void Heap::FinalizePartialMap(Tagged<Map> map) {
   map->set_raw_transitions(Smi::zero());
   map->SetInstanceDescriptors(isolate(), roots.empty_descriptor_array(), 0,
                               SKIP_WRITE_BARRIER);
-  map->init_prototype_and_constructor_or_back_pointer(roots);
+  map->init_prototype_and_constructor_or_back_pointer_during_bootstrap(roots);
 }
 
 AllocationResult Heap::Allocate(DirectHandle<Map> map,
@@ -422,7 +420,8 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
 #undef ALLOCATE_AND_SET_ROOT
 
     // Then, initialise the initial maps.
-    InitializePartialMap(isolate(), meta_map, meta_map, MAP_TYPE, Map::kSize);
+    InitializePartialMap(isolate(), meta_map, meta_map, MAP_TYPE,
+                         kVariableSizeSentinel);
     InitializePartialMap(isolate(), undefined_map, meta_map, ODDBALL_TYPE,
                          sizeof(Undefined));
     InitializePartialMap(isolate(), null_map, meta_map, ODDBALL_TYPE,
@@ -537,6 +536,9 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
     obj->set_map_after_allocation(isolate(), roots.fixed_array_map(),
                                   SKIP_WRITE_BARRIER);
     Cast<FixedArray>(obj)->set_length(0);
+#if TAGGED_SIZE_8_BYTES
+    Cast<FixedArray>(obj)->clear_optional_padding();
+#endif  // TAGGED_SIZE_8_BYTES
   }
   set_empty_fixed_array(Cast<FixedArray>(obj));
 
@@ -547,6 +549,9 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
     obj->set_map_after_allocation(isolate(), roots.weak_fixed_array_map(),
                                   SKIP_WRITE_BARRIER);
     Cast<WeakFixedArray>(obj)->set_length(0);
+#if TAGGED_SIZE_8_BYTES
+    Cast<WeakFixedArray>(obj)->clear_optional_padding();
+#endif  // TAGGED_SIZE_8_BYTES
   }
   set_empty_weak_fixed_array(Cast<WeakFixedArray>(obj));
 
@@ -648,7 +653,8 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
 
     ALLOCATE_MAP(FOREIGN_TYPE, sizeof(Foreign), foreign)
     ALLOCATE_MAP(TRUSTED_FOREIGN_TYPE, sizeof(TrustedForeign), trusted_foreign)
-    ALLOCATE_MAP(MEGA_DOM_HANDLER_TYPE, MegaDomHandler::kSize, mega_dom_handler)
+    ALLOCATE_MAP(MEGA_DOM_HANDLER_TYPE, sizeof(MegaDomHandler),
+                 mega_dom_handler)
 
     ALLOCATE_VARSIZE_MAP(FIXED_DOUBLE_ARRAY_TYPE, fixed_double_array)
     roots.fixed_double_array_map()->set_elements_kind(HOLEY_DOUBLE_ELEMENTS);
@@ -677,7 +683,7 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
       set_invalid_prototype_validity_cell(Cast<Cell>(obj));
     }
 
-    ALLOCATE_MAP(PROPERTY_CELL_TYPE, PropertyCell::kSize, global_property_cell)
+    ALLOCATE_MAP(PROPERTY_CELL_TYPE, sizeof(PropertyCell), global_property_cell)
 
     // The "no closures" and "one closure" FeedbackCell maps need
     // to be marked unstable because their objects can change maps.
@@ -726,18 +732,45 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
       roots_table()[entry.index] = map.ptr();
     }
 
-#define TORQUE_ALLOCATE_MAP(NAME, Name, name) \
-  ALLOCATE_MAP(NAME, Name::SizeFor(), name)
-    TORQUE_DEFINED_FIXED_INSTANCE_TYPE_LIST(TORQUE_ALLOCATE_MAP);
-#undef TORQUE_ALLOCATE_MAP
-
-#define TORQUE_ALLOCATE_VARSIZE_MAP(NAME, Name, name)                   \
-  /* The DescriptorArray map is pre-allocated and initialized above. */ \
-  if (NAME != DESCRIPTOR_ARRAY_TYPE) {                                  \
-    ALLOCATE_VARSIZE_MAP(NAME, name)                                    \
-  }
-    TORQUE_DEFINED_VARSIZE_INSTANCE_TYPE_LIST(TORQUE_ALLOCATE_VARSIZE_MAP);
-#undef TORQUE_ALLOCATE_VARSIZE_MAP
+    // The DescriptorArray map is pre-allocated and initialized above.
+    ALLOCATE_VARSIZE_MAP(STRONG_DESCRIPTOR_ARRAY_TYPE, strong_descriptor_array)
+    ALLOCATE_VARSIZE_MAP(TURBOSHAFT_WORD32_SET_TYPE_TYPE,
+                         turboshaft_word32set_type)
+    ALLOCATE_VARSIZE_MAP(TURBOSHAFT_WORD64_SET_TYPE_TYPE,
+                         turboshaft_word64set_type)
+    ALLOCATE_VARSIZE_MAP(TURBOSHAFT_FLOAT64_SET_TYPE_TYPE,
+                         turboshaft_float64set_type)
+    ALLOCATE_MAP(ON_HEAP_BASIC_BLOCK_PROFILER_DATA_TYPE,
+                 OnHeapBasicBlockProfilerData::SizeFor(),
+                 on_heap_basic_block_profiler_data)
+    ALLOCATE_MAP(TURBOFAN_BITSET_TYPE_TYPE, TurbofanBitsetType::SizeFor(),
+                 turbofan_bitset_type)
+    ALLOCATE_MAP(TURBOFAN_UNION_TYPE_TYPE, TurbofanUnionType::SizeFor(),
+                 turbofan_union_type)
+    ALLOCATE_MAP(TURBOFAN_RANGE_TYPE_TYPE, TurbofanRangeType::SizeFor(),
+                 turbofan_range_type)
+    ALLOCATE_MAP(TURBOFAN_HEAP_CONSTANT_TYPE_TYPE,
+                 TurbofanHeapConstantType::SizeFor(),
+                 turbofan_heap_constant_type)
+    ALLOCATE_MAP(TURBOFAN_OTHER_NUMBER_CONSTANT_TYPE_TYPE,
+                 TurbofanOtherNumberConstantType::SizeFor(),
+                 turbofan_other_number_constant_type)
+    ALLOCATE_MAP(TURBOSHAFT_WORD32_RANGE_TYPE_TYPE,
+                 TurboshaftWord32RangeType::SizeFor(),
+                 turboshaft_word32range_type)
+    ALLOCATE_MAP(TURBOSHAFT_WORD64_RANGE_TYPE_TYPE,
+                 TurboshaftWord64RangeType::SizeFor(),
+                 turboshaft_word64range_type)
+    ALLOCATE_MAP(TURBOSHAFT_FLOAT64_RANGE_TYPE_TYPE,
+                 TurboshaftFloat64RangeType::SizeFor(),
+                 turboshaft_float64range_type)
+    ALLOCATE_MAP(SORT_STATE_TYPE, SortState::SizeFor(), sort_state)
+#if V8_ENABLE_WEBASSEMBLY
+    ALLOCATE_MAP(WASM_FAST_API_CALL_DATA_TYPE, WasmFastApiCallData::SizeFor(),
+                 wasm_fast_api_call_data)
+    ALLOCATE_MAP(WASM_STRING_VIEW_ITER_TYPE, WasmStringViewIter::SizeFor(),
+                 wasm_string_view_iter)
+#endif  // V8_ENABLE_WEBASSEMBLY
 
     ALLOCATE_VARSIZE_MAP(ORDERED_HASH_MAP_TYPE, ordered_hash_map)
     ALLOCATE_VARSIZE_MAP(ORDERED_HASH_SET_TYPE, ordered_hash_set)
@@ -754,16 +787,19 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
 
     ALLOCATE_VARSIZE_MAP(SCRIPT_CONTEXT_TABLE_TYPE, script_context_table)
 
+    ALLOCATE_VARSIZE_MAP(SLOPPY_ARGUMENTS_ELEMENTS_TYPE,
+                         sloppy_arguments_elements)
+
     ALLOCATE_VARSIZE_MAP(OBJECT_BOILERPLATE_DESCRIPTION_TYPE,
                          object_boilerplate_description)
 
     ALLOCATE_VARSIZE_MAP(COVERAGE_INFO_TYPE, coverage_info);
     ALLOCATE_VARSIZE_MAP(REG_EXP_MATCH_INFO_TYPE, regexp_match_info);
 
-    ALLOCATE_MAP(REG_EXP_DATA_TYPE, RegExpData::kSize, regexp_data);
-    ALLOCATE_MAP(ATOM_REG_EXP_DATA_TYPE, AtomRegExpData::kSize,
+    ALLOCATE_MAP(REG_EXP_DATA_TYPE, sizeof(RegExpData), regexp_data);
+    ALLOCATE_MAP(ATOM_REG_EXP_DATA_TYPE, sizeof(AtomRegExpData),
                  atom_regexp_data);
-    ALLOCATE_MAP(IR_REG_EXP_DATA_TYPE, IrRegExpData::kSize, ir_regexp_data);
+    ALLOCATE_MAP(IR_REG_EXP_DATA_TYPE, sizeof(IrRegExpData), ir_regexp_data);
 
     ALLOCATE_MAP(SOURCE_TEXT_MODULE_TYPE, sizeof(SourceTextModule),
                  source_text_module)
@@ -781,8 +817,6 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
     IF_WASM(ALLOCATE_MAP, WASM_INTERNAL_FUNCTION_TYPE,
             WasmInternalFunction::kSize, wasm_internal_function)
     IF_WASM(ALLOCATE_MAP, WASM_FUNC_REF_TYPE, WasmFuncRef::kSize, wasm_func_ref)
-    IF_WASM(ALLOCATE_MAP, WASM_JS_FUNCTION_DATA_TYPE, WasmJSFunctionData::kSize,
-            wasm_js_function_data)
     IF_WASM(ALLOCATE_MAP, WASM_RESUME_DATA_TYPE, WasmResumeData::kSize,
             wasm_resume_data)
     IF_WASM(ALLOCATE_MAP, WASM_SUSPENDER_OBJECT_TYPE,
@@ -802,6 +836,12 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
             wasm_dispatch_table_for_imports);
 
     ALLOCATE_MAP(WEAK_CELL_TYPE, sizeof(WeakCell), weak_cell)
+    ALLOCATE_MAP(DICTIONARY_TEMPLATE_INFO_TYPE, sizeof(DictionaryTemplateInfo),
+                 dictionary_template_info)
+    ALLOCATE_MAP(FUNCTION_TEMPLATE_INFO_TYPE, sizeof(FunctionTemplateInfo),
+                 function_template_info)
+    ALLOCATE_MAP(OBJECT_TEMPLATE_INFO_TYPE, sizeof(ObjectTemplateInfo),
+                 object_template_info)
     ALLOCATE_MAP(INTERPRETER_DATA_TYPE, sizeof(InterpreterData),
                  interpreter_data)
 
@@ -820,9 +860,6 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
 
     ALLOCATE_MAP(SHARED_FUNCTION_INFO_WRAPPER_TYPE,
                  SharedFunctionInfoWrapper::kSize, shared_function_info_wrapper)
-
-    ALLOCATE_MAP(DICTIONARY_TEMPLATE_INFO_TYPE, DictionaryTemplateInfo::kSize,
-                 dictionary_template_info)
   }
 
   return true;
@@ -851,13 +888,12 @@ bool Heap::CreateLateReadOnlyJSReceiverMaps() {
     // of primitive values and exist only for the purpose of passing the data
     // across V8 Api. They are not supposed to be leaked to user JS code
     // except from d8 tests and they are not proper JSReceivers.
-    ALLOCATE_MAP(JS_MESSAGE_OBJECT_TYPE, JSMessageObject::kHeaderSize,
+    ALLOCATE_MAP(JS_MESSAGE_OBJECT_TYPE, sizeof(JSMessageObject),
                  message_object)
     roots.message_object_map()->SetEnumLength(0);
     roots.message_object_map()->set_is_extensible(false);
 
-    ALLOCATE_MAP(JS_EXTERNAL_OBJECT_TYPE, JSExternalObject::kHeaderSize,
-                 external)
+    ALLOCATE_MAP(JS_EXTERNAL_OBJECT_TYPE, sizeof(JSExternalObject), external)
     roots.external_map()->SetEnumLength(0);
     roots.external_map()->set_is_extensible(false);
 
@@ -989,8 +1025,7 @@ bool Heap::CreateImportantReadOnlyObjects() {
 
   {
     AllocationResult alloc =
-        AllocateRaw(ScopeInfo::SizeFor(ScopeInfo::kVariablePartIndex),
-                    AllocationType::kReadOnly);
+        AllocateRaw(ScopeInfo::SizeFor(0), AllocationType::kReadOnly);
     if (!alloc.To(&obj)) return false;
     obj->set_map_after_allocation(isolate(), roots.scope_info_map(),
                                   SKIP_WRITE_BARRIER);
@@ -1734,6 +1769,10 @@ void Heap::CreateInitialMutableObjects() {
     set_empty_protected_fixed_array(*ProtectedFixedArray::New(isolate_, 0));
     set_empty_protected_weak_fixed_array(
         *ProtectedWeakFixedArray::New(isolate_, 0));
+#ifdef V8_ENABLE_WEBASSEMBLY
+    set_empty_wasm_dispatch_table(*isolate_->factory()->NewWasmDispatchTable(
+        0, wasm::kWasmFuncRef, SharedFlag::kNo));
+#endif
   }
 }
 

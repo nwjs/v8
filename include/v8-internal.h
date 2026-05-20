@@ -229,6 +229,16 @@ constexpr size_t kSandboxSizeLog2 = 37;  // 128 GB
 // 16 GB so that the base address + size for the emulated virtual address space
 // lies within the 64 GB total virtual address space.
 constexpr size_t kSandboxSizeLog2 = 34;  // 16 GB
+#elif defined(V8_HOST_ARCH_RISCV64)
+// Most RISC-V hardware currently uses Sv39 (39-bit VA, 256GB userspace).
+// Limit the sandbox to 128GB (a quarter of Sv39 userspace) to avoid exceeding
+// the available virtual address space. Uses V8_HOST_ARCH so that simulator
+// builds on x64 are not unnecessarily constrained.
+constexpr size_t kSandboxSizeLog2 = 37;  // 128 GB
+#elif defined(V8_TARGET_ARCH_LOONG64)
+// Some hardwares like 2k3000 only have 40-bit virtual address space, 39 bits
+// userspace and kernel each.
+constexpr size_t kSandboxSizeLog2 = 37;  // 128 GB
 #else
 // Everywhere else use a 1TB sandbox.
 constexpr size_t kSandboxSizeLog2 = 40;  // 1 TB
@@ -275,6 +285,7 @@ static_assert(1ULL << (64 - kBoundedSizeShift) ==
                   kMaxSafeBufferSizeForSandbox + 1,
               "The maximum size of a BoundedSize must be synchronized with the "
               "kMaxSafeBufferSizeForSandbox");
+constexpr size_t kBoundedSizeMask = (1ULL << (64 - kBoundedSizeShift)) - 1;
 
 // Size of the guard regions surrounding the sandbox. This assumes a worst-case
 // scenario of a 32-bit unsigned index used to access an array of 64-bit values
@@ -291,6 +302,19 @@ static_assert((kSandboxGuardRegionSize % kSandboxAlignment) == 0,
 static_assert(kMaxSafeBufferSizeForSandbox <= kSandboxGuardRegionSize,
               "The maximum allowed buffer size must not be larger than the "
               "sandbox's guard regions");
+
+#if defined(V8_TARGET_OS_ANDROID)
+// On Android, we often won't have sufficient virtual address space available.
+constexpr size_t kAdditionalTrailingGuardRegionSize = 0;
+#else
+// Worst-case, we need 8 (max element size) * 32GB (max ArrayBuffer size) +
+// 32GB (additional bounded size offset for TypedArray access).
+constexpr size_t kAdditionalTrailingGuardRegionSize =
+    288ULL * GB - kSandboxGuardRegionSize;
+#endif
+
+constexpr bool kRequiresTypedArrayAccessMasks =
+    kAdditionalTrailingGuardRegionSize == 0;
 
 #endif  // V8_ENABLE_SANDBOX
 
@@ -905,6 +929,9 @@ static_assert((1 << (32 - kTrustedPointerHandleShift)) == kMaxTrustedPointers,
 // its entrypoint.
 //
 // When the sandbox is disabled, these are regular tagged pointers.
+//
+// TODO(498510170): Removing these explicit code pointer handles is work in
+// progress.
 using CodePointerHandle = IndirectPointerHandle;
 
 // The size of the virtual memory reservation for the code pointer table.
@@ -914,7 +941,7 @@ constexpr size_t kCodePointerTableReservationSize = 128 * MB;
 
 // Code pointer handles are shifted by a different amount than indirect pointer
 // handles as the tables have a different maximum size.
-constexpr uint32_t kCodePointerHandleShift = 9;
+constexpr uint32_t kCodePointerHandleShift = 8;
 
 // A null handle always references an entry that contains nullptr.
 constexpr CodePointerHandle kNullCodePointerHandle = kNullIndirectPointerHandle;
@@ -931,8 +958,8 @@ static_assert(kCodePointerHandleShift > 0);
 static_assert(kTrustedPointerHandleShift > 0);
 
 // The byte size of an entry in a code pointer table.
-constexpr int kCodePointerTableEntrySize = 16;
-constexpr int kCodePointerTableEntrySizeLog2 = 4;
+constexpr int kCodePointerTableEntrySize = 8;
+constexpr int kCodePointerTableEntrySizeLog2 = 3;
 // The maximum number of entries in a code pointer table.
 constexpr size_t kMaxCodePointers =
     kCodePointerTableReservationSize / kCodePointerTableEntrySize;
@@ -940,8 +967,7 @@ static_assert(
     (1 << (32 - kCodePointerHandleShift)) == kMaxCodePointers,
     "kCodePointerTableReservationSize and kCodePointerHandleShift don't match");
 
-constexpr int kCodePointerTableEntryEntrypointOffset = 0;
-constexpr int kCodePointerTableEntryCodeObjectOffset = 8;
+constexpr int kCodePointerTableEntryCodeObjectOffset = 0;
 
 // Constants that can be used to mark places that should be modified once
 // certain types of objects are moved out of the sandbox and into trusted space.
@@ -1508,12 +1534,13 @@ class Internals {
     Address entry = std::atomic_load_explicit(ptr, std::memory_order_relaxed);
     ExternalPointerTag actual_tag = static_cast<ExternalPointerTag>(
         (entry & kExternalPointerTagMask) >> kExternalPointerTagShift);
+    volatile Address safe_entry;
     if (V8_LIKELY(tag_range.Contains(actual_tag))) {
-      return entry & kExternalPointerPayloadMask;
+      safe_entry = entry & kExternalPointerPayloadMask;
     } else {
-      return 0;
+      safe_entry = 0;
     }
-    return entry;
+    return safe_entry;
 #else
     return ReadRawField<Address>(heap_object_ptr, offset);
 #endif  // V8_ENABLE_SANDBOX
@@ -1536,12 +1563,14 @@ class Internals {
     Address entry = std::atomic_load_explicit(ptr, std::memory_order_relaxed);
     ExternalPointerTag actual_tag = static_cast<ExternalPointerTag>(
         (entry & kExternalPointerTagMask) >> kExternalPointerTagShift);
+    // Avoid DCE of the entry logic using volatile.
+    volatile Address safe_entry;
     if (V8_LIKELY(tag_range.Contains(actual_tag))) {
-      return entry & kExternalPointerPayloadMask;
+      safe_entry = entry & kExternalPointerPayloadMask;
     } else {
-      return 0;
+      safe_entry = 0;
     }
-    return entry;
+    return safe_entry;
 #else
     return ReadRawField<Address>(heap_object_ptr, offset);
 #endif  // V8_ENABLE_SANDBOX

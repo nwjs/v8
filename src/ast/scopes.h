@@ -115,7 +115,7 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
   ClassScope* AsClassScope();
   const ClassScope* AsClassScope() const;
 
-  bool is_reparsed() const { return !scope_info_.is_null(); }
+  bool from_scope_info() const { return !scope_info_.is_null(); }
 
   // Re-writes the {VariableLocation} of top-level 'let' bindings from CONTEXT
   // to REPL_GLOBAL. Should only be called on REPL scripts.
@@ -375,6 +375,7 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
   bool is_script_scope() const {
     return scope_type_ == SCRIPT_SCOPE || scope_type_ == REPL_MODE_SCOPE;
   }
+  bool is_toplevel_scope() const { return scope_type_ <= MODULE_SCOPE; }
   bool is_catch_scope() const { return scope_type_ == CATCH_SCOPE; }
   bool is_block_scope() const {
     return scope_type_ == BLOCK_SCOPE || scope_type_ == CLASS_SCOPE;
@@ -798,19 +799,23 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
   // calling context of 'eval'.
   template <ScopeLookupMode mode>
   static Variable* Lookup(VariableProxy* proxy, Scope* scope,
-                          Scope* outer_scope_end, Scope* cache_scope = nullptr,
+                          Scope* outer_scope_end, int* access_position,
+                          Scope* cache_scope = nullptr,
                           bool force_context_allocation = false);
   static Variable* LookupWith(VariableProxy* proxy, Scope* scope,
-                              Scope* outer_scope_end, Scope* cache_scope,
-                              bool force_context_allocation);
+                              Scope* outer_scope_end, int* access_position,
+                              Scope* cache_scope = nullptr,
+                              bool force_context_allocation = false);
   static Variable* LookupSloppyEval(VariableProxy* proxy, Scope* scope,
-                                    Scope* outer_scope_end, Scope* cache_scope,
-                                    bool force_context_allocation);
+                                    Scope* outer_scope_end,
+                                    int* access_position,
+                                    Scope* cache_scope = nullptr,
+                                    bool force_context_allocation = false);
   static void ResolvePreparsedVariable(VariableProxy* proxy, Scope* scope,
                                        Scope* end);
   static void UpdateVariableMaybeAssigned(Variable* var, VariableProxy* proxy,
                                           Scope* current_scope);
-  void ResolveTo(VariableProxy* proxy, Variable* var);
+  void ResolveTo(VariableProxy* proxy, Variable* var, int access_position);
   void ResolveVariable(VariableProxy* proxy);
   V8_WARN_UNUSED_RESULT bool ResolveVariablesRecursively(Scope* end);
 
@@ -820,6 +825,10 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
                         AstNodeFactory* ast_node_factory,
                         UnresolvedList* new_unresolved_list,
                         bool maybe_in_arrowhead);
+
+  // Mark a variable as used and maybe-assigned if it might be dynamically
+  // accessed by name (e.g. via eval(), in a catch scope, or script scope).
+  void MarkMaybeAssignedIfEval(Variable* var);
 
   // Predicates.
   bool MustAllocate(Variable* var);
@@ -1145,7 +1154,7 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
   void DeclareDefaultFunctionVariables(AstValueFactory* ast_value_factory);
 
   // Declare the function variable for a function literal. This variable
-  // is in an intermediate scope between this function scope and the the
+  // is in an intermediate scope between this function scope and the
   // outer scope. Only possible for function scopes; at most one variable.
   //
   // This function needs to be called after all other variables have been
@@ -1219,6 +1228,9 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
   //   function foo(a, b, ...c) {}   ==> 2
   //   function foo(a, b, c = 1) {}  ==> 3
   int num_parameters() const { return num_parameters_; }
+
+  int eval_position() const { return eval_position_; }
+  void set_eval_position(int eval_position) { eval_position_ = eval_position; }
 
   // The function's rest parameter (nullptr if there is none).
   Variable* rest_parameter() const {
@@ -1452,6 +1464,7 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
   FunctionKind function_kind_;
 
   int num_parameters_ = 0;
+  int eval_position_ = kNoSourcePosition;
 
   // Parameter list in source order.
   ZonePtrList<Variable> params_;

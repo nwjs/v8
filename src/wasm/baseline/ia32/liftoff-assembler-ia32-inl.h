@@ -12,7 +12,6 @@
 #include "src/heap/mutable-page.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/liftoff-register.h"
-#include "src/wasm/object-access.h"
 #include "src/wasm/simd-shuffle.h"
 #include "src/wasm/value-type.h"
 #include "src/wasm/wasm-linkage.h"
@@ -77,7 +76,6 @@ inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, Register base,
     case kBottom:
     case kI8:
     case kF16:
-    case kWaitQueue:
       UNREACHABLE();
   }
 }
@@ -112,7 +110,6 @@ inline void Store(LiftoffAssembler* assm, Register base, int32_t offset,
     case kBottom:
     case kI8:
     case kF16:
-    case kWaitQueue:
       UNREACHABLE();
   }
 }
@@ -149,7 +146,6 @@ inline void push(LiftoffAssembler* assm, LiftoffRegister reg, ValueKind kind,
     case kI8:
     case kI16:
     case kF16:
-    case kWaitQueue:
       UNREACHABLE();
   }
 }
@@ -404,9 +400,9 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
       LoadInstanceDataFromFrame(instance_data);
     }
 
-    constexpr int kArrayOffset = wasm::ObjectAccess::ToTagged(
-        WasmTrustedInstanceData::kTieringBudgetArrayOffset);
-    mov(budget_array, Operand{instance_data, kArrayOffset});
+    mov(budget_array,
+        FieldOperand(instance_data,
+                     WasmTrustedInstanceData::kTieringBudgetArrayOffset));
 
     int array_offset = kInt32Size * declared_func_index;
     sub(Operand{budget_array, array_offset}, Immediate(budget_used));
@@ -500,7 +496,7 @@ void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
 void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
                                         int offset, int size) {
   DCHECK_LE(0, offset);
-  Operand src{instance, offset};
+  Operand src = FieldOperand(instance, offset);
   switch (size) {
     case 1:
       movzx_b(dst, src);
@@ -517,7 +513,7 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      Register instance,
                                                      int offset) {
   static_assert(kTaggedSize == kSystemPointerSize);
-  mov(dst, Operand{instance, offset});
+  mov(dst, FieldOperand(instance, offset));
 }
 
 void LiftoffAssembler::ResetOSRTarget() {}
@@ -529,9 +525,12 @@ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          bool needs_shift) {
   DCHECK_GE(offset_imm, 0);
   static_assert(kTaggedSize == kInt32Size);
-  Load(LiftoffRegister(dst), src_addr, offset_reg,
-       static_cast<uint32_t>(offset_imm), LoadType::kI32Load, trapping_load_pc,
-       false, false, needs_shift);
+  ScaleFactor scale_factor = !needs_shift ? times_1 : times_4;
+  Operand src_op = offset_reg == no_reg ? Operand(src_addr, offset_imm)
+                                        : Operand(src_addr, offset_reg,
+                                                  scale_factor, offset_imm);
+  if (trapping_load_pc) *trapping_load_pc = pc_offset();
+  mov(dst, src_op);
 }
 
 void LiftoffAssembler::AtomicLoadTaggedPointer(Register dst, Register src_addr,
@@ -545,9 +544,9 @@ void LiftoffAssembler::AtomicLoadTaggedPointer(Register dst, Register src_addr,
 }
 
 void LiftoffAssembler::LoadProtectedPointer(Register dst, Register src_addr,
-                                            int32_t offset) {
+                                            int32_t field_offset) {
   static_assert(!V8_ENABLE_SANDBOX_BOOL);
-  LoadTaggedPointer(dst, src_addr, no_reg, offset);
+  mov(dst, FieldOperand(src_addr, field_offset));
 }
 
 void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
@@ -1426,15 +1425,18 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
   }
 
   if (v8_flags.disable_write_barriers) return;
+  Label done;
+  j(not_equal, &done, Label::kNear);
   // This assumes that the caller didn't pin any additional registers.
-  // {expected} and {new_value} are no longer needed; we need to unpin
-  // them so that enough registers are available for the write barrier.
+  // {expected}, {value_reg} and {new_value} are no longer needed; we need to
+  // unpin them so that enough registers are available for the write barrier.
   LiftoffRegList new_pinned{dst_addr, new_value_for_write_barrier, result_reg};
   DCHECK(pinned.MaskOut(new_pinned)
-             .MaskOut(LiftoffRegList{expected, new_value, eax})
+             .MaskOut(LiftoffRegList{expected, new_value, eax, value_reg})
              .is_empty());
   pinned = new_pinned;
   EmitWriteBarrier(dst_addr, dst_op, new_value_for_write_barrier, pinned);
+  bind(&done);
 }
 
 void LiftoffAssembler::AtomicFence() { mfence(); }
@@ -1975,6 +1977,10 @@ void LiftoffAssembler::emit_i64_mul(LiftoffRegister dst, LiftoffRegister lhs,
   LiftoffRegister dst_tmp = LiftoffRegister::ForPair(dst_lo, dst_hi);
   if (dst != dst_tmp) Move(dst, dst_tmp, kI64);
 }
+
+void LiftoffAssembler::emit_i64_mul_wide_s() { UNIMPLEMENTED(); }
+
+void LiftoffAssembler::emit_i64_mul_wide_u() { UNIMPLEMENTED(); }
 
 bool LiftoffAssembler::emit_i64_divs(LiftoffRegister dst, LiftoffRegister lhs,
                                      LiftoffRegister rhs,

@@ -895,6 +895,22 @@ struct BuiltinCallDescriptor {
         base_effects.CanReadMemory().CanAllocateWithoutIdentity();
   };
 
+  struct WasmStringAdd_CheckNone_Shared
+      : public Descriptor<WasmStringAdd_CheckNone_Shared> {
+    static constexpr auto kFunction = Builtin::kWasmStringAdd_CheckNone_Shared;
+    using arguments_t = std::tuple<V<String>, V<String>>;
+    using results_t = std::tuple<V<String>>;
+
+    static constexpr bool kNeedsFrameState = false;
+    static constexpr bool kNeedsContext = false;
+    static constexpr Operator::Properties kProperties =
+        Operator::kNoDeopt | Operator::kNoWrite;
+    // This will only write in a fresh object, so the writes are not visible
+    // from Turboshaft, and CanAllocate is enough.
+    static constexpr OpEffects kEffects =
+        base_effects.CanReadMemory().CanAllocateWithoutIdentity();
+  };
+
   struct WasmJSStringEqual : public Descriptor<WasmJSStringEqual> {
     static constexpr auto kFunction = Builtin::kWasmJSStringEqual;
     using arguments_t = std::tuple<V<String>, V<String>, V<WordPtr>>;
@@ -1024,17 +1040,6 @@ struct BuiltinCallDescriptor {
     static constexpr OpEffects kEffects = base_effects.CanAllocate();
   };
 
-  struct WasmAllocateWaitQueue : public Descriptor<WasmAllocateWaitQueue> {
-    static constexpr auto kFunction = Builtin::kWasmAllocateWaitQueue;
-    using arguments_t = std::tuple<V<WasmStruct>, V<Word32>>;
-    using results_t = std::tuple<V<WasmStruct>>;
-
-    static constexpr bool kNeedsFrameState = false;
-    static constexpr bool kNeedsContext = false;
-    static constexpr Operator::Properties kProperties = Operator::kNoProperties;
-    static constexpr OpEffects kEffects = base_effects.CanAllocate();
-  };
-
   struct WasmGetOwnProperty : public Descriptor<WasmGetOwnProperty> {
     static constexpr auto kFunction = Builtin::kWasmGetOwnProperty;
     using arguments_t = std::tuple<V<Object>, V<Symbol>>;
@@ -1159,6 +1164,18 @@ struct BuiltinCallDescriptor {
   struct WasmStringViewWtf16Slice
       : public Descriptor<WasmStringViewWtf16Slice> {
     static constexpr auto kFunction = Builtin::kWasmStringViewWtf16Slice;
+    using arguments_t = std::tuple<V<String>, V<Word32>, V<Word32>>;
+    using results_t = std::tuple<V<String>>;
+
+    static constexpr bool kNeedsFrameState = false;
+    static constexpr bool kNeedsContext = false;
+    static constexpr Operator::Properties kProperties = Operator::kEliminatable;
+    static constexpr OpEffects kEffects =
+        base_effects.CanReadMemory().CanAllocateWithoutIdentity();
+  };
+
+  struct WasmStringSliceShared : public Descriptor<WasmStringSliceShared> {
+    static constexpr auto kFunction = Builtin::kWasmStringSliceShared;
     using arguments_t = std::tuple<V<String>, V<Word32>, V<Word32>>;
     using results_t = std::tuple<V<String>>;
 
@@ -1298,14 +1315,25 @@ struct BuiltinCallDescriptor {
 
   struct WasmManagedObjectWait : public Descriptor<WasmManagedObjectWait> {
     static constexpr auto kFunction = Builtin::kWasmManagedObjectWait;
-    using arguments_t =
-        std::tuple<V<HeapObject>, V<Word32>, V<Word32>, V<BigInt>>;
+    using arguments_t = std::tuple<V<HeapObject>, V<Word32>, V<Word32>,
+                                   V<HeapObject>, V<BigInt>>;
     using results_t = std::tuple<V<Word32>>;
 
     static constexpr bool kNeedsFrameState = false;
     static constexpr bool kNeedsContext = false;
     static constexpr Operator::Properties kProperties = Operator::kNoProperties;
     static constexpr OpEffects kEffects = base_effects.CanCallAnything();
+  };
+
+  struct WasmWaitqueueNew : public Descriptor<WasmWaitqueueNew> {
+    static constexpr auto kFunction = Builtin::kWasmWaitqueueNew;
+    using arguments_t = std::tuple<>;
+    using results_t = std::tuple<V<HeapObject>>;
+
+    static constexpr bool kNeedsFrameState = false;
+    static constexpr bool kNeedsContext = false;
+    static constexpr Operator::Properties kProperties = Operator::kNoProperties;
+    static constexpr OpEffects kEffects = base_effects.CanAllocate();
   };
 
   struct WasmFunctionTableGet : public Descriptor<WasmFunctionTableGet> {

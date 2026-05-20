@@ -606,6 +606,27 @@ RUNTIME_FUNCTION(Runtime_OptimizeFunctionOnNextCall) {
           : CodeKind::TURBOFAN_JS);
 }
 
+RUNTIME_FUNCTION(Runtime_ExhaustInterruptBudget) {
+  HandleScope scope(isolate);
+  CHECK_UNLESS_FUZZING(args.length() == 1);
+  CHECK_UNLESS_FUZZING(IsJSFunction(args[0]));
+  DirectHandle<JSFunction> function = args.at<JSFunction>(0);
+
+  if (!function->has_feedback_vector()) {
+    IsCompiledScope is_compiled_scope;
+    CHECK_UNLESS_FUZZING(
+        EnsureCompiledAndFeedbackVector(isolate, function, &is_compiled_scope));
+  }
+
+  CHECK_UNLESS_FUZZING(function->has_feedback_vector());
+  CHECK_UNLESS_FUZZING(function->shared()->HasBytecodeArray());
+
+  function->SetInterruptBudget(isolate, BudgetModification::kReset);
+  function->raw_feedback_cell()->set_interrupt_budget(0);
+
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
 RUNTIME_FUNCTION(Runtime_EnsureFeedbackVectorForFunction) {
   HandleScope scope(isolate);
   CHECK_UNLESS_FUZZING(args.length() == 1);
@@ -1122,7 +1143,7 @@ RUNTIME_FUNCTION(Runtime_GetAbstractModuleSource) {
   DisallowGarbageCollection no_gc;
   Tagged<JSFunction> abstract_module_source_function =
       isolate->native_context()->abstract_module_source_function();
-  CHECK(IsJSFunction(*abstract_module_source_function));
+  CHECK(IsJSFunction(abstract_module_source_function));
   return abstract_module_source_function;
 }
 
@@ -1337,10 +1358,10 @@ RUNTIME_FUNCTION(Runtime_DebugPrintGeneric) {
 
   CHECK_UNLESS_FUZZING(args.length() == 2 + kNum16BitChunks + 1);
 
-  CHECK(IsSmi(args[1]));
+  CHECK_UNLESS_FUZZING(IsSmi(args[1]));
   DebugPrintValueType value_type =
       static_cast<DebugPrintValueType>(Cast<Smi>(args[1]).value());
-  CHECK(IsSmi(args[6]));
+  CHECK_UNLESS_FUZZING(IsSmi(args[6]));
   int stream_int = Cast<Smi>(args[6]).value();
   FILE* output_stream = stream_int == fileno(stderr) ? stderr : stdout;
 
@@ -1357,10 +1378,10 @@ RUNTIME_FUNCTION(Runtime_DebugPrintGeneric) {
   if (value_type != DebugPrintValueType::kTagged) {
     for (int i = 0; i < kNum16BitChunks; ++i) {
       value <<= 16;
-      CHECK(IsSmi(args[2 + i]));
+      CHECK_UNLESS_FUZZING(IsSmi(args[2 + i]));
       uint32_t chunk = Cast<Smi>(args[2 + i]).value();
       // We encode 16 bit per chunk only!
-      CHECK_EQ(chunk & 0xFFFF0000, 0);
+      CHECK_UNLESS_FUZZING((chunk & 0xFFFF0000) == 0);
       value |= chunk;
     }
   }
@@ -1395,7 +1416,7 @@ RUNTIME_FUNCTION(Runtime_DebugPrintGeneric) {
     }
     case DebugPrintValueType::kTagged: {
       Tagged<Object> tagged = args[5];
-      CHECK(IsHeapObject(tagged));
+      CHECK_UNLESS_FUZZING(IsHeapObject(tagged));
       if (IsString(tagged) && !IsString(args[0])) {
         // We don't have a prefix and just print a string. In this case we don't
         // print the full JS object but just the text.
@@ -1449,10 +1470,10 @@ RUNTIME_FUNCTION(Runtime_DebugPrintWord) {
   uint64_t value = 0;
   for (int i = 0; i < kNum16BitChunks; ++i) {
     value <<= 16;
-    CHECK(IsSmi(args[i]));
+    CHECK_UNLESS_FUZZING(IsSmi(args[i]));
     uint32_t chunk = Cast<Smi>(args[i]).value();
     // We encode 16 bit per chunk only!
-    CHECK_EQ(chunk & 0xFFFF0000, 0);
+    CHECK_UNLESS_FUZZING((chunk & 0xFFFF0000) == 0);
     value |= chunk;
   }
 
@@ -1476,10 +1497,10 @@ RUNTIME_FUNCTION(Runtime_DebugPrintFloat) {
   uint64_t value = 0;
   for (int i = 0; i < kNum16BitChunks; ++i) {
     value <<= 16;
-    CHECK(IsSmi(args[i]));
+    CHECK_UNLESS_FUZZING(IsSmi(args[i]));
     uint32_t chunk = Cast<Smi>(args[i]).value();
     // We encode 16 bit per chunk only!
-    CHECK_EQ(chunk & 0xFFFF0000, 0);
+    CHECK_UNLESS_FUZZING((chunk & 0xFFFF0000) == 0);
     value |= chunk;
   }
 
@@ -1999,6 +2020,9 @@ RUNTIME_FUNCTION(Runtime_HeapObjectVerify) {
   DirectHandle<Object> object = args.at(0);
 #ifdef VERIFY_HEAP
   Object::ObjectVerify(*object, isolate);
+  if (IsHeapObject(*object)) {
+    Cast<HeapObject>(*object)->map()->MapVerify(isolate);
+  }
 #else
   CHECK(IsObject(*object));
   if (IsHeapObject(*object)) {

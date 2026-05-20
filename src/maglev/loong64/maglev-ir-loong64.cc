@@ -859,6 +859,14 @@ void Float64Abs::GenerateCode(MaglevAssembler* masm,
   __ fabs_d(out, in);
 }
 
+void Float64RoundToFloat32::GenerateCode(MaglevAssembler* masm,
+                                         const ProcessingState& state) {
+  DoubleRegister input = ToDoubleRegister(ValueInput());
+  DoubleRegister result = ToDoubleRegister(this->result());
+  __ fcvt_s_d(result, input);
+  __ fcvt_d_s(result, result);
+}
+
 void Float64Round::GenerateCode(MaglevAssembler* masm,
                                 const ProcessingState& state) {
   DoubleRegister in = ToDoubleRegister(ValueInput());
@@ -870,15 +878,25 @@ void Float64Round::GenerateCode(MaglevAssembler* masm,
     MaglevAssembler::TemporaryRegisterScope temps(masm);
     DoubleRegister temp = temps.AcquireScratchDouble();
     DoubleRegister half_one = temps.AcquireScratchDouble();
+    Label done;
+    __ fmov_d(temp, in);
+    __ Round_d(out, in);
+    __ fsub_d(temp, temp, out);
     __ Move(half_one, 0.5);
-    __ fadd_d(temp, in, half_one);
-    __ Floor_d(temp, temp);
-    // Reserve the sign bit when it is between -0.5 and -0.0.
-    __ fcopysign_d(out, temp, in);
+    __ CompareF64(temp, half_one, CUNE);
+    __ BranchTrueF(&done);
+    // Fix wrong tie-to-even by adding 0.5 twice.
+    __ fadd_d(out, out, half_one);
+    __ fadd_d(out, out, half_one);
+    __ bind(&done);
   } else if (kind_ == Kind::kCeil) {
     __ Ceil_d(out, in);
   } else if (kind_ == Kind::kFloor) {
     __ Floor_d(out, in);
+  } else if (kind_ == Kind::kTrunc) {
+    __ Trunc_d(out, in);
+  } else {
+    UNREACHABLE();
   }
 }
 
@@ -1007,7 +1025,7 @@ void LoadTypedArrayLength::GenerateCode(MaglevAssembler* masm,
   if (shift_size > 0) {
     // TODO(leszeks): Merge this shift with the one in LoadBoundedSize.
     DCHECK(shift_size == 1 || shift_size == 2 || shift_size == 3);
-    __ srli_w(result_register, result_register, shift_size);
+    __ srli_d(result_register, result_register, shift_size);
   }
 }
 

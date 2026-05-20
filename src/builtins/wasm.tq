@@ -44,9 +44,9 @@ extern runtime WasmI32AtomicWait(
     Context, WasmTrustedInstanceData, Smi, Number, Number, BigInt): Smi;
 extern runtime WasmI64AtomicWait(
     Context, WasmTrustedInstanceData, Smi, Number, BigInt, BigInt): Smi;
-extern runtime WasmManagedObjectWait(Context, HeapObject, Smi, Number, BigInt):
-    Smi;
-extern runtime WasmAllocateWaitQueue(Context, WasmStruct, Smi): Smi;
+extern runtime WasmManagedObjectWait(
+    Context, HeapObject, Smi, Number, HeapObject, BigInt): Smi;
+extern runtime WasmWaitqueueNew(Context): HeapObject;
 extern runtime WasmArrayCopy(Context, WasmArray, Smi, WasmArray, Smi, Smi):
     JSAny;
 extern runtime WasmAllocateDescriptorStruct(
@@ -85,6 +85,8 @@ extern runtime WasmStringViewWtf8Slice(Context, ByteArray, Number, Number):
 extern runtime WasmStringFromCodePoint(Context, Number, Smi): String;
 extern runtime WasmStringHash(NoContext, String): Smi;
 extern runtime WasmSubstring(Context, String, Smi, Smi): String;
+extern runtime WasmSubstringShared(Context, String, Smi, Smi): String;
+extern runtime WasmStringAdd_CheckNone_Shared(Context, String, String): String;
 extern runtime WasmLiftoffDeoptFinish(NoContext, WasmTrustedInstanceData):
     Undefined;
 
@@ -99,9 +101,6 @@ extern runtime WasmTypeAssertionFailed(NoContext): never;
 extern operator '.wasm_exported_function_data' macro
     LoadSharedFunctionInfoWasmExportedFunctionData(SharedFunctionInfo):
         WasmExportedFunctionData;
-extern operator '.wasm_js_function_data' macro
-    LoadSharedFunctionInfoWasmJSFunctionData(SharedFunctionInfo):
-        WasmJSFunctionData;
 
 namespace unsafe {
 extern macro Allocate(intptr): HeapObject;
@@ -749,19 +748,15 @@ builtin WasmI64AtomicWait(
 
 builtin WasmManagedObjectWait(
     object: HeapObject, fieldOffset: int32, expectedValue: int32,
-    timeout: BigInt): uint32 {
+    waitqueue: HeapObject, timeout: BigInt): uint32 {
   const result: Smi = runtime::WasmManagedObjectWait(
       LoadContextFromFrame(), object, SmiFromInt32(fieldOffset),
-      ChangeInt32ToTagged(expectedValue), timeout);
+      ChangeInt32ToTagged(expectedValue), waitqueue, timeout);
   return Unsigned(SmiToInt32(result));
 }
 
-// It's convenient for Liftoff to return {structValue} back.
-builtin WasmAllocateWaitQueue(structValue: WasmStruct, rawFieldOffset: int32):
-    WasmStruct {
-  runtime::WasmAllocateWaitQueue(
-      LoadContextFromFrame(), structValue, SmiFromInt32(rawFieldOffset));
-  return structValue;
+builtin WasmWaitqueueNew(): HeapObject {
+  tail runtime::WasmWaitqueueNew(LoadContextFromFrame());
 }
 
 // Type feedback collection support for `call_ref` and `call_indirect`.
@@ -808,7 +803,7 @@ macro UpdateCallRefOrIndirectIC(
     // Polymorphic miss.
     const entries = UnsafeCast<FixedArray>(firstSlot);
     const kMaxSlots = kMaxPolymorphism * 2;  // 2 slots per entry.
-    if (entries.length == SmiConstant(kMaxSlots)) {
+    if (entries.length == Unsigned(Int32Constant(kMaxSlots))) {
       // Polymorphic to megamorphic transition.
       vector.objects[index] = ic::kMegamorphicSymbol;
       // The second slot/counter has already been set to undefined below.
@@ -1351,6 +1346,10 @@ builtin WasmStringConcat(a: String, b: String): String {
   tail WasmStringAdd_CheckNone(a, b);
 }
 
+builtin WasmStringAdd_CheckNone_Shared(a: String, b: String): String {
+  tail runtime::WasmStringAdd_CheckNone_Shared(LoadContextFromFrame(), a, b);
+}
+
 extern builtin StringEqual(NoContext, String, String, intptr): Boolean;
 
 builtin WasmStringEqual(a: String, b: String): int32 {
@@ -1379,7 +1378,7 @@ macro IsWtf8CodepointStart(view: ByteArray, pos: uint32): bool {
   return (view.values[Convert<uintptr>(pos)] & 0xc0) != 0x80;
 }
 macro AlignWtf8PositionForward(view: ByteArray, pos: uint32): uint32 {
-  const length = Unsigned(SmiToInt32(view.length));
+  const length = view.length;
   if (pos >= length) return length;
 
   if (IsWtf8CodepointStart(view, pos)) return pos;
@@ -1408,7 +1407,7 @@ builtin WasmStringViewWtf8Advance(view: ByteArray, pos: uint32, bytes: uint32):
     uint32 {
   const clampedPos = AlignWtf8PositionForward(view, pos);
   if (bytes == 0) return clampedPos;
-  const length = Unsigned(SmiToInt32(view.length));
+  const length = view.length;
   if (bytes >= length - clampedPos) return length;
   return AlignWtf8PositionBackward(view, clampedPos + bytes);
 }
@@ -1519,8 +1518,34 @@ transitioning builtin WasmStringViewWtf16Slice(
   return string::SubString(
       string, Convert<uintptr>(start), Convert<uintptr>(clampedEnd));
 }
+builtin WasmStringSliceShared(string: String, start: uint32, end: uint32):
+    String {
+  const length = Unsigned(string.length);
+  if (start >= length) return kEmptyString;
+  if (end <= start) return kEmptyString;
+  const clampedEnd: uint32 = end <= length ? end : length;
+  tail runtime::WasmSubstringShared(
+      LoadContextFromFrame(), string, SmiFromUint32(start),
+      SmiFromUint32(clampedEnd - start));
+}
+extern macro WasmStringViewIterMapConstant(): Map;
+
+@if(TAGGED_SIZE_8_BYTES)
 builtin WasmStringAsIter(string: String): WasmStringViewIter {
-  return new WasmStringViewIter{string: string, offset: 0, optional_padding: 0};
+  return new WasmStringViewIter{
+    map: WasmStringViewIterMapConstant(),
+    string: string,
+    offset: 0,
+    optional_padding: 0
+  };
+}
+@ifnot(TAGGED_SIZE_8_BYTES)
+builtin WasmStringAsIter(string: String): WasmStringViewIter {
+  return new WasmStringViewIter{
+    map: WasmStringViewIterMapConstant(),
+    string: string,
+    offset: 0
+  };
 }
 macro IsLeadSurrogate(code: char16): bool {
   return (code & 0xfc00) == 0xd800;

@@ -118,15 +118,12 @@ class ObjectPreProcessor final {
 #undef PROCESS_INDEXED_FIELD
   }
   void PreProcessJSExternalObject(Tagged<JSExternalObject> o) {
-    ExternalPointerSlot value_slot = o->RawExternalPointerField(
-        JSExternalObject::kValueOffset,
-        {kFirstExternalTypeTag, kLastExternalTypeTag});
+    ExternalPointerSlot value_slot(&o->value_, kExternalObjectValueTagRange);
     EncodeExternalPointerSlotWithTagRange(value_slot);
   }
   void PreProcessFunctionTemplateInfo(Tagged<FunctionTemplateInfo> o) {
     EncodeExternalPointerSlot(
-        o->RawExternalPointerField(FunctionTemplateInfo::kCallbackOffset,
-                                   kFunctionTemplateInfoCallbackTag),
+        ExternalPointerSlot(&o->callback_),
         o->callback(isolate_));  // Pass the non-redirected value.
   }
 #if V8_ENABLE_GEARBOX

@@ -267,9 +267,6 @@ using kWord32Equal = ComparisonMask::For<ComparisonOp::Kind::kEqual,
                                          WordRepresentation::Word32()>;
 using kWord64Equal = ComparisonMask::For<ComparisonOp::Kind::kEqual,
                                          WordRepresentation::Word64()>;
-using kFloat64SignedLessThan =
-    ComparisonMask::For<ComparisonOp::Kind::kSignedLessThan,
-                        RegisterRepresentation::Float64()>;
 using ComparisonKindMask = MaskBuilder<ComparisonOp, FIELD(ComparisonOp, kind)>;
 using kComparisonEqual = ComparisonKindMask::For<ComparisonOp::Kind::kEqual>;
 
@@ -291,6 +288,11 @@ using kFloat64ExtractHighWord32 = ChangeOpMask::For<
     RegisterRepresentation::Float64(), RegisterRepresentation::Word32()>;
 using kTruncateFloat64ToInt64OverflowToMin =
     ChangeOpMask::For<ChangeOp::Kind::kSignedFloatTruncateOverflowToMin,
+                      ChangeOp::Assumption::kNoAssumption,
+                      RegisterRepresentation::Float64(),
+                      RegisterRepresentation::Word64()>;
+using kTruncateFloat64ToUint64OverflowToMin =
+    ChangeOpMask::For<ChangeOp::Kind::kUnsignedFloatTruncateOverflowToMin,
                       ChangeOp::Assumption::kNoAssumption,
                       RegisterRepresentation::Float64(),
                       RegisterRepresentation::Word64()>;

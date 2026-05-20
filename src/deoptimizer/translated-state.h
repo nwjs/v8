@@ -513,8 +513,10 @@ class TranslatedState {
 
   // Resolves one deopt translation value opcode to a raw Tagged<Object>,
   // reading from the live frame if needed.  Only LITERAL and
-  // TAGGED_STACK_SLOT are expected; other opcodes are UNREACHABLE.
-  static Tagged<Object> ResolveTaggedValue(
+  // TAGGED_STACK_SLOT can be resolved cheaply; for any other opcode the
+  // iterator is left positioned just past the opcode and std::nullopt is
+  // returned so the caller can fall back to the full materialization path.
+  static std::optional<Tagged<Object>> TryResolveTaggedValue(
       DeoptTranslationIterator* it, Address fp,
       Tagged<DeoptimizationLiteralArray> literals);
 
@@ -569,9 +571,16 @@ class TranslatedState {
   void InitializeJSObjectAt(TranslatedFrame* frame, int* value_index,
                             TranslatedValue* slot, DirectHandle<Map> map,
                             const DisallowGarbageCollection& no_gc);
+  void InitializeFirstHeaderField(TranslatedFrame* frame, int* value_index,
+                                  TranslatedValue* slot, bool is_fixed_array,
+                                  const DisallowGarbageCollection& no_gc);
   void InitializeObjectWithTaggedFieldsAt(
       TranslatedFrame* frame, int* value_index, TranslatedValue* slot,
-      DirectHandle<Map> map, const DisallowGarbageCollection& no_gc);
+      DirectHandle<Map> map, const DisallowGarbageCollection& no_gc,
+      int consumed_slots);
+  void PrepareObjectForLayoutChange(Handle<HeapObject> object_storage,
+                                    int children_count,
+                                    const DisallowGarbageCollection& no_gc);
 
   Handle<HeapObject> ResolveStringConcat(TranslatedValue* slot);
 

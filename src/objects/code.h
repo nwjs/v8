@@ -61,7 +61,7 @@ enum class LazyDeoptimizeReason : uint8_t;
 // When the sandbox is enabled, Code objects are allocated outside the sandbox
 // and referenced through indirect pointers, so they need to inherit from
 // ExposedTrustedObject.
-class Code : public ExposedTrustedObject {
+V8_OBJECT class Code : public ExposedTrustedObject {
  public:
   // When V8_EXTERNAL_CODE_SPACE is enabled, InstructionStream objects are
   // allocated in a separate pointer compression cage instead of the cage where
@@ -409,12 +409,7 @@ class Code : public ExposedTrustedObject {
   V(kInstructionStreamOffset, kTaggedSize)                                     \
   V(kEndOfStrongFieldsOffset, 0)                                               \
   /* Untagged data not directly visited by GC starts here. */                  \
-  /* When the sandbox is off, the instruction_start field contains a raw */    \
-  /* pointer to the first instruction of this Code. */                         \
-  /* If the sandbox is on, this field does not exist. Instead, the */          \
-  /* instruction_start is stored in this Code's code pointer table entry */    \
-  /* referenced via the kSelfIndirectPointerOffset field */                    \
-  V(kInstructionStartOffset, V8_ENABLE_SANDBOX_BOOL ? 0 : kSystemPointerSize)  \
+  V(kInstructionStartOffset, kSystemPointerSize)                               \
   /* The serializer needs to copy bytes starting from here verbatim. */        \
   V(kDispatchHandleOffset, kJSDispatchHandleSize)                              \
   V(kFlagsOffset, kUInt32Size)                                                 \
@@ -438,8 +433,7 @@ class Code : public ExposedTrustedObject {
   /* Total size. */                                                            \
   V(kSize, 0)
 
-  DEFINE_FIELD_OFFSET_CONSTANTS(ExposedTrustedObject::kHeaderSize,
-                                CODE_DATA_FIELDS)
+  DEFINE_FIELD_OFFSET_CONSTANTS(sizeof(ExposedTrustedObject), CODE_DATA_FIELDS)
 
 #undef CODE_DATA_FIELDS
 
@@ -514,8 +508,7 @@ class Code : public ExposedTrustedObject {
   friend FactoryBase<Factory>;
   friend FactoryBase<LocalFactory>;
 
-  OBJECT_CONSTRUCTORS(Code, ExposedTrustedObject);
-};
+} V8_OBJECT_END;
 
 // A Code object when used in situations where gc might be in progress. The
 // underlying pointer is guaranteed to be a Code object.
@@ -580,7 +573,7 @@ class GcSafeCode : public HeapObject {
 // A CodeWrapper wraps a Code but lives inside the sandbox. This can be useful
 // for example when a reference to a Code needs to be stored along other tagged
 // pointers inside an array or similar container datastructure.
-V8_OBJECT class CodeWrapper : public StructLayout {
+V8_OBJECT class CodeWrapper : public Struct {
  public:
   DECL_CODE_POINTER_ACCESSORS(code)
 

@@ -82,6 +82,7 @@
 #include "src/objects/struct-inl.h"
 #include "src/objects/template-objects-inl.h"
 #include "src/objects/transitions-inl.h"
+#include "src/objects/turboshaft-types-inl.h"
 #include "src/parsing/preparse-data.h"
 #include "src/regexp/regexp.h"
 #include "src/roots/roots.h"
@@ -94,7 +95,7 @@
 #include "src/utils/utils-inl.h"
 
 #if V8_ENABLE_WEBASSEMBLY
-#include "src/wasm/wasm-objects.h"
+#include "src/wasm/wasm-objects-inl.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 #ifdef V8_INTL_SUPPORT
@@ -589,7 +590,7 @@ MaybeDirectHandle<String> Object::NoSideEffectsToMaybeString(
   } else if (IsJSProxy(*input)) {
     DirectHandle<Object> currInput = input;
     do {
-      Tagged<HeapObject> target = Cast<JSProxy>(currInput)->target(isolate);
+      Tagged<HeapObject> target = Cast<JSProxy>(currInput)->target();
       currInput = direct_handle(target, isolate);
     } while (IsJSProxy(*currInput));
     return NoSideEffectsToString(isolate, currInput);
@@ -1853,8 +1854,8 @@ V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Object::SpeciesConstructor(
   DirectHandle<Object> ctor_obj;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, ctor_obj,
-      JSObject::GetProperty(isolate, recv,
-                            isolate->factory()->constructor_string()));
+      JSReceiver::GetProperty(isolate, recv,
+                              isolate->factory()->constructor_string()));
 
   if (IsUndefined(*ctor_obj, isolate)) return default_ctor;
 
@@ -1868,8 +1869,8 @@ V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Object::SpeciesConstructor(
   DirectHandle<Object> species;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, species,
-      JSObject::GetProperty(isolate, ctor,
-                            isolate->factory()->species_symbol()));
+      JSReceiver::GetProperty(isolate, ctor,
+                              isolate->factory()->species_symbol()));
 
   if (IsNullOrUndefined(*species, isolate)) {
     return default_ctor;
@@ -1972,8 +1973,6 @@ std::ostream& operator<<(std::ostream& os, const Brief& v) {
 void Smi::SmiPrint(Tagged<Smi> smi, std::ostream& os) { os << smi.value(); }
 
 void Struct::BriefPrintDetails(std::ostream& os) {}
-
-void StructLayout::BriefPrintDetails(std::ostream& os) {}
 
 void Tuple2::BriefPrintDetails(std::ostream& os) {
   os << " " << Brief(value1()) << ", " << Brief(value2());
@@ -2100,6 +2099,9 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
     return PropertyArray::SizeFor(
         UncheckedCast<PropertyArray>(*this)->length(kAcquireLoad).value());
   }
+  if (instance_type == SCOPE_INFO_TYPE) {
+    return UncheckedCast<ScopeInfo>(*this)->AllocatedSize();
+  }
   if (instance_type == FEEDBACK_VECTOR_TYPE) {
     return FeedbackVector::SizeFor(
         UncheckedCast<FeedbackVector>(*this)->length());
@@ -2111,13 +2113,6 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
     Tagged<PreparseData> data = UncheckedCast<PreparseData>(*this);
     return PreparseData::SizeFor(data->data_length(), data->children_length());
   }
-#define MAKE_TORQUE_SIZE_FOR(TYPE, TypeName)                \
-  if (instance_type == TYPE) {                              \
-    return UncheckedCast<TypeName>(*this)->AllocatedSize(); \
-  }
-  TORQUE_INSTANCE_TYPE_TO_BODY_DESCRIPTOR_LIST(MAKE_TORQUE_SIZE_FOR)
-#undef MAKE_TORQUE_SIZE_FOR
-
   if (instance_type == INSTRUCTION_STREAM_TYPE) {
     return UncheckedCast<InstructionStream>(*this)->Size();
   }
@@ -2158,6 +2153,18 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
   }
   if (instance_type == HOLE_TYPE) {
     return sizeof(Hole);
+  }
+  if (instance_type == TURBOSHAFT_WORD32_SET_TYPE_TYPE) {
+    return TurboshaftWord32SetType::SizeFor(
+        UncheckedCast<TurboshaftWord32SetType>(*this)->set_size());
+  }
+  if (instance_type == TURBOSHAFT_WORD64_SET_TYPE_TYPE) {
+    return TurboshaftWord64SetType::SizeFor(
+        UncheckedCast<TurboshaftWord64SetType>(*this)->set_size());
+  }
+  if (instance_type == TURBOSHAFT_FLOAT64_SET_TYPE_TYPE) {
+    return TurboshaftFloat64SetType::SizeFor(
+        UncheckedCast<TurboshaftFloat64SetType>(*this)->set_size());
   }
   UNREACHABLE();
 }
@@ -2284,7 +2291,7 @@ void HeapObject::RehashBasedOnMap(IsolateT* isolate) {
       Cast<DescriptorArray>(*this)->Sort();
       break;
     case TRANSITION_ARRAY_TYPE:
-      Cast<TransitionArray>(*this)->Sort();
+      Cast<TransitionArray>(*this)->Sort(true);
       break;
     case SMALL_ORDERED_HASH_MAP_TYPE:
       DCHECK_EQ(0, Cast<SmallOrderedHashMap>(*this)->NumberOfElements());
@@ -2385,6 +2392,28 @@ Maybe<bool> Object::SetPropertyInternal(LookupIterator* it,
 
       case LookupIterator::INTERCEPTOR: {
         if (it->HolderIsReceiverOrHiddenPrototype()) {
+          // In case we are executing contextual store to a global object with
+          // an interceptor in strict mode, we need to check that the property
+          // actually exists before calling the setter. See
+          // https://tc39.es/ecma262/#sec-object-environment-records-setmutablebinding-n-v-s
+          if (IsJSGlobalObject(*it->GetReceiver())) {
+            Isolate* isolate = it->isolate();
+            auto should_throw_value = GetShouldThrow(isolate, should_throw);
+            should_throw = Just(should_throw_value);
+            if (should_throw_value == kThrowOnError) {
+              Maybe<PropertyAttributes> maybe_attributes =
+                  JSObject::GetPropertyAttributesWithInterceptor(it);
+              if (maybe_attributes.IsNothing()) return Nothing<bool>();
+              if ((maybe_attributes.FromJust() & READ_ONLY) != 0) {
+                return WriteToReadOnlyProperty(it, value, should_throw);
+              }
+              if (maybe_attributes.FromJust() == ABSENT) {
+                // Interceptor doesn't have the property, continue lookup.
+                continue;
+              }
+            }
+          }
+
           InterceptorResult result;
           if (!JSObject::SetPropertyWithInterceptor(it, should_throw, value)
                    .To(&result)) {
@@ -4036,14 +4065,14 @@ void DescriptorArray::Initialize(Tagged<EnumCache> empty_enum_cache,
   DCHECK_GE(nof_descriptors, 0);
   DCHECK_GE(slack, 0);
   DCHECK_LE(nof_descriptors + slack, kMaxNumberOfDescriptors);
-  set_number_of_all_descriptors(nof_descriptors + slack);
+  set_number_of_all_descriptors(nof_descriptors + slack, kReleaseStore);
   set_number_of_descriptors(nof_descriptors);
   set_raw_gc_state(raw_gc_state, kRelaxedStore);
   set_enum_cache(empty_enum_cache, SKIP_WRITE_BARRIER);
   set_flags(FastIterableBits::encode(FastIterableState::kUnknown),
             kRelaxedStore);
 #if TAGGED_SIZE_8_BYTES
-  set_optional_padding(0);
+  optional_padding_ = 0;
 #endif
   MemsetTagged(GetDescriptorSlot(0), undefined_value,
                number_of_all_descriptors() * kEntrySize);
@@ -4488,7 +4517,7 @@ Maybe<bool> JSArray::SetLength(Isolate* isolate, DirectHandle<JSArray> array,
 // ES6: 9.5.2 [[SetPrototypeOf]] (V)
 // static
 Maybe<bool> JSProxy::SetPrototype(Isolate* isolate, DirectHandle<JSProxy> proxy,
-                                  DirectHandle<Object> value,
+                                  DirectHandle<JSPrototype> value,
                                   bool from_javascript,
                                   ShouldThrow should_throw) {
   STACK_CHECK(isolate, Nothing<bool>());
@@ -6182,7 +6211,8 @@ void PropertyCell::ClearAndInvalidate(Isolate* isolate) {
   details = details.set_cell_type(PropertyCellType::kConstant);
   Transition(details, isolate->factory()->property_cell_hole_value());
   DependentCode::DeoptimizeDependencyGroups(
-      isolate, *this, DependentCode::kPropertyCellChangedGroup);
+      isolate, Tagged<PropertyCell>(this),
+      DependentCode::kPropertyCellChangedGroup);
 }
 
 // static
@@ -6297,7 +6327,8 @@ void PropertyCell::InvalidateProtector(Isolate* isolate) {
     set_value(Smi::FromInt(Protectors::kProtectorInvalid), kReleaseStore,
               SKIP_WRITE_BARRIER);
     DependentCode::DeoptimizeDependencyGroups(
-        isolate, *this, DependentCode::kPropertyCellChangedGroup);
+        isolate, Tagged<PropertyCell>(this),
+        DependentCode::kPropertyCellChangedGroup);
   }
 }
 

@@ -19,6 +19,7 @@
 #include "src/objects/trusted-object-inl.h"
 #include "src/objects/trusted-pointer-inl.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
+#include "src/utils/memcopy.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -781,8 +782,8 @@ Tagged<Object> Code::raw_instruction_stream(PtrComprCageBase cage_base,
 
 DEF_GETTER(Code, instruction_start, Address) {
 #ifdef V8_ENABLE_SANDBOX
-  return ReadCodeEntrypointViaCodePointerField(kSelfIndirectPointerOffset,
-                                               entrypoint_tag());
+  const auto tag = entrypoint_tag();
+  return ReadField<Address>(kInstructionStartOffset) ^ tag;
 #else
   return ReadField<Address>(kInstructionStartOffset);
 #endif
@@ -790,8 +791,9 @@ DEF_GETTER(Code, instruction_start, Address) {
 
 void Code::set_instruction_start(IsolateForSandbox isolate, Address value) {
 #ifdef V8_ENABLE_SANDBOX
-  WriteCodeEntrypointViaCodePointerField(kSelfIndirectPointerOffset, value,
-                                         entrypoint_tag());
+  DCHECK_EQ(value >> kCodeEntrypointTagShift, 0);
+  const auto tag = entrypoint_tag();
+  WriteField<Address>(kInstructionStartOffset, value ^ tag);
 #else
   WriteField<Address>(kInstructionStartOffset, value);
 #endif
@@ -863,9 +865,8 @@ void Code::ClearInstructionStartForSerialization(IsolateForSandbox isolate) {
   // The instruction start is stored in this object's code pointer table.
   WriteField<CodePointerHandle>(kSelfIndirectPointerOffset,
                                 kNullCodePointerHandle);
-#else
-  set_instruction_start(isolate, kNullAddress);
 #endif  // V8_ENABLE_SANDBOX
+  set_instruction_start(isolate, kNullAddress);
 }
 
 void Code::UpdateInstructionStart(IsolateForSandbox isolate,
@@ -875,7 +876,8 @@ void Code::UpdateInstructionStart(IsolateForSandbox isolate,
 }
 
 void Code::clear_padding() {
-  memset(reinterpret_cast<void*>(address() + kUnalignedSize), 0,
+  if (kSize - kUnalignedSize == 0) return;
+  Memset(reinterpret_cast<uint8_t*>(address() + kUnalignedSize), 0,
          kSize - kUnalignedSize);
 }
 

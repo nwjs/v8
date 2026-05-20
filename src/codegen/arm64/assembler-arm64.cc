@@ -52,14 +52,11 @@ CpuFeatureSet SimulatorFeaturesFromCommandLine() {
     static_assert(std::is_same_v<unsigned, CpuFeatureSet::StorageType>);
     return CpuFeatureSet::FromIntegral((1u << NUMBER_OF_CPU_FEATURES) - 1);
   }
-  fprintf(
-      stderr,
-      "Error: unrecognised value for --sim-arm64-optional-features ('%s').\n",
+  base::FatalNoSecurityImpact(
+      "Error: unrecognised value for --sim-arm64-optional-features ('%s').\n"
+      "Supported values are:  none\n"
+      "                       all\n",
       v8_flags.sim_arm64_optional_features.value());
-  fprintf(stderr,
-          "Supported values are:  none\n"
-          "                       all\n");
-  FATAL("sim-arm64-optional-features");
 }
 #endif  // USE_SIMULATOR
 
@@ -93,6 +90,9 @@ constexpr CpuFeatureSet CpuFeaturesFromCompiler() {
 #endif
 #if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
   features.Add(FP16);
+#endif
+#if defined(__ARM_FEATURE_SVE)
+  features.Add(SVE);
 #endif
 #if defined(__ARM_FEATURE_SVE2_BITPERM)
   features.Add(SVEBITPERM);
@@ -165,6 +165,9 @@ void CpuFeatures::ProbeImpl(bool cross_compile) {
   }
   if (cpu.has_mops()) {
     runtime.Add(MOPS);
+  }
+  if (cpu.has_sve()) {
+    runtime.Add(SVE);
   }
   if (cpu.has_svebitperm()) {
     runtime.Add(SVEBITPERM);
@@ -4678,13 +4681,7 @@ bool Assembler::IsImmFP64(uint64_t bits) {
 void Assembler::GrowBuffer() {
   // Compute new buffer size.
   int old_size = buffer_->size();
-  int new_size = std::min(2 * old_size, old_size + 1 * MB);
-
-  // Some internal data structures overflow for very large buffers,
-  // they must ensure that kMaximalBufferSize is not too large.
-  if (new_size > kMaximalBufferSize) {
-    V8::FatalProcessOutOfMemory(nullptr, "Assembler::GrowBuffer");
-  }
+  int new_size = ComputeNewBufferSize(BufferGrowthStrategy::kDoubleCapped1MB);
 
   // Set up new buffer.
   std::unique_ptr<AssemblerBuffer> new_buffer = buffer_->Grow(new_size);

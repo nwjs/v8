@@ -746,7 +746,6 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(FunctionConstructor, kDontAdaptArgumentsSentinel)                        \
   ASM(FunctionPrototypeApply, JSTrampoline)                                    \
   CPP(FunctionPrototypeBind, kDontAdaptArgumentsSentinel)                      \
-  IF_WASM(CPP, WebAssemblyFunctionPrototypeBind, kDontAdaptArgumentsSentinel)  \
   IF_WASM(TFJ, WasmConstructorWrapper, kDontAdaptArgumentsSentinel)            \
   IF_WASM(TFJ, WasmMethodWrapper, kDontAdaptArgumentsSentinel)                 \
   ASM(FunctionPrototypeCall, JSTrampoline)                                     \
@@ -772,7 +771,6 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(AsyncFunctionConstructor, kDontAdaptArgumentsSentinel)                   \
   TFC(SuspendGeneratorBaseline, SuspendGeneratorBaseline)                      \
   TFC(ResumeGeneratorBaseline, ResumeGeneratorBaseline)                        \
-  TFC(GeneratorNextLazyDeoptContinuation, GeneratorNextLazyDeoptContinuation)  \
                                                                                \
   /* Iterator Protocol */                                                      \
   TFC(GetIteratorWithFeedbackLazyDeoptContinuation, GetIteratorStackParameter) \
@@ -1175,7 +1173,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
                                                                                \
   /* Wasm */                                                                   \
   IF_WASM_DRUMBRAKE(ASM, WasmInterpreterEntry, WasmDummy)                      \
-  IF_WASM_DRUMBRAKE(ASM, GenericJSToWasmInterpreterWrapper, JSTrampoline)      \
+  IF_WASM_DRUMBRAKE(ASM, JSToWasmInterpreterWrapperAsm, WasmJSToWasmWrapper)   \
   IF_WASM_DRUMBRAKE(ASM, WasmInterpreterCWasmEntry, WasmDummy)                 \
   IF_WASM_DRUMBRAKE(ASM, GenericWasmToJSInterpreterWrapper, WasmDummy)         \
                                                                                \

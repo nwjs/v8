@@ -1085,8 +1085,8 @@ void NativeModule::LogWasmCodes(Isolate* isolate, Tagged<Script> script) {
   DisallowGarbageCollection no_gc;
   if (!WasmCode::ShouldBeLogged(isolate)) return;
 
-  TRACE_EVENT1("v8.wasm", "wasm.LogWasmCodes", "functions",
-               module_->num_declared_functions);
+  TRACE_EVENT("v8.wasm", "wasm.LogWasmCodes", "functions",
+              module_->num_declared_functions);
 
   Tagged<Object> url_obj = script->name();
   DCHECK(IsString(url_obj) || IsUndefined(url_obj));
@@ -1422,8 +1422,8 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
 }
 
 WasmCode* NativeModule::PublishCode(UnpublishedWasmCode unpublished_code) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-               "wasm.PublishCode");
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+              "wasm.PublishCode");
   base::RecursiveMutexGuard lock(&allocation_mutex_);
   return PublishCodeLocked(std::move(unpublished_code.code),
                            unpublished_code.assumptions.get());
@@ -1431,8 +1431,8 @@ WasmCode* NativeModule::PublishCode(UnpublishedWasmCode unpublished_code) {
 
 std::vector<WasmCode*> NativeModule::PublishCode(
     base::Vector<UnpublishedWasmCode> unpublished_codes) {
-  TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-               "wasm.PublishCode", "number", unpublished_codes.size());
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"), "wasm.PublishCode",
+              "number", unpublished_codes.size());
   std::vector<WasmCode*> published_code;
   published_code.reserve(unpublished_codes.size());
   base::RecursiveMutexGuard lock(&allocation_mutex_);
@@ -1507,7 +1507,7 @@ WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> owned_code,
   DCHECK_NULL(owned_code);
 
   // Add the code to the surrounding code ref scope, so the returned pointer is
-  // guaranteed to be valid.
+  // guaranteed to stay valid.
   WasmCodeRefScope::AddRef(code);
 
   if (code->index() < static_cast<int>(module_->num_imported_functions)) {
@@ -1535,6 +1535,8 @@ WasmCode* NativeModule::PublishCodeLocked(std::unique_ptr<WasmCode> owned_code,
   if (should_update_code_table(code, prior_code)) {
     code_table_[slot_idx] = code;
     if (prior_code) {
+      // Code in the code table is always live, so `AddRef` can be used instead
+      // of `AddRefIfNotDying`.
       WasmCodeRefScope::AddRef(prior_code);
       // The code is added to the current {WasmCodeRefScope}, hence the ref
       // count cannot drop to zero here.
@@ -1598,9 +1600,9 @@ void NativeModule::ReinstallDebugCode(WasmCode* code) {
 
   uint32_t slot_idx = declared_function_index(module(), code->index());
   if (WasmCode* prior_code = code_table_[slot_idx]) {
-    WasmCodeRefScope::AddRef(prior_code);
     // The code is added to the current {WasmCodeRefScope}, hence the ref
     // count cannot drop to zero here.
+    WasmCodeRefScope::AddRef(prior_code);
     prior_code->DecRefOnLiveCode();
   }
   code_table_[slot_idx] = code;
@@ -1665,6 +1667,8 @@ NativeModule::SnapshotCodeTable() const {
   WasmCode** start = code_table_.get();
   WasmCode** end = start + module_->num_declared_functions;
   for (WasmCode* code : base::VectorOf(start, end - start)) {
+    // Code in the code table is always live, so `AddRef` can be used instead
+    // of `AddRefIfNotDying`.
     if (code) WasmCodeRefScope::AddRef(code);
   }
   std::vector<WellKnownImport> import_statuses(module_->num_imported_functions);
@@ -1678,16 +1682,20 @@ std::vector<WasmCode*> NativeModule::SnapshotAllOwnedCode() const {
   base::RecursiveMutexGuard lock(&allocation_mutex_);
   if (!new_owned_code_.empty()) TransferNewOwnedCodeLocked();
 
-  std::vector<WasmCode*> all_code(owned_code_.size());
-  std::transform(owned_code_.begin(), owned_code_.end(), all_code.begin(),
-                 [](auto& entry) { return entry.second.get(); });
-  std::for_each(all_code.begin(), all_code.end(), WasmCodeRefScope::AddRef);
+  std::vector<WasmCode*> all_code;
+  all_code.reserve(owned_code_.size());
+  for (auto& [address, unique_code_ptr] : owned_code_) {
+    if (!WasmCodeRefScope::AddRefIfNotDying(unique_code_ptr.get())) continue;
+    all_code.push_back(unique_code_ptr.get());
+  }
   return all_code;
 }
 
 WasmCode* NativeModule::GetCode(uint32_t index) const {
   base::RecursiveMutexGuard guard(&allocation_mutex_);
   WasmCode* code = code_table_[declared_function_index(module(), index)];
+  // Code in the code table is always live, so `AddRef` can be used instead of
+  // `AddRefIfNotDying`.
   if (code) WasmCodeRefScope::AddRef(code);
   return code;
 }
@@ -2006,6 +2014,8 @@ WasmCode* NativeModule::Lookup(Address pc) const {
   WasmCode* candidate = iter->second.get();
   DCHECK_EQ(candidate->instruction_start(), iter->first);
   if (!candidate->contains(pc)) return nullptr;
+  // Code we lookup by address is expected to be live, so use `AddRef` instead
+  // of `AddRefIfNotDying`.
   WasmCodeRefScope::AddRef(candidate);
   return candidate;
 }
@@ -2317,21 +2327,29 @@ VirtualMemory WasmCodeManager::TryAllocate(size_t size) {
   // iOS cannot adjust page permissions for MAP_JIT'd pages, they are set as RWX
   // at the start.
 #if !defined(V8_OS_WIN) && !defined(V8_OS_IOS)
+  bool success = false;
   if (MemoryProtectionKeysEnabled()) {
 #if V8_HAS_PKU_JIT_WRITE_PROTECT
     if (ThreadIsolation::Enabled()) {
-      CHECK(ThreadIsolation::MakeExecutable(mem.address(), mem.size()));
+      success = ThreadIsolation::MakeExecutable(mem.address(), mem.size());
     } else {
-      CHECK(base::MemoryProtectionKey::SetPermissionsAndKey(
+      success = base::MemoryProtectionKey::SetPermissionsAndKey(
           mem.region(), PagePermissions::kReadWriteExecute,
-          RwxMemoryWriteScope::memory_protection_key()));
+          RwxMemoryWriteScope::memory_protection_key());
     }
 #else
     UNREACHABLE();
 #endif
   } else {
-    CHECK(SetPermissions(GetPageAllocator(), mem.address(), mem.size(),
-                         PageAllocator::kReadWriteExecute));
+    success = SetPermissions(GetPageAllocator(), mem.address(), mem.size(),
+                             PageAllocator::kReadWriteExecute);
+  }
+
+  if (!success) {
+    auto oom_detail = base::FormattedString{} << "region size: " << mem.size();
+    V8::FatalProcessOutOfMemory(nullptr, "Make wasm code space executable",
+                                {.detail = oom_detail.PrintToArray().data()});
+    UNREACHABLE();
   }
   page_allocator->DiscardSystemPages(reinterpret_cast<void*>(mem.address()),
                                      mem.size());
@@ -2670,8 +2688,8 @@ UnpublishedWasmCode NativeModule::AddCompiledCode(
 
 std::vector<UnpublishedWasmCode> NativeModule::AddCompiledCode(
     base::Vector<WasmCompilationResult> results) {
-  TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-               "wasm.AddCompiledCode", "num", results.size());
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+              "wasm.AddCompiledCode", "num", results.size());
   DCHECK(!results.empty());
   std::vector<UnpublishedWasmCode> generated_code;
   generated_code.reserve(results.size());
@@ -2857,10 +2875,6 @@ void NativeModule::FreeCode(base::Vector<WasmCode* const> codes) {
   // Free the {WasmCode} objects. This will also unregister trap handler data.
   for (WasmCode* code : codes) {
     DCHECK_EQ(1, owned_code_.count(code->instruction_start()));
-    // TODO(407003348): Drop this check if it doesn't trigger in the wild.
-    CHECK_EQ(WasmCode::refcount(
-                 code->ref_count_bitfield_.load(std::memory_order_acquire)),
-             0);
     owned_code_.erase(code->instruction_start());
   }
   // Remove debug side tables for all removed code objects, after releasing our

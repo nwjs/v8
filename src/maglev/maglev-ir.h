@@ -157,11 +157,12 @@ class ExceptionHandlerInfo;
   V(Float64Exponentiate)                \
   V(Float64Modulus)                     \
   V(Float64Negate)                      \
+  V(Float64Max)                         \
+  V(Float64Min)                         \
+  V(Float64RoundToFloat32)              \
   V(Float64Round)                       \
   V(Float64Compare)                     \
   V(Float64ToBoolean)                   \
-  V(Float64Min)                         \
-  V(Float64Max)                         \
   V(Float64Ieee754Unary)                \
   V(Float64Ieee754Binary)               \
   V(Float64Sqrt)
@@ -213,12 +214,15 @@ class ExceptionHandlerInfo;
   V(ChangeUint32ToHoleyFloat64)         \
   V(ChangeFloat64ToHoleyFloat64)        \
   V(CheckedFloat64ToInt32)              \
+  V(CheckedFloat64ToUint32)             \
   V(CheckedFloat64ToSmiSizedInt32)      \
   V(CheckedHoleyFloat64ToSmiSizedInt32) \
   V(CheckedHoleyFloat64ToInt32)         \
+  V(CheckedHoleyFloat64ToUint32)        \
   V(CheckedHoleyFloat64ToFloat64)       \
   V(CheckedInt32ToUint32)               \
   V(CheckedIntPtrToInt32)               \
+  V(CheckedIntPtrToUint32)              \
   V(CheckedObjectToIndex)               \
   V(CheckedNumberToInt32)               \
   V(CheckedNumberToFloat64)             \
@@ -335,7 +339,7 @@ class ExceptionHandlerInfo;
   V(Int32ToUint8Clamped)                                              \
   V(Uint32ToUint8Clamped)                                             \
   V(Float64ToUint8Clamped)                                            \
-  V(CheckedNumberToUint8Clamped)                                      \
+  V(CheckedNumberOrOddballToUint8Clamped)                             \
   V(Int32CountLeadingZeros)                                           \
   V(TaggedCountLeadingZeros)                                          \
   V(Float64CountLeadingZeros)                                         \
@@ -383,6 +387,7 @@ class ExceptionHandlerInfo;
   V(GetContinuationPreservedEmbedderData)                             \
   V(ReturnedValue)                                                    \
   V(StringSlice)                                                      \
+  V(StringSubstring)                                                  \
   CONSTANT_VALUE_NODE_LIST(V)                                         \
   CONVERSION_NODE_LIST(V)                                             \
   INT32_OPERATIONS_NODE_LIST(V)                                       \
@@ -677,7 +682,11 @@ constexpr bool IsSimpleFieldStore(Opcode opcode) {
          opcode == Opcode::kStoreFixedArrayElementWithWriteBarrier ||
          opcode == Opcode::kStoreFixedArrayElementNoWriteBarrier ||
          opcode == Opcode::kStoreFixedDoubleArrayElement ||
-         opcode == Opcode::kStoreTrustedPointerFieldWithWriteBarrier;
+         opcode == Opcode::kStoreTrustedPointerFieldWithWriteBarrier ||
+         opcode == Opcode::kStoreContextSlotWithWriteBarrier ||
+         opcode == Opcode::kStoreSmiContextCell ||
+         opcode == Opcode::kStoreInt32ContextCell ||
+         opcode == Opcode::kStoreFloat64ContextCell;
 }
 constexpr bool IsElementsArrayWrite(Opcode opcode) {
   return opcode == Opcode::kMaybeGrowFastElements ||
@@ -3904,10 +3913,11 @@ class Float64ToUint8Clamped
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 };
 
-class CheckedNumberToUint8Clamped
-    : public FixedInputValueNodeT<1, CheckedNumberToUint8Clamped> {
+class CheckedNumberOrOddballToUint8Clamped
+    : public FixedInputValueNodeT<1, CheckedNumberOrOddballToUint8Clamped> {
  public:
-  explicit CheckedNumberToUint8Clamped(uint64_t bitfield) : Base(bitfield) {}
+  explicit CheckedNumberOrOddballToUint8Clamped(uint64_t bitfield)
+      : Base(bitfield) {}
 
   static constexpr OpProperties kProperties =
       OpProperties::EagerDeopt() | OpProperties::Int32();
@@ -3979,9 +3989,23 @@ class Float64CountLeadingZeros
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 };
 
+class Float64RoundToFloat32
+    : public FixedInputValueNodeT<1, Float64RoundToFloat32> {
+ public:
+  explicit Float64RoundToFloat32(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr Opcode kOpcode = Opcode::kFloat64RoundToFloat32;
+  static constexpr OpProperties kProperties = OpProperties::Float64();
+  DECLARE_UNOP(Float64)
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&) const {}
+};
+
 class Float64Round : public FixedInputValueNodeT<1, Float64Round> {
  public:
-  enum class Kind { kFloor, kCeil, kNearest };
+  enum class Kind { kFloor, kCeil, kNearest, kTrunc };
 
   static Builtin continuation(Kind kind) {
     switch (kind) {
@@ -3991,6 +4015,8 @@ class Float64Round : public FixedInputValueNodeT<1, Float64Round> {
         return Builtin::kMathFloorContinuation;
       case Kind::kNearest:
         return Builtin::kMathRoundContinuation;
+      case Kind::kTrunc:
+        return Builtin::kMathTrunc;
     }
   }
 
@@ -4106,13 +4132,16 @@ DEFINE_PURE_CONV(UnsafeSmiUntag, Tagged, Int32, Smi, DONT_DECOMPRESS_INPUTS)
 DEFINE_PURE_CONV(UnsafeNumberToFloat64, Tagged, Float64, Number)
 
 DEFINE_CHECKED_CONV(CheckedFloat64ToInt32, Float64, Int32, Number)
+DEFINE_CHECKED_CONV(CheckedFloat64ToUint32, Float64, Uint32, Number)
 DEFINE_CHECKED_CONV(CheckedHoleyFloat64ToInt32, HoleyFloat64, Int32, Number)
+DEFINE_CHECKED_CONV(CheckedHoleyFloat64ToUint32, HoleyFloat64, Uint32, Number)
 DEFINE_CHECKED_CONV(CheckedFloat64ToSmiSizedInt32, Float64, Int32, Smi)
 DEFINE_CHECKED_CONV(CheckedHoleyFloat64ToSmiSizedInt32, HoleyFloat64, Int32,
                     Smi)
 DEFINE_CHECKED_CONV(CheckedHoleyFloat64ToFloat64, HoleyFloat64, Float64, Number)
 DEFINE_CHECKED_CONV(CheckedInt32ToUint32, Int32, Uint32, Number)
 DEFINE_CHECKED_CONV(CheckedIntPtrToInt32, IntPtr, Int32, Number)
+DEFINE_CHECKED_CONV(CheckedIntPtrToUint32, IntPtr, Uint32, Number)
 DEFINE_CHECKED_CONV(CheckedNumberToInt32, Tagged, Int32, Number)
 DEFINE_CHECKED_CONV(CheckedNumberToFloat64, Tagged, Float64, Number)
 DEFINE_CHECKED_CONV(CheckedSmiTagFloat64, Float64, TaggedValue, Smi)
@@ -5339,6 +5368,8 @@ enum class ObjectType {
   kDefault,
   kConsString,
   kHeapNumber,
+  // TODO(375937549): only needed for TF compatibility.
+  kFixedArray,
 };
 
 // The type of a VirtualObject field. Extend as needed.
@@ -5635,7 +5666,17 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
       }
     }
     for (int i = 0; i < slot_count(); i++) {
-      if (!callback(slots_[i], FieldForSlot(i))) {
+      vobj::Field field = FieldForSlot(i);
+#if TAGGED_SIZE_8_BYTES
+      // To keep the deoptimization data in sync with TF (which represents
+      // length and padding in a single Uint64), we skip the padding.
+      if (mode == ForEachSlotIterationMode::kForDeopt &&
+          object_type() == vobj::ObjectType::kFixedArray &&
+          field.offset == FixedArrayBase::kPaddingOffset) {
+        continue;
+      }
+#endif  // TAGGED_SIZE_8_BYTES
+      if (!callback(slots_[i], field)) {
         return false;
       }
     }
@@ -5771,8 +5812,8 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
 };
 
 struct VirtualJSReceiverShape : VirtualHeapObjectShape {
-#define FIELD_LIST(V)                                        \
-  V(properties_or_hash, JSReceiver::kPropertiesOrHashOffset, \
+#define FIELD_LIST(V)                                              \
+  V(properties_or_hash, offsetof(JSReceiver, properties_or_hash_), \
     vobj::FieldType::kTagged)
   DEF_SHAPE(VirtualHeapObjectShape, FIELD_LIST);
 #undef FIELD_LIST
@@ -5796,19 +5837,19 @@ struct VirtualJSArrayShape : VirtualJSObjectShape {
 
 struct VirtualJSArrayIteratorShape : VirtualJSObjectShape {
   using T = JSArrayIterator;
-#define FIELD_LIST(V)                                                    \
-  V(iterated_object, T::kIteratedObjectOffset, vobj::FieldType::kTagged) \
-  V(next_index, T::kNextIndexOffset, vobj::FieldType::kTagged)           \
-  V(kind, T::kKindOffset, vobj::FieldType::kTagged)
+#define FIELD_LIST(V)                                                         \
+  V(iterated_object, offsetof(T, iterated_object_), vobj::FieldType::kTagged) \
+  V(next_index, offsetof(T, next_index_), vobj::FieldType::kTagged)           \
+  V(kind, offsetof(T, kind_), vobj::FieldType::kTagged)
   DEF_SHAPE(VirtualJSObjectShape, FIELD_LIST);
 #undef FIELD_LIST
 };
 
 struct VirtualJSStringIteratorShape : VirtualJSObjectShape {
   using T = JSStringIterator;
-#define FIELD_LIST(V)                                   \
-  V(string, T::kStringOffset, vobj::FieldType::kTagged) \
-  V(index, T::kIndexOffset, vobj::FieldType::kTagged)
+#define FIELD_LIST(V)                                       \
+  V(string, offsetof(T, string_), vobj::FieldType::kTagged) \
+  V(index, offsetof(T, index_), vobj::FieldType::kTagged)
   DEF_SHAPE(VirtualJSObjectShape, FIELD_LIST);
 #undef FIELD_LIST
 };
@@ -5824,7 +5865,7 @@ struct VirtualJSIteratorResultShape : VirtualJSObjectShape {
 
 struct VirtualJSPrimitiveWrapperShape : VirtualJSObjectShape {
   using T = JSPrimitiveWrapper;
-#define FIELD_LIST(V) V(value, T::kValueOffset, vobj::FieldType::kTagged)
+#define FIELD_LIST(V) V(value, offsetof(T, value_), vobj::FieldType::kTagged)
   DEF_SHAPE(VirtualJSObjectShape, FIELD_LIST);
 #undef FIELD_LIST
 };
@@ -5842,14 +5883,15 @@ struct VirtualJSRegExpShape : VirtualJSObjectShape {
 
 struct VirtualJSGeneratorObjectShape : VirtualJSObjectShape {
   using T = JSGeneratorObject;
-#define FIELD_LIST(V)                                                        \
-  V(function, T::kFunctionOffset, vobj::FieldType::kTagged)                  \
-  V(context, T::kContextOffset, vobj::FieldType::kTagged)                    \
-  V(receiver, T::kReceiverOffset, vobj::FieldType::kTagged)                  \
-  V(input_or_debug_pos, T::kInputOrDebugPosOffset, vobj::FieldType::kTagged) \
-  V(resume_mode, T::kResumeModeOffset, vobj::FieldType::kTagged)             \
-  V(continuation, T::kContinuationOffset, vobj::FieldType::kTagged)          \
-  V(parameters_and_registers, T::kParametersAndRegistersOffset,              \
+#define FIELD_LIST(V)                                                   \
+  V(function, offsetof(T, function_), vobj::FieldType::kTagged)         \
+  V(context, offsetof(T, context_), vobj::FieldType::kTagged)           \
+  V(receiver, offsetof(T, receiver_), vobj::FieldType::kTagged)         \
+  V(input_or_debug_pos, offsetof(T, input_or_debug_pos_),               \
+    vobj::FieldType::kTagged)                                           \
+  V(resume_mode, offsetof(T, resume_mode_), vobj::FieldType::kTagged)   \
+  V(continuation, offsetof(T, continuation_), vobj::FieldType::kTagged) \
+  V(parameters_and_registers, offsetof(T, parameters_and_registers_),   \
     vobj::FieldType::kTagged)
   DEF_SHAPE(VirtualJSObjectShape, FIELD_LIST);
 #undef FIELD_LIST
@@ -5857,29 +5899,30 @@ struct VirtualJSGeneratorObjectShape : VirtualJSObjectShape {
 
 struct VirtualJSAsyncGeneratorObjectShape : VirtualJSGeneratorObjectShape {
   using T = JSAsyncGeneratorObject;
-#define FIELD_LIST(V)                                 \
-  V(queue, T::kQueueOffset, vobj::FieldType::kTagged) \
-  V(is_awaiting, T::kIsAwaitingOffset, vobj::FieldType::kTagged)
+#define FIELD_LIST(V)                                     \
+  V(queue, offsetof(T, queue_), vobj::FieldType::kTagged) \
+  V(is_awaiting, offsetof(T, is_awaiting_), vobj::FieldType::kTagged)
   DEF_SHAPE(VirtualJSGeneratorObjectShape, FIELD_LIST);
 #undef FIELD_LIST
-  static_assert(kHeaderSize == T::kHeaderSize);
+  static_assert(kHeaderSize == sizeof(T));
 };
 
 struct VirtualJSAsyncFunctionObjectShape : VirtualJSObjectShape {
   using T = JSAsyncFunctionObject;
-#define FIELD_LIST(V)                                                        \
-  V(function, T::kFunctionOffset, vobj::FieldType::kTagged)                  \
-  V(context, T::kContextOffset, vobj::FieldType::kTagged)                    \
-  V(receiver, T::kReceiverOffset, vobj::FieldType::kTagged)                  \
-  V(input_or_debug_pos, T::kInputOrDebugPosOffset, vobj::FieldType::kTagged) \
-  V(resume_mode, T::kResumeModeOffset, vobj::FieldType::kTagged)             \
-  V(continuation, T::kContinuationOffset, vobj::FieldType::kTagged)          \
-  V(parameters_and_registers, T::kParametersAndRegistersOffset,              \
-    vobj::FieldType::kTagged)                                                \
-  V(promise, T::kPromiseOffset, vobj::FieldType::kTagged)                    \
-  V(await_resolve_closure, T::kAwaitResolveClosureOffset,                    \
-    vobj::FieldType::kTagged)                                                \
-  V(await_reject_closure, T::kAwaitRejectClosureOffset,                      \
+#define FIELD_LIST(V)                                                   \
+  V(function, offsetof(T, function_), vobj::FieldType::kTagged)         \
+  V(context, offsetof(T, context_), vobj::FieldType::kTagged)           \
+  V(receiver, offsetof(T, receiver_), vobj::FieldType::kTagged)         \
+  V(input_or_debug_pos, offsetof(T, input_or_debug_pos_),               \
+    vobj::FieldType::kTagged)                                           \
+  V(resume_mode, offsetof(T, resume_mode_), vobj::FieldType::kTagged)   \
+  V(continuation, offsetof(T, continuation_), vobj::FieldType::kTagged) \
+  V(parameters_and_registers, offsetof(T, parameters_and_registers_),   \
+    vobj::FieldType::kTagged)                                           \
+  V(promise, offsetof(T, promise_), vobj::FieldType::kTagged)           \
+  V(await_resolve_closure, offsetof(T, await_resolve_closure_),         \
+    vobj::FieldType::kTagged)                                           \
+  V(await_reject_closure, offsetof(T, await_reject_closure_),           \
     vobj::FieldType::kTagged)
   DEF_SHAPE(VirtualJSObjectShape, FIELD_LIST);
 #undef FIELD_LIST
@@ -5899,10 +5942,30 @@ struct VirtualFixedArrayShape : VirtualHeapObjectShape {
   // The instance size is determined by array length, and array elements are
   // tagged.
   static constexpr bool kInstancesHaveStaticSize = false;
+  static constexpr vobj::ObjectType kObjectType = vobj::ObjectType::kFixedArray;
+  static constexpr vobj::FieldType kBodyFieldType = vobj::FieldType::kTagged;
+#if TAGGED_SIZE_8_BYTES
+#define OPTIONAL_PADDING(V) \
+  V(optional_padding, FixedArrayBase::kPaddingOffset, vobj::FieldType::kInt32)
+#else
+#define OPTIONAL_PADDING(V)
+#endif  // TAGGED_SIZE_8_BYTES
+#define FIELD_LIST(V)                                               \
+  V(length, FixedArrayBase::kLengthOffset, vobj::FieldType::kInt32) \
+  OPTIONAL_PADDING(V)
+  DEF_SHAPE(VirtualHeapObjectShape, FIELD_LIST);
+#undef OPTIONAL_PADDING
+#undef FIELD_LIST
+};
+
+struct ContextShape : VirtualHeapObjectShape {
+  // The instance size is determined by context length, and context elements are
+  // tagged.
+  static constexpr bool kInstancesHaveStaticSize = false;
   static constexpr vobj::FieldType kBodyFieldType = vobj::FieldType::kTagged;
 
 #define FIELD_LIST(V) \
-  V(length, FixedArrayBase::kLengthOffset, vobj::FieldType::kTagged)
+  V(length, Context::kLengthOffset, vobj::FieldType::kTagged)
 
   DEF_SHAPE(VirtualHeapObjectShape, FIELD_LIST);
 #undef FIELD_LIST
@@ -5960,10 +6023,19 @@ struct VirtualConsStringShape : VirtualNameShape {
 
 struct VirtualFixedDoubleArrayShape : VirtualHeapObjectShape {
   static constexpr bool kInstancesHaveStaticSize = false;
+  static constexpr vobj::ObjectType kObjectType = vobj::ObjectType::kFixedArray;
   static constexpr vobj::FieldType kBodyFieldType = vobj::FieldType::kFloat64;
-#define FIELD_LIST(V) \
-  V(length, FixedArrayBase::kLengthOffset, vobj::FieldType::kTagged)
+#if TAGGED_SIZE_8_BYTES
+#define OPTIONAL_PADDING(V) \
+  V(optional_padding, FixedArrayBase::kPaddingOffset, vobj::FieldType::kInt32)
+#else
+#define OPTIONAL_PADDING(V)
+#endif  // TAGGED_SIZE_8_BYTES
+#define FIELD_LIST(V)                                               \
+  V(length, FixedArrayBase::kLengthOffset, vobj::FieldType::kInt32) \
+  OPTIONAL_PADDING(V)
   DEF_SHAPE(VirtualHeapObjectShape, FIELD_LIST);
+#undef OPTIONAL_PADDING
 #undef FIELD_LIST
 };
 
@@ -7668,6 +7740,25 @@ class StringSlice : public FixedInputValueNodeT<3, StringSlice> {
   int MaxCallStackArgs() const { return 0; }
 
   DECLARE_INPUTS(String, StartIndex, EndIndex)
+  DECLARE_INPUT_TYPES(Tagged, Int32, Int32)
+
+  NodeType type() const { return NodeType::kString; }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+};
+
+class StringSubstring : public FixedInputValueNodeT<3, StringSubstring> {
+ public:
+  explicit StringSubstring(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::CanAllocate() |
+      OpProperties::CanRead() | OpProperties::TaggedValue();
+
+  int MaxCallStackArgs() const { return 0; }
+
+  DECLARE_INPUTS(String, From, To)
   DECLARE_INPUT_TYPES(Tagged, Int32, Int32)
 
   NodeType type() const { return NodeType::kString; }

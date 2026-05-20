@@ -12,7 +12,6 @@
 #include "src/heap/mutable-page.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
-#include "src/wasm/object-access.h"
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
 
@@ -297,12 +296,12 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
 
   temps.Include(x17);
 
-  Register scratch = temps.AcquireX();
-
   // Shift the whole frame upwards, except for fp and lr.
   // Adjust x16 to be the new stack pointer first, so that {str} doesn't need
   // a temp register to materialize the offset.
   Sub(x16, x16, stack_param_delta * 8);
+
+  Register scratch = temps.AcquireX();
   int slot_count = num_callee_stack_params;
   for (int i = slot_count - 1; i >= 0; --i) {
     ldr(scratch, MemOperand(sp, i * 8));
@@ -462,9 +461,9 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
     LoadInstanceDataFromFrame(instance_data);
   }
 
-  constexpr int kArrayOffset = wasm::ObjectAccess::ToTagged(
-      WasmTrustedInstanceData::kTieringBudgetArrayOffset);
-  ldr(budget_array, MemOperand{instance_data, kArrayOffset});
+  ldr(budget_array,
+      FieldMemOperand(instance_data,
+                      WasmTrustedInstanceData::kTieringBudgetArrayOffset));
 
   int budget_arr_offset = kInt32Size * declared_func_index;
   // If the offset cannot be used in the operand directly, add it once to the
@@ -579,7 +578,7 @@ void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
 void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
                                         int offset, int size) {
   DCHECK_LE(0, offset);
-  MemOperand src{instance, offset};
+  MemOperand src = FieldMemOperand(instance, offset);
   switch (size) {
     case 1:
       Ldrb(dst.W(), src);
@@ -599,7 +598,7 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      Register instance,
                                                      int offset) {
   DCHECK_LE(0, offset);
-  LoadTaggedField(dst, MemOperand{instance, offset});
+  LoadTaggedField(dst, FieldMemOperand(instance, offset));
 }
 
 void LiftoffAssembler::ResetOSRTarget() {}
@@ -679,8 +678,8 @@ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
 }
 
 void LiftoffAssembler::LoadProtectedPointer(Register dst, Register src_addr,
-                                            int32_t offset_imm) {
-  LoadProtectedPointerField(dst, MemOperand{src_addr, offset_imm});
+                                            int32_t field_offset) {
+  LoadProtectedPointerField(dst, FieldMemOperand(src_addr, field_offset));
 }
 
 void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
@@ -1434,8 +1433,14 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
   }
 
   if (v8_flags.disable_write_barriers) return;
-  // Emit the write barrier.
+
+  // We only need a write barrier if the CAS was successful.
+  // The AtomicCompareExchange above leaves the condition flags from the
+  // final comparison (either from {casal} or the manual {Cmp} in the loop).
   Label exit;
+  B(ne, &exit);
+
+  // Emit the write barrier.
   JumpIfSmi(new_value.gp(), &exit);
   CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask,
                 kZero, &exit);
@@ -1687,6 +1692,17 @@ void LiftoffAssembler::emit_i64_add(LiftoffRegister dst, LiftoffRegister lhs,
   Add(dst.gp().X(), lhs.gp().X(), rhs.gp().X());
 }
 
+void LiftoffAssembler::emit_i64_add128(Register dst_low, Register dst_high,
+                                       Register al, Register ah, Register bl,
+                                       Register bh) {
+  DCHECK_NE(dst_low, ah);
+  DCHECK_NE(dst_low, bh);
+  DCHECK_NE(dst_low, dst_high);
+
+  Adds(dst_low.X(), al.X(), bl.X());
+  Adc(dst_high.X(), ah.X(), bh.X());
+}
+
 void LiftoffAssembler::emit_i64_sub(LiftoffRegister dst, LiftoffRegister lhs,
                                     LiftoffRegister rhs) {
   Sub(dst.gp().X(), lhs.gp().X(), rhs.gp().X());
@@ -1707,6 +1723,10 @@ void LiftoffAssembler::emit_i64_muli(LiftoffRegister dst, LiftoffRegister lhs,
   Mov(scratch, imm);
   Mul(dst.gp().X(), lhs.gp().X(), scratch);
 }
+
+void LiftoffAssembler::emit_i64_mul_wide_s() { UNIMPLEMENTED(); }
+
+void LiftoffAssembler::emit_i64_mul_wide_u() { UNIMPLEMENTED(); }
 
 void LiftoffAssembler::emit_i64_and(LiftoffRegister dst, LiftoffRegister lhs,
                                     LiftoffRegister rhs) {
@@ -4324,7 +4344,7 @@ bool LiftoffAssembler::supports_f16_mem_access() {
 
 void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t max_index,
                                              Label* trap_label) {
-  DCHECK_EQ(base::bits::RoundUpToPowerOfTwo64(max_index), kMaxMemory64Size);
+  DCHECK_LE(max_index, kMaxMemory64Size);
 
   if (kMaxMemory64Size - max_index <= AllocatePageSize()) {
     // We have reserved an extra guard page, so that more accesses with small

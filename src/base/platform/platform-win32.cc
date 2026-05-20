@@ -564,7 +564,7 @@ void OS::ExitProcess(int exit_code) {
 // for output. However, if the application is linked as a GUI application,
 // the process doesn't have a console, and therefore (debugging) output is lost.
 // This is the case if we are embedded in a windows program (like a browser).
-// In order to be able to get debug output in this case the the debugging
+// In order to be able to get debug output in this case the debugging
 // facility using OutputDebugString. This output goes to the active debugger
 // for the process (if any). Else the output can be monitored using DBMON.EXE.
 
@@ -610,7 +610,7 @@ static void VPrintHelper(FILE* stream, const char* format, va_list args) {
 }
 
 // Convert utf-8 encoded string to utf-16 encoded.
-static std::wstring ConvertUtf8StringToUtf16(const char* str) {
+std::wstring OS::ConvertUtf8StringToUtf16(const char* str) {
   // On Windows wchar_t must be a 16-bit value.
   static_assert(sizeof(wchar_t) == 2, "wrong wchar_t size");
   std::wstring utf16_str;

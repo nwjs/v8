@@ -287,7 +287,7 @@ class V8_NODISCARD PrepareStackTraceScope {
 }  // namespace
 
 // static
-MaybeDirectHandle<Object> ErrorUtils::FormatStackTrace(
+MaybeDirectHandle<JSAny> ErrorUtils::FormatStackTrace(
     Isolate* isolate, DirectHandle<JSObject> error,
     DirectHandle<Object> raw_stack) {
   if (v8_flags.correctness_fuzzer_suppressions) {
@@ -313,7 +313,7 @@ MaybeDirectHandle<Object> ErrorUtils::FormatStackTrace(
       ASSIGN_RETURN_ON_EXCEPTION(
           isolate, result,
           isolate->RunPrepareStackTraceCallback(error_context, error, sites));
-      return result;
+      return Cast<JSAny>(result);
     } else {
       DirectHandle<JSFunction> global_error(error_context->error_function(),
                                             isolate);
@@ -324,7 +324,7 @@ MaybeDirectHandle<Object> ErrorUtils::FormatStackTrace(
       DirectHandle<Object> prepare_stack_trace;
       ASSIGN_RETURN_ON_EXCEPTION(
           isolate, prepare_stack_trace,
-          JSFunction::GetProperty(isolate, global_error, "prepareStackTrace"));
+          JSReceiver::GetProperty(isolate, global_error, "prepareStackTrace"));
 
       if (IsJSFunction(*prepare_stack_trace)) {
         PrepareStackTraceScope scope(isolate);
@@ -353,7 +353,7 @@ MaybeDirectHandle<Object> ErrorUtils::FormatStackTrace(
             isolate, result,
             Execution::Call(isolate, prepare_stack_trace, global_error,
                             base::VectorOf(args)));
-        return result;
+        return Cast<JSAny>(result);
       }
     }
   }
@@ -613,7 +613,7 @@ MaybeHandle<JSObject> ErrorUtils::Construct(
     if (IsJSReceiver(*options)) {
       DirectHandle<JSReceiver> js_options = Cast<JSReceiver>(options);
       Maybe<bool> has_cause =
-          JSObject::HasProperty(isolate, js_options, cause_string);
+          JSReceiver::HasProperty(isolate, js_options, cause_string);
       if (has_cause.IsNothing()) {
         DCHECK((isolate)->has_exception());
         return MaybeHandle<JSObject>();
@@ -622,7 +622,7 @@ MaybeHandle<JSObject> ErrorUtils::Construct(
         DirectHandle<Object> cause;
         ASSIGN_RETURN_ON_EXCEPTION(
             isolate, cause,
-            JSObject::GetProperty(isolate, js_options, cause_string));
+            JSReceiver::GetProperty(isolate, js_options, cause_string));
         RETURN_ON_EXCEPTION(isolate, JSObject::SetOwnPropertyIgnoreAttributes(
                                          err, cause_string, cause, DONT_ENUM));
       }
@@ -649,7 +649,7 @@ MaybeHandle<String> GetStringPropertyOrDefault(Isolate* isolate,
                                                Handle<String> default_str) {
   Handle<Object> obj;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, obj,
-                             JSObject::GetProperty(isolate, recv, key));
+                             JSReceiver::GetProperty(isolate, recv, key));
 
   Handle<String> str;
   if (IsUndefined(*obj, isolate)) {
@@ -1155,7 +1155,8 @@ ErrorUtils::StackPropertyLookupResult ErrorUtils::GetErrorStackProperty(
 // static
 MaybeDirectHandle<Object> ErrorUtils::GetFormattedStack(
     Isolate* isolate, DirectHandle<JSObject> maybe_error_object) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__);
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
+              perfetto::StaticString(__func__));
 
   ErrorUtils::StackPropertyLookupResult lookup =
       ErrorUtils::GetErrorStackProperty(isolate, maybe_error_object);
@@ -1175,7 +1176,7 @@ MaybeDirectHandle<Object> ErrorUtils::GetFormattedStack(
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, formatted_stack,
         FormatStackTrace(isolate, error_object, expanded));
-    error_stack_data->set_formatted_stack(*formatted_stack);
+    error_stack_data->set_formatted_stack(Cast<JSAny>(*formatted_stack));
     return formatted_stack;
   }
 
@@ -1202,7 +1203,7 @@ MaybeDirectHandle<Object> ErrorUtils::GetFormattedStack(
 // static
 void ErrorUtils::SetFormattedStack(Isolate* isolate,
                                    DirectHandle<JSObject> maybe_error_object,
-                                   DirectHandle<Object> formatted_stack) {
+                                   DirectHandle<JSAny> formatted_stack) {
   ErrorUtils::StackPropertyLookupResult lookup =
       ErrorUtils::GetErrorStackProperty(isolate, maybe_error_object);
 

@@ -281,6 +281,7 @@ Node* RepresentationChanger::GetRepresentationFor(
     case MachineRepresentation::kWord64:
       DCHECK(use_info.type_check() == TypeCheckKind::kNone ||
              use_info.type_check() == TypeCheckKind::kSigned64 ||
+             use_info.type_check() == TypeCheckKind::kUnsigned64 ||
              use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger ||
              TypeCheckIsBigInt(use_info.type_check()) ||
              use_info.type_check() == TypeCheckKind::kArrayIndex);
@@ -807,6 +808,7 @@ Node* RepresentationChanger::GetFloat64RepresentationFor(
       case TypeCheckKind::kHeapObject:
       case TypeCheckKind::kSigned32:
       case TypeCheckKind::kSigned64:
+      case TypeCheckKind::kUnsigned64:
       case TypeCheckKind::kSignedSmall:
       case TypeCheckKind::kArrayIndex:
       case TypeCheckKind::kAdditiveSafeInteger:
@@ -1011,7 +1013,7 @@ Node* RepresentationChanger::GetWord32RepresentationFor(
       op = machine()->ChangeFloat64ToUint32();
     } else if (use_info.truncation().IsUsedAsWord32()) {
       if (use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger) {
-        if (output_type.Is(cache_->kAdditiveSafeInteger)) {
+        if (output_type.Is(cache_->kAdditiveSafeIntegerFeedback)) {
           op = machine()->TruncateFloat64ToWord32();
         } else {
           op = simplified()->CheckedFloat64ToAdditiveSafeInteger(
@@ -1045,7 +1047,7 @@ Node* RepresentationChanger::GetWord32RepresentationFor(
       op = machine()->ChangeFloat64ToUint32();
     } else if (use_info.truncation().IsUsedAsWord32()) {
       if (use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger) {
-        if (output_type.Is(cache_->kAdditiveSafeInteger)) {
+        if (output_type.Is(cache_->kAdditiveSafeIntegerFeedback)) {
           op = machine()->TruncateFloat64ToWord32();
         } else {
           op = simplified()->CheckedFloat64ToAdditiveSafeInteger(
@@ -1086,7 +1088,7 @@ Node* RepresentationChanger::GetWord32RepresentationFor(
           CheckTaggedInputMode::kAdditiveSafeInteger, use_info.feedback());
     } else if (use_info.truncation().IsUsedAsWord32()) {
       if (use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger) {
-        if (output_type.Is(cache_->kAdditiveSafeInteger)) {
+        if (output_type.Is(cache_->kAdditiveSafeIntegerFeedback)) {
           op = simplified()->TruncateNumberOrOddballToWord32();
         } else {
           op = simplified()->CheckedTruncateTaggedToWord32(
@@ -1281,8 +1283,8 @@ Node* RepresentationChanger::GetWord64RepresentationFor(
           int64_t const iv = static_cast<int64_t>(fv);
           if (static_cast<double>(iv) == fv) {
             if (use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger) {
-              if (iv < kMinAdditiveSafeInteger ||
-                  kMaxAdditiveSafeInteger < iv ||
+              if (iv < kMinAdditiveSafeIntegerFeedback ||
+                  kMaxAdditiveSafeIntegerFeedback < iv ||
                   (iv == 0 && std::signbit(fv))) {
                 Node* unreachable = InsertUnconditionalDeopt(
                     use_node, DeoptimizeReason::kNotAdditiveSafeInteger,
@@ -1352,10 +1354,13 @@ Node* RepresentationChanger::GetWord64RepresentationFor(
                     use_info.truncation().IdentifiesZeroAndMinusZero());
       op = machine()->ChangeUint32ToUint64();
     } else if (output_type.Is(Type::Signed32OrMinusZero())) {
-      // int32 -> int64
       CHECK_IMPLIES(output_type.Maybe(Type::MinusZero()),
                     use_info.truncation().IdentifiesZeroAndMinusZero());
-      op = machine()->ChangeInt32ToInt64();
+      if (use_info.type_check() == TypeCheckKind::kUnsigned64) {
+        op = simplified()->CheckedInt32ToUint64(use_info.feedback());
+      } else {
+        op = machine()->ChangeInt32ToInt64();
+      }
     } else if (use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger) {
       // If it is a word representation, but not word32 type, then it is not an
       // integer.
@@ -1372,7 +1377,7 @@ Node* RepresentationChanger::GetWord64RepresentationFor(
     if (use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger) {
       // float32 -> float64 -> int64
       node = InsertChangeFloat32ToFloat64(node);
-      if (output_type.Is(cache_->kAdditiveSafeInteger)) {
+      if (output_type.Is(cache_->kAdditiveSafeIntegerFeedback)) {
         op = machine()->ChangeFloat64ToInt64();
       } else {
         op = simplified()->CheckedFloat64ToAdditiveSafeInteger(
@@ -1400,13 +1405,21 @@ Node* RepresentationChanger::GetWord64RepresentationFor(
               ? use_info.minus_zero_check()
               : CheckForMinusZeroMode::kDontCheckForMinusZero,
           use_info.feedback());
+    } else if (use_info.type_check() == TypeCheckKind::kUnsigned64) {
+      // float32 -> float64 -> uint64
+      node = InsertChangeFloat32ToFloat64(node);
+      op = simplified()->CheckedFloat64ToUint64(
+          output_type.Maybe(Type::MinusZero())
+              ? use_info.minus_zero_check()
+              : CheckForMinusZeroMode::kDontCheckForMinusZero,
+          use_info.feedback());
     } else {
       return TypeError(node, output_rep, output_type,
                        MachineRepresentation::kWord64);
     }
   } else if (output_rep == MachineRepresentation::kFloat64) {
     if (use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger) {
-      if (output_type.Is(cache_->kAdditiveSafeInteger)) {
+      if (output_type.Is(cache_->kAdditiveSafeIntegerFeedback)) {
         op = machine()->ChangeFloat64ToInt64();
       } else {
         op = simplified()->CheckedFloat64ToAdditiveSafeInteger(
@@ -1428,6 +1441,12 @@ Node* RepresentationChanger::GetWord64RepresentationFor(
               ? use_info.minus_zero_check()
               : CheckForMinusZeroMode::kDontCheckForMinusZero,
           use_info.feedback());
+    } else if (use_info.type_check() == TypeCheckKind::kUnsigned64) {
+      op = simplified()->CheckedFloat64ToUint64(
+          output_type.Maybe(Type::MinusZero())
+              ? use_info.minus_zero_check()
+              : CheckForMinusZeroMode::kDontCheckForMinusZero,
+          use_info.feedback());
     } else {
       return TypeError(node, output_rep, output_type,
                        MachineRepresentation::kWord64);
@@ -1437,6 +1456,9 @@ Node* RepresentationChanger::GetWord64RepresentationFor(
       if (output_type.IsRange() && output_type.AsRange()->Min() >= 0) {
         node = InsertChangeTaggedSignedToInt32(node);
         op = machine()->ChangeUint32ToUint64();
+      } else if (use_info.type_check() == TypeCheckKind::kUnsigned64) {
+        node = InsertChangeTaggedSignedToInt32(node);
+        op = simplified()->CheckedInt32ToUint64(use_info.feedback());
       } else {
         op = simplified()->ChangeTaggedSignedToInt64();
       }
@@ -1454,7 +1476,7 @@ Node* RepresentationChanger::GetWord64RepresentationFor(
     op = simplified()->TruncateBigIntToWord64();
   } else if (CanBeTaggedPointer(output_rep)) {
     if (use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger) {
-      if (output_type.Is(cache_->kAdditiveSafeInteger)) {
+      if (output_type.Is(cache_->kAdditiveSafeIntegerFeedback)) {
         op = simplified()->ChangeTaggedToInt64();
       } else {
         op = simplified()->CheckedTaggedToAdditiveSafeInteger(
@@ -1473,6 +1495,12 @@ Node* RepresentationChanger::GetWord64RepresentationFor(
               ? use_info.minus_zero_check()
               : CheckForMinusZeroMode::kDontCheckForMinusZero,
           use_info.feedback());
+    } else if (use_info.type_check() == TypeCheckKind::kUnsigned64) {
+      op = simplified()->CheckedTaggedToUint64(
+          output_type.Maybe(Type::MinusZero())
+              ? use_info.minus_zero_check()
+              : CheckForMinusZeroMode::kDontCheckForMinusZero,
+          use_info.feedback());
     } else if (use_info.type_check() == TypeCheckKind::kArrayIndex) {
       op = simplified()->CheckedTaggedToArrayIndex(use_info.feedback());
     } else {
@@ -1481,7 +1509,7 @@ Node* RepresentationChanger::GetWord64RepresentationFor(
     }
   } else if (output_rep == MachineRepresentation::kWord64) {
     if (use_info.type_check() == TypeCheckKind::kAdditiveSafeInteger) {
-      if (output_type.Is(cache_->kAdditiveSafeInteger)) {
+      if (output_type.Is(cache_->kAdditiveSafeIntegerFeedback)) {
         return node;
       } else {
         op = simplified()->CheckedInt64ToAdditiveSafeInteger(

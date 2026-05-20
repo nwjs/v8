@@ -35,22 +35,26 @@ static int EncodeElementWidth(VSew sew) {
   // The lane size field has 8 free bits, so there is plenty of room.
   static_assert((0 <= static_cast<int>(VSew::E8)) &&
                 (static_cast<int>(VSew::E64) <= 3));
-#ifdef DEBUG
-  // In debug mode, we mark one bit to indicate that the lane size is
-  // populated.
-  return LaneSizeField::encode(0x4 | sew);
-#else
-  return LaneSizeField::encode(sew);
-#endif
+  switch (sew) {
+    case VSew::E8:
+      return LaneSizeField::encode(LaneSize::kL8);
+    case VSew::E16:
+      return LaneSizeField::encode(LaneSize::kL16);
+    case VSew::E32:
+      return LaneSizeField::encode(LaneSize::kL32);
+    case VSew::E64:
+      return LaneSizeField::encode(LaneSize::kL64);
+    default:
+      UNREACHABLE();
+  }
 }
 
 static int EncodeRegisterConstraint(RiscvRegisterConstraint constraint) {
   // The element width is encoded in 3 bits, which leaves us some bits
   // for asserting that the register constraints are correct.
 #ifdef DEBUG
-  static_assert(static_cast<int>(VSew::E64) <= 3);
-  DCHECK(static_cast<int>(constraint) <= 0xF);
-  return LaneSizeField::encode(static_cast<int>(constraint) << 3);
+  DCHECK(static_cast<int>(constraint) <= 0x7);
+  return RiscvRegisterConstraintField::encode(constraint);
 #else
   return 0;
 #endif
@@ -1737,15 +1741,17 @@ void InstructionSelector::VisitChangeFloat16RawBitsToFloat64(OpIndex node) {
 }
 
 // static
+/*
+Only support FullUnalignedAccessSupport in V8.
+
+Mainstream high-performance RISC-V cores (U74, U54, XuanTie C9xx)
+now support misaligned access in hardware.If hardware lacking support, the SBI
+specification requires firmware to handle these cases via trap handlers.
+*/
 MachineOperatorBuilder::AlignmentRequirements
 InstructionSelector::AlignmentRequirements() {
-#ifdef RISCV_HAS_NO_UNALIGNED
-  return MachineOperatorBuilder::AlignmentRequirements::
-      NoUnalignedAccessSupport();
-#else
   return MachineOperatorBuilder::AlignmentRequirements::
       FullUnalignedAccessSupport();
-#endif
 }
 
 void InstructionSelector::AddOutputToSelectContinuation(OperandGenerator* g,

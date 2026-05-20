@@ -152,7 +152,7 @@ void LookupIterator::NextInternal(Tagged<Map> orig_map,
     }
   } while (!IsFound());
 
-  if (V8_UNLIKELY(is_element && IsJSArrayMap(*orig_map))) {
+  if (V8_UNLIKELY(is_element && IsJSArrayMap(orig_map))) {
     isolate_->CountUsage(v8::Isolate::kHoleyArrayReadthrough);
   }
 
@@ -475,6 +475,12 @@ void LookupIterator::PrepareForDataProperty(DirectHandle<Object> value) {
     // Check that current value matches new value otherwise we should make
     // the property mutable.
     if (holder->HasFastProperties(isolate_)) {
+      if (property_details_.representation().IsDouble() && IsNumber(*value)) {
+        double v = Object::NumberValue(*value);
+        if (std::isnan(v)) {
+          value = isolate_->factory()->nan_value();
+        }
+      }
       if (!CanStayConst(*value)) new_constness = PropertyConstness::kMutable;
     } else if (V8_DICT_PROPERTY_CONST_TRACKING_BOOL) {
       if (!DictCanStayConst(*value)) {
@@ -751,7 +757,7 @@ Maybe<bool> LookupIterator::ApplyTransitionToDataProperty(
   }
   DirectHandle<Map> transition = transition_map();
   bool simple_transition =
-      transition->GetBackPointer(isolate_) == receiver->map(isolate_);
+      transition->GetBackPointer() == receiver->map(isolate_);
 
   if (configuration_ == DEFAULT && !transition->is_dictionary_map() &&
       !transition->is_prototype_map() &&
@@ -876,7 +882,7 @@ void LookupIterator::TransitionToAccessorProperty(
     DirectHandle<Map> new_map = Map::TransitionToAccessorProperty(
         isolate_, old_map, name_, number_, getter, setter, attributes);
     bool simple_transition =
-        new_map->GetBackPointer(isolate_) == receiver->map(isolate_);
+        new_map->GetBackPointer() == receiver->map(isolate_);
     JSObject::MigrateToMap(isolate_, receiver, new_map);
 
     if (simple_transition) {
@@ -1028,7 +1034,7 @@ DirectHandle<Object> LookupIterator::FetchValue(
   } else {
     result =
         holder_->map(isolate_)->instance_descriptors(isolate_)->GetStrongValue(
-            isolate_, descriptor_number());
+            descriptor_number());
   }
   return direct_handle(result, isolate_);
 }
@@ -1050,18 +1056,14 @@ bool LookupIterator::CanStayConst(Tagged<Object> value) const {
       FieldIndex::ForDetails(holder->map(isolate_), property_details_);
   if (property_details_.representation().IsDouble()) {
     if (!IsNumber(value, isolate_)) return false;
-    uint64_t bits;
+    // Attempt to store HeapNumber with the hole NaN pattern should have
+    // already generalized field constness to kMutable.
+    DCHECK_IMPLIES(!IsSmi(value), !Cast<HeapNumber>(value)->is_the_hole());
     Tagged<Object> current_value =
         holder->RawFastPropertyAt(isolate_, field_index);
     DCHECK(IsHeapNumber(current_value, isolate_));
-    bits = Cast<HeapNumber>(current_value)->value_as_bits();
-    // Use bit representation of double to check for hole double, since
-    // manipulating the signaling NaN used for the hole in C++, e.g. with
-    // base::bit_cast or value(), will change its value on ia32 (the x87
-    // stack is used to return values and stores to the stack silently clear the
-    // signalling bit).
     // Only allow initializing stores to double to stay constant.
-    return bits == kHoleNanInt64;
+    return Cast<HeapNumber>(current_value)->is_the_hole();
   }
 
   Tagged<Object> current_value =
@@ -1195,10 +1197,16 @@ void LookupIterator::WriteDataValue(DirectHandle<Object> value,
   } else if (holder->HasFastProperties(isolate_)) {
     DCHECK(IsJSObject(*holder, isolate_));
     if (property_details_.location() == PropertyLocation::kField) {
+      if (property_details_.representation().IsDouble() && IsNumber(*value)) {
+        double v = Object::NumberValue(*value);
+        if (std::isnan(v)) {
+          value = isolate_->factory()->nan_value();
+        }
+      }
       // Check that in case of VariableMode::kConst field the existing value is
       // equal to |value|.
       DCHECK_IMPLIES(!initializing_store && property_details_.constness() ==
-                                                PropertyConstness::kConst,
+                                                 PropertyConstness::kConst,
                      CanStayConst(*value));
       Cast<JSObject>(*holder)->WriteToField(descriptor_number(),
                                             property_details_, *value);
@@ -1331,13 +1339,13 @@ bool LookupIterator::SkipInterceptor(Tagged<JSObject> holder) {
 Tagged<JSReceiver> LookupIterator::NextHolder(Tagged<Map> map) {
   DisallowGarbageCollection no_gc;
   if (map->prototype(isolate_) == ReadOnlyRoots(isolate_).null_value()) {
-    return JSReceiver();
+    return {};
   }
   bool check_prototype_chain =
       this->check_prototype_chain() ||
       interceptor_state_ == InterceptorState::kSkipNonMaskingOwnProperty;
   if (!check_prototype_chain && !IsJSGlobalProxyMap(map)) {
-    return JSReceiver();
+    return {};
   }
   return Cast<JSReceiver>(map->prototype(isolate_));
 }
@@ -1403,7 +1411,7 @@ LookupIterator::State LookupIterator::LookupInSpecialHolder(
         number_ = dict->FindEntry(isolate(), name_);
         if (number_.is_not_found()) return NOT_FOUND;
         Tagged<PropertyCell> cell = dict->CellAt(isolate_, number_);
-        if (IsPropertyCellHole(cell->value(isolate_), isolate_)) {
+        if (IsPropertyCellHole(cell->value(), isolate_)) {
           return NOT_FOUND;
         }
         property_details_ = cell->property_details();

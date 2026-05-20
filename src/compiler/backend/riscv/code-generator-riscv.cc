@@ -45,13 +45,7 @@ static int SewToInt(VSew sew) {
 }
 
 static VSew DecodeElementWidth(int opcode) {
-#ifdef DEBUG
-  // Check that the lane-size field was populated.
-  DCHECK_NE((LaneSizeField::decode(opcode) & 0x4), 0);
-  return static_cast<VSew>(LaneSizeField::decode(opcode) & 0x3);
-#else
-  return static_cast<VSew>(LaneSizeField::decode(opcode));
-#endif
+  return static_cast<VSew>((LaneSizeField::decode(opcode)));
 }
 
 // Adds RISC-V-specific methods to convert InstructionOperands.
@@ -185,8 +179,8 @@ class RiscvOperandConverter final : public InstructionOperandConverter {
 static void CheckRegisterConstraints(int opcode, RiscvOperandConverter& i,
                                      RiscvRegisterConstraint constraint) {
 #ifdef DEBUG
-  auto decoded =
-      static_cast<RiscvRegisterConstraint>(LaneSizeField::decode(opcode) >> 3);
+  RiscvRegisterConstraint decoded =
+      RiscvRegisterConstraintField::decode(opcode);
   DCHECK_EQ(constraint, decoded);
 #endif
   switch (constraint) {
@@ -1032,8 +1026,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kArchPrepareCallCFunction: {
 #ifdef V8_TARGET_ARCH_RISCV64
-      int const num_gp_parameters = ParamField::decode(instr->opcode());
-      int const num_fp_parameters = FPParamField::decode(instr->opcode());
+      uint32_t num_parameters = i.InputUint32(instr->InputCount() - 1);
+      int const num_gp_parameters = ParamField::decode(num_parameters);
+      int const num_fp_parameters = FPParamField::decode(num_parameters);
       __ PrepareCallCFunction(num_gp_parameters, num_fp_parameters,
                               kScratchReg);
 #else
@@ -2116,6 +2111,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kRiscvTruncUlD: {
       Register result = instr->OutputCount() > 1 ? i.OutputRegister(1) : no_reg;
       __ Trunc_ul_d(i.OutputRegister(0), i.InputDoubleRegister(0), result);
+      bool set_overflow_to_min_u64 = MiscField::decode(instr->opcode());
+      if (set_overflow_to_min_u64) {
+        Label done;
+        __ AddWord(kScratchReg, i.OutputRegister(), 1);
+        __ Branch(&done, ult, i.OutputRegister(), Operand(kScratchReg));
+        __ Move(i.OutputRegister(), zero_reg);
+        __ bind(&done);
+      }
       break;
     }
     case kRiscvBitcastDL:
@@ -2163,26 +2166,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kRiscvLhu:
       __ Lhu(i.OutputRegister(), i.MemoryOperand(), trapper);
       break;
-    case kRiscvUlhu:
-      __ Ulhu(i.OutputRegister(), i.MemoryOperand());
-      break;
     case kRiscvLh:
       __ Lh(i.OutputRegister(), i.MemoryOperand(), trapper);
-      break;
-    case kRiscvUlh:
-      __ Ulh(i.OutputRegister(), i.MemoryOperand());
       break;
     case kRiscvSh:
       __ Sh(i.InputOrZeroRegister(0), i.MemoryOperand(1), trapper);
       break;
-    case kRiscvUsh:
-      __ Ush(i.InputOrZeroRegister(2), i.MemoryOperand());
-      break;
     case kRiscvLw:
       __ Lw(i.OutputRegister(), i.MemoryOperand(), trapper);
-      break;
-    case kRiscvUlw:
-      __ Ulw(i.OutputRegister(), i.MemoryOperand());
       break;
 #if V8_TARGET_ARCH_RISCV64
     case kRiscvLwu:
@@ -2191,28 +2182,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kRiscvLd:
       __ Ld(i.OutputRegister(), i.MemoryOperand(), trapper);
       break;
-    case kRiscvUld:
-      __ Uld(i.OutputRegister(), i.MemoryOperand());
-      break;
     case kRiscvSd:
       __ Sd(i.InputOrZeroRegister(0), i.MemoryOperand(1), trapper);
-      break;
-    case kRiscvUsd:
-      __ Usd(i.InputOrZeroRegister(2), i.MemoryOperand());
       break;
 #endif
     case kRiscvSw:
       __ Sw(i.InputOrZeroRegister(0), i.MemoryOperand(1), trapper);
       break;
-    case kRiscvUsw:
-      __ Usw(i.InputOrZeroRegister(2), i.MemoryOperand());
-      break;
     case kRiscvLoadFloat: {
       __ LoadFloat(i.OutputSingleRegister(), i.MemoryOperand(), trapper);
-      break;
-    }
-    case kRiscvULoadFloat: {
-      __ ULoadFloat(i.OutputSingleRegister(), i.MemoryOperand());
       break;
     }
     case kRiscvStoreFloat: {
@@ -2224,37 +2202,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ StoreFloat(ft, operand, trapper);
       break;
     }
-    case kRiscvUStoreFloat: {
-      size_t index = 0;
-      MemOperand operand = i.MemoryOperand(&index);
-      FPURegister ft = i.InputOrZeroSingleRegister(index);
-      if (ft == kSingleRegZero && !__ IsSingleZeroRegSet()) {
-        __ LoadFPRImmediate(kSingleRegZero, 0.0f);
-      }
-      __ UStoreFloat(ft, operand);
-      break;
-    }
     case kRiscvLoadDouble:
       __ LoadDouble(i.OutputDoubleRegister(), i.MemoryOperand(), trapper);
       break;
-    case kRiscvULoadDouble: {
-      __ ULoadDouble(i.OutputDoubleRegister(), i.MemoryOperand());
-      break;
-    }
     case kRiscvStoreDouble: {
       FPURegister ft = i.InputOrZeroDoubleRegister(0);
       if (ft == kDoubleRegZero && !__ IsDoubleZeroRegSet()) {
         __ LoadFPRImmediate(kDoubleRegZero, 0.0);
       }
       __ StoreDouble(ft, i.MemoryOperand(1), trapper);
-      break;
-    }
-    case kRiscvUStoreDouble: {
-      FPURegister ft = i.InputOrZeroDoubleRegister(2);
-      if (ft == kDoubleRegZero && !__ IsDoubleZeroRegSet()) {
-        __ LoadFPRImmediate(kDoubleRegZero, 0.0);
-      }
-      __ UStoreDouble(ft, i.MemoryOperand());
       break;
     }
     case kRiscvSync: {
@@ -2608,13 +2564,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       if (v8_flags.disable_write_barriers) break;
       // Emit the write barrier.
+      // We only need a write barrier if the CAS was successful (i.e., the
+      // value was actually written). Compare the result with the expected
+      // value to determine if the CAS succeeded.
       Register object = i.InputRegister(0);
       Operand offset = i.InputOperand(1);
       Register new_value = i.InputRegister(3);
       auto ool = zone()->New<OutOfLineRecordWrite>(
           this, object, offset, new_value, RecordWriteMode::kValueIsAny,
           DetermineStubCallMode());
+      __ Branch(ool->exit(), ne, i.OutputRegister(0),
+                Operand(i.InputRegister(2)));
       __ JumpIfSmi(new_value, ool->exit());
+
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
                        ne, ool->entry());
       __ bind(ool->exit());
@@ -2681,13 +2643,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kAtomicCompareExchangeWithWriteBarrier: {
       ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER(Ll, Sc);
       if (v8_flags.disable_write_barriers) break;
+
       // Emit the write barrier.
+      // We only need a write barrier if the CAS was successful (i.e., the
+      // value was actually written). Compare the result with the expected
+      // value to determine if the CAS succeeded.
       Register object = i.InputRegister(0);
       Operand offset = i.InputOperand(1);
       Register new_value = i.InputRegister(3);
       RecordWriteMode mode = RecordWriteMode::kValueIsAny;
       auto ool = zone()->New<OutOfLineRecordWrite>(
           this, object, offset, new_value, mode, DetermineStubCallMode());
+      __ Branch(ool->exit(), ne, i.OutputRegister(0),
+                Operand(i.InputRegister(2)));
       __ JumpIfSmi(new_value, ool->exit());
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
                        ne, ool->entry());
@@ -3444,7 +3412,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Simd128Register result = kSimd128ScratchReg;
       if (sew == E32) {
         // Working on 32-bit floats.
-        __ li(kScratchReg, 0x7FC00000);
+        __ li(kScratchReg, kFP32DefaultNaN);
         __ vmv_vx(result, kScratchReg);
       } else {
 #ifdef V8_TARGET_ARCH_RISCV32
@@ -3483,7 +3451,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Simd128Register result = kSimd128ScratchReg;
       if (sew == E32) {
         // Working on 32-bit floats.
-        __ li(kScratchReg, 0x7FC00000);
+        __ li(kScratchReg, kFP32DefaultNaN);
         __ vmv_vx(result, kScratchReg);
       } else {
 #ifdef V8_TARGET_ARCH_RISCV32
@@ -3625,16 +3593,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kRiscvF32x4UConvertI32x4: {
       __ VU.SetSimd128(E32);
-      __ VU.set(FPURoundingMode::RTZ);
       __ vfcvt_f_xu_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
-      __ VU.set(FPURoundingMode::RNE);
       break;
     }
     case kRiscvF32x4SConvertI32x4: {
       __ VU.SetSimd128(E32);
-      __ VU.set(FPURoundingMode::RTZ);
       __ vfcvt_f_x_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
-      __ VU.set(FPURoundingMode::RNE);
       break;
     }
     case kRiscvF32x4ReplaceLane: {

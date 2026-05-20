@@ -4,6 +4,7 @@
 
 #include "src/debug/debug-scopes.h"
 
+#include <algorithm>
 #include <memory>
 
 #include "src/ast/ast.h"
@@ -824,7 +825,8 @@ void ScopeIterator::VisitScriptScope(const Visitor& visitor) const {
       context_->native_context()->script_context_table(), isolate_);
 
   // Skip the first script since that just declares 'this'.
-  for (int i = 1; i < script_contexts->length(kAcquireLoad); i++) {
+  const uint32_t len = script_contexts->length(kAcquireLoad).value();
+  for (uint32_t i = 1; i < len; i++) {
     DirectHandle<Context> context(script_contexts->get(i), isolate_);
     DirectHandle<ScopeInfo> scope_info(context->scope_info(), isolate_);
     if (VisitContextLocals(visitor, scope_info, context, ScopeTypeScript)) {
@@ -932,13 +934,20 @@ bool ScopeIterator::VisitLocals(const Visitor& visitor, Mode mode,
           DCHECK(!generator_.is_null());
           Tagged<FixedArray> parameters_and_registers =
               generator_->parameters_and_registers();
-          DCHECK_GE(index, 0);
-          DCHECK_LT(static_cast<uint32_t>(index),
-                    parameters_and_registers->ulength().value());
+          CHECK_GE(index, 0);
+          CHECK_LT(static_cast<uint32_t>(index),
+                   parameters_and_registers->ulength().value());
           value = handle(parameters_and_registers->get(index), isolate_);
         } else if (var->IsReceiver()) {
           value = frame_inspector_->GetReceiver();
         } else {
+          JavaScriptFrame* frame = GetFrame();
+          if (frame->is_unoptimized()) {
+            CHECK_GE(index, 0);
+            CHECK_LT(static_cast<uint32_t>(index),
+                     std::max(frame->GetActualArgumentCount(),
+                              frame->ComputeParametersCount()));
+          }
           value = frame_inspector_->GetParameter(index);
         }
         break;
@@ -953,11 +962,16 @@ bool ScopeIterator::VisitLocals(const Visitor& visitor, Mode mode,
           int parameter_count =
               function_->shared()->scope_info()->ParameterCount();
           index += parameter_count;
-          DCHECK_GE(index, 0);
-          DCHECK_LT(static_cast<uint32_t>(index),
-                    parameters_and_registers->ulength().value());
+          CHECK_GE(index, 0);
+          CHECK_LT(static_cast<uint32_t>(index),
+                   parameters_and_registers->ulength().value());
           value = handle(parameters_and_registers->get(index), isolate_);
         } else {
+          JavaScriptFrame* frame = GetFrame();
+          if (frame->is_unoptimized()) {
+            CHECK_GE(index, 0);
+            CHECK_LT(index, frame->ComputeExpressionsCount());
+          }
           value = frame_inspector_->GetExpression(index);
           if (IsOptimizedOut(*value, isolate_)) {
             // We'll rematerialize this later.
@@ -1040,17 +1054,28 @@ void ScopeIterator::VisitLocalScope(const Visitor& visitor, Mode mode,
       // suspended generators. We'd need to read the arguments out from the
       // suspended generator rather than from an activation as
       // FunctionGetArguments does.
-      if (frame_inspector_ != nullptr && !closure_scope_->is_arrow_scope() &&
-          (closure_scope_->arguments() == nullptr ||
-           IsOptimizedOut(*frame_inspector_->GetExpression(
-                              closure_scope_->arguments()->index()),
-                          isolate_))) {
+      if (frame_inspector_ != nullptr && !closure_scope_->is_arrow_scope()) {
+        Variable* arguments_var = closure_scope_->arguments();
+        bool arguments_optimized_out = arguments_var == nullptr;
         JavaScriptFrame* frame = GetFrame();
-        Handle<JSObject> arguments = Accessors::FunctionGetArguments(
-            frame, frame_inspector_->inlined_frame_index());
-        if (visitor(isolate_->factory()->arguments_string(), arguments,
-                    scope_type))
-          return;
+        if (!arguments_optimized_out &&
+            arguments_var->location() == VariableLocation::LOCAL) {
+          int index = arguments_var->index();
+          if (frame->is_unoptimized()) {
+            CHECK_GE(index, 0);
+            CHECK_LT(index, frame->ComputeExpressionsCount());
+          }
+          arguments_optimized_out =
+              IsOptimizedOut(*frame_inspector_->GetExpression(index), isolate_);
+        }
+
+        if (arguments_optimized_out) {
+          Handle<JSObject> arguments = Accessors::FunctionGetArguments(
+              frame, frame_inspector_->inlined_frame_index());
+          if (visitor(isolate_->factory()->arguments_string(), arguments,
+                      scope_type))
+            return;
+        }
       }
     }
   } else {
@@ -1109,9 +1134,9 @@ bool ScopeIterator::SetLocalVariableValue(DirectHandle<String> variable_name,
             DCHECK(!generator_.is_null());
             DirectHandle<FixedArray> parameters_and_registers(
                 generator_->parameters_and_registers(), isolate_);
-            DCHECK_GE(index, 0);
-            DCHECK_LT(static_cast<uint32_t>(index),
-                      parameters_and_registers->ulength().value());
+            CHECK_GE(index, 0);
+            CHECK_LT(static_cast<uint32_t>(index),
+                     parameters_and_registers->ulength().value());
             parameters_and_registers->set(index, *new_value);
           } else {
             JavaScriptFrame* frame = GetFrame();
@@ -1131,15 +1156,17 @@ bool ScopeIterator::SetLocalVariableValue(DirectHandle<String> variable_name,
             index += parameter_count;
             DirectHandle<FixedArray> parameters_and_registers(
                 generator_->parameters_and_registers(), isolate_);
-            DCHECK_GE(index, 0);
-            DCHECK_LT(static_cast<uint32_t>(index),
-                      parameters_and_registers->ulength().value());
+            CHECK_GE(index, 0);
+            CHECK_LT(static_cast<uint32_t>(index),
+                     parameters_and_registers->ulength().value());
             parameters_and_registers->set(index, *new_value);
           } else {
             // Set the variable on the stack.
             JavaScriptFrame* frame = GetFrame();
             if (!frame->is_unoptimized()) return false;
 
+            CHECK_GE(index, 0);
+            CHECK_LT(index, frame->ComputeExpressionsCount());
             frame->SetExpression(index, *new_value);
           }
           return true;
@@ -1188,8 +1215,13 @@ bool ScopeIterator::SetContextExtensionValue(DirectHandle<String> variable_name,
 
 bool ScopeIterator::SetContextVariableValue(DirectHandle<String> variable_name,
                                             DirectHandle<Object> new_value) {
-  int slot_index = context_->scope_info()->ContextSlotIndex(*variable_name);
+  VariableLookupResult lookup_result;
+  int slot_index =
+      context_->scope_info()->ContextSlotIndex(*variable_name, &lookup_result);
   if (slot_index < 0) return false;
+  if (IsPrivateMethodOrAccessorVariableMode(lookup_result.mode)) {
+    return false;
+  }
   Context::Set(context_, slot_index, new_value, isolate_);
   return true;
 }

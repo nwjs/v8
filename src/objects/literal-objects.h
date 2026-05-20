@@ -24,7 +24,7 @@ class StructBodyDescriptor;
 
 #include "torque-generated/src/objects/literal-objects-tq.inc"
 
-V8_OBJECT class PrototypeSharedClosureInfo : public StructLayout {
+V8_OBJECT class PrototypeSharedClosureInfo : public Struct {
  public:
   inline Tagged<ObjectBoilerplateDescription> boilerplate_description() const;
   inline void set_boilerplate_description(
@@ -104,6 +104,10 @@ class ObjectBoilerplateDescription
 
   class BodyDescriptor;
 
+  static constexpr uint32_t kLengthOffset = HeapObject::kHeaderSize;
+  static constexpr uint32_t kHeaderSize =
+      kLengthOffset + (TAGGED_SIZE_8_BYTES ? kTaggedSize : kApiInt32Size);
+
  private:
   using TaggedArrayBase::get;
   using TaggedArrayBase::set;
@@ -113,7 +117,7 @@ class ObjectBoilerplateDescription
   static constexpr int ValueIndex(int i) { return i * kElementsPerEntry + 1; }
 };
 
-V8_OBJECT class ArrayBoilerplateDescription : public StructLayout {
+V8_OBJECT class ArrayBoilerplateDescription : public Struct {
  public:
   inline ElementsKind elements_kind() const;
   inline void set_elements_kind(ElementsKind kind);
@@ -145,7 +149,7 @@ V8_OBJECT class ArrayBoilerplateDescription : public StructLayout {
   TaggedMember<FixedArrayBase> constant_elements_;
 } V8_OBJECT_END;
 
-V8_OBJECT class RegExpBoilerplateDescription : public StructLayout {
+V8_OBJECT class RegExpBoilerplateDescription : public Struct {
  public:
   // Dispatched behavior.
   void BriefPrintDetails(std::ostream& os);
@@ -181,7 +185,7 @@ struct ObjectTraits<RegExpBoilerplateDescription> {
                                kRegExpDataIndirectPointerTag>>;
 };
 
-V8_OBJECT class ClassBoilerplate : public StructLayout {
+V8_OBJECT class ClassBoilerplate : public Struct {
  public:
   enum ValueKind { kData, kGetter, kSetter, kAutoAccessor };
 

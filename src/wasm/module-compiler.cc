@@ -21,6 +21,7 @@
 #include "src/handles/global-handles-inl.h"
 #include "src/logging/counters-scopes.h"
 #include "src/logging/metrics.h"
+#include "src/objects/managed.h"
 #include "src/tracing/trace-event.h"
 #include "src/wasm/code-space-access.h"
 #include "src/wasm/compilation-environment-inl.h"
@@ -1189,6 +1190,7 @@ bool CompileLazy(Isolate* isolate, NativeModule* native_module,
 void ThrowLazyCompilationError(Isolate* isolate,
                                const NativeModule* native_module,
                                int func_index) {
+  HandleScope handle_scope(isolate);
   const WasmModule* module = native_module->module();
 
   CompilationStateImpl* compilation_state =
@@ -1651,7 +1653,6 @@ void PublishDetectedFeatures(WasmDetectedFeatures detected_features,
       {WasmDetectedFeature::return_call, Feature::kWasmReturnCall},
       {WasmDetectedFeature::extended_const, Feature::kWasmExtendedConst},
       {WasmDetectedFeature::relaxed_simd, Feature::kWasmRelaxedSimd},
-      {WasmDetectedFeature::type_reflection, Feature::kWasmTypeReflection},
       {WasmDetectedFeature::exnref, Feature::kWasmExnRef},
       {WasmDetectedFeature::typed_funcref, Feature::kWasmTypedFuncRef},
       {WasmDetectedFeature::jspi, Feature::kWasmJavaScriptPromiseIntegration},
@@ -1932,7 +1933,7 @@ constexpr uint8_t kMainTaskId = 0;
 CompilationExecutionResult ExecuteCompilationUnits(
     std::weak_ptr<NativeModule> native_module, JobDelegate* delegate,
     CompilationTier tier) {
-  TRACE_EVENT0("v8.wasm", "wasm.ExecuteCompilationUnits");
+  TRACE_EVENT("v8.wasm", "wasm.ExecuteCompilationUnits");
 
   // Compilation must be disabled in jitless mode.
   CHECK(!v8_flags.wasm_jitless);
@@ -1981,7 +1982,7 @@ CompilationExecutionResult ExecuteCompilationUnits(
   while (true) {
     ExecutionTier current_tier = unit->tier();
     const char* event_name = GetCompilationEventName(unit.value(), env.value());
-    TRACE_EVENT0("v8.wasm", event_name);
+    TRACE_EVENT("v8.wasm", perfetto::StaticString(event_name));
     while (unit->tier() == current_tier) {
       // Track detected features on a per-function basis before collecting them
       // into {global_detected_features}.
@@ -2130,7 +2131,9 @@ void CompileNativeModule(ErrorThrower* thrower,
   }
 
   if (compilation_state->failed()) {
-    DCHECK_IMPLIES(IsLazyModule(module), !v8_flags.wasm_lazy_validation);
+    DCHECK(!IsLazyModule(module) || !v8_flags.wasm_lazy_validation ||
+           (v8_flags.experimental_wasm_compilation_hints &&
+            !module->compilation_priorities.empty()));
     WasmError validation_error =
         ValidateFunctions(*native_module, kAllFunctions);
     CHECK(validation_error.has_error());
@@ -2140,13 +2143,20 @@ void CompileNativeModule(ErrorThrower* thrower,
 
 class BackgroundCompileJob final : public JobTask {
  public:
-  explicit BackgroundCompileJob(std::weak_ptr<NativeModule> native_module,
-                                CompilationTier tier)
+  BackgroundCompileJob(std::weak_ptr<NativeModule> native_module,
+                       CompilationTier tier, IsolateGroup* isolate_group)
       : native_module_(std::move(native_module)),
         engine_barrier_(GetWasmEngine()->GetBarrierForBackgroundCompile()),
-        tier_(tier) {}
+#ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
+        isolate_group_(isolate_group),
+#endif  // V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
+        tier_(tier) {
+  }
 
   void Run(JobDelegate* delegate) override {
+#ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
+    IsolateGroup::set_current(isolate_group_);
+#endif  // V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
     auto engine_scope = engine_barrier_->TryLock();
     if (!engine_scope) return;
     ExecuteCompilationUnits(native_module_, delegate, tier_);
@@ -2167,6 +2177,9 @@ class BackgroundCompileJob final : public JobTask {
  private:
   std::weak_ptr<NativeModule> native_module_;
   std::shared_ptr<OperationsBarrier> engine_barrier_;
+#ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
+  IsolateGroup* isolate_group_;
+#endif  // V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
   const CompilationTier tier_;
 };
 
@@ -2180,8 +2193,9 @@ std::shared_ptr<NativeModule> GetOrCompileNewNativeModule(
   if (base::TimeTicks::IsHighResolution()) start_time = base::TimeTicks::Now();
 
   std::shared_ptr<NativeModule> native_module =
-      GetWasmEngine()->MaybeGetNativeModule(
-          module->origin, wire_bytes.as_vector(), compile_imports);
+      GetWasmEngine()->MaybeGetNativeModule(module->origin,
+                                            wire_bytes.as_vector(),
+                                            enabled_features, compile_imports);
   if (native_module) {
     GetWasmEngine()->UseNativeModuleInIsolate(native_module.get(), isolate);
 
@@ -2348,8 +2362,8 @@ AsyncCompileJob::AsyncCompileJob(
       wire_bytes_(bytes_copy_.as_vector()),
       resolver_(std::move(resolver)),
       compilation_id_(compilation_id) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-               "wasm.AsyncCompileJob");
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+              "wasm.AsyncCompileJob");
   CHECK(v8_flags.wasm_async_compilation);
   CHECK(!v8_flags.jitless || v8_flags.wasm_jitless);
 }
@@ -2479,7 +2493,7 @@ class ValidateFunctionsStreamingJob final : public JobTask {
       : module_(module), enabled_features_(enabled_features), data_(data) {}
 
   void Run(JobDelegate* delegate) override {
-    TRACE_EVENT0("v8.wasm", "wasm.ValidateFunctionsStreaming");
+    TRACE_EVENT("v8.wasm", "wasm.ValidateFunctionsStreaming");
     using Unit = ValidateFunctionsStreamingJobData::Unit;
     Zone validation_zone{GetWasmEngine()->allocator(),
                          "Wasm ValidateFunctionsStreamingJob"};
@@ -2514,6 +2528,7 @@ class ValidateFunctionsStreamingJob final : public JobTask {
 class AsyncStreamingProcessor final : public StreamingProcessor {
  public:
   explicit AsyncStreamingProcessor(AsyncCompileJob* job);
+  ~AsyncStreamingProcessor() override;
 
   void InitializeIsolateSpecificInfo(Isolate* isolate) override {
     job_->InitializeIsolateSpecificInfo(isolate);
@@ -2560,6 +2575,7 @@ class AsyncStreamingProcessor final : public StreamingProcessor {
   // section size, but excludes the code section itself. Used by the
   // {NativeModuleCache} to detect potential duplicate modules.
   base::Hasher prefix_hasher_;
+  bool owns_cache_entry_ = false;
 };
 
 std::shared_ptr<StreamingDecoder> AsyncCompileJob::CreateStreamingDecoder() {
@@ -2607,7 +2623,8 @@ AsyncCompileJob::GetOrCreateNativeModule(
   DCHECK_NULL(new_native_module_);
   std::shared_ptr<NativeModule> cached_native_module =
       GetWasmEngine()->MaybeGetNativeModule(
-          module->origin, wire_bytes_.module_bytes(), compile_imports_);
+          module->origin, wire_bytes_.module_bytes(), enabled_features_,
+          compile_imports_);
   if (cached_native_module) return {cached_native_module, true};
   CreateNativeModule(std::move(module), code_size_estimate);
   return {new_native_module_, false};
@@ -2619,8 +2636,8 @@ void AsyncCompileJob::FinishCompile(
     std::shared_ptr<NativeModule> native_module,
     DirectHandle<WasmModuleObject> deserialized_module_object,
     bool cache_hit) && {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-               "wasm.FinishAsyncCompile");
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+              "wasm.FinishAsyncCompile");
   Isolate* isolate = isolate_specific_info_.isolate_;
   DCHECK_EQ(isolate->thread_id(), ThreadId::Current());
   GetWasmEngine()->UseNativeModuleInIsolate(native_module.get(), isolate);
@@ -2720,8 +2737,8 @@ void AsyncCompileJob::FinishCompile(
     script->set_source_mapping_url(*src_map_str.ToHandleChecked());
   }
   {
-    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-                 "wasm.Debug.OnAfterCompile");
+    TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+                "wasm.Debug.OnAfterCompile");
     isolate->debug()->OnAfterCompile(script);
   }
 
@@ -2748,8 +2765,8 @@ void AsyncCompileJob::FinishCompile(
   native_module->LogWasmCodes(isolate, *script);
 
   {
-    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-                 "wasm.OnCompilationSucceeded");
+    TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+                "wasm.OnCompilationSucceeded");
     // We have to make sure that an "incumbent context" is available in case the
     // module's start function calls out to Blink.
     Local<v8::Context> backup_incumbent_context =
@@ -2928,8 +2945,8 @@ class AsyncCompileJob::DecodeModule : public AsyncCompileJob::CompileStep {
     DisallowHeapAllocation no_allocation;
     // Decode the module bytes.
     TRACE_COMPILE("(1) Decoding module...\n");
-    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-                 "wasm.DecodeModule");
+    TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+                "wasm.DecodeModule");
     auto enabled_features = job->enabled_features_;
     ModuleResult result = DecodeWasmModule(
         enabled_features, job->wire_bytes_.module_bytes(), false, kWasmOrigin,
@@ -3094,6 +3111,13 @@ AsyncStreamingProcessor::AsyncStreamingProcessor(AsyncCompileJob* job)
       job_(job),
       compilation_unit_builder_(nullptr) {}
 
+AsyncStreamingProcessor::~AsyncStreamingProcessor() {
+  if (owns_cache_entry_) {
+    GetWasmEngine()->StreamingCompilationFailed(
+        prefix_hasher_.hash(), job_->enabled_features_, job_->compile_imports_);
+  }
+}
+
 // Process the module header.
 bool AsyncStreamingProcessor::ProcessModuleHeader(
     base::Vector<const uint8_t> bytes) {
@@ -3157,11 +3181,13 @@ bool AsyncStreamingProcessor::ProcessCodeSectionHeader(
                              static_cast<uint32_t>(code_section_length)});
 
   if (!GetWasmEngine()->GetStreamingCompilationOwnership(
-          prefix_hasher_.hash(), job_->compile_imports_)) {
+          prefix_hasher_.hash(), job_->enabled_features_,
+          job_->compile_imports_)) {
     // Known prefix, wait until the end of the stream and check the cache.
     prefix_cache_hit_ = true;
     return true;
   }
+  owns_cache_entry_ = true;
 
   // Execute the PrepareAndStartCompile step immediately and not in a separate
   // task.
@@ -3301,13 +3327,15 @@ void AsyncStreamingProcessor::OnFinishedStream(
       decode_event, job_->isolate_specific_info_.context_id_);
 
   if (after_error) {
-    if (job_->new_native_module_ &&
-        job_->new_native_module_->wire_bytes().empty()) {
+    if (owns_cache_entry_) {
       // Clean up the temporary cache entry.
       GetWasmEngine()->StreamingCompilationFailed(prefix_hasher_.hash(),
+                                                  job_->enabled_features_,
                                                   job_->compile_imports_);
+      owns_cache_entry_ = false;
     }
     // Calling {Failed} will invalidate the {AsyncCompileJob} and delete {this}.
+    HandleScope handle_scope(isolate);
     std::move(*job_).Failed();
     return;
   }
@@ -3380,6 +3408,7 @@ void AsyncStreamingProcessor::OnFinishedStream(
     const bool failed = job_->new_native_module_->compilation_state()->failed();
     final_native_module = GetWasmEngine()->UpdateNativeModuleCache(
         failed, job_->new_native_module_, isolate);
+    owns_cache_entry_ = false;
     cache_hit = final_native_module != job_->new_native_module_;
     // We finally call {Failed} or {FinishCompile}, which will invalidate the
     // {AsyncCompileJob} and delete {this}.
@@ -3401,11 +3430,11 @@ void AsyncStreamingProcessor::OnAbort() {
     validate_functions_job_handle_->Cancel();
     validate_functions_job_handle_.reset();
   }
-  if (job_->new_native_module_ &&
-      job_->new_native_module_->wire_bytes().empty()) {
+  if (owns_cache_entry_) {
     // Clean up the temporary cache entry.
-    GetWasmEngine()->StreamingCompilationFailed(prefix_hasher_.hash(),
-                                                job_->compile_imports_);
+    GetWasmEngine()->StreamingCompilationFailed(
+        prefix_hasher_.hash(), job_->enabled_features_, job_->compile_imports_);
+    owns_cache_entry_ = false;
   }
   // {Abort} invalidates the {AsyncCompileJob}, which in turn deletes {this}.
   job_->Abort();
@@ -3414,7 +3443,7 @@ void AsyncStreamingProcessor::OnAbort() {
 bool AsyncStreamingProcessor::Deserialize(
     base::Vector<const uint8_t> module_bytes,
     base::OwnedVector<const uint8_t>& wire_bytes) {
-  TRACE_EVENT0("v8.wasm", "wasm.Deserialize");
+  TRACE_EVENT("v8.wasm", "wasm.Deserialize");
   Isolate* isolate = job_->isolate_specific_info_.isolate_;
   std::optional<TimedHistogramScope> time_scope;
   if (base::TimeTicks::IsHighResolution()) {
@@ -3438,12 +3467,13 @@ bool AsyncStreamingProcessor::Deserialize(
   }
 
   DCHECK_NULL(job_->new_native_module_);
-  std::shared_ptr<NativeModule> deserialized_native_module =
-      module_object->shared_native_module();
+  Managed<NativeModule>::Ptr deserialized_native_module =
+      module_object->native_module();
   job_->wire_bytes_ = ModuleWireBytes(deserialized_native_module->wire_bytes());
   // Calling {FinishCompile} deletes the {AsyncCompileJob} and {this}.
-  std::move(*job_).FinishCompile(deserialized_native_module, module_object,
-                                 false);
+  std::move(*job_).FinishCompile(
+      std::move(deserialized_native_module).as_shared_ptr(), module_object,
+      false);
   return true;
 }
 
@@ -3464,11 +3494,13 @@ void CompilationStateImpl::InitCompileJob() {
   baseline_compile_job_ = V8::GetCurrentPlatform()->CreateJob(
       TaskPriority::kUserVisible,
       std::make_unique<BackgroundCompileJob>(native_module_weak_,
-                                             CompilationTier::kBaseline));
+                                             CompilationTier::kBaseline,
+                                             IsolateGroup::current()));
   top_tier_compile_job_ = V8::GetCurrentPlatform()->CreateJob(
       TaskPriority::kUserVisible,
       std::make_unique<BackgroundCompileJob>(native_module_weak_,
-                                             CompilationTier::kTopTier));
+                                             CompilationTier::kTopTier,
+                                             IsolateGroup::current()));
 }
 
 void CompilationStateImpl::CancelCompilation(
@@ -3582,7 +3614,7 @@ void CompilationStateImpl::ApplyPgoInfoToInitialProgress(
 }
 
 void CompilationStateImpl::ApplyPgoInfoLate(ProfileInformation* pgo_info) {
-  TRACE_EVENT0("v8.wasm", "wasm.ApplyPgoInfo");
+  TRACE_EVENT("v8.wasm", "wasm.ApplyPgoInfo");
   const WasmModule* module = native_module_->module();
   CompilationUnitBuilder builder{native_module_};
 
@@ -3753,9 +3785,9 @@ void CompilationStateImpl::InitializeCompilationUnits(
 void CompilationStateImpl::InitializeCompilationProgressAfterDeserialization(
     base::Vector<const int> lazy_functions,
     base::Vector<const int> eager_functions) {
-  TRACE_EVENT2("v8.wasm", "wasm.CompilationAfterDeserialization",
-               "num_lazy_functions", lazy_functions.size(),
-               "num_eager_functions", eager_functions.size());
+  TRACE_EVENT("v8.wasm", "wasm.CompilationAfterDeserialization",
+              "num_lazy_functions", lazy_functions.size(),
+              "num_eager_functions", eager_functions.size());
   base::ElapsedTimer lazy_compile_time;
   if (base::TimeTicks::IsHighResolution()) {
     lazy_compile_time.Start();
@@ -3883,8 +3915,8 @@ std::optional<WasmCompilationUnit> CompilationStateImpl::GetNextCompilationUnit(
 
 void CompilationStateImpl::OnFinishedUnits(
     base::Vector<WasmCode*> code_vector) {
-  TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-               "wasm.OnFinishedUnits", "units", code_vector.size());
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+              "wasm.OnFinishedUnits", "units", code_vector.size());
 
   base::MutexGuard guard(&callbacks_mutex_);
 
@@ -4067,7 +4099,8 @@ void CompilationStateImpl::TriggerCallbacks(
                        "wasm.CompilationChunkFinished")}) {
     if (!events.contains(event.first)) continue;
     DCHECK_NE(compilation_id_, kInvalidCompilationID);
-    TRACE_EVENT1("v8.wasm", event.second, "id", compilation_id_);
+    TRACE_EVENT("v8.wasm", perfetto::StaticString(event.second), "id",
+                compilation_id_);
     for (auto& callback : callbacks_) {
       callback->call(event.first);
     }

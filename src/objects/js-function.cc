@@ -20,6 +20,10 @@
 #include "src/objects/feedback-vector.h"
 #include "src/strings/string-builder-inl.h"
 
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/wasm-objects-inl.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
+
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
 
@@ -266,14 +270,14 @@ void JSFunction::RequestOptimization(Isolate* isolate, CodeKind target_kind,
     if (tiering_in_progress()) {
       if (v8_flags.trace_concurrent_recompilation) {
         PrintF("  ** Not marking ");
-        ShortPrint(*this);
+        ShortPrint(Tagged<HeapObject>(this));
         PrintF(" -- already in optimization queue.\n");
       }
       return;
     }
     if (v8_flags.trace_concurrent_recompilation) {
       PrintF("  ** Marking ");
-      ShortPrint(*this);
+      ShortPrint(Tagged<HeapObject>(this));
       PrintF(" for concurrent %s recompilation.\n",
              CodeKindToString(target_kind));
     }
@@ -1379,8 +1383,8 @@ DirectHandle<String> JSFunction::GetDebugName(
     // JSFunction where the "name" property is untouched, so we retain
     // that exact behavior and go with SharedFunctionInfo::DebugName()
     // in case of the fast-path.
-    DirectHandle<Object> name =
-        GetDataProperty(isolate, function, isolate->factory()->name_string());
+    DirectHandle<Object> name = JSReceiver::GetDataProperty(
+        isolate, function, isolate->factory()->name_string());
     if (IsString(*name)) return Cast<String>(name);
   }
   return SharedFunctionInfo::DebugName(

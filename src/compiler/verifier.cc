@@ -1604,6 +1604,10 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckValueInputIs(node, 0, Type::Any());
       CheckNotTyped(node);
       break;
+    case IrOpcode::kCheckHomomorphic:
+      CheckValueInputIs(node, 0, Type::Any());
+      CheckNotTyped(node);
+      break;
     case IrOpcode::kCompareMaps:
       CheckValueInputIs(node, 0, Type::Any());
       CheckTypeIs(node, Type::Boolean());
@@ -1675,11 +1679,14 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kCheckedFloat64ToInt32:
     case IrOpcode::kCheckedFloat64ToAdditiveSafeInteger:
     case IrOpcode::kCheckedFloat64ToInt64:
+    case IrOpcode::kCheckedInt32ToUint64:
+    case IrOpcode::kCheckedFloat64ToUint64:
     case IrOpcode::kCheckedTaggedSignedToInt32:
     case IrOpcode::kCheckedTaggedToInt32:
     case IrOpcode::kCheckedTaggedToArrayIndex:
     case IrOpcode::kCheckedTaggedToAdditiveSafeInteger:
     case IrOpcode::kCheckedTaggedToInt64:
+    case IrOpcode::kCheckedTaggedToUint64:
     case IrOpcode::kCheckedTaggedToFloat64:
     case IrOpcode::kCheckedTaggedToTaggedSigned:
     case IrOpcode::kCheckedTaggedToTaggedPointer:

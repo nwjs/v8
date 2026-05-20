@@ -4,12 +4,15 @@
 
 #include "src/objects/templates.h"
 
+#include <stdint.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <optional>
 
 #include "src/api/api-inl.h"
 #include "src/base/macros.h"
+#include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
@@ -98,7 +101,7 @@ bool FunctionTemplateInfo::IsTemplateFor(Tagged<Map> map) const {
   // Iterate through the chain of inheriting function templates to
   // see if the required one occurs.
   while (IsFunctionTemplateInfo(type)) {
-    if (type == *this) return true;
+    if (type == this) return true;
     type = Cast<FunctionTemplateInfo>(type)->GetParentTemplate();
   }
   // Didn't find the required type in the inheritance chain.
@@ -118,9 +121,9 @@ bool FunctionTemplateInfo::IsLeafTemplateForApiObject(
   Tagged<Object> constructor_obj = map->GetConstructor();
   if (IsJSFunction(constructor_obj)) {
     Tagged<JSFunction> fun = Cast<JSFunction>(constructor_obj);
-    result = (*this == fun->shared()->api_func_data());
+    result = (this == fun->shared()->api_func_data());
   } else if (IsFunctionTemplateInfo(constructor_obj)) {
-    result = (*this == constructor_obj);
+    result = (this == constructor_obj);
   }
   DCHECK_IMPLIES(result, IsTemplateFor(map));
   return result;
@@ -169,17 +172,17 @@ std::optional<Tagged<Name>> FunctionTemplateInfo::TryGetCachedPropertyName(
   return Cast<Name>(maybe_name);
 }
 
-int FunctionTemplateInfo::GetCFunctionsCount() const {
+uint32_t FunctionTemplateInfo::GetCFunctionsCount() const {
   i::DisallowHeapAllocation no_gc;
   return Cast<FixedArray>(GetCFunctionOverloads())->ulength().value();
 }
 
-CFunctionWithSignature FunctionTemplateInfo::GetCFunction(Isolate* isolate,
-                                                          int index) const {
-  i::DisallowHeapAllocation no_gc;
+CFunctionWithSignature FunctionTemplateInfo::GetCFunction(
+    uint32_t index) const {
+  i::DisallowGarbageCollection no_gc;
   return *Cast<Managed<CFunctionWithSignature>>(
               Cast<FixedArray>(GetCFunctionOverloads())->get(index))
-              ->raw();
+              ->raw(no_gc);
 }
 
 // static
@@ -220,7 +223,8 @@ DirectHandle<JSObject> CreateSlowJSObjectWithProperties(
   DirectHandle<JSObject> object = isolate->factory()->NewSlowJSObjectFromMap(
       isolate->slow_object_with_object_prototype_map(), num_properties_set,
       AllocationType::kYoung);
-  Handle<Object> properties = handle(object->raw_properties_or_hash(), isolate);
+  Handle<PropertyDictionary> properties = handle(
+      Cast<PropertyDictionary>(object->raw_properties_or_hash()), isolate);
   for (int i = 0; i < static_cast<int>(property_values.size()); ++i) {
     Local<Value> property_value;
     if (!property_values[i].ToLocal(&property_value)) {
@@ -228,7 +232,7 @@ DirectHandle<JSObject> CreateSlowJSObjectWithProperties(
     }
     properties =
         PropertyDictionary::Add(
-            isolate, Cast<PropertyDictionary>(properties),
+            isolate, properties,
             Cast<String>(handle(property_names->get(i), isolate)),
             Utils::OpenDirectHandle(*property_value), PropertyDetails::Empty())
             .ToHandleChecked();

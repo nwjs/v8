@@ -30,7 +30,9 @@
   [0.05, "--no-enable-popcnt"],
   [0.02, "--no-flush-bytecode"],
   [0.02, "--no-lazy"],
-  [0.2, "--no-lazy-feedback-allocation"],
+  [0.8, "--no-baseline-batch-compilation"],
+  [0.8, "--no-lazy-feedback-allocation"],
+  [0.5, "--stress-lazy-source-positions"],
   [0.1, "--no-wasm-generic-wrapper"],
   [0.02, "--no-maglev"],
   [0.02, "--no-sparkplug"],
@@ -55,5 +57,6 @@
   [0.1, "--hashes-collide"],
   [0.5, "--proto-assign-seq-lazy-func-opt --proto-assign-seq-opt-count=1"],
   [0.5, "--private-field-bytecodes"],
-  [0.1, "--scavenger-chaos-mode"]
+  [0.1, "--scavenger-chaos-mode"],
+  [0.1, "--stress-branch-hinting"]
 ]

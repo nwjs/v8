@@ -869,7 +869,8 @@ Type Typer::Visitor::TypeParameter(Node* node) {
   } else if (index == start.ContextParameterIndex()) {
     return Type::OtherInternal();
   }
-  return Type::NonInternal();
+  // Maglev parameter elision can insert kOptimizedOut holes.
+  return Type::Union(Type::NonInternal(), Type::Hole(), typer_->zone());
 }
 
 Type Typer::Visitor::TypeOsrValue(Node* node) {
@@ -2467,6 +2468,8 @@ Type Typer::Visitor::TypeCheckInternalizedString(Node* node) {
 }
 
 Type Typer::Visitor::TypeCheckMaps(Node* node) { UNREACHABLE(); }
+
+Type Typer::Visitor::TypeCheckHomomorphic(Node* node) { UNREACHABLE(); }
 
 Type Typer::Visitor::TypeCompareMaps(Node* node) { return Type::Boolean(); }
 

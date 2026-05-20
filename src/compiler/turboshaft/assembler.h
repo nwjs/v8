@@ -2776,6 +2776,14 @@ class AssemblerOpInterface : public Next {
                                          ChangeOrDeoptOp::Kind::kFloat64ToInt64,
                                          minus_zero_mode, feedback));
   }
+  V<Word64> ChangeFloat64ToUint64OrDeopt(V<Float64> input,
+                                         V<turboshaft::FrameState> frame_state,
+                                         CheckForMinusZeroMode minus_zero_mode,
+                                         const FeedbackSource& feedback) {
+    return V<Word64>::Cast(ChangeOrDeopt(
+        input, frame_state, ChangeOrDeoptOp::Kind::kFloat64ToUint64,
+        minus_zero_mode, feedback));
+  }
 
   V<Smi> TagSmi(ConstOrV<Word32> input) {
     constexpr int kSmiShiftBits = kSmiShiftSize + kSmiTagSize;
@@ -3799,6 +3807,29 @@ class AssemblerOpInterface : public Next {
              Descriptor::kEffects));
   }
 
+  // Abstracts over calling a builtin from Wasm code. In the Wasm pipeline, it
+  // calls through the Wasm jump table (since builtins may be too far away for a
+  // relative branch on arm64, for example). In the JS pipeline (when inlining
+  // Wasm-into-JS), there is no Wasm jump table, so it dispatches to
+  // CallBuiltin, which emits a direct call to the builtin's code object loaded
+  // as a heap constant.
+  template <typename Descriptor>
+  detail::index_type_for_t<typename Descriptor::results_t> CallWasmBuiltin(
+      const typename Descriptor::arguments_t& args) {
+    const bool is_wasm_in_js_inlining = !Asm().data()->is_wasm();
+    if (is_wasm_in_js_inlining) {
+      // We are in the JS pipeline. Wasm nodes are compiled within the JS
+      // compiler, so there is no Wasm jump table. We use regular builtin
+      // calls instead.
+      Isolate* isolate = Asm().data()->isolate();
+      DCHECK_NOT_NULL(isolate);
+      return CallBuiltin<Descriptor>(isolate, args);
+    } else {
+      // Wasm pipeline: go through the jump table.
+      return WasmCallBuiltinThroughJumptable<Descriptor>(args);
+    }
+  }
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   template <typename Desc>
@@ -4732,8 +4763,13 @@ class AssemblerOpInterface : public Next {
                                             right_high, kind);
   }
 
-  V<Tuple<Word64, Word64>> Word64MulWide(V<Word64> left, V<Word64> right,
-                                         Word64MulWideOp::Kind kind) {
+  V<Word64Pair> Add128(V<Word64> a_low, V<Word64> a_high, V<Word64> b_low,
+                       V<Word64> b_high) {
+    return ReduceIfReachableWord64Add128(a_low, a_high, b_low, b_high);
+  }
+
+  V<Word64Pair> Word64MulWide(V<Word64> left, V<Word64> right,
+                              Word64MulWideOp::Kind kind) {
     return ReduceIfReachableWord64MulWide(left, right, kind);
   }
 
@@ -4891,6 +4927,16 @@ class AssemblerOpInterface : public Next {
                  const FeedbackSource& feedback) {
     ReduceIfReachableCheckMaps(heap_object, frame_state, map, maps, flags,
                                feedback);
+  }
+
+  void CheckHomomorphic(V<HeapObject> heap_object,
+                        V<turboshaft::FrameState> frame_state, NameRef name,
+                        WeakHomomorphicFixedArrayRef homomorphic_array,
+                        int handler_value, bool check_heap_object,
+                        const FeedbackSource& feedback) {
+    ReduceIfReachableCheckHomomorphic(heap_object, frame_state, name,
+                                      homomorphic_array, handler_value,
+                                      check_heap_object, feedback);
   }
 
   void AssumeMap(V<HeapObject> heap_object, const ZoneRefSet<Map>& maps) {
@@ -5076,7 +5122,14 @@ class AssemblerOpInterface : public Next {
 
   V<Object> AssertNotNull(V<Object> object, wasm::ValueType type,
                           TrapId trap_id) {
-    return ReduceIfReachableAssertNotNull(object, type, trap_id);
+    return ReduceIfReachableAssertNotNull(
+        object, OptionalV<turboshaft::FrameState>{}, type, trap_id);
+  }
+
+  V<Object> AssertNotNull(V<Object> object,
+                          OptionalV<turboshaft::FrameState> frame_state,
+                          wasm::ValueType type, TrapId trap_id) {
+    return ReduceIfReachableAssertNotNull(object, frame_state, type, trap_id);
   }
 
   V<Map> RttCanon(V<FixedArray> rtts, wasm::ModuleTypeIndex type_index) {
@@ -5091,18 +5144,20 @@ class AssemblerOpInterface : public Next {
   }
 
   V<Object> WasmTypeCast(V<Object> object, OptionalV<Map> rtt,
-                         WasmTypeCheckConfig config) {
+                         WasmTypeCheckConfig config,
+                         OptionalV<turboshaft::FrameState> frame_state = {}) {
     DCHECK(__ generating_unreachable_operations() ||
            rtt.valid() != config.to.is_abstract_ref());
-    return ReduceIfReachableWasmTypeCast(object, rtt, config);
+    return ReduceIfReachableWasmTypeCast(object, rtt, config, frame_state);
   }
 
-  V<Object> AnyConvertExtern(V<Object> input, SharedFlag is_shared) {
-    return ReduceIfReachableAnyConvertExtern(input, is_shared);
+  V<Object> AnyConvertExtern(V<Object> input, SharedFlag is_shared,
+                             bool is_nullable) {
+    return ReduceIfReachableAnyConvertExtern(input, is_shared, is_nullable);
   }
 
-  V<Object> ExternConvertAny(V<Object> input) {
-    return ReduceIfReachableExternConvertAny(input);
+  V<Object> ExternConvertAny(V<Object> input, bool is_nullable) {
+    return ReduceIfReachableExternConvertAny(input, is_nullable);
   }
 
   template <typename T>
@@ -5123,8 +5178,20 @@ class AssemblerOpInterface : public Next {
                    wasm::ModuleTypeIndex type_index, int field_index,
                    bool is_signed, CheckForNull null_check,
                    std::optional<AtomicMemoryOrder> memory_order) {
-    return ReduceIfReachableStructGet(object, type, type_index, field_index,
-                                      is_signed, null_check, memory_order);
+    return ReduceIfReachableStructGet(
+        object, OptionalV<turboshaft::FrameState>{}, type, type_index,
+        field_index, is_signed, null_check, memory_order);
+  }
+
+  V<Any> StructGet(V<WasmStructNullable> object,
+                   OptionalV<turboshaft::FrameState> frame_state,
+                   const wasm::StructType* type,
+                   wasm::ModuleTypeIndex type_index, int field_index,
+                   bool is_signed, CheckForNull null_check,
+                   std::optional<AtomicMemoryOrder> memory_order) {
+    return ReduceIfReachableStructGet(object, frame_state, type, type_index,
+                                      field_index, is_signed, null_check,
+                                      memory_order);
   }
 
   void StructSet(V<WasmStructNullable> object, V<Any> value,
@@ -5132,8 +5199,20 @@ class AssemblerOpInterface : public Next {
                  int field_index, CheckForNull null_check,
                  std::optional<AtomicMemoryOrder> memory_order,
                  WriteBarrierKind write_barrier) {
-    ReduceIfReachableStructSet(object, value, type, type_index, field_index,
-                               null_check, memory_order, write_barrier);
+    ReduceIfReachableStructSet(
+        object, value, OptionalV<turboshaft::FrameState>{}, type, type_index,
+        field_index, null_check, memory_order, write_barrier);
+  }
+
+  void StructSet(V<WasmStructNullable> object,
+                 OptionalV<turboshaft::FrameState> frame_state, V<Any> value,
+                 const wasm::StructType* type, wasm::ModuleTypeIndex type_index,
+                 int field_index, CheckForNull null_check,
+                 std::optional<AtomicMemoryOrder> memory_order,
+                 WriteBarrierKind write_barrier) {
+    ReduceIfReachableStructSet(object, value, frame_state, type, type_index,
+                               field_index, null_check, memory_order,
+                               write_barrier);
   }
 
   V<Any> StructAtomicRMW(V<WasmStructNullable> object, V<Any> value,
@@ -5183,6 +5262,53 @@ class AssemblerOpInterface : public Next {
     return ReduceIfReachableArrayLength(array, frame_state, null_check);
   }
 
+  // Shared between the Wasm pipeline and the Wasm-in-JS body inlining.
+  void WasmBoundsCheckArray(
+      V<WasmArrayNullable> array, V<Word32> index, wasm::ValueType array_type,
+      OptionalV<turboshaft::FrameState> frame_state = {}) {
+    if (V8_UNLIKELY(v8_flags.experimental_wasm_skip_bounds_checks)) {
+      if (array_type.is_nullable()) {
+        __ AssertNotNull(array, frame_state, array_type,
+                         TrapId::kTrapNullDereference);
+      }
+    } else {
+      V<Word32> length = __ ArrayLength(array, frame_state,
+                                        array_type.is_nullable()
+                                            ? compiler::kWithNullCheck
+                                            : compiler::kWithoutNullCheck);
+      __ TrapIfNot(__ Uint32LessThan(index, length), frame_state,
+                   TrapId::kTrapArrayOutOfBounds);
+    }
+  }
+
+  // Shared between the Wasm pipeline and the Wasm-in-JS body inlining.
+  V<Any> WasmDefaultValue(wasm::ValueType type) {
+    switch (type.kind()) {
+      case wasm::kI8:
+      case wasm::kI16:
+      case wasm::kI32:
+        return __ Word32Constant(int32_t{0});
+      case wasm::kI64:
+        return __ Word64Constant(int64_t{0});
+      case wasm::kF16:
+      case wasm::kF32:
+        return __ Float32Constant(0.0f);
+      case wasm::kF64:
+        return __ Float64Constant(0.0);
+      case wasm::kRefNull:
+        return __ Null(type);
+      case wasm::kS128: {
+        uint8_t value[kSimd128Size] = {};
+        return __ Simd128Constant(value);
+      }
+      case wasm::kVoid:
+      case wasm::kRef:
+      case wasm::kBottom:
+      case wasm::kTop:
+        UNREACHABLE();
+    }
+  }
+
   V<WasmArray> WasmAllocateArray(V<Map> rtt, ConstOrV<Word32> length,
                                  const wasm::ArrayType* array_type,
                                  SharedFlag is_shared) {
@@ -5196,7 +5322,8 @@ class AssemblerOpInterface : public Next {
     return ReduceIfReachableWasmAllocateStruct(rtt, struct_type, is_shared);
   }
 
-  V<WasmFuncRef> WasmRefFunc(V<Object> wasm_instance, uint32_t function_index) {
+  V<WasmFuncRef> WasmRefFunc(V<WasmTrustedInstanceData> wasm_instance,
+                             uint32_t function_index) {
     return ReduceIfReachableWasmRefFunc(wasm_instance, function_index);
   }
 

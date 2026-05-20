@@ -969,7 +969,7 @@ static i::DirectHandle<i::EmbedderDataArray> EmbedderDataFor(
   i::DirectHandle<i::EmbedderDataArray> data(
       i::Cast<i::EmbedderDataArray>(env->embedder_data()), i_isolate);
   if (index < data->length()) return data;
-  if (!Utils::ApiCheck(can_grow && index < i::EmbedderDataArray::kMaxLength,
+  if (!Utils::ApiCheck(can_grow && index < i::kEmbedderDataArrayMaxLength,
                        location, "Index too large")) {
     return {};
   }
@@ -4856,6 +4856,16 @@ MaybeLocal<Value> v8::Object::GetPrivate(Local<Context> context,
 
 Maybe<PropertyAttribute> v8::Object::GetPropertyAttributes(
     Local<Context> context, Local<Value> key) {
+  PropertyAttribute attributes = PropertyAttribute::None;
+  auto result = GetPropertyAttributes(context, key, &attributes);
+  if (result.IsNothing()) return {};
+  // This will confusingly return None when the property doesn't exist.
+  return Just(attributes);
+}
+
+Maybe<bool> v8::Object::GetPropertyAttributes(
+    Local<Context> context, Local<Value> key,
+    PropertyAttribute* out_attributes) {
   auto i_isolate = i::Isolate::Current();
   EnterV8Scope<> api_scope{i_isolate, context,
                            RCCId::kAPI_Object_GetPropertyAttributes};
@@ -4868,9 +4878,10 @@ Maybe<PropertyAttribute> v8::Object::GetPropertyAttributes(
   auto result = i::JSReceiver::GetPropertyAttributes(i_isolate, self, key_name);
   if (result.IsNothing()) return {};
   if (result.FromJust() == i::ABSENT) {
-    return Just(static_cast<PropertyAttribute>(i::NONE));
+    return Just(false);
   }
-  return Just(static_cast<PropertyAttribute>(result.FromJust()));
+  *out_attributes = static_cast<PropertyAttribute>(result.FromJust());
+  return Just(true);
 }
 
 MaybeLocal<Value> v8::Object::GetOwnPropertyDescriptor(Local<Context> context,
@@ -4931,9 +4942,10 @@ Maybe<bool> SetPrototypeImpl(v8::Object* this_, Local<Context> context,
     // We do not allow exceptions thrown while setting the prototype
     // to propagate outside.
     TryCatch try_catch(reinterpret_cast<v8::Isolate*>(i_isolate));
-    auto result =
-        i::JSProxy::SetPrototype(i_isolate, i::Cast<i::JSProxy>(self),
-                                 value_obj, from_javascript, i::kThrowOnError);
+    if (!i::IsJSReceiver(*value_obj) && !i::IsNull(*value_obj)) return {};
+    auto result = i::JSProxy::SetPrototype(i_isolate, i::Cast<i::JSProxy>(self),
+                                           i::Cast<i::JSPrototype>(value_obj),
+                                           from_javascript, i::kThrowOnError);
     if (result.IsNothing()) return {};
     // Convert Just(false) to Just(true).
     return Just(true);
@@ -5464,7 +5476,7 @@ V8_INLINE void* GetAlignedPointerFromEmbedderDataInCreationContextImpl(
   }
   // Bad index, report an API error.
   Utils::ApiCheck(index >= 0, location, "Negative index");
-  Utils::ApiCheck(index < i::EmbedderDataArray::kMaxLength, location,
+  Utils::ApiCheck(index < i::kEmbedderDataArrayMaxLength, location,
                   "Index too large");
   return nullptr;
 }
@@ -7440,7 +7452,7 @@ bool FunctionTemplate::HasInstance(v8::Local<v8::Value> value) {
     return true;
   }
   if (i::IsJSGlobalProxy(*obj)) {
-    auto jsobj = Cast<i::JSGlobalProxy>(*obj);
+    auto jsobj = i::Cast<i::JSGlobalProxy>(*obj);
     if (jsobj->IsDetached()) return false;
     // If it's a global proxy, then test with the global object. Note that the
     // inner global object may not necessarily be a JSGlobalObject.
@@ -8904,7 +8916,7 @@ CompiledWasmModule WasmModuleObject::GetCompiledModule() {
                               i::Isolate::Current());
   size_t length;
   std::unique_ptr<char[]> cstring = url->ToCString(&length);
-  return CompiledWasmModule(std::move(obj->shared_native_module()),
+  return CompiledWasmModule(obj->native_module().as_shared_ptr(),
                             {cstring.get(), length});
 #else
   UNREACHABLE();

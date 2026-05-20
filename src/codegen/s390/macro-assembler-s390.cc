@@ -2058,14 +2058,18 @@ void MacroAssembler::LoadMap(Register destination, Register object) {
   LoadTaggedField(destination, FieldMemOperand(object, HeapObject::kMapOffset));
 }
 
-void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
-                                        Register scratch, Label* fbv_undef) {
-  Label done;
-
-  // Load the feedback vector from the closure.
+void MacroAssembler::LoadFeedbackCell(Register dst, Register closure) {
   LoadTaggedField(dst,
                   FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  LoadTaggedField(dst, FieldMemOperand(dst, offsetof(FeedbackCell, value_)));
+}
+
+void MacroAssembler::LoadFeedbackVectorFromCell(Register dst,
+                                                Register feedback_cell,
+                                                Register scratch,
+                                                Label* fbv_undef) {
+  Label done;
+  LoadTaggedField(
+      dst, FieldMemOperand(feedback_cell, offsetof(FeedbackCell, value_)));
 
   // Check if feedback vector is valid.
   IsObjectType(dst, scratch, scratch, FEEDBACK_VECTOR_TYPE);
@@ -2076,6 +2080,12 @@ void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
   b(fbv_undef);
 
   bind(&done);
+}
+
+void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
+                                        Register scratch, Label* fbv_undef) {
+  LoadFeedbackCell(dst, closure);
+  LoadFeedbackVectorFromCell(dst, dst, scratch, fbv_undef);
 }
 
 void MacroAssembler::LoadInterpreterDataBytecodeArray(
@@ -4784,14 +4794,18 @@ void MacroAssembler::JumpJSFunction(Register function_object,
 // Helper for CallApiFunctionAndReturn().
 void MacroAssembler::zosStoreReturnAddressAndCall(Register target,
                                                   Register scratch) {
-  DCHECK(target == r3 || target == r4);
+  DCHECK(target == r3 || target == r4 || target == r5);
   // Shuffle the arguments from Linux arg register to XPLINK arg regs
   mov(r1, r2);
   if (target == r3) {
     mov(r2, r3);
+  } else if (target == r4) {
+    mov(r2, r3);
+    mov(r3, r4);
   } else {
     mov(r2, r3);
     mov(r3, r4);
+    mov(r4, r5);
   }
 
   // Update System Stack Pointer with the appropriate XPLINK stack bias.

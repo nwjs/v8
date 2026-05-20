@@ -27,11 +27,12 @@
 #include "src/compiler/schedule.h"
 #include "src/compiler/turbofan-graph.h"
 #include "src/objects/script-inl.h"
-#include "src/objects/shared-function-info.h"
+#include "src/objects/shared-function-info-inl.h"
 #include "src/utils/ostreams.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-disassembler.h"
+#include "src/wasm/wasm-objects-inl.h"
 #endif
 
 namespace v8 {
@@ -81,7 +82,7 @@ void JsonPrintBytecodeSource(std::ostream& os, int source_id,
   os << ", \"feedbackVector\": \"";
   if (!feedback_vector.is_null()) {
     std::stringstream stream;
-    FeedbackVector::Print(feedback_vector, stream);
+    Print(feedback_vector, stream);
     std::regex newlines_re("\n+");
     os << std::regex_replace(stream.str(), newlines_re, "\\n");
   }

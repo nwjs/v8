@@ -20,7 +20,6 @@
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
 #include "src/wasm/baseline/parallel-move.h"
-#include "src/wasm/object-access.h"
 #include "src/wasm/simd-shuffle.h"
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
@@ -358,9 +357,9 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
   }
 
   Register budget_array = kScratchRegister;  // Overwriting {instance_data}.
-  constexpr int kArrayOffset = wasm::ObjectAccess::ToTagged(
-      WasmTrustedInstanceData::kTieringBudgetArrayOffset);
-  movq(budget_array, Operand{instance_data, kArrayOffset});
+  movq(budget_array,
+       FieldMemOperand(instance_data,
+                       WasmTrustedInstanceData::kTieringBudgetArrayOffset));
 
   int offset = kInt32Size * declared_func_index;
   subl(Operand{budget_array, offset}, Immediate(budget_used));
@@ -450,7 +449,7 @@ void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
 void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
                                         int offset, int size) {
   DCHECK_LE(0, offset);
-  Operand src{instance, offset};
+  MemOperand src = FieldMemOperand(instance, offset);
   switch (size) {
     case 1:
       movzxbl(dst, src);
@@ -470,7 +469,7 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      Register instance,
                                                      int offset) {
   DCHECK_LE(0, offset);
-  LoadTaggedField(dst, Operand(instance, offset));
+  LoadTaggedField(dst, FieldMemOperand(instance, offset));
 }
 
 void LiftoffAssembler::ResetOSRTarget() {
@@ -505,9 +504,9 @@ void LiftoffAssembler::AtomicLoadTaggedPointer(Register dst, Register src_addr,
 }
 
 void LiftoffAssembler::LoadProtectedPointer(Register dst, Register src_addr,
-                                            int32_t offset_imm) {
-  DCHECK_LE(0, offset_imm);
-  LoadProtectedPointerField(dst, Operand{src_addr, offset_imm});
+                                            int32_t field_offset) {
+  DCHECK_LE(0, field_offset);
+  LoadProtectedPointerField(dst, FieldMemOperand(src_addr, field_offset));
 }
 
 void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
@@ -1111,7 +1110,15 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
     if (result.gp() != rax) {
       movl(result.gp(), rax);
     }
-    addq(result.gp(), kPtrComprCageBaseRegister);
+    // Pointer decompression needs to use an or instead of an add as
+    // value_reg is a full pointer. If the expected value stored in rax matches
+    // the expected value, rax is left unmodified which already contains a
+    // decompressed pointer. Now, if result.gp() is rax, we don't emit the movl
+    // above and result.gp() holds the full decompressed pointer and doing an
+    // add here would decompress twice. Using an or means decompressing the
+    // value if it isn't already decompressed but keeping it unmodified
+    // otherwise.
+    orq(result.gp(), kPtrComprCageBaseRegister);
   } else {
     cmpxchgq(dst_op, value_reg);
     if (result.gp() != rax) {
@@ -1120,7 +1127,18 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
   }
 
   if (v8_flags.disable_write_barriers) return;
+  Label done;
+#ifdef V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
+  // TODO(429142815): WriteBarrier builtins currently require a sandbox mode
+  // switch, so more code is emitted and we need far jumps here. Once the
+  // builtins run in sandboxed mode, we can again always use near jumps.
+  Label::Distance distance = Label::kFar;
+#else
+  Label::Distance distance = Label::kNear;
+#endif  // V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
+  j(not_equal, &done, distance);
   EmitWriteBarrier(dst_addr, dst_op, new_value_for_write_barrier, pinned);
+  bind(&done);
 }
 
 void LiftoffAssembler::AtomicFence() { mfence(); }
@@ -1619,6 +1637,63 @@ void LiftoffAssembler::emit_i64_addi(LiftoffRegister dst, LiftoffRegister lhs,
     addq(dst.gp(), Immediate(static_cast<int32_t>(imm)));
   } else {
     leaq(dst.gp(), Operand(lhs.gp(), static_cast<int32_t>(imm)));
+  }
+}
+
+namespace liftoff {
+template <void (Assembler::*op)(Register)>
+void EmitI64MulWide(LiftoffAssembler* assm) {
+  static_assert(
+      op == static_cast<void (Assembler::*)(Register)>(&Assembler::imulq) ||
+          op == static_cast<void (Assembler::*)(Register)>(&Assembler::mulq),
+      "EmitI64MulWide only supports imulq or mulq");
+  DCHECK(!assm->cache_state()->frozen);
+  LiftoffRegister lrax{rax};
+  LiftoffRegister lrdx{rdx};
+  // For simplicity, force the input into rdx (the explicit input to the
+  // multiply). We have to free up rdx anyway because the machine instruction
+  // will overwrite it.
+  assm->PopToFixedRegister(lrdx);
+  assm->PopToFixedRegister(lrax);
+  // PopToFixedRegister can return without spilling the register.
+  if (assm->cache_state()->is_used(lrax)) assm->SpillRegister(lrax);
+  if (assm->cache_state()->is_used(lrdx)) assm->SpillRegister(lrdx);
+  // lhs = rax is implicit. Result is in [rdx:rax].
+  (assm->*op)(rdx);
+  assm->PushRegister(kI64, lrax);
+  assm->PushRegister(kI64, lrdx);
+}
+}  // namespace liftoff
+
+void LiftoffAssembler::emit_i64_mul_wide_s() {
+  liftoff::EmitI64MulWide<&Assembler::imulq>(this);
+}
+
+void LiftoffAssembler::emit_i64_mul_wide_u() {
+  liftoff::EmitI64MulWide<&Assembler::mulq>(this);
+}
+
+void LiftoffAssembler::emit_i64_add128(Register dst_low, Register dst_high,
+                                       Register al, Register ah, Register bl,
+                                       Register bh) {
+  DCHECK_NE(dst_low, ah);
+  DCHECK_NE(dst_low, bh);
+  DCHECK_NE(dst_low, dst_high);
+  if (dst_low == al) {
+    addq(dst_low, bl);
+  } else if (dst_low == bl) {
+    addq(dst_low, al);
+  } else {
+    movq(dst_low, al);
+    addq(dst_low, bl);
+  }
+  if (dst_high == ah) {
+    adcq(dst_high, bh);
+  } else if (dst_high == bh) {
+    adcq(dst_high, ah);
+  } else {
+    movq(dst_high, ah);
+    adcq(dst_high, bh);
   }
 }
 
@@ -2498,29 +2573,45 @@ void LiftoffAssembler::emit_ptrsize_cond_jumpi(Condition cond, Label* label,
 
 void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
   testl(src, src);
-  setcc(equal, dst);
-  movzxbl(dst, dst);
+  if (UseApxSetzucc()) {
+    setzucc(equal, dst);
+  } else {
+    setcc(equal, dst);
+    movzxbl(dst, dst);
+  }
 }
 
 void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
                                          Register lhs, Register rhs) {
   cmpl(lhs, rhs);
-  setcc(cond, dst);
-  movzxbl(dst, dst);
+  if (UseApxSetzucc()) {
+    setzucc(cond, dst);
+  } else {
+    setcc(cond, dst);
+    movzxbl(dst, dst);
+  }
 }
 
 void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
   testq(src.gp(), src.gp());
-  setcc(equal, dst);
-  movzxbl(dst, dst);
+  if (UseApxSetzucc()) {
+    setzucc(equal, dst);
+  } else {
+    setcc(equal, dst);
+    movzxbl(dst, dst);
+  }
 }
 
 void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
                                          LiftoffRegister lhs,
                                          LiftoffRegister rhs) {
   cmpq(lhs.gp(), rhs.gp());
-  setcc(cond, dst);
-  movzxbl(dst, dst);
+  if (UseApxSetzucc()) {
+    setzucc(cond, dst);
+  } else {
+    setcc(cond, dst);
+    movzxbl(dst, dst);
+  }
 }
 
 namespace liftoff {
@@ -2543,8 +2634,12 @@ void EmitFloatSetCond(LiftoffAssembler* assm, Condition cond, Register dst,
   assm->jmp(&cont, Label::kNear);
   assm->bind(&not_nan);
 
-  assm->setcc(cond, dst);
-  assm->movzxbl(dst, dst);
+  if (UseApxSetzucc()) {
+    assm->setzucc(cond, dst);
+  } else {
+    assm->setcc(cond, dst);
+    assm->movzxbl(dst, dst);
+  }
   assm->bind(&cont);
 }
 }  // namespace liftoff
@@ -2571,19 +2666,27 @@ bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
 
   testl(condition, condition);
 
-  if (kind == kI32) {
-    if (dst == false_value) {
-      cmovl(not_zero, dst.gp(), true_value.gp());
+  if (UseApxCmovcc()) {
+    if (kind == kI32) {
+      cfcmovl(not_zero, dst.gp(), false_value.gp(), true_value.gp());
     } else {
-      if (dst != true_value) movl(dst.gp(), true_value.gp());
-      cmovl(zero, dst.gp(), false_value.gp());
+      cfcmovq(not_zero, dst.gp(), false_value.gp(), true_value.gp());
     }
   } else {
-    if (dst == false_value) {
-      cmovq(not_zero, dst.gp(), true_value.gp());
+    if (kind == kI32) {
+      if (dst == false_value) {
+        cmovl(not_zero, dst.gp(), true_value.gp());
+      } else {
+        if (dst != true_value) movl(dst.gp(), true_value.gp());
+        cmovl(zero, dst.gp(), false_value.gp());
+      }
     } else {
-      if (dst != true_value) movq(dst.gp(), true_value.gp());
-      cmovq(zero, dst.gp(), false_value.gp());
+      if (dst == false_value) {
+        cmovq(not_zero, dst.gp(), true_value.gp());
+      } else {
+        if (dst != true_value) movq(dst.gp(), true_value.gp());
+        cmovq(zero, dst.gp(), false_value.gp());
+      }
     }
   }
 
@@ -2680,9 +2783,14 @@ void EmitSimdShiftOpImm(LiftoffAssembler* assm, LiftoffRegister dst,
 
 inline void EmitAnyTrue(LiftoffAssembler* assm, LiftoffRegister dst,
                         LiftoffRegister src) {
-  assm->xorq(dst.gp(), dst.gp());
-  assm->Ptest(src.fp(), src.fp());
-  assm->setcc(not_equal, dst.gp());
+  if (UseApxSetzucc()) {
+    assm->Ptest(src.fp(), src.fp());
+    assm->setzucc(not_equal, dst.gp());
+  } else {
+    assm->xorq(dst.gp(), dst.gp());
+    assm->Ptest(src.fp(), src.fp());
+    assm->setcc(not_equal, dst.gp());
+  }
 }
 
 template <void (SharedMacroAssemblerBase::*pcmp)(XMMRegister, XMMRegister)>
@@ -2693,11 +2801,18 @@ inline void EmitAllTrue(LiftoffAssembler* assm, LiftoffRegister dst,
   if (feature.has_value()) sse_scope.emplace(assm, *feature);
 
   XMMRegister tmp = kScratchDoubleReg;
-  assm->xorq(dst.gp(), dst.gp());
-  assm->Pxor(tmp, tmp);
-  (assm->*pcmp)(tmp, src.fp());
-  assm->Ptest(tmp, tmp);
-  assm->setcc(equal, dst.gp());
+  if (UseApxSetzucc()) {
+    assm->Pxor(tmp, tmp);
+    (assm->*pcmp)(tmp, src.fp());
+    assm->Ptest(tmp, tmp);
+    assm->setzucc(equal, dst.gp());
+  } else {
+    assm->xorq(dst.gp(), dst.gp());
+    assm->Pxor(tmp, tmp);
+    (assm->*pcmp)(tmp, src.fp());
+    assm->Ptest(tmp, tmp);
+    assm->setcc(equal, dst.gp());
+  }
 }
 
 }  // namespace liftoff

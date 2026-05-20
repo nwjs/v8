@@ -347,28 +347,17 @@ size_t Heap::YoungGenerationSizeFromHeapSize(uint64_t physical_memory,
 
 size_t Heap::OldGenerationSizeFromPhysicalMemory(uint64_t physical_memory) {
   // Compute the old generation size and cap it.
-  if (v8_flags.new_old_generation_heap_size) {
-    uint64_t old_generation = physical_memory /
-                              kPhysicalMemoryToOldGenerationRatio *
-                              kSystemPointerSize / 4;
-    old_generation = std::clamp<uint64_t>(
-        old_generation, DefaultMinHeapSize(physical_memory),
-        MaxOldGenerationSizeFromPhysicalMemory(physical_memory));
-    return RoundUp(old_generation, NormalPage::kPageSize);
-  }
-  uint64_t old_generation = physical_memory /
-                            kPhysicalMemoryToOldGenerationRatio *
-                            HeapLimitMultiplier(physical_memory);
-  old_generation =
-      std::min(old_generation,
-               static_cast<uint64_t>(
-                   MaxOldGenerationSizeFromPhysicalMemory(physical_memory)));
-  old_generation =
-      std::max({old_generation,
-                static_cast<uint64_t>(DefaultMinHeapSize(physical_memory))});
-  old_generation = RoundUp(old_generation, NormalPage::kPageSize);
-
-  return static_cast<size_t>(old_generation);
+#if V8_OS_ANDROID || defined(V8_TARGET_ARCH_32_BIT)
+  // Android requires 16GB of physical memory to reach the maximum of 4GB.
+  static constexpr size_t kRatio = 4;
+#else
+  // On 64-bit 8GB of physical memory is enough for the maximum of 4GB.
+  static constexpr size_t kRatio = 2;
+#endif
+  uint64_t old_generation = physical_memory / kRatio;
+  old_generation = std::clamp<uint64_t>(old_generation, kDefaultMinHeapSize,
+                                        kDefaultMaxHeapSize);
+  return RoundUp(old_generation, NormalPage::kPageSize);
 }
 
 // static
@@ -399,54 +388,6 @@ size_t Heap::MinOldGenerationSize() {
 
 size_t Heap::MaxOldGenerationSize() {
   return limits()->max_old_generation_size();
-}
-
-// static
-size_t Heap::AllocatorLimitOnMaxOldGenerationSize(uint64_t physical_memory) {
-#ifdef V8_COMPRESS_POINTERS
-  if (v8_flags.new_old_generation_heap_size) {
-    return kPtrComprCageReservationSize;
-  }
-  // The young generation is also allocated on the heap.
-  return kPtrComprCageReservationSize -
-         YoungGenerationSizeFromSemiSpaceSize(
-             DefaultMaxSemiSpaceSize(physical_memory));
-#else
-  return std::numeric_limits<size_t>::max();
-#endif
-}
-
-// static
-size_t Heap::MaxOldGenerationSizeFromPhysicalMemory(uint64_t physical_memory) {
-  if (v8_flags.new_old_generation_heap_size) {
-#ifdef V8_HOST_ARCH_64_BIT
-    return static_cast<uint64_t>(4u) * GB;
-#else
-    return static_cast<uint64_t>(1u) * GB;
-#endif
-  }
-
-  size_t max_size = DefaultMaxHeapSize(physical_memory);
-
-  // Increase the heap size from 2GB to 4GB for 64-bit systems with physical
-  // memory at least 16GB. The threshold is set to 15GB to accommodate for some
-  // memory being reserved by the hardware.
-#ifdef V8_HOST_ARCH_64_BIT
-  if ((physical_memory / GB) >= 15) {
-#if V8_OS_ANDROID
-    // As of 2024, Android devices with 16GiB are shipping (for instance the
-    // Pixel 9 Pro). However, a large fraction of their memory is not usable,
-    // and there is no disk swap, so heaps are still smaller than on desktop for
-    // now.
-    DCHECK_EQ(max_size / GB, IsHighEndAndroid(physical_memory) ? 2u : 1u);
-#else
-    DCHECK_EQ(max_size / GB, 2u);
-#endif
-    max_size *= 2;
-  }
-#endif  // V8_HOST_ARCH_64_BIT
-  return std::min(max_size,
-                  AllocatorLimitOnMaxOldGenerationSize(physical_memory));
 }
 
 namespace {
@@ -527,15 +468,6 @@ size_t Heap::CommittedMemoryExecutable() {
   if (!HasBeenSetUp()) return 0;
 
   return static_cast<size_t>(memory_allocator()->SizeExecutable());
-}
-
-void Heap::UpdateMaximumCommitted() {
-  if (!HasBeenSetUp()) return;
-
-  const size_t current_committed_memory = CommittedMemory();
-  if (current_committed_memory > maximum_committed_) {
-    maximum_committed_ = current_committed_memory;
-  }
 }
 
 size_t Heap::Available() {
@@ -1019,14 +951,9 @@ void Heap::GarbageCollectionPrologue(
   nodes_copied_in_new_space_ = 0;
   nodes_promoted_ = 0;
 
-  UpdateMaximumCommitted();
 
-#ifdef DEBUG
   DCHECK(!AllowGarbageCollection::IsAllowed());
   DCHECK_EQ(gc_state(), NOT_IN_GC);
-
-  if (v8_flags.gc_verbose) Print();
-#endif  // DEBUG
 }
 
 void Heap::GarbageCollectionPrologueInSafepoint(GarbageCollector collector) {
@@ -1169,27 +1096,16 @@ void Heap::GarbageCollectionEpilogueInSafepoint(GarbageCollector collector) {
       static_cast<int>(space()->CommittedMemory()));    \
   isolate_->counters()->space##_bytes_used()->Set(      \
       static_cast<int>(space()->SizeOfObjects()));
-#define UPDATE_FRAGMENTATION_FOR_SPACE(space)                          \
-  if (space()->CommittedMemory() > 0) {                                \
-    isolate_->counters()->external_fragmentation_##space()->AddSample( \
-        static_cast<int>(100 - (space()->SizeOfObjects() * 100.0) /    \
-                                   space()->CommittedMemory()));       \
-  }
-#define UPDATE_COUNTERS_AND_FRAGMENTATION_FOR_SPACE(space) \
-  UPDATE_COUNTERS_FOR_SPACE(space)                         \
-  UPDATE_FRAGMENTATION_FOR_SPACE(space)
 
   if (new_space()) {
     UPDATE_COUNTERS_FOR_SPACE(new_space)
   }
 
-  UPDATE_COUNTERS_AND_FRAGMENTATION_FOR_SPACE(old_space)
-  UPDATE_COUNTERS_AND_FRAGMENTATION_FOR_SPACE(code_space)
+  UPDATE_COUNTERS_FOR_SPACE(old_space)
+  UPDATE_COUNTERS_FOR_SPACE(code_space)
 
-  UPDATE_COUNTERS_AND_FRAGMENTATION_FOR_SPACE(lo_space)
+  UPDATE_COUNTERS_FOR_SPACE(lo_space)
 #undef UPDATE_COUNTERS_FOR_SPACE
-#undef UPDATE_FRAGMENTATION_FOR_SPACE
-#undef UPDATE_COUNTERS_AND_FRAGMENTATION_FOR_SPACE
 
 #ifdef DEBUG
   if (v8_flags.print_global_handles) isolate_->global_handles()->Print();
@@ -1232,7 +1148,6 @@ void Heap::GarbageCollectionEpilogue(GarbageCollector collector) {
   TRACE_GC(tracer(), GCTracer::Scope::HEAP_EPILOGUE);
   AllowGarbageCollection for_the_rest_of_the_epilogue;
 
-  UpdateMaximumCommitted();
 
   isolate_->counters()->alive_after_last_gc()->Set(
       static_cast<int>(SizeOfObjects()));
@@ -1245,11 +1160,6 @@ void Heap::GarbageCollectionEpilogue(GarbageCollector collector) {
         static_cast<int>(CommittedMemory() / KB));
     isolate_->counters()->heap_sample_total_used()->AddSample(
         static_cast<int>(SizeOfObjects() / KB));
-    isolate_->counters()->heap_sample_code_space_committed()->AddSample(
-        static_cast<int>(code_space()->CommittedMemory() / KB));
-
-    isolate_->counters()->heap_sample_maximum_committed()->AddSample(
-        static_cast<int>(MaximumCommittedMemory() / KB));
   }
 
 #ifdef DEBUG
@@ -1882,12 +1792,6 @@ int Heap::NotifyContextDisposed(bool has_dependent_context) {
     if (!initial_size_overwritten_) {
       DCHECK_IMPLIES(initial_size_overwritten_, !configured_);
       limits()->ResetAllocationLimit();
-    } else if (preconfigured_old_generation_size_) {
-      EnsureMinimumRemainingAllocationLimit(
-          limits()->initial_old_generation_size());
-      // Reset using_initial_limit() to prevent the sweeper from overwriting
-      // this limit right after this operation.
-      limits()->set_using_initial_limit(true);
     }
     if (memory_reducer_) {
       memory_reducer_->NotifyPossibleGarbage();
@@ -2389,8 +2293,7 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
   UpdateSurvivalStatistics(static_cast<int>(start_young_generation_size));
   if (!initial_size_overwritten_ && tracer()->SurvivalEventsRecorded()) {
     base::MutexGuard guard(old_space()->mutex());
-    limits()->ShrinkAllocationLimitIfNotConfigured(CurrentHeapGrowingMode(),
-                                                   OldGenerationConsumedBytes(),
+    limits()->ShrinkAllocationLimitIfNotConfigured(OldGenerationConsumedBytes(),
                                                    GlobalConsumedBytes());
   }
 
@@ -3315,23 +3218,48 @@ Tagged<FixedArrayBase> Heap::LeftTrimFixedArray(Tagged<FixedArrayBase> object,
   Address old_start = object.address();
   Address new_start = old_start + bytes_to_trim;
 
+  auto clear_recorded_slots = MayContainRecordedSlots(object)
+                                  ? ClearRecordedSlots::kYes
+                                  : ClearRecordedSlots::kNo;
+
   // Technically in new space this write might be omitted (except for
   // debug mode which iterates through the heap), but to play safer
   // we still do it.
   CreateFillerObjectAtRaw(
       WritableFreeSpace::ForNonExecutableMemory(old_start, bytes_to_trim),
-      ClearFreedMemoryMode::kClearFreedMemory,
-      MayContainRecordedSlots(object) ? ClearRecordedSlots::kYes
-                                      : ClearRecordedSlots::kNo,
+      ClearFreedMemoryMode::kClearFreedMemory, clear_recorded_slots,
       VerifyNoSlotsRecorded::kYes);
+
+  // The length field of FixedArray is a uint32, therefore we need to ensure
+  // that its new location is not in any of the remembered sets.
+  Address new_header_end = new_start + 2 * kTaggedSize;
+  if (clear_recorded_slots == ClearRecordedSlots::kYes) {
+#if DEBUG
+    // Left trimming cannot happen during incremental marking
+    MutablePage* page = MutablePage::FromHeapObject(isolate(), object);
+    CHECK_NULL(page->slot_set<OLD_TO_OLD>());
+    RememberedSet<OLD_TO_OLD>::CheckNoneInRange(page, new_start,
+                                                new_header_end);
+#endif  // DEBUG
+    ClearRecordedSlotRange(new_start, new_header_end,
+                           SlotClearingMode::kUnconditional);
+  } else {
+    VerifyNoNeedToClearSlots(new_start, new_header_end);
+  }
 
   // Initialize header of the trimmed array. Since left trimming is only
   // performed on pages which are not concurrently swept creating a filler
   // object does not require synchronization.
   RELAXED_WRITE_FIELD(object, bytes_to_trim,
                       Tagged<Object>(MapWord::FromMap(map).ptr()));
-  RELAXED_WRITE_FIELD(object, bytes_to_trim + kTaggedSize,
-                      Smi::FromUInt(len - elements_to_trim));
+  RELAXED_WRITE_UINT32_FIELD(object, bytes_to_trim + kTaggedSize,
+                             len - elements_to_trim);
+#if TAGGED_SIZE_8_BYTES
+  static_assert(offsetof(FixedArrayBase, optional_padding_) ==
+                kTaggedSize + kApiInt32Size);
+  RELAXED_WRITE_UINT32_FIELD(object,
+                             bytes_to_trim + kTaggedSize + kApiInt32Size, 0);
+#endif  // TAGGED_SIZE_8_BYTES
 
   Tagged<FixedArrayBase> new_object =
       Cast<FixedArrayBase>(HeapObject::FromAddress(new_start));
@@ -4214,8 +4142,7 @@ bool Heap::InvokeNearHeapLimitCallback() {
                                  limits()->initial_max_old_generation_size());
     if (heap_limit > limits()->max_old_generation_size()) {
       limits()->SetMaximumSizes(
-          std::min(heap_limit,
-                   AllocatorLimitOnMaxOldGenerationSize(physical_memory())),
+          std::min(heap_limit, kAllocatorLimitOnMaxOldGenerationSize),
           physical_memory());
       return true;
     }
@@ -4917,19 +4844,6 @@ size_t Heap::DefaultMaxSemiSpaceSize(uint64_t physical_memory) {
 }
 
 // static
-size_t Heap::DefaultMinHeapSize(uint64_t physical_memory) {
-  if (v8_flags.new_old_generation_heap_size) {
-    return 256u * MB;
-  }
-  return 128u * HeapLimitMultiplier(physical_memory) * MB;
-}
-
-// static
-size_t Heap::DefaultMaxHeapSize(uint64_t physical_memory) {
-  return 1024u * HeapLimitMultiplier(physical_memory) * MB;
-}
-
-// static
 size_t Heap::HeapSizeToSemiSpaceRatio(uint64_t physical_memory) {
   // The ratio is determined so that we hit DefaultMaxSemiSpaceSize()
   // at about `heap_size = 256MB`, which corresponds to
@@ -5080,8 +4994,7 @@ void Heap::ConfigureHeap(const v8::ResourceConstraints& constraints,
     }
     max_old_generation_size =
         std::clamp(max_old_generation_size, MinOldGenerationSize(),
-                   AllocatorLimitOnMaxOldGenerationSize(
-                       constraints.physical_memory_size_in_bytes()));
+                   kAllocatorLimitOnMaxOldGenerationSize);
     max_old_generation_size =
         RoundDown<NormalPage::kPageSize>(max_old_generation_size);
 
@@ -6448,7 +6361,6 @@ void Heap::TearDown() {
   // It's too late for Heap::Verify() here, as parts of the Isolate are
   // already gone by the time this is called.
 
-  UpdateMaximumCommitted();
 
   if (v8_flags.fuzzer_gc_analysis) {
     if (v8_flags.stress_marking > 0) {
@@ -6817,7 +6729,8 @@ void Heap::VerifySkippedIndirectWriteBarrier(Address object) {
 #endif  // V8_VERIFY_WRITE_BARRIERS
 }
 
-void Heap::ClearRecordedSlotRange(Address start, Address end) {
+void Heap::ClearRecordedSlotRange(Address start, Address end,
+                                  SlotClearingMode mode) {
 #ifndef V8_DISABLE_WRITE_BARRIERS
   MemoryChunk* chunk = MemoryChunk::FromAddress(start);
   DCHECK(!chunk->IsLargePage());
@@ -6832,7 +6745,7 @@ void Heap::ClearRecordedSlotRange(Address start, Address end) {
            page->owner_identity() == TRUSTED_SPACE ||
            page->owner_identity() == SHARED_SPACE);
 
-    if (!page->SweepingDone()) {
+    if (mode == SlotClearingMode::kUnconditional || !page->SweepingDone()) {
       RememberedSet<OLD_TO_NEW>::RemoveRange(page, start, end,
                                              SlotSet::KEEP_EMPTY_BUCKETS);
       RememberedSet<OLD_TO_NEW_BACKGROUND>::RemoveRange(

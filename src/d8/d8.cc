@@ -39,6 +39,7 @@
 #include "src/base/fpu.h"
 #include "src/base/hashing.h"
 #include "src/base/logging.h"
+#include "src/base/macros.h"
 #include "src/base/platform/memory.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/time.h"
@@ -71,6 +72,7 @@
 #include "src/parsing/parsing.h"
 #include "src/parsing/scanner-character-streams.h"
 #include "src/profiler/profile-generator.h"
+#include "src/sandbox/trap-fuzzer.h"
 #include "src/snapshot/snapshot.h"
 #include "src/strings/owning-external-string-resource.h"
 #include "src/tasks/cancelable-task.h"
@@ -122,6 +124,7 @@
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-js.h"
+#include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-result.h"
 #include "src/wasm/wasm-serialization.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -143,6 +146,7 @@ thread_local Worker* current_worker_ = nullptr;
 
 constexpr v8::EmbedderDataTypeTag kInspectorClientTag = 1;
 
+std::unordered_map<std::string, std::string> bundle_module_files;
 #ifdef V8_FUZZILLI
 bool fuzzilli_reprl = true;
 #else
@@ -440,21 +444,21 @@ static Local<Value> GetValue(v8::Isolate* isolate, Local<Context> context,
   return TryGetValue(isolate, context, object, property).ToLocalChecked();
 }
 
-std::shared_ptr<Worker> GetWorkerFromInternalField(Isolate* isolate,
+i::Managed<Worker>::Ptr GetWorkerFromInternalField(Isolate* isolate,
                                                    Local<Object> object) {
   if (object->InternalFieldCount() != 1) {
     ThrowError(isolate, "this is not a Worker");
-    return nullptr;
+    return {};
   }
 
   i::DirectHandle<i::Object> handle =
       Utils::OpenDirectHandle(*object->GetInternalField(0));
   if (IsSmi(*handle)) {
     ThrowError(isolate, "Worker is defunct because main thread is terminating");
-    return nullptr;
+    return {};
   }
   auto managed = i::Cast<i::Managed<Worker>>(handle);
-  return managed->get();
+  return managed->ptr();
 }
 
 base::Thread::Options GetThreadOptions(const char* name) {
@@ -567,6 +571,7 @@ std::unordered_set<size_t> Shell::wasm_serialized_bytes_hashes_;
 Global<Context> Shell::evaluation_context_;
 ArrayBuffer::Allocator* Shell::array_buffer_allocator;
 bool check_d8_flag_contradictions = true;
+bool exit_on_flag_contradictions = false;
 ShellOptions Shell::options;
 base::OnceType Shell::quit_once_ = V8_ONCE_INIT;
 
@@ -844,7 +849,7 @@ class ModuleEmbedderData {
 
 enum { kModuleEmbedderDataIndex, kInspectorClientIndex };
 
-std::shared_ptr<ModuleEmbedderData> InitializeModuleEmbedderData(
+i::Managed<ModuleEmbedderData>::Ptr InitializeModuleEmbedderData(
     Local<Context> context) {
   i::Isolate* i_isolate = i::Isolate::Current();
   const size_t kModuleEmbedderDataEstimate = 4 * 1024;  // module map.
@@ -855,17 +860,17 @@ std::shared_ptr<ModuleEmbedderData> InitializeModuleEmbedderData(
               reinterpret_cast<v8::Isolate*>(i_isolate)));
   v8::Local<v8::Data> module_data = Utils::ToLocal(module_data_managed);
   context->SetEmbedderDataV2(kModuleEmbedderDataIndex, module_data);
-  return module_data_managed->get();
+  return module_data_managed->ptr();
 }
 
-std::shared_ptr<ModuleEmbedderData> GetModuleDataFromContext(
+i::Managed<ModuleEmbedderData>::Ptr GetModuleDataFromContext(
     Local<Context> context) {
   v8::Local<v8::Data> module_data =
       context->GetEmbedderDataV2(kModuleEmbedderDataIndex);
   i::DirectHandle<i::Managed<ModuleEmbedderData>> module_data_managed =
       i::Cast<i::Managed<ModuleEmbedderData>>(
           Utils::OpenDirectHandle<Data, i::Object>(module_data));
-  return module_data_managed->get();
+  return module_data_managed->ptr();
 }
 
 ScriptOrigin CreateScriptOrigin(Isolate* isolate, Local<String> resource_name,
@@ -1003,7 +1008,7 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
   Local<Context> context(isolate->GetCurrentContext());
   ScriptOrigin origin = CreateScriptOrigin(isolate, name, ScriptType::kClassic);
 
-  std::shared_ptr<ModuleEmbedderData> module_data =
+  i::Managed<ModuleEmbedderData>::Ptr module_data =
       GetModuleDataFromContext(realm);
   module_data->origin = ToSTLString(isolate, name);
 
@@ -1099,8 +1104,9 @@ std::string GetWorkingDirectory() {
 
 // Returns the directory part of path, without the trailing '/'.
 std::string DirName(const std::string& path) {
-  if (path.starts_with(kDataURLPrefix)) return GetWorkingDirectory();
-  DCHECK(IsAbsolutePath(path));
+  if (!IsAbsolutePath(path)) {
+    return GetWorkingDirectory();
+  }
   size_t last_slash = path.find_last_of('/');
   DCHECK(last_slash != std::string::npos);
   return path.substr(0, last_slash);
@@ -1193,7 +1199,7 @@ MaybeLocal<Module> ResolveModuleCallback(Local<Context> context,
                                          Local<FixedArray> import_attributes,
                                          Local<Module> referrer) {
   Isolate* isolate = Isolate::GetCurrent();
-  std::shared_ptr<ModuleEmbedderData> module_data =
+  i::Managed<ModuleEmbedderData>::Ptr module_data =
       GetModuleDataFromContext(context);
   std::string referrer_specifier = module_data->GetModuleSpecifier(referrer);
 
@@ -1210,7 +1216,7 @@ MaybeLocal<Object> ResolveModuleSourceCallback(
     Local<Context> context, Local<String> specifier,
     Local<FixedArray> import_attributes, Local<Module> referrer) {
   Isolate* isolate = Isolate::GetCurrent();
-  std::shared_ptr<ModuleEmbedderData> module_data =
+  i::Managed<ModuleEmbedderData>::Ptr module_data =
       GetModuleDataFromContext(context);
   std::string referrer_specifier = module_data->GetModuleSpecifier(referrer);
 
@@ -1231,7 +1237,7 @@ MaybeLocal<Object> Shell::FetchModuleSource(Local<Module> referrer,
                                             const std::string& module_specifier,
                                             ModuleType module_type) {
   Isolate* isolate = Isolate::GetCurrent();
-  std::shared_ptr<ModuleEmbedderData> module_data =
+  i::Managed<ModuleEmbedderData>::Ptr module_data =
       GetModuleDataFromContext(context);
 
   // Loading modules is only allowed for local absolute paths.
@@ -1298,34 +1304,46 @@ MaybeLocal<Module> Shell::FetchModuleTree(Local<Module> referrer,
                                           const std::string& module_specifier,
                                           ModuleType module_type) {
   Isolate* isolate = Isolate::GetCurrent();
-  std::shared_ptr<ModuleEmbedderData> module_data =
+  i::Managed<ModuleEmbedderData>::Ptr module_data =
       GetModuleDataFromContext(context);
   MaybeLocal<String> source_text;
-  if (module_specifier.starts_with(kDataURLPrefix)) {
-    source_text = String::NewFromUtf8(
-        isolate, module_specifier.c_str() + strlen(kDataURLPrefix));
-  } else if (IsAbsolutePath(module_specifier)) {
-    source_text = ReadFile(isolate, module_specifier.c_str(), false);
-    if (source_text.IsEmpty() && options.fuzzy_module_file_extensions) {
-      std::string fallback_file_name = module_specifier + ".js";
-      source_text = ReadFile(isolate, fallback_file_name.c_str(), false);
-      if (source_text.IsEmpty()) {
-        fallback_file_name = module_specifier + ".mjs";
-        source_text = ReadFile(isolate, fallback_file_name.c_str());
+
+  bool found_in_bundle = false;
+  if (options.bundle) {
+    auto it = bundle_module_files.find(module_specifier);
+    if (it != bundle_module_files.end()) {
+      source_text = String::NewFromUtf8(isolate, it->second.c_str());
+      found_in_bundle = true;
+    }
+  }
+
+  if (!found_in_bundle) {
+    if (module_specifier.starts_with(kDataURLPrefix)) {
+      source_text = String::NewFromUtf8(
+          isolate, module_specifier.c_str() + strlen(kDataURLPrefix));
+    } else if (IsAbsolutePath(module_specifier)) {
+      source_text = ReadFile(isolate, module_specifier.c_str(), false);
+      if (source_text.IsEmpty() && options.fuzzy_module_file_extensions) {
+        std::string fallback_file_name = module_specifier + ".js";
+        source_text = ReadFile(isolate, fallback_file_name.c_str(), false);
+        if (source_text.IsEmpty()) {
+          fallback_file_name = module_specifier + ".mjs";
+          source_text = ReadFile(isolate, fallback_file_name.c_str());
+        }
       }
+    } else {
+      // Loading modules is only allowed for local absolute paths.
+      std::ostringstream msg;
+      msg << "d8: Reading module from " << module_specifier
+          << " is not supported.";
+      if (!referrer.IsEmpty()) {
+        std::string referrer_specifier =
+            module_data->GetModuleSpecifier(referrer);
+        msg << "\n    imported by " << referrer_specifier;
+      }
+      ThrowError(isolate, msg.view());
+      return MaybeLocal<Module>();
     }
-  } else {
-    // Loading modules is only allowed for local absolute paths.
-    std::ostringstream msg;
-    msg << "d8: Reading module from " << module_specifier
-        << " is not supported.";
-    if (!referrer.IsEmpty()) {
-      std::string referrer_specifier =
-          module_data->GetModuleSpecifier(referrer);
-      msg << "\n    imported by " << referrer_specifier;
-    }
-    ThrowError(isolate, msg.view());
-    return MaybeLocal<Module>();
   }
 
   if (source_text.IsEmpty()) {
@@ -1449,7 +1467,7 @@ MaybeLocal<Value> Shell::JSONModuleEvaluationSteps(Local<Context> context,
                                                    Local<Module> module) {
   Isolate* isolate = Isolate::GetCurrent();
 
-  std::shared_ptr<ModuleEmbedderData> module_data =
+  i::Managed<ModuleEmbedderData>::Ptr module_data =
       GetModuleDataFromContext(context);
   Local<Value> json_value = module_data->GetJsonModuleValue(module);
 
@@ -1592,7 +1610,7 @@ void Shell::HostInitializeImportMetaObject(Local<Context> context,
   Isolate* isolate = Isolate::GetCurrent();
   HandleScope handle_scope(isolate);
 
-  std::shared_ptr<ModuleEmbedderData> module_data =
+  i::Managed<ModuleEmbedderData>::Ptr module_data =
       GetModuleDataFromContext(context);
   std::string specifier = module_data->GetModuleSpecifier(module);
 
@@ -1606,9 +1624,9 @@ void Shell::HostInitializeImportMetaObject(Local<Context> context,
 MaybeLocal<Context> Shell::HostCreateShadowRealmContext(
     Local<Context> initiator_context) {
   Local<Context> context = v8::Context::New(Isolate::GetCurrent());
-  std::shared_ptr<ModuleEmbedderData> shadow_realm_data =
+  i::Managed<ModuleEmbedderData>::Ptr shadow_realm_data =
       InitializeModuleEmbedderData(context);
-  std::shared_ptr<ModuleEmbedderData> initiator_data =
+  i::Managed<ModuleEmbedderData>::Ptr initiator_data =
       GetModuleDataFromContext(initiator_context);
 
   // ShadowRealms are synchronously accessible and are always in the same origin
@@ -1717,7 +1735,7 @@ void Shell::DoHostImportModuleDynamically(void* data) {
       return;
     }
 
-    std::shared_ptr<ModuleEmbedderData> module_data =
+    i::Managed<ModuleEmbedderData>::Ptr module_data =
         GetModuleDataFromContext(realm);
 
     std::string source_url = referrer->IsNull()
@@ -1846,7 +1864,7 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
     std::string absolute_path =
         NormalizeModuleSpecifier(file_name, GetWorkingDirectory());
 
-    std::shared_ptr<ModuleEmbedderData> module_data =
+    i::Managed<ModuleEmbedderData>::Ptr module_data =
         GetModuleDataFromContext(realm);
     Local<Module> root_module;
     auto module_it = module_data->module_map.find(
@@ -2769,18 +2787,21 @@ void Shell::TestVerifySourcePositions(
 
   auto callable =
       i::Cast<i::JSFunctionOrBoundFunctionOrWrappedFunction>(arg_handle);
-  while (IsJSBoundFunction(*callable)) {
+  while (IsJSBoundFunction(*callable) || IsJSWrappedFunction(*callable)) {
     internal::DisallowGarbageCollection no_gc;
-    auto bound_function = i::Cast<i::JSBoundFunction>(callable);
-    auto bound_target = bound_function->bound_target_function();
-    if (!IsJSFunctionOrBoundFunctionOrWrappedFunction(bound_target)) {
+    auto target =
+        IsJSBoundFunction(*callable)
+            ? i::Cast<i::JSBoundFunction>(callable)->bound_target_function()
+            : i::Cast<i::JSWrappedFunction>(callable)
+                  ->wrapped_target_function();
+    if (!IsJSFunctionOrBoundFunctionOrWrappedFunction(target)) {
       internal::AllowGarbageCollection allow_gc;
-      ThrowError(isolate, "Expected function as bound target.");
+      ThrowError(isolate, "Expected function as target.");
       return;
     }
-    callable = handle(
-        i::Cast<i::JSFunctionOrBoundFunctionOrWrappedFunction>(bound_target),
-        i_isolate);
+    callable =
+        handle(i::Cast<i::JSFunctionOrBoundFunctionOrWrappedFunction>(target),
+               i_isolate);
   }
 
   i::DirectHandle<i::JSFunction> function = i::Cast<i::JSFunction>(callable);
@@ -3028,6 +3049,7 @@ void Shell::WasmSerializeModule(
   // only serialized bytes are accepted when deserializing.
   {
     size_t hash = base::Hasher{}
+                      .Add(native_module->wire_bytes().size())
                       .AddRange(native_module->wire_bytes())
                       .AddRange(byte_buffer)
                       .hash();
@@ -3099,6 +3121,7 @@ void Shell::WasmDeserializeModule(
   // bytes) in regular fuzzing.
   {
     size_t hash = base::Hasher{}
+                      .Add(wire_bytes_vec.size())
                       .AddRange(wire_bytes_vec.as_vector())
                       .AddRange(serialized_bytes_vec.as_vector())
                       .hash();
@@ -3719,9 +3742,9 @@ void Shell::WorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& info) {
     return;
   }
 
-  std::shared_ptr<Worker> worker =
+  i::Managed<Worker>::Ptr worker =
       GetWorkerFromInternalField(isolate, info.This());
-  if (!worker.get()) {
+  if (!worker) {
     return;
   }
 
@@ -3739,9 +3762,9 @@ void Shell::WorkerGetMessage(const v8::FunctionCallbackInfo<v8::Value>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   Isolate* isolate = info.GetIsolate();
   HandleScope handle_scope(isolate);
-  std::shared_ptr<Worker> worker =
+  i::Managed<Worker>::Ptr worker =
       GetWorkerFromInternalField(isolate, info.This());
-  if (!worker.get()) {
+  if (!worker) {
     return;
   }
 
@@ -3869,13 +3892,15 @@ void Shell::WorkerOnMessageGetter(
   Isolate* isolate = info.GetIsolate();
   HandleScope handle_scope(isolate);
 
-  std::shared_ptr<Worker> worker =
+  i::Managed<Worker>::Ptr worker =
       GetWorkerFromInternalField(isolate, info.This());
-  if (!worker.get()) {
+  if (!worker) {
     return;
   }
   Local<Function> callback =
-      PerIsolateData::Get(isolate)->GetWorkerOnMessage(worker).second;
+      PerIsolateData::Get(isolate)
+          ->GetWorkerOnMessage(std::move(worker).as_shared_ptr())
+          .second;
 
   if (!callback.IsEmpty()) {
     info.GetReturnValue().Set(callback);
@@ -3893,9 +3918,9 @@ void Shell::WorkerOnMessageSetter(
     return;
   }
 
-  std::shared_ptr<Worker> worker =
+  i::Managed<Worker>::Ptr worker =
       GetWorkerFromInternalField(isolate, info.This());
-  if (!worker.get()) {
+  if (!worker) {
     return;
   }
 
@@ -3903,16 +3928,17 @@ void Shell::WorkerOnMessageSetter(
   if (!callback->IsFunction()) return;
 
   PerIsolateData::Get(isolate)->SubscribeWorkerOnMessage(
-      worker, isolate->GetCurrentContext(), Local<Function>::Cast(callback));
+      std::move(worker).as_shared_ptr(), isolate->GetCurrentContext(),
+      Local<Function>::Cast(callback));
 }
 
 void Shell::WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   Isolate* isolate = info.GetIsolate();
   HandleScope handle_scope(isolate);
-  std::shared_ptr<Worker> worker =
+  i::Managed<Worker>::Ptr worker =
       GetWorkerFromInternalField(isolate, info.This());
-  if (!worker.get()) return;
+  if (!worker) return;
   worker->Terminate();
 }
 
@@ -3921,17 +3947,18 @@ void Shell::WorkerTerminateAndWait(
   DCHECK(i::ValidateCallbackInfo(info));
   Isolate* isolate = info.GetIsolate();
   HandleScope handle_scope(isolate);
-  std::shared_ptr<Worker> worker =
+  i::Managed<Worker>::Ptr worker =
       GetWorkerFromInternalField(isolate, info.This());
-  if (!worker.get()) {
+  if (!worker) {
     return;
   }
 
   reinterpret_cast<i::Isolate*>(isolate)
       ->main_thread_local_isolate()
-      ->ExecuteMainThreadWhileParked([worker](const i::ParkedScope& parked) {
-        worker->TerminateAndWaitForThread(parked);
-      });
+      ->ExecuteMainThreadWhileParked(
+          [worker = std::move(worker)](const i::ParkedScope& parked) mutable {
+            worker->TerminateAndWaitForThread(parked);
+          });
 }
 
 void Shell::QuitOnce(v8::FunctionCallbackInfo<v8::Value>* info) {
@@ -4341,9 +4368,30 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
   return global_template;
 }
 
+void Shell::ChangeDirectoryCallback(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  DCHECK(i::ValidateCallbackInfo(info));
+  Isolate* isolate = info.GetIsolate();
+  if (info.Length() != 1) {
+    isolate->ThrowError("chdir() takes one argument");
+    return;
+  }
+  String::Utf8Value directory(isolate, info[0]);
+  if (*directory == nullptr) {
+    isolate->ThrowError("os.chdir(): String conversion of argument failed.");
+    return;
+  }
+  if (!Shell::ChangeWorkingDirectory(*directory, /*print_error=*/false)) {
+    isolate->ThrowError("os.chdir(): Failed to change directory");
+    return;
+  }
+}
+
 Local<ObjectTemplate> Shell::CreateOSTemplate(Isolate* isolate) {
   Local<ObjectTemplate> os_template = ObjectTemplate::New(isolate);
   AddOSMethods(isolate, os_template);
+  os_template->Set(isolate, "chdir",
+                   FunctionTemplate::New(isolate, ChangeDirectoryCallback));
   os_template->Set(isolate, "name",
                    v8::String::NewFromUtf8Literal(isolate, V8_TARGET_OS_STRING),
                    PropertyAttribute::ReadOnly);
@@ -4467,6 +4515,8 @@ Local<ObjectTemplate> Shell::CreateD8Template(Isolate* isolate) {
                        FunctionTemplate::New(isolate, Shell::ReadFile));
     file_template->Set(isolate, "execute",
                        FunctionTemplate::New(isolate, Shell::ExecuteFile));
+    file_template->Set(isolate, "exists",
+                       FunctionTemplate::New(isolate, Shell::FileExists));
 #if V8_TARGET_OS_LINUX && V8_ENABLE_WEBASSEMBLY
     if (i::v8_flags.experimental_wasm_memory_control) {
       file_template->Set(
@@ -4803,22 +4853,6 @@ MaybeLocal<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
 #endif  // V8_ENABLE_HARDWARE_WATCHPOINT_SUPPORT
 
   return handle_scope.Escape(context);
-}
-
-void Shell::WriteIgnitionDispatchCountersFile(v8::Isolate* isolate) {
-  HandleScope handle_scope(isolate);
-  Local<Context> context = Context::New(isolate);
-  Context::Scope context_scope(context);
-
-  i::DirectHandle<i::JSObject> dispatch_counters =
-      reinterpret_cast<i::Isolate*>(isolate)
-          ->interpreter()
-          ->GetDispatchCountersObject();
-  std::ofstream dispatch_counters_stream(
-      i::v8_flags.trace_ignition_dispatches_output_file);
-  dispatch_counters_stream << *String::Utf8Value(
-      isolate, JSON::Stringify(context, Utils::ToLocal(dispatch_counters))
-                   .ToLocalChecked());
 }
 
 namespace {
@@ -5204,9 +5238,11 @@ V8_NOINLINE void FuzzerMonitor::UndefinedBehavior() {
 V8_NOINLINE void FuzzerMonitor::UseAfterFree() {
   // Use-after-free caught by ASAN.
 #if defined(__clang__)  // GCC-12 detects this at compile time!
+  START_IGNORE_LIFETIME_SAFETY_WARNINGS();
   std::vector<bool>* storage = new std::vector<bool>(3);
   delete storage;
   USE(storage->at(1));
+  END_IGNORE_LIFETIME_SAFETY_WARNINGS();
 #endif
 }
 
@@ -5589,6 +5625,136 @@ bool ends_with(const char* input, const char* suffix) {
   return false;
 }
 
+bool TryExecuteBundle(Isolate* isolate, const std::string& content,
+                      Local<String> file_name, bool* out_success) {
+  // Find the first // JS_BUNDLE_ comment. It's either
+  // "// JS_BUNDLE_SCRIPT", "// JS_BUNDLE_MODULE:filename.mjs", or "//
+  // JS_BUNDLE_MODULE_ENTRYPOINT". Then find either the end of the file, or the
+  // next // JS_BUNDLE_ comment. Between those locations, we have our file (or
+  // module).
+
+  // We first gather all scripts and modules, and then execute the scripts and
+  // the module entrypoints in order.
+
+  std::string script_marker = "// JS_BUNDLE_SCRIPT";
+  std::string module_marker_prefix = "// JS_BUNDLE_MODULE:";
+  std::string entrypoint_marker_prefix = "// JS_BUNDLE_MODULE_ENTRYPOINT";
+  std::string marker_prefix = "// JS_BUNDLE_";
+
+  size_t pos = 0;
+  // Skip whitespace and comments before the first marker.
+  while (pos < content.length()) {
+    if (isspace(content[pos])) {
+      pos++;
+      continue;
+    }
+    if (pos + 2 <= content.length() && content[pos] == '/') {
+      if (content[pos + 1] == '/') {
+        // Check if it's a marker.
+        if (content.compare(pos, marker_prefix.length(), marker_prefix) == 0) {
+          break;
+        }
+        // Skip single line comment.
+        pos = content.find('\n', pos);
+        if (pos == std::string::npos) return false;
+        pos++;
+        continue;
+      } else if (content[pos + 1] == '*') {
+        // Skip multi-line comment.
+        pos = content.find("*/", pos + 2);
+        if (pos == std::string::npos) return false;
+        pos += 2;
+        continue;
+      }
+    }
+    // Not a bundle if we encounter anything else.
+    return false;
+  }
+
+  if (pos >= content.length()) return false;
+
+  bundle_module_files.clear();
+
+  struct ExecutionItem {
+    enum Type { kScript, kModuleEntrypoint };
+    Type type;
+    std::string content_or_name;
+  };
+  std::vector<ExecutionItem> execution_order;
+  int anon_module_counter = 0;
+
+  while (pos < content.length()) {
+    // We expect a marker at pos.
+    if (content.compare(pos, marker_prefix.length(), marker_prefix) != 0) {
+      break;
+    }
+
+    size_t nl_pos = content.find('\n', pos);
+    std::string header;
+    if (nl_pos == std::string::npos) {
+      header = content.substr(pos);
+      pos = content.length();
+    } else {
+      header = content.substr(pos, nl_pos - pos);
+      if (!header.empty() && header.back() == '\r') header.pop_back();
+      pos = nl_pos + 1;
+    }
+
+    // Find the next marker.
+    size_t next_marker = content.find(marker_prefix, pos);
+    size_t part_end =
+        (next_marker == std::string::npos) ? content.length() : next_marker;
+
+    std::string part_content = content.substr(pos, part_end - pos);
+    pos = part_end;
+
+    if (header == script_marker) {
+      execution_order.push_back({ExecutionItem::kScript, part_content});
+    } else if (header.starts_with(module_marker_prefix)) {
+      std::string m_name = header.substr(module_marker_prefix.length());
+      std::string normalized_name =
+          NormalizeModuleSpecifier(m_name, GetWorkingDirectory());
+      bundle_module_files[normalized_name] = part_content;
+    } else if (header.starts_with(entrypoint_marker_prefix)) {
+      std::string m_name;
+      if (header.length() > entrypoint_marker_prefix.length() &&
+          header[entrypoint_marker_prefix.length()] == ':') {
+        m_name = header.substr(entrypoint_marker_prefix.length() + 1);
+      } else {
+        m_name = "entrypoint_" + std::to_string(anon_module_counter++) + ".mjs";
+      }
+      std::string normalized_name =
+          NormalizeModuleSpecifier(m_name, GetWorkingDirectory());
+      bundle_module_files[normalized_name] = part_content;
+      execution_order.push_back(
+          {ExecutionItem::kModuleEntrypoint, normalized_name});
+    } else {
+      std::cout << "Warning: Unknown bundle marker: " << header << "\n";
+    }
+  }
+
+  // Second pass: Execution
+  for (const auto& item : execution_order) {
+    Shell::set_script_executed();
+    if (item.type == ExecutionItem::kScript) {
+      Local<String> source =
+          String::NewFromUtf8(isolate, item.content_or_name.c_str())
+              .ToLocalChecked();
+      if (!Shell::ExecuteString(isolate, source, file_name,
+                                Shell::kReportExceptions)) {
+        *out_success = false;
+      }
+    } else if (item.type == ExecutionItem::kModuleEntrypoint) {
+      if (!Shell::ExecuteModule(isolate, item.content_or_name.c_str())) {
+        *out_success = false;
+      }
+    }
+  }
+
+  bundle_module_files.clear();
+  return true;  // Bundle handled successfully (even if execution failed)
+}
+
 bool SourceGroup::Execute(Isolate* isolate) {
   bool success = true;
 #ifdef V8_FUZZILLI
@@ -5611,19 +5777,38 @@ bool SourceGroup::Execute(Isolate* isolate) {
     }
     buffer[script_size] = 0;
 
-    Local<String> source =
-        String::NewFromUtf8(isolate, buffer, NewStringType::kNormal)
-            .ToLocalChecked();
+    std::string content(buffer, script_size);
     delete[] buffer;
-    Shell::set_script_executed();
-    if (!Shell::ExecuteString(isolate, source, file_name,
-                              Shell::kReportExceptions)) {
-      return false;
+
+    bool handled_as_bundle = false;
+    if (Shell::options.bundle) {
+      handled_as_bundle =
+          TryExecuteBundle(isolate, content, file_name, &success);
+    }
+
+    if (!handled_as_bundle) {
+      Local<String> source =
+          String::NewFromUtf8(isolate, content.c_str(), NewStringType::kNormal)
+              .ToLocalChecked();
+      Shell::set_script_executed();
+      if (!Shell::ExecuteString(isolate, source, file_name,
+                                Shell::kReportExceptions)) {
+        return false;
+      }
+    } else if (!success) {
+      return false;  // Bundle execution failed
     }
   }
 #endif  // V8_FUZZILLI
   for (int i = begin_offset_; i < end_offset_; ++i) {
     const char* arg = argv_[i];
+    if (arg == nullptr) continue;
+    // When we hit -C, switch to the new CWD and stay there
+    if (i == Shell::options.post_filtering_cwd_index) {
+      Shell::ChangeWorkingDirectory(Shell::options.cwd);
+      continue;
+    }
+
     if (strcmp(arg, "-e") == 0 && i + 1 < end_offset_) {
       // Execute argument given to -e option directly.
       HandleScope handle_scope(isolate);
@@ -5679,8 +5864,19 @@ bool SourceGroup::Execute(Isolate* isolate) {
     }
     Shell::set_script_executed();
     Shell::update_script_size(source->Length());
-    if (!Shell::ExecuteString(isolate, source, file_name,
-                              Shell::kReportExceptions)) {
+
+    bool handled_as_bundle = false;
+    if (Shell::options.bundle) {
+      String::Utf8Value utf8(isolate, source);
+      std::string content(*utf8, utf8.length());
+      if (TryExecuteBundle(isolate, content, file_name, &success)) {
+        handled_as_bundle = true;
+        if (!success) break;
+      }
+    }
+
+    if (!handled_as_bundle && !Shell::ExecuteString(isolate, source, file_name,
+                                                    Shell::kReportExceptions)) {
       success = false;
       break;
     }
@@ -5876,7 +6072,13 @@ std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
   while (!out_queue_.Dequeue(&result)) {
     // If the worker is no longer running, and there are no messages in the
     // queue, don't expect any more messages from it.
-    if (!is_running()) break;
+    if (!is_running()) {
+      // Do try to read one more message from the queue though, in case a
+      // message was posted between the previous Dequeue and the is_running()
+      // check.
+      out_queue_.Dequeue(&result);
+      break;
+    }
     out_semaphore_.ParkedWait(
         reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
   }
@@ -5966,7 +6168,7 @@ void Worker::ProcessMessage(std::unique_ptr<SerializationData> data) {
 
 void Worker::ProcessMessages() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate_);
-  i::SaveAndSwitchContext saved_context(i_isolate, i::Context());
+  i::SaveAndSwitchContext saved_context(i_isolate, {});
   SealHandleScope shs(isolate_);
 
   TryCatch try_catch(isolate_);
@@ -6159,7 +6361,8 @@ void Worker::PostMessageOut(const v8::FunctionCallbackInfo<v8::Value>& info) {
   }
 
   Local<Value> message = info[0];
-  Local<Value> transfer = Undefined(isolate);
+  Local<Value> transfer =
+      info.Length() >= 2 ? info[1] : Undefined(isolate).As<Value>();
   std::unique_ptr<SerializationData> data =
       Shell::SerializeValue(isolate, message, transfer);
   if (data) {
@@ -6189,40 +6392,7 @@ void Worker::Close(const v8::FunctionCallbackInfo<v8::Value>& info) {
   worker->Terminate();
 }
 
-#ifdef V8_TARGET_OS_WIN
-// Enable support for unicode filename path on windows.
-// We first convert ansi encoded argv[i] to utf16 encoded, and then
-// convert utf16 encoded to utf8 encoded with setting the argv[i]
-// to the utf8 encoded arg. We allocate memory for the utf8 encoded
-// arg, and we will free it and reset it to nullptr after using
-// the filename path arg. And because Execute may be called multiple
-// times, we need to free the allocated unicode filename when exit.
 
-// Save the allocated utf8 filenames, and we will free them when exit.
-std::vector<char*> utf8_filenames;
-#include <shellapi.h>
-// Convert utf-16 encoded string to utf-8 encoded.
-char* ConvertUtf16StringToUtf8(const wchar_t* str) {
-  // On Windows wchar_t must be a 16-bit value.
-  static_assert(sizeof(wchar_t) == 2, "wrong wchar_t size");
-  int len =
-      WideCharToMultiByte(CP_UTF8, 0, str, -1, nullptr, 0, nullptr, FALSE);
-  DCHECK_LT(0, len);
-  char* utf8_str = new char[len];
-  utf8_filenames.push_back(utf8_str);
-  WideCharToMultiByte(CP_UTF8, 0, str, -1, utf8_str, len, nullptr, FALSE);
-  return utf8_str;
-}
-
-// Convert ansi encoded argv[i] to utf8 encoded.
-void PreProcessUnicodeFilenameArg(char* argv[], int i) {
-  int argc;
-  wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
-  argv[i] = ConvertUtf16StringToUtf8(wargv[i]);
-  LocalFree(wargv);
-}
-
-#endif
 
 namespace {
 
@@ -6238,7 +6408,7 @@ bool FlagMatches(const char* flag, char** arg, bool keep_flag = false) {
 
 template <size_t N>
 bool FlagWithArgMatches(const char (&flag)[N], char** flag_value, int argc,
-                        char* argv[], int* i) {
+                        char* argv[], int* i, bool keep_flag = false) {
   char* current_arg = argv[*i];
 
   // Compare the flag up to the last character of the flag name (not including
@@ -6247,16 +6417,16 @@ bool FlagWithArgMatches(const char (&flag)[N], char** flag_value, int argc,
     // Match against --flag=value
     if (current_arg[N - 1] == '=') {
       *flag_value = argv[*i] + N;
-      argv[*i] = nullptr;
+      if (!keep_flag) argv[*i] = nullptr;
       return true;
     }
     // Match against --flag value
     if (current_arg[N - 1] == '\0') {
       CHECK_LT(*i, argc - 1);
-      argv[*i] = nullptr;
+      if (!keep_flag) argv[*i] = nullptr;
       (*i)++;
       *flag_value = argv[*i];
-      argv[*i] = nullptr;
+      if (!keep_flag) argv[*i] = nullptr;
       return true;
     }
   }
@@ -6270,7 +6440,7 @@ bool FlagWithArgMatches(const char (&flag)[N], char** flag_value, int argc,
 bool Shell::SetOptions(int argc, char* argv[]) {
   options.d8_path = argv[0];
   bool disallow_unsafe_flags = false;
-  bool exit_on_flag_contradictions = false;
+  bool flag_processing_mode_explicitly_set = false;
   for (int i = 0; i < argc; i++) {
     char* flag_value = nullptr;
     if (FlagMatches("--", &argv[i])) {
@@ -6284,19 +6454,23 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       options.include_arguments = false;
     } else if (FlagMatches("--simulate-errors", &argv[i])) {
       options.simulate_errors = true;
-    } else if (FlagMatches("--fuzzing", &argv[i], /*keep_flag=*/true) ||
-               FlagMatches("--no-abort-on-contradictory-flags", &argv[i],
-                           /*keep_flag=*/true) ||
-               FlagMatches("--noabort-on-contradictory-flags", &argv[i],
-                           /*keep_flag=*/true)) {
-      check_d8_flag_contradictions = false;
-    } else if (FlagMatches("--abort-on-contradictory-flags", &argv[i],
-                           /*keep_flag=*/true)) {
-      check_d8_flag_contradictions = true;
-    } else if (FlagMatches("--exit-on-contradictory-flags", &argv[i],
-                           /*keep_flag=*/true)) {
-      check_d8_flag_contradictions = true;
-      exit_on_flag_contradictions = true;
+    } else if (FlagWithArgMatches("--flag-processing-mode", &flag_value, argc,
+                                  argv, &i, /*keep_flag=*/true)) {
+      flag_processing_mode_explicitly_set = true;
+      if (strcmp(flag_value, "exit-on-error") == 0) {
+        check_d8_flag_contradictions = true;
+        exit_on_flag_contradictions = true;
+      } else if (strcmp(flag_value, "ignore-contradictions") == 0) {
+        check_d8_flag_contradictions = false;
+        exit_on_flag_contradictions = false;
+      } else if (strcmp(flag_value, "abort-on-error") == 0) {
+        check_d8_flag_contradictions = true;
+        exit_on_flag_contradictions = false;
+      }
+    } else if (FlagMatches("--fuzzing", &argv[i], /*keep_flag=*/true)) {
+      if (!flag_processing_mode_explicitly_set) {
+        check_d8_flag_contradictions = false;
+      }
     } else if (FlagMatches("--disallow-unsafe-flags", &argv[i],
                            /*keep_flag=*/true)) {
       disallow_unsafe_flags = true;
@@ -6324,6 +6498,16 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       // Ignore any -f flags for compatibility with other stand-alone
       // JavaScript engines.
       continue;
+    } else if (FlagWithArgMatches("-C", &flag_value, argc, argv, &i,
+                                  /*keep_flag=*/true)) {
+      if (options.cwd.WasSpecified()) {
+        FATAL("Only one -C option is allowed.");
+      }
+      options.cwd = flag_value;
+      if (flag_value == argv[i]) {
+        // Clear the separate path arg to simplify late -C checks.
+        argv[i] = nullptr;
+      }
     } else if (FlagMatches("--ignore-unhandled-promises", &argv[i])) {
       options.ignore_unhandled_promises = true;
     } else if (FlagMatches("--isolate", &argv[i], /*keep_flag=*/true)) {
@@ -6447,6 +6631,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                   argv, &i)) {
       // Value is expressed in MB.
       options.max_serializer_memory = atoi(flag_value) * i::MB;
+    } else if (FlagMatches("--bundle", &argv[i])) {
+      options.bundle = true;
 #ifdef V8_FUZZILLI
     } else if (FlagMatches("--fuzzilli-enable-builtins-coverage", &argv[i])) {
       options.fuzzilli_enable_builtins_coverage = true;
@@ -6484,7 +6670,7 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       options.flush_denormals = true;
     } else {
 #ifdef V8_TARGET_OS_WIN
-      PreProcessUnicodeFilenameArg(argv, i);
+      Shell::PreProcessUnicodeFilenameArg(argv, i);
 #endif
     }
   }
@@ -6497,15 +6683,10 @@ bool Shell::SetOptions(int argc, char* argv[]) {
           if (!flag.WasSpecified()) {
             return;
           }
-          base::OS::PrintError(
+          ReportFlagError(
               "Command-line provided flag --%s is prohibited by "
-              "--disallow-unsafe-flags.\n",
+              "--disallow-unsafe-flags",
               flag.name());
-          if (exit_on_flag_contradictions) {
-            base::OS::ExitProcess(-1);
-          } else {
-            base::OS::Abort();
-          }
         };  // NOLINT(readability/braces)
     // The --disallow-unsafe-flags is meant to block known unsafe configurations
     // and mitigate spurious reports due invalid flag combinations/values. To
@@ -6546,9 +6727,11 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       " <file>...]\n\n"
       "  -e        execute a string in V8\n"
       "  --shell   run an interactive JavaScript shell\n"
-      "  --module  execute a file as a JavaScript module\n";
+      "  --module  execute a file as a JavaScript module\n"
+      "  -C        set the current working directory before executing "
+      "subsequent files\n";
   using HelpOptions = i::FlagList::HelpOptions;
-  i::v8_flags.abort_on_contradictory_flags = true;
+  i::v8_flags.flag_processing_mode = "abort-on-error";
   static constexpr char kStandaloneD8ShellFlag[] = "--is_standalone_d8_shell";
   i::FlagList::SetFlagsFromString(kStandaloneD8ShellFlag,
                                   strlen(kStandaloneD8ShellFlag));
@@ -6575,7 +6758,10 @@ bool Shell::SetOptions(int argc, char* argv[]) {
   current->Begin(argv, 1);
   for (int i = 1; i < argc; i++) {
     const char* str = argv[i];
-    if (strcmp(str, "--isolate") == 0) {
+    if (strcmp(str, "-C") == 0 || strncmp(str, "-C=", 3) == 0) {
+      options.post_filtering_cwd_index = i;
+      continue;
+    } else if (strcmp(str, "--isolate") == 0) {
       current->End(i);
       current++;
       current->Begin(argv, i + 1);
@@ -6601,7 +6787,9 @@ int Shell::RunMain(v8::Isolate* isolate, bool last_run) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
 
   for (int i = 1; i < options.num_isolates; ++i) {
-    options.isolate_sources[i].StartExecuteInThread();
+    if (!options.bundle) {
+      options.isolate_sources[i].StartExecuteInThread();
+    }
   }
 
   // The Context object, created inside RunMainIsolate, is used after the method
@@ -6616,10 +6804,12 @@ int Shell::RunMain(v8::Isolate* isolate, bool last_run) {
   i_isolate->main_thread_local_heap()->ExecuteMainThreadWhileParked(
       [last_run](const i::ParkedScope& parked) {
         for (int i = 1; i < options.num_isolates; ++i) {
-          if (last_run) {
-            options.isolate_sources[i].JoinThread(parked);
-          } else {
-            options.isolate_sources[i].WaitForThread(parked);
+          if (!options.bundle) {
+            if (last_run) {
+              options.isolate_sources[i].JoinThread(parked);
+            } else {
+              options.isolate_sources[i].WaitForThread(parked);
+            }
           }
         }
         WaitForRunningWorkers(parked);
@@ -6726,7 +6916,7 @@ bool ProcessMessages(
     Isolate* isolate,
     const std::function<platform::MessageLoopBehavior()>& behavior) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  i::SaveAndSwitchContext saved_context(i_isolate, i::Context());
+  i::SaveAndSwitchContext saved_context(i_isolate, {});
   SealHandleScope shs(isolate);
 
   if (isolate->IsExecutionTerminating()) return true;
@@ -7295,7 +7485,10 @@ int Shell::Main(int argc, char* argv[]) {
         options.apply_priority ? v8::platform::PriorityMode::kApply
                                : v8::platform::PriorityMode::kDontApply);
   }
+  // The platform is owned by wrapper platform despite the `std::move` below.
+  START_IGNORE_LIFETIME_SAFETY_WARNINGS()
   g_default_platform = g_platform.get();
+  END_IGNORE_LIFETIME_SAFETY_WARNINGS()
   if (i::v8_flags.predictable) {
     g_platform = MakePredictablePlatform(std::move(g_platform));
   }
@@ -7429,6 +7622,15 @@ int Shell::Main(int argc, char* argv[]) {
     Initialize(isolate, &console);
     PerIsolateData data(isolate);
 
+    if (i::v8_flags.sandbox_trap_fuzzing) {
+#ifdef V8_SANDBOX_TRAP_FUZZER_AVAILABLE
+      i::SandboxTrapFuzzer::Enable();
+#else
+      printf("Trap-based sandbox fuzzing is not available on this platform.");
+      base::OS::ExitProcess(1);
+#endif
+    }
+
     // Fuzzilli REPRL = read-eval-print-loop
     do {
 #ifdef V8_FUZZILLI
@@ -7478,11 +7680,12 @@ int Shell::Main(int argc, char* argv[]) {
 
       if (i::v8_flags.stress_runs > 0) {
         options.stress_runs = i::v8_flags.stress_runs;
-        for (int i = 0; i < options.stress_runs && result == 0; i++) {
+        for (int i = 0; i < options.stress_runs; i++) {
           printf("============ Run %d/%d ============\n", i + 1,
                  options.stress_runs.get());
           bool last_run = i == options.stress_runs - 1;
-          result = RunMain(isolate, last_run);
+          int this_result = RunMain(isolate, last_run);
+          if (this_result != 0) result = this_result;
         }
       } else if (options.code_cache_options != ShellOptions::kNoProduceCache) {
         // Park the main thread here in case the new isolate wants to perform
@@ -7538,10 +7741,6 @@ int Shell::Main(int argc, char* argv[]) {
       // executed, but never on --test
       if (use_interactive_shell()) {
         RunShell(isolate);
-      }
-
-      if (i::v8_flags.trace_ignition_dispatches_output_file != nullptr) {
-        WriteIgnitionDispatchCountersFile(isolate);
       }
 
       if (options.cpu_profiler) {
@@ -7616,15 +7815,11 @@ int Shell::Main(int argc, char* argv[]) {
   if (options.trace_enabled) {
     tracing_controller->StopTracing();
   }
+  g_default_platform = nullptr;
   g_platform.reset();
 
 #ifdef V8_TARGET_OS_WIN
-  // We need to free the allocated utf8 filenames in
-  // PreProcessUnicodeFilenameArg.
-  for (char* utf8_str : utf8_filenames) {
-    delete[] utf8_str;
-  }
-  utf8_filenames.clear();
+  Shell::FreeUnicodeFilenameArgs();
 #endif
 
   Shell::array_buffer_allocator = nullptr;

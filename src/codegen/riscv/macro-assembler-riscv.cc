@@ -458,26 +458,6 @@ void MacroAssembler::ResolveCodePointerHandle(Register destination,
   Or(destination, destination, Operand(kHeapObjectTag));
 }
 
-void MacroAssembler::LoadCodeEntrypointViaCodePointer(Register destination,
-                                                      MemOperand field_operand,
-                                                      CodeEntrypointTag tag) {
-  DCHECK_NE(tag, kInvalidEntrypointTag);
-  ASM_CODE_COMMENT(this);
-  UseScratchRegisterScope temps(this);
-  Register scratch = temps.Acquire();
-  LoadCodePointerTableBase(scratch);
-  Lwu(destination, field_operand);
-  SrlWord(destination, destination, kCodePointerHandleShift);
-  SllWord(destination, destination, kCodePointerTableEntrySizeLog2);
-  AddWord(scratch, scratch, destination);
-  LoadWord(destination,
-           MemOperand(scratch, kCodePointerTableEntryEntrypointOffset));
-  if (tag != 0) {
-    li(scratch, Operand(tag));
-    Xor(destination, destination, scratch);
-  }
-}
-
 void MacroAssembler::LoadCodePointerTableBase(Register destination) {
 #ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
   if (!options().isolate_independent_code && isolate()) {
@@ -2338,84 +2318,6 @@ void MacroAssembler::AlignedStoreHelper(Reg_T value, const MemOperand& rs,
   generator(value, source);
 }
 
-void MacroAssembler::Ulw(Register rd, const MemOperand& rs) {
-  UnalignedLoadHelper<4, true>(rd, rs);
-}
-
-#if V8_TARGET_ARCH_RISCV64
-void MacroAssembler::Ulwu(Register rd, const MemOperand& rs) {
-  UnalignedLoadHelper<4, false>(rd, rs);
-}
-#endif
-void MacroAssembler::Usw(Register rd, const MemOperand& rs) {
-  UnalignedStoreHelper<4>(rd, rs, t4);
-}
-
-void MacroAssembler::Ulh(Register rd, const MemOperand& rs) {
-  UnalignedLoadHelper<2, true>(rd, rs);
-}
-
-void MacroAssembler::Ulhu(Register rd, const MemOperand& rs) {
-  UnalignedLoadHelper<2, false>(rd, rs);
-}
-
-void MacroAssembler::Ush(Register rd, const MemOperand& rs) {
-  UnalignedStoreHelper<2>(rd, rs, t4);
-}
-
-void MacroAssembler::Uld(Register rd, const MemOperand& rs) {
-  UnalignedLoadHelper<8, true>(rd, rs);
-}
-#if V8_TARGET_ARCH_RISCV64
-// Load consequent 32-bit word pair in 64-bit reg. and put first word in low
-// bits,
-// second word in high bits.
-void MacroAssembler::LoadWordPair(Register rd, const MemOperand& rs) {
-  UseScratchRegisterScope temps(this);
-  Register scratch = temps.Acquire();
-  Lwu(rd, rs);
-  Lw(scratch, MemOperand(rs.rm(), rs.offset() + kSystemPointerSize / 2));
-  SllWord(scratch, scratch, 32);
-  AddWord(rd, rd, scratch);
-}
-
-// Do 64-bit store as two consequent 32-bit stores to unaligned address.
-void MacroAssembler::StoreWordPair(Register rd, const MemOperand& rs) {
-  UseScratchRegisterScope temps(this);
-  Register scratch = temps.Acquire();
-  Sw(rd, rs);
-  SraWord(scratch, rd, 32);
-  Sw(scratch, MemOperand(rs.rm(), rs.offset() + kSystemPointerSize / 2));
-}
-#endif
-
-void MacroAssembler::Usd(Register rd, const MemOperand& rs) {
-  UnalignedStoreHelper<8>(rd, rs, t4);
-}
-
-void MacroAssembler::ULoadFloat(FPURegister fd, const MemOperand& rs) {
-  UnalignedFLoadHelper<4>(fd, rs);
-}
-
-void MacroAssembler::UStoreFloat(FPURegister fd, const MemOperand& rs) {
-  UnalignedFStoreHelper<4>(fd, rs);
-}
-
-void MacroAssembler::ULoadDouble(FPURegister fd, const MemOperand& rs) {
-#if V8_TARGET_ARCH_RISCV64
-  UnalignedFLoadHelper<8>(fd, rs);
-#elif V8_TARGET_ARCH_RISCV32
-  UnalignedDoubleHelper(fd, rs);
-#endif
-}
-
-void MacroAssembler::UStoreDouble(FPURegister fd, const MemOperand& rs) {
-#if V8_TARGET_ARCH_RISCV64
-  UnalignedFStoreHelper<8>(fd, rs);
-#elif V8_TARGET_ARCH_RISCV32
-  UnalignedDStoreHelper(fd, rs);
-#endif
-}
 
 void MacroAssembler::Lb(Register rd, const MemOperand& rs, Trapper&& trapper) {
   auto fn = [&](Register target, const MemOperand& source) {
@@ -3865,27 +3767,47 @@ void MacroAssembler::FaddS(FPURegister dst, FPURegister lhs, FPURegister rhs) {
 #if V8_TARGET_ARCH_RISCV64
 void MacroAssembler::Floor_d_d(FPURegister dst, FPURegister src,
                                FPURegister fpu_scratch) {
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fround_d(dst, src, RDN);
+    return;
+  }
   RoundHelper<double>(dst, src, fpu_scratch, RDN);
 }
 
 void MacroAssembler::Ceil_d_d(FPURegister dst, FPURegister src,
                               FPURegister fpu_scratch) {
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fround_d(dst, src, RUP);
+    return;
+  }
   RoundHelper<double>(dst, src, fpu_scratch, RUP);
 }
 
 void MacroAssembler::Trunc_d_d(FPURegister dst, FPURegister src,
                                FPURegister fpu_scratch) {
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fround_d(dst, src, RTZ);
+    return;
+  }
   RoundHelper<double>(dst, src, fpu_scratch, RTZ);
 }
 
 void MacroAssembler::Round_d_d(FPURegister dst, FPURegister src,
                                FPURegister fpu_scratch) {
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fround_d(dst, src, RNE);
+    return;
+  }
   RoundHelper<double>(dst, src, fpu_scratch, RNE);
 }
 #endif
 
 void MacroAssembler::Floor_s_s(FPURegister dst, FPURegister src,
                                FPURegister fpu_scratch) {
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fround_s(dst, src, RDN);
+    return;
+  }
 #if V8_TARGET_ARCH_RISCV64
   RoundHelper<float>(dst, src, fpu_scratch, RDN);
 #elif V8_TARGET_ARCH_RISCV32
@@ -3895,6 +3817,10 @@ void MacroAssembler::Floor_s_s(FPURegister dst, FPURegister src,
 
 void MacroAssembler::Ceil_s_s(FPURegister dst, FPURegister src,
                               FPURegister fpu_scratch) {
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fround_s(dst, src, RUP);
+    return;
+  }
 #if V8_TARGET_ARCH_RISCV64
   RoundHelper<float>(dst, src, fpu_scratch, RUP);
 #elif V8_TARGET_ARCH_RISCV32
@@ -3904,6 +3830,10 @@ void MacroAssembler::Ceil_s_s(FPURegister dst, FPURegister src,
 
 void MacroAssembler::Trunc_s_s(FPURegister dst, FPURegister src,
                                FPURegister fpu_scratch) {
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fround_s(dst, src, RTZ);
+    return;
+  }
 #if V8_TARGET_ARCH_RISCV64
   RoundHelper<float>(dst, src, fpu_scratch, RTZ);
 #elif V8_TARGET_ARCH_RISCV32
@@ -3913,6 +3843,10 @@ void MacroAssembler::Trunc_s_s(FPURegister dst, FPURegister src,
 
 void MacroAssembler::Round_s_s(FPURegister dst, FPURegister src,
                                FPURegister fpu_scratch) {
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fround_s(dst, src, RNE);
+    return;
+  }
 #if V8_TARGET_ARCH_RISCV64
   RoundHelper<float>(dst, src, fpu_scratch, RNE);
 #elif V8_TARGET_ARCH_RISCV32
@@ -4578,6 +4512,11 @@ void MacroAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
                                        Register result,
                                        DoubleRegister double_input,
                                        StubCallMode stub_mode) {
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fcvtmod_w_d(result, double_input);
+    return;
+  }
+
   Label done;
 
   TryInlineTruncateDoubleToI(result, double_input, &done);
@@ -7367,24 +7306,40 @@ void MacroAssembler::FloatMinMaxHelper(FPURegister dst, FPURegister src1,
 void MacroAssembler::Float32Max(FPURegister dst, FPURegister src1,
                                 FPURegister src2) {
   ASM_CODE_COMMENT(this);
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fmaxm_s(dst, src1, src2);
+    return;
+  }
   FloatMinMaxHelper<float>(dst, src1, src2, MaxMinKind::kMax);
 }
 
 void MacroAssembler::Float32Min(FPURegister dst, FPURegister src1,
                                 FPURegister src2) {
   ASM_CODE_COMMENT(this);
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fminm_s(dst, src1, src2);
+    return;
+  }
   FloatMinMaxHelper<float>(dst, src1, src2, MaxMinKind::kMin);
 }
 
 void MacroAssembler::Float64Max(FPURegister dst, FPURegister src1,
                                 FPURegister src2) {
   ASM_CODE_COMMENT(this);
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fmaxm_d(dst, src1, src2);
+    return;
+  }
   FloatMinMaxHelper<double>(dst, src1, src2, MaxMinKind::kMax);
 }
 
 void MacroAssembler::Float64Min(FPURegister dst, FPURegister src1,
                                 FPURegister src2) {
   ASM_CODE_COMMENT(this);
+  if (CpuFeatures::IsSupported(ZFA)) {
+    fminm_d(dst, src1, src2);
+    return;
+  }
   FloatMinMaxHelper<double>(dst, src1, src2, MaxMinKind::kMin);
 }
 
@@ -7637,13 +7592,15 @@ void MacroAssembler::LoadCodeInstructionStart(Register destination,
                                               Register code_object,
                                               CodeEntrypointTag tag) {
   ASM_CODE_COMMENT(this);
-#ifdef V8_ENABLE_SANDBOX
-  LoadCodeEntrypointViaCodePointer(
-      destination,
-      FieldMemOperand(code_object, Code::kSelfIndirectPointerOffset), tag);
-#else
   LoadWord(destination,
            FieldMemOperand(code_object, Code::kInstructionStartOffset));
+#ifdef V8_ENABLE_SANDBOX
+  if (tag != 0) {
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
+    li(scratch, Operand(tag));
+    Xor(destination, destination, scratch);
+  }
 #endif
 }
 
@@ -8291,11 +8248,22 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
 
 void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
                                         Register scratch, Label* fbv_undef) {
-  Label done;
-  // Load the feedback vector from the closure.
+  LoadFeedbackCell(dst, closure);
+  LoadFeedbackVectorFromCell(dst, dst, scratch, fbv_undef);
+}
+
+void MacroAssembler::LoadFeedbackCell(Register dst, Register closure) {
   LoadTaggedField(dst,
                   FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  LoadTaggedField(dst, FieldMemOperand(dst, offsetof(FeedbackCell, value_)));
+}
+
+void MacroAssembler::LoadFeedbackVectorFromCell(Register dst,
+                                                Register feedback_cell,
+                                                Register scratch,
+                                                Label* fbv_undef) {
+  Label done;
+  LoadTaggedField(
+      dst, FieldMemOperand(feedback_cell, offsetof(FeedbackCell, value_)));
 
   // Check if feedback vector is valid.
   LoadTaggedField(scratch, FieldMemOperand(dst, HeapObject::kMapOffset));

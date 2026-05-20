@@ -10,7 +10,6 @@
 #include "src/heap/mutable-page.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
-#include "src/wasm/object-access.h"
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
 
@@ -78,9 +77,9 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
     LoadInstanceDataFromFrame(instance_data);
   }
 
-  constexpr int kArrayOffset = wasm::ObjectAccess::ToTagged(
-      WasmTrustedInstanceData::kTieringBudgetArrayOffset);
-  LoadWord(budget_array, MemOperand(instance_data, kArrayOffset));
+  LoadWord(budget_array,
+           FieldMemOperand(instance_data,
+                           WasmTrustedInstanceData::kTieringBudgetArrayOffset));
 
   int budget_arr_offset = kInt32Size * declared_func_index;
   // TODO(kasperl@rivosinc.com): We cannot currently use {temps} to acquire a
@@ -289,16 +288,16 @@ void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
 void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
                                         int offset, int size) {
   DCHECK_LE(0, offset);
-  MemOperand src{instance, offset};
+  MemOperand src = FieldMemOperand(instance, offset);
   switch (size) {
     case 1:
-      Lb(dst, MemOperand(src));
+      Lb(dst, src);
       break;
     case 4:
-      Lw(dst, MemOperand(src));
+      Lw(dst, src);
       break;
     case 8:
-      LoadWord(dst, MemOperand(src));
+      LoadWord(dst, src);
       break;
     default:
       UNIMPLEMENTED();
@@ -309,7 +308,7 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      Register instance,
                                                      int offset) {
   DCHECK_LE(0, offset);
-  LoadTaggedField(dst, MemOperand{instance, offset});
+  LoadTaggedField(dst, FieldMemOperand(instance, offset));
 }
 
 void LiftoffAssembler::ResetOSRTarget() {}
@@ -1819,12 +1818,11 @@ void LiftoffAssembler::emit_f32x4_div(LiftoffRegister dst, LiftoffRegister lhs,
 
 void LiftoffAssembler::emit_f32x4_min(LiftoffRegister dst, LiftoffRegister lhs,
                                       LiftoffRegister rhs) {
-  const int32_t kNaN = 0x7FC00000;
   VU.SetSimd128(E32);
   vmfeq_vv(v0, lhs.simd128(), lhs.simd128());
   vmfeq_vv(kSimd128ScratchReg, rhs.simd128(), rhs.simd128());
   vand_vv(v0, v0, kSimd128ScratchReg);
-  li(kScratchReg, kNaN);
+  li(kScratchReg, kFP32DefaultNaN);
   vmv_vx(kSimd128ScratchReg, kScratchReg);
   vfmin_vv(kSimd128ScratchReg, rhs.simd128(), lhs.simd128(), Mask);
   vmv_vv(dst.simd128(), kSimd128ScratchReg);
@@ -1832,12 +1830,11 @@ void LiftoffAssembler::emit_f32x4_min(LiftoffRegister dst, LiftoffRegister lhs,
 
 void LiftoffAssembler::emit_f32x4_max(LiftoffRegister dst, LiftoffRegister lhs,
                                       LiftoffRegister rhs) {
-  const int32_t kNaN = 0x7FC00000;
   VU.SetSimd128(E32);
   vmfeq_vv(v0, lhs.simd128(), lhs.simd128());
   vmfeq_vv(kSimd128ScratchReg, rhs.simd128(), rhs.simd128());
   vand_vv(v0, v0, kSimd128ScratchReg);
-  li(kScratchReg, kNaN);
+  li(kScratchReg, kFP32DefaultNaN);
   vmv_vx(kSimd128ScratchReg, kScratchReg);
   vfmax_vv(kSimd128ScratchReg, rhs.simd128(), lhs.simd128(), Mask);
   vmv_vv(dst.simd128(), kSimd128ScratchReg);
@@ -2438,11 +2435,15 @@ void LiftoffAssembler::PushRegisters(LiftoffRegList regs) {
     }
     DCHECK_EQ(offset, num_fp_regs * sizeof(double));
   }
-
-  SaveVectorRegisters(regs.GetSimd128List());
+  if (!regs.GetSimd128List().is_empty()) {
+    SaveVectorRegisters(regs.GetSimd128List());
+  }
 }
 
 void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+  if (!regs.GetSimd128List().is_empty()) {
+    RestoreVectorRegisters(regs.GetSimd128List());
+  }
   LiftoffRegList fp_regs = regs & kFpCacheRegList;
   int32_t fp_offset = 0;
   while (!fp_regs.is_empty()) {
@@ -2461,8 +2462,6 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
     gp_offset += kSystemPointerSize;
   }
   AddWord(sp, sp, Operand(gp_offset));
-
-  RestoreVectorRegisters(regs.GetSimd128List());
 }
 
 void LiftoffAssembler::RecordSpillsInSafepoint(

@@ -356,6 +356,19 @@ bool MarkCompactCollector::StartCompaction(StartCompactionMode mode) {
     return false;
   }
 
+  // We perform compaction when any of the following conditions are met:
+  // 1) The 'compaction_on_regular_gcs' flag is enabled.
+  // 2) A compaction testing or stress mode is enabled.
+  // 3) We are in a memory reduction garbage collection.
+  // 4) We should optimize for memory usage.
+  if (!v8_flags.compaction_on_regular_gcs &&
+      !v8_flags.compact_on_every_full_gc && !v8_flags.stress_compaction &&
+      !v8_flags.stress_compaction_random &&
+      !v8_flags.manual_evacuation_candidates_selection &&
+      !heap_->ShouldReduceMemory() && !heap_->ShouldOptimizeForMemoryUsage()) {
+    return false;
+  }
+
   // For --no-compact-with-stack we can bail out for atomic GCs with a stack
   // present. For non-atomic GCs the final atomic pause could still be triggered
   // from a task.
@@ -2475,7 +2488,7 @@ void MarkCompactCollector::RecordObjectStats() {
   if (V8_LIKELY(!TracingFlags::is_gc_stats_enabled())) return;
   // Cannot run during bootstrapping due to incomplete objects.
   if (heap_->isolate()->bootstrapper()->IsActive()) return;
-  TRACE_EVENT0(TRACE_GC_CATEGORIES, "V8.GC_OBJECT_DUMP_STATISTICS");
+  TRACE_EVENT(TRACE_GC_CATEGORIES, "V8.GC_OBJECT_DUMP_STATISTICS");
   heap_->CreateObjectStats();
   ObjectStatsCollector collector(heap_, heap_->live_object_stats_.get(),
                                  heap_->dead_object_stats_.get());
@@ -2485,10 +2498,9 @@ void MarkCompactCollector::RecordObjectStats() {
     std::stringstream live, dead;
     heap_->live_object_stats_->Dump(live);
     heap_->dead_object_stats_->Dump(dead);
-    TRACE_EVENT_INSTANT2(TRACE_DISABLED_BY_DEFAULT("v8.gc_stats"),
-                         "V8.GC_Objects_Stats", TRACE_EVENT_SCOPE_THREAD,
-                         "live", TRACE_STR_COPY(live.str().c_str()), "dead",
-                         TRACE_STR_COPY(dead.str().c_str()));
+    TRACE_EVENT_INSTANT(TRACE_DISABLED_BY_DEFAULT("v8.gc_stats"),
+                        "V8.GC_Objects_Stats", "live", live.str().c_str(),
+                        "dead", dead.str().c_str());
   }
   if (v8_flags.trace_gc_object_stats) {
     heap_->live_object_stats_->PrintJSON("live");
@@ -3647,13 +3659,9 @@ void MarkCompactCollector::FlushBytecodeFromSFI(
 
 #ifdef V8_ENABLE_SANDBOX
   DCHECK(!HeapLayout::InWritableSharedSpace(shared_info));
-  // Zap the old entry in the trusted pointer table.
-  TrustedPointerTable& table = heap_->isolate()->trusted_pointer_table();
-  IndirectPointerSlot self_indirect_pointer_slot =
-      bytecode_array->RawIndirectPointerField(
-          BytecodeArray::kSelfIndirectPointerOffset,
-          kBytecodeArrayIndirectPointerTag);
-  table.Zap(self_indirect_pointer_slot.Relaxed_LoadHandle());
+  // Make the old handle unusable. We don't zap it eagerly since other SFI might
+  // point to the same bytecode array.
+  bytecode_array->Unpublish(heap_->isolate());
 #endif
 
   Tagged<HeapObject> compiled_data = bytecode_array;
@@ -3698,6 +3706,7 @@ void MarkCompactCollector::FlushBytecodeFromSFI(
   Tagged<UncompiledData> uncompiled_data =
       TrustedCast<UncompiledData>(compiled_data);
 
+  // We allocate the new handle here.
   uncompiled_data->InitAfterBytecodeFlush(
       heap_->isolate(), inferred_name, start_position, end_position,
       [](Tagged<HeapObject> object, ObjectSlot slot,
@@ -3714,7 +3723,13 @@ void MarkCompactCollector::FlushBytecodeFromSFI(
 
 #ifdef V8_ENABLE_SANDBOX
   // Mark the new entry in the trusted pointer table as alive.
+  TrustedPointerTable& table = heap_->isolate()->trusted_pointer_table();
   TrustedPointerTable::Space* space = heap_->trusted_pointer_space();
+  IndirectPointerSlot self_indirect_pointer_slot =
+      Cast<ExposedTrustedObject>(uncompiled_data)
+          ->RawIndirectPointerField(
+              ExposedTrustedObject::kSelfIndirectPointerOffset,
+              kUncompiledDataIndirectPointerTag);
   table.Mark(space, self_indirect_pointer_slot.Relaxed_LoadHandle());
 #endif
 
@@ -3727,8 +3742,56 @@ void MarkCompactCollector::ProcessOldCodeCandidates() {
          weak_objects_.code_flushing_candidates.IsEmpty());
   Tagged<SharedFunctionInfo> flushing_candidate;
   int number_of_flushed_sfis = 0;
+  Isolate* const isolate = heap_->isolate();
   while (local_weak_objects()->code_flushing_candidates_local.Pop(
       &flushing_candidate)) {
+#ifdef V8_ENABLE_SANDBOX
+    // If the data is unpublished, it means another SFI sharing the same
+    // BytecodeArray has already flushed it and unpublished the handle.
+    //
+    // Before flushing:
+    // +------+      +------------+      +---------------+
+    // | SFI1 | ---> | old_handle | <--> | BytecodeArray |
+    // +------+      +------------+      +---------------+
+    //                     ^
+    // +------+            |
+    // | SFI2 | -----------+
+    // +------+
+    //
+    // After flushing SFI1:
+    // +------+      +------------+      +----------------+
+    // | SFI1 | ---> | new_handle | <--> | UncompiledData |
+    // +------+      +------------+      +----------------+
+    //                                           ^
+    // +------+      +------------+              |
+    // | SFI2 | ---> | old_handle | -------------+
+    // +------+      +------------+ (unpublished)
+    //
+    // In that case, we must not try to resolve the handle normally but instead
+    // manually update to the new canonical handle.
+    bool is_unpublished =
+        flushing_candidate->HasUnpublishedTrustedData(isolate);
+    if (is_unpublished) {
+      IndirectPointerHandle handle =
+          flushing_candidate->Relaxed_ReadField<IndirectPointerHandle>(
+              SharedFunctionInfo::kTrustedFunctionDataOffset);
+
+      // Read the object from the table. It is now an UncompiledData.
+      Address obj_addr = isolate->trusted_pointer_table().GetMaybeUnpublished(
+          handle, kBytecodeArrayIndirectPointerTag);
+      Tagged<TrustedObject> trusted_obj =
+          UncheckedCast<TrustedObject>(Tagged<Object>(obj_addr));
+      Tagged<UncompiledData> uncompiled_data =
+          SbxCast<UncompiledData>(trusted_obj);
+
+      // Update the SFI UncompiledData. This effectively updates us from
+      // old_handle to new_handle.
+      flushing_candidate->set_uncompiled_data(uncompiled_data);
+      // We want to continue here on purpose to trigger DiscardCompiledMetadata
+      // eventually.
+    }
+#endif  // V8_ENABLE_SANDBOX
+
     bool is_bytecode_live;
     if (v8_flags.flush_baseline_code && flushing_candidate->HasBaselineCode()) {
       is_bytecode_live = ProcessOldBaselineSFI(flushing_candidate);
@@ -3753,7 +3816,7 @@ void MarkCompactCollector::ProcessOldCodeCandidates() {
   }
 
   if (v8_flags.trace_flush_code) {
-    PrintIsolate(heap_->isolate(), "%d flushed SharedFunctionInfo(s)\n",
+    PrintIsolate(isolate, "%d flushed SharedFunctionInfo(s)\n",
                  number_of_flushed_sfis);
   }
 }
@@ -4034,7 +4097,7 @@ void RightTrimDescriptorArray(Heap* heap, Tagged<DescriptorArray> array,
   if (heap::ShouldZapGarbage()) {
     heap::ZapBlock(start, aligned_start - start, kZapValue);
   }
-  array->set_number_of_all_descriptors(new_nof_all_descriptors);
+  array->set_number_of_all_descriptors(new_nof_all_descriptors, kReleaseStore);
 }
 
 void TrimEnumCache(Heap* heap, Tagged<Map> map,
@@ -4219,7 +4282,7 @@ void MarkCompactCollector::ProcessJSWeakRefs(JobDelegate* delegate) {
                            SKIP_WRITE_BARRIER);
     } else {
       // The value of the JSWeakRef is alive.
-      ObjectSlot slot = weak_ref->RawField(JSWeakRef::kTargetOffset);
+      ObjectSlot slot(&weak_ref->target_);
       RecordSlot(weak_ref, slot, target);
     }
   }
@@ -4745,7 +4808,7 @@ class Evacuator final : public Malloced {
 };
 
 void Evacuator::EvacuatePage(MutablePage* page) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.gc"), "Evacuator::EvacuatePage");
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.gc"), "Evacuator::EvacuatePage");
   DCHECK(page->SweepingDone());
   intptr_t saved_live_bytes = page->live_bytes();
   double evacuation_time = 0.0;
@@ -4801,8 +4864,8 @@ class LiveObjectVisitor final : AllStatic {
 template <class Visitor>
 bool LiveObjectVisitor::VisitMarkedObjects(NormalPage* page, Visitor* visitor,
                                            Tagged<HeapObject>* failed_object) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
-               "LiveObjectVisitor::VisitMarkedObjects");
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
+              "LiveObjectVisitor::VisitMarkedObjects");
   for (auto [object, size] : LiveObjectRange(page)) {
     if (!visitor->Visit(object, size)) {
       *failed_object = object;
@@ -4815,8 +4878,8 @@ bool LiveObjectVisitor::VisitMarkedObjects(NormalPage* page, Visitor* visitor,
 template <class Visitor>
 void LiveObjectVisitor::VisitMarkedObjectsNoFail(NormalPage* page,
                                                  Visitor* visitor) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
-               "LiveObjectVisitor::VisitMarkedObjectsNoFail");
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
+              "LiveObjectVisitor::VisitMarkedObjectsNoFail");
   for (auto [object, size] : LiveObjectRange(page)) {
     const bool success = visitor->Visit(object, size);
     USE(success);
@@ -4826,10 +4889,10 @@ void LiveObjectVisitor::VisitMarkedObjectsNoFail(NormalPage* page,
 
 bool Evacuator::RawEvacuatePage(MutablePage* page) {
   const EvacuationMode evacuation_mode = ComputeEvacuationMode(page);
-  TRACE_EVENT2(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
-               "FullEvacuator::RawEvacuatePage", "evacuation_mode",
-               EvacuationModeName(evacuation_mode), "live_bytes",
-               page->live_bytes());
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
+              "FullEvacuator::RawEvacuatePage", "evacuation_mode",
+              EvacuationModeName(evacuation_mode), "live_bytes",
+              page->live_bytes());
   switch (evacuation_mode) {
     case kObjectsNewToOld:
 #if DEBUG
@@ -5203,9 +5266,9 @@ void MarkCompactCollector::EvacuatePagesInParallel() {
   const size_t pages_count = evacuation_items.size();
   size_t wanted_num_tasks = 0;
   if (!evacuation_items.empty()) {
-    TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
-                 "MarkCompactCollector::EvacuatePagesInParallel", "pages",
-                 evacuation_items.size());
+    TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
+                "MarkCompactCollector::EvacuatePagesInParallel", "pages",
+                evacuation_items.size());
 
     wanted_num_tasks = CreateAndExecuteEvacuationTasks(
         heap_, this, std::move(evacuation_items));
@@ -5398,8 +5461,8 @@ class RememberedSetUpdatingItem : public UpdatingItem {
   ~RememberedSetUpdatingItem() override = default;
 
   void Process() override {
-    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
-                 "RememberedSetUpdatingItem::Process");
+    TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
+                "RememberedSetUpdatingItem::Process");
     UpdateUntypedPointers();
     UpdateTypedPointers();
   }
@@ -6121,8 +6184,6 @@ void MarkCompactCollector::StartSweepNewSpace() {
   PagedSpaceForNewSpace* paged_space = heap_->paged_new_space()->paged_space();
   paged_space->ClearAllocatorState();
 
-  int will_be_swept = 0;
-
   heap_->StartResizeNewSpace();
 
   DCHECK(empty_new_space_pages_to_be_swept_.empty());
@@ -6141,13 +6202,6 @@ void MarkCompactCollector::StartSweepNewSpace() {
     } else {
       empty_new_space_pages_to_be_swept_.push_back(p);
     }
-    will_be_swept++;
-  }
-
-  if (v8_flags.gc_verbose) {
-    PrintIsolate(heap_->isolate(),
-                 "sweeping: space=%s initialized_for_sweeping=%d",
-                 ToString(paged_space->identity()), will_be_swept);
   }
 }
 
@@ -6170,7 +6224,6 @@ void MarkCompactCollector::StartSweepSpace(PagedSpace* space) {
   DCHECK_NE(NEW_SPACE, space->identity());
   space->ClearAllocatorState();
 
-  int will_be_swept = 0;
   bool unused_page_present = false;
 
   Sweeper* sweeper = heap_->sweeper();
@@ -6197,10 +6250,6 @@ void MarkCompactCollector::StartSweepSpace(PagedSpace* space) {
     // One unused page is kept, all further are released before sweeping them.
     if (p->live_bytes() == 0) {
       if (unused_page_present) {
-        if (v8_flags.gc_verbose) {
-          PrintIsolate(heap_->isolate(), "sweeping: released page: %p",
-                       static_cast<void*>(p));
-        }
         ReleasePage(space, p);
         continue;
       }
@@ -6208,17 +6257,10 @@ void MarkCompactCollector::StartSweepSpace(PagedSpace* space) {
     }
 
     sweeper->AddPage(space->identity(), p);
-    will_be_swept++;
   }
 
   if (v8_flags.sticky_mark_bits && space->identity() == OLD_SPACE) {
     static_cast<StickySpace*>(space)->set_old_objects_size(space->Size());
-  }
-
-  if (v8_flags.gc_verbose) {
-    PrintIsolate(heap_->isolate(),
-                 "sweeping: space=%s initialized_for_sweeping=%d",
-                 ToString(space->identity()), will_be_swept);
   }
 }
 

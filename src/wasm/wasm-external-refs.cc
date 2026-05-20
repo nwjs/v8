@@ -22,6 +22,7 @@
 #include "src/utils/memcopy.h"
 #include "src/wasm/canonical-types.h"
 #include "src/wasm/leb-helper.h"
+#include "src/wasm/signature-hashing.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-engine-globals.h"
 #include "src/wasm/wasm-objects-inl.h"
@@ -362,6 +363,24 @@ uint64_t word64_rol_wrapper(uint64_t input, uint32_t shift) {
 
 uint64_t word64_ror_wrapper(uint64_t input, uint32_t shift) {
   return (input >> (shift & 63)) | (input << ((64 - shift) & 63));
+}
+
+void wasm_int128_add_wrapper(Address data) {
+  // Implemented for 32-bit platforms, where __uint128_t is not available.
+  uint64_t* ptr = reinterpret_cast<uint64_t*>(data);
+
+  uint64_t bh = ptr[0];
+  uint64_t bl = ptr[1];
+  uint64_t ah = ptr[2];
+  uint64_t al = ptr[3];
+
+  uint64_t rl = al + bl;
+  bool carry = (rl < al);
+  uint64_t rh = ah + bh + (carry ? 1 : 0);
+
+  // Overwrite slots for Operand A.
+  ptr[2] = rh;
+  ptr[3] = rl;
 }
 
 void float64_pow_wrapper(Address data) {
@@ -926,8 +945,6 @@ void array_fill_wrapper(Address raw_array, uint32_t index, uint32_t length,
       DCHECK_EQ(base::ReadUnalignedValue<int64_t>(initial_value_addr), 0);
       std::memset(initial_element_address, 0, bytes_to_set);
       return;
-    case kWaitQueue:
-      UNIMPLEMENTED();
     case kVoid:
     case kTop:
     case kBottom:
@@ -1107,7 +1124,9 @@ wasm::StackMemory* find_wasmfx_handler_stack(Isolate* isolate,
       break;
     }
 
-    // The caller frame is the WASM frame that contains the handler table.
+    // The caller frame is the WASM frame that contains the handler table, or
+    // a WASM_SEGMENT_START frame if this happens to be the first frame of a new
+    // growable stack segment.
     target_pc = StackFrame::ReadPC(reinterpret_cast<Address*>(
         target_fp + CommonFrameConstants::kCallerPCOffset));
     target_sp = target_fp + CommonFrameConstants::kCallerSPOffset;
@@ -1115,7 +1134,7 @@ wasm::StackMemory* find_wasmfx_handler_stack(Isolate* isolate,
                                       CommonFrameConstants::kCallerFPOffset);
     type = StackFrame::MarkerToType(base::Memory<intptr_t>(
         target_fp + CommonFrameConstants::kContextOrFrameTypeOffset));
-    CHECK_EQ(type, StackFrame::WASM);
+    CHECK(type == StackFrame::WASM || type == StackFrame::WASM_SEGMENT_START);
 
     // Get the handler table and search for a matching tag.
     WasmCode* wasm_code =
@@ -1181,6 +1200,10 @@ Address suspend_wasmfx_stack(Isolate* isolate, Address sp, Address fp,
 
   from->set_param_types(sig->returns());
 
+  const CanonicalSig* original_sig = from->func_ref()->internal(isolate)->sig();
+  VectorSignature suspended_sig(original_sig->returns(), sig->returns());
+  from->set_signature_hash(SignatureHasher::Hash(&suspended_sig));
+
   if (v8_flags.trace_wasm_stack_switching) {
     PrintF("Switch from stack %d to %d (suspend)\n", from->id(), to->id());
   }
@@ -1203,8 +1226,8 @@ Address switch_wasmfx_stack(Isolate* isolate, Address sp, Address fp,
   if (!parent) return kNullAddress;
 
   if (v8_flags.trace_wasm_stack_switching) {
-    PrintF("Switch from stack %d to %d\n", from->id(), target_stack->id());
-    PrintF("parent is %d\n", parent->id());
+    PrintF("Switch from stack %d to %d, parent %d\n", from->id(),
+           target_stack->id(), parent->id());
   }
 
   const CanonicalSig* return_sig =
@@ -1212,10 +1235,12 @@ Address switch_wasmfx_stack(Isolate* isolate, Address sp, Address fp,
           CanonicalTypeIndex{sig_index});
 
   target_stack->set_current_continuation({});
+  target_stack->clear_bound_args();
 
   from->set_arg_buffer(arg_buffer);
   from->set_current_continuation(cont);
   from->set_param_types(return_sig->parameters());
+  from->set_signature_hash(SignatureHasher::Hash(return_sig));
   SuspendStack(isolate, from, parent, sp, fp, pc);
   ResumeStack(isolate, parent, target_stack, parent->jmpbuf()->sp,
               parent->jmpbuf()->fp, parent->jmpbuf()->pc);
@@ -1237,8 +1262,6 @@ void return_jspi_stack(Isolate* isolate, wasm::StackMemory* to) {
       isolate->isolate_data()->active_suspender();
   // Clear the external stack pointer to avoid a UAF.
   suspender->set_stack(isolate, nullptr);
-  // Also unpublish the trusted suspender object just in case.
-  suspender->Unpublish(isolate);
   return_stack(isolate, to);
 }
 

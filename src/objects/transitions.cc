@@ -22,7 +22,7 @@ Tagged<Map> TransitionsAccessor::GetSimpleTransition(Isolate* isolate,
     case kWeakRef:
       return Cast<Map>(raw_transitions.GetHeapObjectAssumeWeak());
     default:
-      return Tagged<Map>();
+      return {};
   }
 }
 
@@ -74,7 +74,7 @@ void TransitionsAccessor::InsertHelper(Isolate* isolate, DirectHandle<Map> map,
       Tagged<Name> key = GetSimpleTransitionKey(simple_transition);
       PropertyDetails old_details =
           simple_transition->GetLastDescriptorDetails(isolate);
-      PropertyDetails new_details = GetTargetDetails(*name, **target);
+      PropertyDetails new_details = GetTargetDetails(*name, *target);
       if (key->Equals(*name) && old_details.kind() == new_details.kind() &&
           old_details.attributes() == new_details.attributes()) {
         ReplaceTransitions(isolate, map, MakeWeak(*target));
@@ -107,7 +107,7 @@ void TransitionsAccessor::InsertHelper(Isolate* isolate, DirectHandle<Map> map,
       index =
           result->SearchSpecial(Cast<Symbol>(*name), false, &insertion_index);
     } else {
-      PropertyDetails details = GetTargetDetails(*name, **target);
+      PropertyDetails details = GetTargetDetails(*name, *target);
       index = result->Search(details.kind(), *name, details.attributes(),
                              &insertion_index);
     }
@@ -140,7 +140,7 @@ void TransitionsAccessor::InsertHelper(Isolate* isolate, DirectHandle<Map> map,
   DCHECK_EQ(is_special_transition, IsSpecialTransition(roots, *name));
   PropertyDetails details = is_special_transition
                                 ? PropertyDetails::Empty()
-                                : GetTargetDetails(*name, **target);
+                                : GetTargetDetails(*name, *target);
 
   {
     DisallowGarbageCollection no_gc;
@@ -249,10 +249,10 @@ Tagged<Map> TransitionsAccessor::SearchTransition(
     case kPrototypeSharedClosureInfo:
     case kUninitialized:
     case kMigrationTarget:
-      return Tagged<Map>();
+      return {};
     case kWeakRef: {
       Tagged<Map> map = Cast<Map>(raw_transitions_.GetHeapObjectAssumeWeak());
-      if (!IsMatchingMap(map, name, kind, attributes)) return Tagged<Map>();
+      if (!IsMatchingMap(map, name, kind, attributes)) return {};
       return map;
     }
     case kFullTransitionArray: {
@@ -565,7 +565,7 @@ Tagged<Map> TransitionsAccessor::GetMigrationTarget() {
   if (encoding() == kMigrationTarget) {
     return Cast<Map>(map_->raw_transitions(kAcquireLoad));
   }
-  return Tagged<Map>();
+  return {};
 }
 
 // static
@@ -763,7 +763,7 @@ Tagged<Map> TransitionArray::SearchDetailsAndGetTarget(
       break;
     }
   }
-  return Tagged<Map>();
+  return {};
 }
 
 int TransitionArray::Search(PropertyKind kind, Tagged<Name> name,
@@ -779,7 +779,7 @@ Tagged<Map> TransitionArray::SearchAndGetTarget(PropertyKind kind,
                                                 PropertyAttributes attributes) {
   int transition = SearchName(name);
   if (transition == kNotFound) {
-    return Tagged<Map>();
+    return {};
   }
   return SearchDetailsAndGetTarget(transition, kind, attributes);
 }
@@ -799,12 +799,15 @@ void TransitionArray::ForEachTransitionTo(
   }
 }
 
-void TransitionArray::Sort() {
+void TransitionArray::Sort(bool force) {
   DisallowGarbageCollection no_gc;
   // In-place insertion sort.
   int length = number_of_transitions();
-  // Sorting matters only for binary search.
-  if (length <= kMaxElementsForLinearSearch) return;
+  // After rehashing, the arrays are no longer in hash-sorted order.
+  // In this case, we need to force a re-sort even for small arrays,
+  // so that subsequent linear searches can find the correct transition
+  // and avoid inserting duplicates.
+  if (!force && length <= kMaxElementsForLinearSearch) return;
 
   ReadOnlyRoots roots = GetReadOnlyRoots();
   for (int i = 1; i < length; i++) {

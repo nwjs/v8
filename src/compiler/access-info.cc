@@ -26,6 +26,11 @@
 #include "src/objects/struct-inl.h"
 #include "src/objects/templates.h"
 
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/value-type.h"
+#include "src/wasm/wasm-objects-inl.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
+
 namespace v8 {
 namespace internal {
 namespace compiler {
@@ -172,12 +177,11 @@ PropertyAccessInfo PropertyAccessInfo::FastAccessorConstant(
 }
 
 // static
-PropertyAccessInfo PropertyAccessInfo::ModuleExport(Zone* zone,
-                                                    MapRef receiver_map,
-                                                    CellRef cell) {
-  return PropertyAccessInfo(zone, kModuleExport, {} /* holder */,
-                            cell /* constant */, {} /* api_holder */,
-                            {} /* name */, {{receiver_map}, zone});
+PropertyAccessInfo PropertyAccessInfo::ModuleExport(
+    Zone* zone, MapRef receiver_map, CellRef cell, OptionalJSObjectRef holder) {
+  return PropertyAccessInfo(zone, kModuleExport, holder, cell /* constant */,
+                            {} /* api_holder */, {} /* name */,
+                            {{receiver_map}, zone});
 }
 
 // static
@@ -561,9 +565,6 @@ std::optional<ElementAccessInfo> AccessInfoFactory::ComputeElementAccessInfo(
             sfi.object()->GetTrustedData(broker()->local_isolate_or_isolate());
         Tagged<WasmExportedFunctionData> wasm_data;
         if (!TryCast(trusted_data, &wasm_data)) return {};
-        // Supporting receiver-is-first-param mode would require passing
-        // the Proxy's handler to the eventual building of the Call node.
-        if (wasm_data->receiver_is_first_param()) return {};
         const wasm::CanonicalSig* wasm_signature = wasm_data->internal()->sig();
         if (wasm_signature->parameter_count() < 2) return {};
         wasm::CanonicalValueType key_type = wasm_signature->GetParam(1);
@@ -587,6 +588,11 @@ std::optional<ElementAccessInfo> AccessInfoFactory::ComputeElementAccessInfo(
         // Finally: all good!
         bool string_keys = key_type == wasm::kWasmExternRef;
         return ElementAccessInfo(map, trap_value, target, string_keys, zone());
+      }
+      if (proto_map.IsWasmObjectMap()) {
+        // Wasm objects are opaque and frozen, so we can safely skip over them.
+        prototype = proto_map.prototype(broker());
+        continue;
       }
       // Nothing else can occur on prototype chains.
       UNREACHABLE();
@@ -777,7 +783,7 @@ PropertyAccessInfo AccessorAccessInfoHelper(
       return PropertyAccessInfo::Invalid(zone);
     }
     return PropertyAccessInfo::ModuleExport(zone, receiver_map,
-                                            cell_ref.value());
+                                            cell_ref.value(), holder);
   }
   if (access_mode == AccessMode::kHas) {
     // kHas is not supported for dictionary mode objects.

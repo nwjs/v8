@@ -162,6 +162,8 @@ bool Code::Inlines(Tagged<SharedFunctionInfo> sfi) {
 
 void Code::SetMarkedForDeoptimization(Isolate* isolate,
                                       LazyDeoptimizeReason reason) {
+  // We've already marked for deoptimization, return.
+  if (marked_for_deoptimization()) return;
   set_marked_for_deoptimization(true);
   // Eager deopts are already logged by the deoptimizer.
   if (reason != LazyDeoptimizeReason::kEagerDeopt &&
@@ -172,7 +174,7 @@ void Code::SetMarkedForDeoptimization(Isolate* isolate,
   if (handle != kNullJSDispatchHandle) {
     JSDispatchTable& jdt = isolate->js_dispatch_table();
     Tagged<Code> cur = jdt.GetCode(handle);
-    if (SafeEquals(cur)) {
+    if (Tagged{this}.SafeEquals(cur)) {
       if (v8_flags.reopt_after_lazy_deopts &&
           isolate->concurrent_recompilation_enabled()) {
         jdt.SetCodeNoWriteBarrier(

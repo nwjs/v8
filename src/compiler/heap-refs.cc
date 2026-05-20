@@ -7,17 +7,20 @@
 #include <optional>
 
 #include "src/base/logging.h"
+#include "src/base/sanitizer/tsan.h"
 #include "src/common/globals.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/instance-type-inl.h"
+#include "src/sandbox/bounded-size-inl.h"
 
 #ifdef ENABLE_SLOW_DCHECKS
 #include <algorithm>
 #endif
 
 #include "src/api/api-inl.h"
+#include "src/common/assert-scope.h"
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/js-heap-broker-inl.h"
 #include "src/execution/protectors-inl.h"
@@ -213,13 +216,13 @@ namespace {
 
 ZoneVector<CFunctionInfoWithDetails> GetCFunctionsWithSignatures(
     Tagged<FixedArray> function_overloads, Isolate* isolate, Zone* zone) {
+  DisallowGarbageCollection no_gc;
   const uint32_t len = function_overloads->ulength().value();
-  ZoneVector<CFunctionInfoWithDetails> c_functions_with_signatures =
-      ZoneVector<CFunctionInfoWithDetails>(len, zone);
+  ZoneVector<CFunctionInfoWithDetails> c_functions_with_signatures(len, zone);
   for (uint32_t i = 0; i < len; i++) {
     auto overload =
         Cast<Managed<CFunctionWithSignature>>(function_overloads->get(i))
-            ->raw();
+            ->raw(no_gc);
     c_functions_with_signatures[i] = {overload->address, overload->signature};
   }
   return c_functions_with_signatures;
@@ -351,8 +354,8 @@ std::optional<Tagged<Object>> GetOwnFastConstantDataPropertyFromHeap(
         return {};
       }
     } else {
-      Tagged<Object> raw_properties_or_hash =
-          holder.object()->raw_properties_or_hash(cage_base, kRelaxedLoad);
+      Tagged<JSReceiver::PropertiesOrHash> raw_properties_or_hash =
+          holder.object()->raw_properties_or_hash(kRelaxedLoad);
       // Ensure that the object is safe to inspect.
       if (broker->ObjectMayBeUninitialized(raw_properties_or_hash)) {
         return {};
@@ -426,6 +429,24 @@ OptionalObjectRef GetOwnDictionaryPropertyFromHeap(
   return TryMakeRef(broker, constant);
 }
 
+// Separate function for racy JSTypedArray length read, so that we can
+// explicitly suppress it in TSAN (see tools/sanitizers/tsan_suppressions.txt).
+// We prevent inlining of this function in TSAN builds, so that TSAN does indeed
+// see that this is where the race is, and does indeed ignore it.
+#ifdef V8_IS_TSAN
+V8_NOINLINE
+#endif
+size_t RacyReadJSTypedArrayLength(Tagged<JSTypedArray> object) {
+  Address field_address =
+      object->address() + JSArrayBufferView::kRawByteLengthOffset;
+#ifdef V8_ENABLE_SANDBOX
+  size_t raw_value = base::ReadUnalignedValue<size_t>(field_address);
+  return raw_value >> kBoundedSizeShift;
+#else
+  return ReadMaybeUnalignedValue<size_t>(field_address);
+#endif
+}
+
 }  // namespace
 
 class JSTypedArrayData : public JSObjectData {
@@ -433,7 +454,19 @@ class JSTypedArrayData : public JSObjectData {
   JSTypedArrayData(JSHeapBroker* broker, ObjectData** storage,
                    InstanceType instance_type,
                    IndirectHandle<JSTypedArray> object, ObjectDataKind kind)
-      : JSObjectData(broker, storage, instance_type, object, kind) {}
+      : JSObjectData(broker, storage, instance_type, object, kind) {
+    size_t length = RacyReadJSTypedArrayLength(*object);
+    if (object->buffer()->was_detached(kAcquireLoad)) {
+      byte_length_ = 0;
+    } else {
+      byte_length_ = length;
+    }
+  }
+
+  size_t byte_length() const { return byte_length_; }
+
+ private:
+  size_t byte_length_;
 };
 
 class JSDataViewData : public JSObjectData {
@@ -1045,12 +1078,20 @@ class JSGlobalProxyData : public JSObjectData {
     auto ho_data = static_cast<const HeapObjectData*>(this);              \
     InstanceType data_instance_type = ho_data->data_instance_type();      \
     /* Make sure HeapObjectData subclass has matching type. */            \
-    if (!InstanceTypeChecker::Is##Name(data_instance_type)) return false; \
+    if (!InstanceTypeChecker::Is##Name(data_instance_type)) {             \
+      return false;                                                       \
+    }                                                                     \
     /* Check if object()'s map's instance_type matches. */                \
     InstanceType instance_type = ho_data->GetMapInstanceType();           \
     /* As long as Maps are background serialized, the heap object's */    \
     /* instance type should match the HeapObjectData subclass. */         \
-    DCHECK_EQ(data_instance_type, instance_type);                         \
+    /* This transition is safe because when a typed array is detached, */ \
+    /* its map changes and calls NotifyLeafMapLayoutChange, which */      \
+    /* invalidates StableMapDependency on the original map. Any */        \
+    /* optimized code relying on the old map will be deoptimized. */      \
+    DCHECK(data_instance_type == instance_type ||                         \
+           (data_instance_type == JS_TYPED_ARRAY_TYPE &&                  \
+            instance_type == JS_DETACHED_TYPED_ARRAY_TYPE));              \
     return InstanceTypeChecker::Is##Name(instance_type);                  \
   }
 HEAP_BROKER_OBJECT_LIST(DEFINE_IS)
@@ -1961,13 +2002,14 @@ size_t JSTypedArrayRef::length(JSHeapBroker* broker) const {
   if (map(broker).instance_type() == JS_DETACHED_TYPED_ARRAY_TYPE) {
     return 0;
   }
-  return object()->byte_length() /
-         ElementsKindToByteSize(elements_kind(broker));
+  return byte_length() / ElementsKindToByteSize(elements_kind(broker));
 }
 
 size_t JSTypedArrayRef::byte_length() const {
-  // Immutable after initialization (since this is not used for RAB/GSAB).
-  return object()->byte_length();
+  if (object()->buffer()->was_detached(kAcquireLoad)) {
+    return 0;
+  }
+  return data()->AsJSTypedArray()->byte_length();
 }
 
 ElementsKind JSTypedArrayRef::elements_kind(JSHeapBroker* broker) const {
@@ -2212,7 +2254,7 @@ std::optional<Tagged<Object>> JSObjectRef::GetOwnConstantElementFromHeap(
   //   of `length` below.
   if (i::IsJSArray(*holder)) {
     Tagged<Object> array_length_obj =
-        Cast<JSArray>(*holder)->length(broker->isolate(), kRelaxedLoad);
+        Cast<JSArray>(*holder)->length(kRelaxedLoad);
     if (!i::IsSmi(array_length_obj)) {
       // Can't safely read into HeapNumber objects without atomic semantics
       // (relaxed would be sufficient due to the guarantees above).
@@ -2277,6 +2319,8 @@ std::optional<Float64> JSObjectRef::GetOwnFastConstantDoubleProperty(
   Float64 unboxed_value = Float64::FromBits(
       RacyReadHeapNumberBits(Cast<HeapNumber>(constant.value())));
 
+  // Const double fields should not contain values with the hole NaN pattern.
+  DCHECK(!unboxed_value.is_hole_nan());
   dependencies->DependOnOwnConstantDoubleProperty(*this, map(broker), index,
                                                   unboxed_value);
   return unboxed_value;
@@ -2303,7 +2347,7 @@ ObjectRef JSArrayRef::GetBoilerplateLength(JSHeapBroker* broker) const {
 }
 
 OptionalObjectRef JSArrayRef::length_unsafe(JSHeapBroker* broker) const {
-  return TryMakeRef(broker, object()->length(broker->isolate(), kRelaxedLoad));
+  return TryMakeRef(broker, object()->length(kRelaxedLoad));
 }
 
 OptionalObjectRef JSArrayRef::GetOwnCowElement(JSHeapBroker* broker,

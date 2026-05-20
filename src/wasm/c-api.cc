@@ -35,6 +35,7 @@
 #include "src/compiler/wasm-compiler.h"
 #include "src/flags/flags.h"
 #include "src/objects/call-site-info-inl.h"
+#include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-collection-inl.h"
 #include "src/objects/managed-inl.h"
 #include "src/wasm/leb-helper.h"
@@ -43,7 +44,7 @@
 #include "src/wasm/wasm-arguments.h"
 #include "src/wasm/wasm-constants.h"
 #include "src/wasm/wasm-engine.h"
-#include "src/wasm/wasm-objects.h"
+#include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-result.h"
 #include "src/wasm/wasm-serialization.h"
 #include "third_party/wasm-api/wasm.h"
@@ -1738,7 +1739,6 @@ void PushArgs(const i::wasm::CanonicalSig* sig, const vec<Val>& args,
       case i::wasm::kI8:
       case i::wasm::kI16:
       case i::wasm::kF16:
-      case i::wasm::kWaitQueue:
       case i::wasm::kVoid:
       case i::wasm::kTop:
       case i::wasm::kBottom:
@@ -1780,7 +1780,6 @@ void PopArgs(const i::wasm::CanonicalSig* sig, vec<Val>& results,
       case i::wasm::kI8:
       case i::wasm::kI16:
       case i::wasm::kF16:
-      case i::wasm::kWaitQueue:
       case i::wasm::kVoid:
       case i::wasm::kTop:
       case i::wasm::kBottom:
@@ -2082,7 +2081,6 @@ WASM_EXPORT auto Global::get() const -> Val {
     case i::wasm::kI8:
     case i::wasm::kI16:
     case i::wasm::kF16:
-    case i::wasm::kWaitQueue:
     case i::wasm::kVoid:
     case i::wasm::kTop:
     case i::wasm::kBottom:
@@ -2178,8 +2176,10 @@ WASM_EXPORT auto Table::make(Store* store_abs, const TableType* type,
 
   if (ref) {
     i::DirectHandle<i::JSReceiver> init = impl(ref)->v8_object();
+    i::DirectHandle<i::WasmDispatchTable> dispatch_table(
+        table_obj->trusted_dispatch_table(isolate), isolate);
     for (uint32_t i = 0; i < minimum; i++) {
-      table_obj->Set(isolate, table_obj, i, init);
+      i::WasmTableObject::Set(isolate, table_obj, dispatch_table, i, init);
     }
   }
   return implement<Table>::type::make(store, table_obj);
@@ -2242,8 +2242,10 @@ WASM_EXPORT auto Table::set(size_t index, const Ref* ref) -> bool {
       i::wasm::JSToWasmObject(isolate, nullptr, obj, table->unsafe_type(),
                               &error_message)
           .ToHandleChecked();
-  i::WasmTableObject::Set(isolate, table, static_cast<uint32_t>(index),
-                          obj_as_wasm);
+  i::DirectHandle<i::WasmDispatchTable> dispatch_table(
+      table->trusted_dispatch_table(isolate), isolate);
+  i::WasmTableObject::Set(isolate, table, dispatch_table,
+                          static_cast<uint32_t>(index), obj_as_wasm);
   return true;
 }
 
@@ -2269,8 +2271,11 @@ WASM_EXPORT auto Table::grow(size_t delta, const Ref* ref) -> bool {
       i::wasm::JSToWasmObject(isolate, nullptr, obj, table->unsafe_type(),
                               &error_message)
           .ToHandleChecked();
-  int result = i::WasmTableObject::Grow(
-      isolate, table, static_cast<uint32_t>(delta), obj_as_wasm);
+  i::DirectHandle<i::WasmDispatchTable> dispatch_table(
+      table->trusted_dispatch_table(isolate), isolate);
+  int result =
+      i::WasmTableObject::Grow(isolate, table, dispatch_table,
+                               static_cast<uint32_t>(delta), obj_as_wasm);
   return result >= 0;
 }
 
@@ -2395,7 +2400,7 @@ WASM_EXPORT own<Instance> Instance::make(Store* store_abs,
     i::DirectHandle<i::JSObject> module_obj;
     i::LookupIterator module_it(isolate, imports_obj, module_str,
                                 i::LookupIterator::OWN_SKIP_INTERCEPTOR);
-    if (i::JSObject::HasProperty(&module_it).ToChecked()) {
+    if (i::JSReceiver::HasProperty(&module_it).ToChecked()) {
       module_obj = i::Cast<i::JSObject>(
           i::Object::GetProperty(&module_it).ToHandleChecked());
     } else {

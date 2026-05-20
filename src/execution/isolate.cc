@@ -159,7 +159,7 @@
 #include "src/wasm/wasm-code-pointer-table-inl.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-module.h"
-#include "src/wasm/wasm-objects.h"
+#include "src/wasm/wasm-objects-inl.h"
 
 #if V8_ENABLE_DRUMBRAKE
 #include "src/wasm/interpreter/wasm-interpreter.h"
@@ -173,6 +173,12 @@
 #if defined(V8_OS_WIN64)
 #include "src/diagnostics/unwinding-info-win64.h"
 #endif  // V8_OS_WIN64
+
+#if defined(V8_OS_DARWIN)
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif  // V8_OS_DARWIN
 
 #if USE_SIMULATOR
 #include "src/execution/simulator-base.h"
@@ -225,6 +231,47 @@ std::atomic<const uint8_t*> current_embedded_blob_code_(nullptr);
 std::atomic<uint32_t> current_embedded_blob_code_size_(0);
 std::atomic<const uint8_t*> current_embedded_blob_data_(nullptr);
 std::atomic<uint32_t> current_embedded_blob_data_size_(0);
+
+#ifdef DEBUG
+bool IsDebuggerAttached() {
+#ifdef V8_OS_LINUX
+  FILE* fp = fopen("/proc/self/status", "r");
+  if (!fp) return false;
+  char line[128];
+  bool attached = false;
+  while (fgets(line, sizeof(line), fp)) {
+    if (strncmp(line, "TracerPid:", 10) == 0) {
+      int pid = atoi(line + 10);
+      if (pid != 0) {
+        attached = true;
+      }
+      break;
+    }
+  }
+  fclose(fp);
+  return attached;
+#elif defined(V8_OS_DARWIN)
+  int mib[4];
+  mib[0] = CTL_KERN;
+  mib[1] = KERN_PROC;
+  mib[2] = KERN_PROC_PID;
+  mib[3] = getpid();
+
+  struct kinfo_proc info;
+  size_t size = sizeof(info);
+
+  info.kp_proc.p_flag = 0;
+
+  if (sysctl(mib, 4, &info, &size, NULL, 0) == -1) {
+    return false;
+  }
+
+  return ((info.kp_proc.p_flag & P_TRACED) != 0);
+#else
+  return false;
+#endif
+}
+#endif  // DEBUG
 
 // The various workflows around embedded snapshots are fairly complex. We need
 // to support plain old snapshot builds, nosnap builds, and the requirements of
@@ -352,11 +399,16 @@ void Isolate::SetEmbeddedBlob(const uint8_t* code, uint32_t code_size,
   }
   if (v8_flags.text_is_readable) {
     if (d.EmbeddedBlobCodeHash() != d.CreateEmbeddedBlobCodeHash()) {
-      FATAL(
-          "Embedded blob code section checksum verification failed. This "
-          "indicates that the embedded blob has been modified since "
-          "compilation time. A common cause is a debugging breakpoint set "
-          "within builtin code.");
+      if (IsDebuggerAttached()) {
+        PrintF(
+            "Warning: Embedded blob code section checksum verification failed, "
+            "but debugger is attached. Skipping.\n");
+      } else
+        FATAL(
+            "Embedded blob code section checksum verification failed. This "
+            "indicates that the embedded blob has been modified since "
+            "compilation time. A common cause is a debugging breakpoint set "
+            "within builtin code.");
     }
   }
 #endif  // DEBUG
@@ -612,7 +664,7 @@ char* Isolate::Iterate(RootVisitor* v, char* thread_storage) {
   // but in order to simplify handling of frozen threads we just clear it.
   // Otherwise, we'd need to traverse the thread_storage again just to find this
   // one field.
-  thread->topmost_script_having_context_ = Context();
+  thread->topmost_script_having_context_ = {};
   return thread_storage + sizeof(ThreadLocalTop);
 }
 
@@ -704,21 +756,45 @@ DirectHandle<String> Isolate::StackTraceString() {
   }
 }
 
-void Isolate::PushStackTraceAndDie(void* ptr1, void* ptr2, void* ptr3,
-                                   void* ptr4, void* ptr5, void* ptr6) {
+[[noreturn]] void Isolate::PushStackTraceAndDie(void* ptr1, void* ptr2,
+                                                void* ptr3, void* ptr4,
+                                                void* ptr5, void* ptr6) {
+  static std::atomic<bool> recursive{false};
+  if (recursive.exchange(true)) IMMEDIATE_CRASH();
+
+  // Constructing the stack trace requires allocations and handles and is
+  // therefore only supported on the main thread.
+  CHECK(LocalHeap::Current()->is_main_thread());
   StackTraceFailureMessage message(this,
                                    StackTraceFailureMessage::kIncludeStackTrace,
                                    {ptr1, ptr2, ptr3, ptr4, ptr5, ptr6});
   message.Print();
+
+  // Print an error message similar to hitting V8_Fatal under
+  // `v8::base::ControlledCrashesAreHarmless()`, for fuzzers / Clusterfuzz but
+  // also humans investigating externally reported crashes.
+  v8::base::OS::PrintError(
+      "\n\n#\n# Safely terminating process due to hitting "
+      "Isolate::PushStackTraceAndDie\n#\n");
+
   base::OS::Abort();
 }
 
-void Isolate::PushParamsAndDie(void* ptr1, void* ptr2, void* ptr3, void* ptr4,
-                               void* ptr5, void* ptr6) {
+[[noreturn]] void Isolate::PushParamsAndDie(void* ptr1, void* ptr2, void* ptr3,
+                                            void* ptr4, void* ptr5,
+                                            void* ptr6) {
   StackTraceFailureMessage message(
       this, StackTraceFailureMessage::kDontIncludeStackTrace,
       {ptr1, ptr2, ptr3, ptr4, ptr5, ptr6});
   message.Print();
+
+  // Print an error message similar to hitting V8_Fatal under
+  // `v8::base::ControlledCrashesAreHarmless()`, for fuzzers / Clusterfuzz but
+  // also humans investigating externally reported crashes.
+  v8::base::OS::PrintError(
+      "\n\n#\n# Safely terminating process due to hitting "
+      "Isolate::PushParamsAndDie\n#\n");
+
   base::OS::Abort();
 }
 
@@ -962,7 +1038,8 @@ class CallSiteBuilder {
 
     // We store the offset of the promise into the element function's
     // hash field for element callbacks.
-    int promise_index = Smi::ToInt(element_function->GetIdentityHash()) - 1;
+    int promise_index =
+        Smi::ToInt(Cast<JSReceiver>(element_function)->GetIdentityHash()) - 1;
     AppendFrame(receiver, combinator, code, promise_index, flags);
   }
 
@@ -1542,8 +1619,8 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
 Handle<FixedArray> CaptureSimpleStackTrace(Isolate* isolate, int limit,
                                            FrameSkipMode mode,
                                            Handle<Object> caller) {
-  TRACE_EVENT_BEGIN1(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__,
-                     "maxFrameCount", limit);
+  TRACE_EVENT_BEGIN(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
+                    perfetto::StaticString(__func__), "maxFrameCount", limit);
 
 #if V8_ENABLE_WEBASSEMBLY
   wasm::WasmCodeRefScope code_ref_scope;
@@ -1560,8 +1637,8 @@ Handle<FixedArray> CaptureSimpleStackTrace(Isolate* isolate, int limit,
   }
 
   Handle<FixedArray> stack_trace = builder.Build();
-  TRACE_EVENT_END1(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__,
-                   "frameCount", stack_trace->ulength().value());
+  TRACE_EVENT_END(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), "frameCount",
+                  stack_trace->ulength().value());
   return stack_trace;
 }
 
@@ -1605,7 +1682,8 @@ DirectHandle<StackTraceInfo> GetDetailedStackTraceFromCallSiteInfos(
 MaybeDirectHandle<JSObject> Isolate::CaptureAndSetErrorStack(
     DirectHandle<JSObject> error_object, FrameSkipMode mode,
     Handle<Object> caller) {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__);
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
+              perfetto::StaticString(__func__));
   Handle<UnionOf<Undefined, FixedArray>> call_site_infos_or_formatted_stack =
       factory()->undefined_value();
 
@@ -1791,13 +1869,13 @@ class StackFrameBuilder {
 
 DirectHandle<StackTraceInfo> Isolate::CaptureDetailedStackTrace(
     int limit, StackTrace::StackTraceOptions options) {
-  TRACE_EVENT_BEGIN1(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__,
-                     "maxFrameCount", limit);
+  TRACE_EVENT_BEGIN(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
+                    perfetto::StaticString(__func__), "maxFrameCount", limit);
   StackFrameBuilder builder(this, static_cast<uint32_t>(limit));
   VisitStack(this, &builder, options);
   auto frames = builder.Build();
-  TRACE_EVENT_END1(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__,
-                   "frameCount", frames->ulength().value());
+  TRACE_EVENT_END(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), "frameCount",
+                  frames->ulength().value());
   auto stack_trace = factory()->NewStackTraceInfo(frames);
   OnStackTraceCaptured(stack_trace);
   return stack_trace;
@@ -1979,14 +2057,16 @@ class CurrentScriptStackVisitor {
 }  // namespace
 
 DirectHandle<String> Isolate::CurrentScriptNameOrSourceURL() {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__);
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
+              perfetto::StaticString(__func__));
   CurrentScriptNameStackVisitor visitor(this);
   VisitStack(this, &visitor);
   return visitor.CurrentScriptNameOrSourceURL();
 }
 
 int Isolate::CurrentScriptId() {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__);
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
+              perfetto::StaticString(__func__));
   CurrentScriptIdStackVisitor visitor;
   VisitStack(this, &visitor);
   return visitor.CurrentScriptId();
@@ -1997,7 +2077,8 @@ size_t Isolate::CurrentScriptIdsAndContexts(
   if (frame_data.size() == 0) {
     return 0;
   }
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__);
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
+              perfetto::StaticString(__func__));
   CurrentScriptIdsAndContextsStackVisitor visitor(this, frame_data);
   VisitStack(this, &visitor);
   return visitor.FrameCount();
@@ -2006,7 +2087,8 @@ size_t Isolate::CurrentScriptIdsAndContexts(
 size_t Isolate::CurrentScriptData(
     v8::MemorySpan<StackTrace::ScriptData> frame_data) {
   if (frame_data.size() == 0) return 0;
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__);
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
+              perfetto::StaticString(__func__));
 
   CurrentScriptDataStackVisitor visitor(this, frame_data);
   // CurrentScriptData should only expose frames from the same origin.
@@ -2015,7 +2097,8 @@ size_t Isolate::CurrentScriptData(
 }
 
 MaybeDirectHandle<Script> Isolate::CurrentReferrerScript() {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"), __func__);
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
+              perfetto::StaticString(__func__));
   CurrentScriptStackVisitor visitor{};
   VisitStack(this, &visitor);
   DirectHandle<Script> script;
@@ -2364,7 +2447,7 @@ Tagged<Object> Isolate::StackOverflow() {
   JSObject::AddProperty(this, exception, factory()->wasm_uncatchable_symbol(),
                         factory()->true_value(), NONE);
 
-  Throw(*exception);
+  Throw(*exception, nullptr, true);
 
 #ifdef VERIFY_HEAP
   if (v8_flags.verify_heap && v8_flags.stress_compaction) {
@@ -2543,7 +2626,8 @@ DirectHandle<JSMessageObject> Isolate::CreateMessageOrAbort(
 }
 
 Tagged<Object> Isolate::Throw(Tagged<Object> raw_exception,
-                              MessageLocation* location) {
+                              MessageLocation* location,
+                              bool is_stack_overflow) {
   if (has_exception()) {
     // A termination exception may have been thrown while preparing
     // {raw_exception}, e.g. by the near heap limit callback
@@ -2613,7 +2697,8 @@ Tagged<Object> Isolate::Throw(Tagged<Object> raw_exception,
   // Notify debugger of exception.
   if (is_catchable_by_javascript(*exception)) {
     DirectHandle<Object> message(pending_message(), this);
-    std::optional<Tagged<Object>> maybe_exception = debug()->OnThrow(exception);
+    std::optional<Tagged<Object>> maybe_exception =
+        debug()->OnThrow(exception, is_stack_overflow);
     if (maybe_exception.has_value()) {
       return *maybe_exception;
     }
@@ -2795,7 +2880,7 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
         Address instruction_start =
             code->InstructionStart(this, iter.frame()->pc());
         int handler_offset = table.LookupReturn(0);
-        return FoundHandler(iter, Context(), instruction_start, handler_offset,
+        return FoundHandler(iter, {}, instruction_start, handler_offset,
                             kNullAddress, iter.frame()->sp(),
                             iter.frame()->fp(), visited_frames);
       } else {
@@ -2839,14 +2924,14 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
         Address return_sp = frame->fp() +
                             StandardFrameConstants::kFixedFrameSizeAboveFp -
                             code->stack_slots() * kSystemPointerSize;
-        return FoundHandler(iter, Context(), code->instruction_start(), offset,
+        return FoundHandler(iter, {}, code->instruction_start(), offset,
                             code->constant_pool(), return_sp, frame->fp(),
                             visited_frames);
       }
 
       debug()->clear_restart_frame();
       Tagged<Code> code = *BUILTIN_CODE(this, RestartFrameTrampoline);
-      return FoundHandler(iter, Context(), code->instruction_start(), 0,
+      return FoundHandler(iter, {}, code->instruction_start(), 0,
                           code->constant_pool(), kNullAddress, frame->fp(),
                           visited_frames);
     }
@@ -2863,8 +2948,7 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
         // Gather information from the handler.
         Tagged<Code> code = frame->LookupCode();
         HandlerTable table(code);
-        return FoundHandler(iter, Context(),
-                            code->InstructionStart(this, frame->pc()),
+        return FoundHandler(iter, {}, code->InstructionStart(this, frame->pc()),
                             table.LookupReturn(0), code->constant_pool(),
                             handler->address() + StackHandlerConstants::kSize,
                             0, visited_frames);
@@ -2886,9 +2970,9 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
           Address return_sp = *reinterpret_cast<Address*>(
               frame->fp() + WasmInterpreterCWasmEntryConstants::kSPFPOffset);
           const int handler_offset = table.LookupReturn(0);
-          return FoundHandler(iter, Context(), instruction_start,
-                              handler_offset, code->constant_pool(), return_sp,
-                              frame->fp(), visited_frames);
+          return FoundHandler(iter, {}, instruction_start, handler_offset,
+                              code->constant_pool(), return_sp, frame->fp(),
+                              visited_frames);
         }
 #endif  // V8_ENABLE_DRUMBRAKE
 
@@ -2905,7 +2989,7 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
         Address return_sp = frame->fp() +
                             StandardFrameConstants::kFixedFrameSizeAboveFp -
                             code->stack_slots() * kSystemPointerSize;
-        return FoundHandler(iter, Context(), instruction_start, handler_offset,
+        return FoundHandler(iter, {}, instruction_start, handler_offset,
                             code->constant_pool(), return_sp, frame->fp(),
                             visited_frames);
       }
@@ -2946,9 +3030,9 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
         }
 #endif  // V8_ENABLE_DRUMBRAKE
 
-        return FoundHandler(iter, Context(), wasm_code->instruction_start(),
-                            offset, wasm_code->constant_pool(), return_sp,
-                            frame->fp(), visited_frames);
+        return FoundHandler(iter, {}, wasm_code->instruction_start(), offset,
+                            wasm_code->constant_pool(), return_sp, frame->fp(),
+                            visited_frames);
       }
 
       case StackFrame::WASM_LIFTOFF_SETUP: {
@@ -2984,9 +3068,9 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
           set_deoptimizer_lazy_throw(true);
         }
 
-        return FoundHandler(
-            iter, Context(), code->InstructionStart(this, frame->pc()), offset,
-            code->constant_pool(), return_sp, frame->fp(), visited_frames);
+        return FoundHandler(iter, {}, code->InstructionStart(this, frame->pc()),
+                            offset, code->constant_pool(), return_sp,
+                            frame->fp(), visited_frames);
       }
 
       case StackFrame::STUB: {
@@ -3013,9 +3097,9 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
                             StandardFrameConstants::kFixedFrameSizeAboveFp -
                             code->stack_slots() * kSystemPointerSize;
 
-        return FoundHandler(
-            iter, Context(), code->InstructionStart(this, frame->pc()), offset,
-            code->constant_pool(), return_sp, frame->fp(), visited_frames);
+        return FoundHandler(iter, {}, code->InstructionStart(this, frame->pc()),
+                            offset, code->constant_pool(), return_sp,
+                            frame->fp(), visited_frames);
       }
 
       case StackFrame::INTERPRETED:
@@ -3053,9 +3137,9 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
           // Patch the context register directly on the frame, so that we don't
           // need to have a context read + write in the baseline code.
           sp_frame->PatchContext(context);
-          return FoundHandler(iter, Context(), code->instruction_start(),
-                              pc_offset, code->constant_pool(), return_sp,
-                              sp_frame->fp(), visited_frames);
+          return FoundHandler(iter, {}, code->instruction_start(), pc_offset,
+                              code->constant_pool(), return_sp, sp_frame->fp(),
+                              visited_frames);
         } else {
           InterpretedFrame::cast(js_frame)->PatchBytecodeOffset(
               static_cast<int>(offset));
@@ -3111,7 +3195,7 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
               caller_code->GetOffsetFromInstructionStart(this, fast_call_pc);
           // Check if there is actually an exception handler registered at the
           // return address of the fast call. If so, then we tell the
-          // deoptimizer of the exception and just return the the Deotimization
+          // deoptimizer of the exception and just return the Deoptimization
           // Entry. Otherwise we iterate the stack further to find a handler.
           HandlerTable table(caller_code->UnsafeCastToCode());
           int handler_offset = table.LookupReturn(caller_offset);
@@ -3136,10 +3220,9 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
               static_cast<int>(frame->pc() - code->instruction_start());
           set_deoptimizer_lazy_throw(true);
 
-          return FoundHandler(iter, Context(),
-                              code->InstructionStart(this, frame->pc()), offset,
-                              code->constant_pool(), frame->sp(), frame->fp(),
-                              visited_frames);
+          return FoundHandler(
+              iter, {}, code->InstructionStart(this, frame->pc()), offset,
+              code->constant_pool(), frame->sp(), frame->fp(), visited_frames);
         }
         break;
       }
@@ -3153,7 +3236,7 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
         // Reconstruct the stack pointer from the frame pointer.
         Address return_sp = js_frame->fp() - js_frame->GetSPToFPDelta();
         Tagged<Code> code = js_frame->LookupCode();
-        return FoundHandler(iter, Context(), code->instruction_start(), 0,
+        return FoundHandler(iter, {}, code->instruction_start(), 0,
                             code->constant_pool(), return_sp, frame->fp(),
                             visited_frames);
       }
@@ -3756,7 +3839,7 @@ bool WalkPromiseTreeInternal(
     // If there is an outer promise, follow that to see if it is caught.
     DirectHandle<Symbol> key = isolate->factory()->promise_handled_by_symbol();
     DirectHandle<Object> outer_promise_obj =
-        JSObject::GetDataProperty(isolate, promise, key);
+        JSReceiver::GetDataProperty(isolate, promise, key);
     if (IsJSPromise(*outer_promise_obj)) {
       return WalkPromiseTreeInternal(
           isolate, Cast<JSPromise>(outer_promise_obj), callback);
@@ -4011,7 +4094,7 @@ bool Isolate::WalkCallStackAndPromiseTree(
     } else if (IsSmi(promise->reactions())) {
       // Also check that there is no outer promise
       DirectHandle<Symbol> key = factory()->promise_handled_by_symbol();
-      if (!IsJSPromise(*JSObject::GetDataProperty(this, promise, key))) {
+      if (!IsJSPromise(*JSReceiver::GetDataProperty(this, promise, key))) {
         // Ignore this promise; set to null
         rejected_promise = MaybeDirectHandle<JSPromise>();
       }
@@ -4829,8 +4912,28 @@ void Isolate::UpdateLogObjectRelocation() {
       heap()->has_heap_object_allocation_tracker();
 }
 
+#ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
+void Isolate::PrintAndClearRegExpSubjectStrings() {
+  if (trace_regexp_exec_subject_indices_.empty()) return;
+  DCHECK(v8_flags.trace_regexp_exec_ool_subjects);
+  PrintF("--- RegExp Trace Subject Strings ---\n");
+  for (size_t i = 0; i < trace_regexp_exec_subject_indices_.size(); ++i) {
+    Handle<String> subject = Cast<String>(
+        eternal_handles()->Get(trace_regexp_exec_subject_indices_[i]));
+    std::unique_ptr<char[]> c_str = subject->ToCString();
+    PrintF("Subject #%zu: %s\n", i, c_str.get());
+  }
+  trace_regexp_exec_subject_indices_.clear();
+  trace_regexp_exec_subject_hash_to_index_.clear();
+}
+#endif  // V8_ENABLE_REGEXP_DIAGNOSTICS
+
 void Isolate::Deinit() {
   TRACE_ISOLATE(deinit);
+
+#ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
+  PrintAndClearRegExpSubjectStrings();
+#endif  // V8_ENABLE_REGEXP_DIAGNOSTICS
 
 #if defined(V8_USE_PERFETTO)
   PerfettoLogger::UnregisterIsolate(this);
@@ -6270,7 +6373,7 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   }
 
   if ((v8_flags.trace_turbo || v8_flags.trace_turbo_graph ||
-       v8_flags.turbo_profiling) &&
+       v8_flags.turbo_profiling || v8_flags.print_turbolev_frontend) &&
       !v8_flags.concurrent_turbo_tracing) {
     PrintF("Concurrent recompilation has been disabled for tracing.\n");
   } else if (OptimizingCompileDispatcher::Enabled()) {
@@ -6605,10 +6708,6 @@ void Isolate::DumpAndResetBuiltinsProfileData() {
       BasicBlockProfiler::Get()->Print(this, out);
     }
     BasicBlockProfiler::Get()->ResetCounts(this);
-  } else {
-    // Only log builtins PGO data if v8 was built with
-    // v8_enable_builtins_profiling=true
-    CHECK_NULL(v8_flags.turbo_profiling_output);
   }
 }
 
@@ -6658,12 +6757,6 @@ bool Isolate::use_optimizer() {
   // TODO(v8:7700): Update this predicate for a world with multiple tiers.
   return (v8_flags.turbofan || v8_flags.maglev) && !serializer_enabled_ &&
          CpuFeatures::SupportsOptimizer() && !is_precise_count_code_coverage();
-}
-
-void Isolate::IncreaseTotalRegexpCodeGenerated(DirectHandle<HeapObject> code) {
-  PtrComprCageBase cage_base(this);
-  DCHECK(IsCode(*code, cage_base) || IsTrustedByteArray(*code, cage_base));
-  total_regexp_code_generated_ += code->Size(cage_base);
 }
 
 bool Isolate::NeedsDetailedOptimizedCodeLineInfo() const {
@@ -7718,7 +7811,6 @@ void Isolate::DetachGlobal(DirectHandle<NativeContext> env) {
         env->global_object()));
     return;
   }
-  counters()->errors_thrown_per_context()->AddSample(env->GetErrorsThrown());
 
   {
     // Create a copy of JSGlobalProxy that will be used as holder for contextual
@@ -7811,8 +7903,7 @@ void Isolate::PrintWithTimestamp(const char* format, ...) {
                   output_buffer);
 
 #if defined(V8_USE_PERFETTO)
-  TRACE_EVENT_INSTANT1("v8", "V8.PrintWithTimestamp", TRACE_EVENT_SCOPE_THREAD,
-                       "value", TRACE_STR_COPY(output_buffer));
+  TRACE_EVENT_INSTANT("v8", "V8.PrintWithTimestamp", "value", output_buffer);
 #endif
 }
 
@@ -7979,10 +8070,10 @@ SaveContext::SaveContext(Isolate* isolate) : isolate_(isolate) {
 }
 
 SaveContext::~SaveContext() {
-  isolate_->set_context(context_.is_null() ? Tagged<Context>() : *context_);
+  isolate_->set_context(context_.is_null() ? Tagged<Context>{} : *context_);
   isolate_->set_topmost_script_having_context(
       topmost_script_having_context_.is_null()
-          ? Tagged<Context>()
+          ? Tagged<Context>{}
           : *topmost_script_having_context_);
 }
 

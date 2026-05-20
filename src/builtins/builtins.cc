@@ -41,8 +41,21 @@ struct BuiltinMetadata {
   Builtins::Kind kind;
 
   struct BytecodeAndScale {
-    interpreter::Bytecode bytecode : 8;
-    interpreter::OperandScale scale : 8;
+    using BytecodeField = base::BitField<interpreter::Bytecode, 0, 8, uint16_t>;
+    using ScaleField = BytecodeField::Next<interpreter::OperandScale, 8>;
+
+    constexpr BytecodeAndScale(interpreter::Bytecode bytecode,
+                               interpreter::OperandScale scale)
+        : data_(BytecodeField::encode(bytecode) | ScaleField::encode(scale)) {}
+
+    constexpr interpreter::Bytecode bytecode() const {
+      return BytecodeField::decode(data_);
+    }
+    constexpr interpreter::OperandScale scale() const {
+      return ScaleField::decode(data_);
+    }
+
+    uint16_t data_;
   };
 
   static_assert(sizeof(interpreter::Bytecode) == 1);
@@ -433,9 +446,9 @@ void Builtins::EmitCodeCreateEvents(Isolate* isolate) {
     auto builtin_code = DirectHandle<Code>::FromSlot(&builtins[i]);
     DirectHandle<AbstractCode> code = Cast<AbstractCode>(builtin_code);
     interpreter::Bytecode bytecode =
-        builtin_metadata[i].data.bytecode_and_scale.bytecode;
+        builtin_metadata[i].data.bytecode_and_scale.bytecode();
     interpreter::OperandScale scale =
-        builtin_metadata[i].data.bytecode_and_scale.scale;
+        builtin_metadata[i].data.bytecode_and_scale.scale();
     PROFILE(isolate,
             CodeCreateEvent(
                 LogEventListener::CodeTag::kBytecodeHandler, code,
@@ -652,6 +665,8 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     case Builtin::kArrayFindIndexLoopAfterCallbackLazyDeoptContinuation:
     case Builtin::kArrayForEachLoopEagerDeoptContinuation:
     case Builtin::kArrayForEachLoopLazyDeoptContinuation:
+    case Builtin::kArraySortNoopEagerDeoptContinuation:
+    case Builtin::kArraySortNoopLazyDeoptContinuation:
     case Builtin::kArrayMapPreLoopLazyDeoptContinuation:
     case Builtin::kArrayMapLoopEagerDeoptContinuation:
     case Builtin::kArrayMapLoopLazyDeoptContinuation:
@@ -665,6 +680,7 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     case Builtin::kArraySomeLoopLazyDeoptContinuation:
     case Builtin::kStringCreateLazyDeoptContinuation:
     case Builtin::kGenericLazyDeoptContinuation:
+    case Builtin::kGeneratorPrototypeNextLazyDeoptContinuation:
     case Builtin::kPromiseConstructorLazyDeoptContinuation:
       return JSBuiltinStateFlag::kDisabledJSBuiltin;
 
@@ -722,11 +738,9 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     // These builtins with JS calling convention are not JS language builtins
     // but are allowed to be installed into JSFunctions.
     case Builtin::kJSToWasmWrapper:
-    case Builtin::kJSToJSWrapper:
-    case Builtin::kJSToJSWrapperInvalidSig:
     case Builtin::kWasmPromising:
 #if V8_ENABLE_DRUMBRAKE
-    case Builtin::kGenericJSToWasmInterpreterWrapper:
+    case Builtin::kJSToWasmInterpreterWrapper:
 #endif
     case Builtin::kWasmStressSwitch:
       return JSBuiltinStateFlag::kJSTrampoline;
@@ -758,9 +772,7 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     case Builtin::kWebAssemblyStringLength:
     case Builtin::kWebAssemblyStringMeasureUtf8:
     case Builtin::kWebAssemblyStringConcat:
-    case Builtin::kWebAssemblyStringConcatShared:
     case Builtin::kWebAssemblyStringSubstring:
-    case Builtin::kWebAssemblyStringSubstringShared:
     case Builtin::kWebAssemblyStringEquals:
     case Builtin::kWebAssemblyStringCompare:
     case Builtin::kWebAssemblyConfigureAllPrototypes:
@@ -790,12 +802,6 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
       //
       // Various feature-dependent builtins.
       //
-
-#if V8_ENABLE_WEBASSEMBLY
-    case Builtin::kWebAssemblyFunctionPrototypeBind:
-      RETURN_FLAG_DEPENDENT_BUILTIN_STATE(
-          wasm::WasmEnabledFeatures::FromFlags().has_type_reflection());
-#endif  // V8_ENABLE_WEBASSEMBLY
 
     // --enable-experimental-regexp-engine
     case Builtin::kRegExpPrototypeLinearGetter:
@@ -893,6 +899,7 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
 
     // --js-joint-iteration:
     case Builtin::kIteratorZip:
+    case Builtin::kIteratorZipKeyed:
       RETURN_FLAG_DEPENDENT_BUILTIN_STATE(v8_flags.js_joint_iteration);
 
     // --js-upsert

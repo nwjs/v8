@@ -21,7 +21,6 @@
 #include "src/wasm/function-body-decoder-impl.h"
 #include "src/wasm/interpreter/wasm-interpreter-inl.h"
 #include "src/wasm/interpreter/wasm-interpreter-runtime-inl.h"
-#include "src/wasm/object-access.h"
 #include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-opcodes-inl.h"
 #include "src/zone/zone.h"
@@ -843,9 +842,9 @@ static void PrintAndClearProfilingData() {
 
 #endif  // DRUMBRAKE_ENABLE_PROFILING
 
-static int StructFieldOffset(const StructType* struct_type, int field_index) {
-  return wasm::ObjectAccess::ToTagged(WasmStruct::kHeaderSize +
-                                      struct_type->field_offset(field_index));
+int StructFieldOffset(const StructType* struct_type, int field_index) {
+  return WasmStruct::kHeaderSize + struct_type->field_offset(field_index) -
+         kHeapObjectTag;
 }
 
 InstructionHandler s_unwind_code = InstructionHandler::k_s2s_Unwind;
@@ -6013,11 +6012,10 @@ class Handlers : public HandlersBase {
                                          WasmInterpreterRuntime* wasm_runtime,
                                          int64_t r0, double fp0) {
     uint32_t index = Read<int32_t>(code);
-    std::pair<DirectHandle<WasmStruct>, const StructType*> struct_new_result =
-        wasm_runtime->StructNewUninitialized(index);
-    DirectHandle<HeapObject> struct_obj = struct_new_result.first;
-    const StructType* struct_type = struct_new_result.second;
-    WriteBarrierMode mode = struct_type->is_shared() == SharedFlag::kYes
+    auto struct_new_result = wasm_runtime->StructNewUninitialized(index);
+    DirectHandle<HeapObject> struct_obj = struct_new_result.struct_object;
+    const StructType* struct_type = struct_new_result.type;
+    WriteBarrierMode mode = struct_new_result.needs_write_barrier
                                 ? UPDATE_WRITE_BARRIER
                                 : SKIP_WRITE_BARRIER;
 
@@ -6086,11 +6084,10 @@ class Handlers : public HandlersBase {
       const uint8_t* code, uint32_t* sp, WasmInterpreterRuntime* wasm_runtime,
       int64_t r0, double fp0) {
     uint32_t index = Read<int32_t>(code);
-    std::pair<DirectHandle<WasmStruct>, const StructType*> struct_new_result =
-        wasm_runtime->StructNewUninitialized(index);
-    DirectHandle<HeapObject> struct_obj = struct_new_result.first;
-    const StructType* struct_type = struct_new_result.second;
-    WriteBarrierMode mode = struct_type->is_shared() == SharedFlag::kYes
+    auto struct_new_result = wasm_runtime->StructNewUninitialized(index);
+    DirectHandle<HeapObject> struct_obj = struct_new_result.struct_object;
+    const StructType* struct_type = struct_new_result.type;
+    WriteBarrierMode mode = struct_new_result.needs_write_barrier
                                 ? UPDATE_WRITE_BARRIER
                                 : SKIP_WRITE_BARRIER;
 
@@ -6298,8 +6295,9 @@ class Handlers : public HandlersBase {
               sizeof(Tagged_t));
 #endif
 
-    WriteBarrierMode mode =
-        array_new_result.is_shared ? UPDATE_WRITE_BARRIER : SKIP_WRITE_BARRIER;
+    WriteBarrierMode mode = array_new_result.needs_write_barrier
+                                ? UPDATE_WRITE_BARRIER
+                                : SKIP_WRITE_BARRIER;
 
     {
       // The new array is uninitialized, which means GC might fail until
@@ -6378,7 +6376,7 @@ class Handlers : public HandlersBase {
               break;
             case kRef:
             case kRefNull: {
-              WriteBarrierMode mode = array_new_result.is_shared
+              WriteBarrierMode mode = array_new_result.needs_write_barrier
                                           ? UPDATE_WRITE_BARRIER
                                           : SKIP_WRITE_BARRIER;
               WasmRef ref = pop<WasmRef>(sp, code, wasm_runtime);
@@ -6451,7 +6449,7 @@ class Handlers : public HandlersBase {
             break;
           case kRef:
           case kRefNull: {
-            WriteBarrierMode mode = array_new_result.is_shared
+            WriteBarrierMode mode = array_new_result.needs_write_barrier
                                         ? UPDATE_WRITE_BARRIER
                                         : SKIP_WRITE_BARRIER;
             StoreRefIntoMemory(TrustedCast<HeapObject>(*array), element_addr,

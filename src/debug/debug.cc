@@ -1709,11 +1709,11 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
  public:
   explicit DiscardBaselineCodeVisitor(Tagged<SharedFunctionInfo> shared)
       : shared_(shared) {}
-  DiscardBaselineCodeVisitor() : shared_(SharedFunctionInfo()) {}
+  DiscardBaselineCodeVisitor() : shared_() {}
 
   void VisitThread(Isolate* isolate, ThreadLocalTop* top) override {
     DisallowGarbageCollection diallow_gc;
-    bool deopt_all = shared_ == SharedFunctionInfo();
+    bool deopt_all = shared_ == Tagged<SharedFunctionInfo>{};
     for (JavaScriptStackFrameIterator it(isolate, top); !it.done();
          it.Advance()) {
       if (!deopt_all && it.frame()->function()->shared() != shared_) continue;
@@ -1730,7 +1730,7 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
         UnoptimizedJSFrame* frame = UnoptimizedJSFrame::cast(it.frame());
         if (v8_flags.trace_baseline) {
           PrintF("[Sparkplug] discarding on-stack ");
-          ShortPrint(*code);
+          ShortPrint(code);
           PrintF("\n");
         }
         int bytecode_offset = code->GetBytecodeOffsetForBaselinePC(
@@ -1768,7 +1768,7 @@ void Debug::DiscardBaselineCode(Tagged<SharedFunctionInfo> shared) {
   DCHECK(shared->HasBaselineCode());
   if (v8_flags.trace_baseline) {
     PrintF("[Sparkplug] discarding baseline code for ");
-    ShortPrint(*shared);
+    ShortPrint(shared);
     PrintF("\n");
   }
   DiscardBaselineCodeVisitor visitor(shared);
@@ -2065,7 +2065,7 @@ class SharedFunctionInfoFinder {
         target_position_(target_position) {}
 
   void NewCandidate(Tagged<SharedFunctionInfo> shared,
-                    Tagged<JSFunction> closure = JSFunction()) {
+                    Tagged<JSFunction> closure = {}) {
     if (!shared->IsSubjectToDebugging()) return;
     int start_position = shared->function_token_position();
     if (start_position == kNoSourcePosition) {
@@ -2336,7 +2336,7 @@ void Debug::CreateBreakInfo(DirectHandle<SharedFunctionInfo> shared) {
   DirectHandle<FixedArray> break_points(
       factory->NewFixedArray(DebugInfo::kEstimatedNofBreakPointsInFunction));
 
-  int flags = debug_info->flags(kRelaxedLoad);
+  DebugInfo::Flags flags = debug_info->flags(kRelaxedLoad);
   flags |= DebugInfo::kHasBreakInfo;
   if (CanBreakAtEntry(shared)) flags |= DebugInfo::kCanBreakAtEntry;
   debug_info->set_flags(flags, kRelaxedStore);
@@ -2476,7 +2476,8 @@ bool Debug::BreakAtEntry(Tagged<SharedFunctionInfo> sfi) {
   return false;
 }
 
-std::optional<Tagged<Object>> Debug::OnThrow(DirectHandle<Object> exception) {
+std::optional<Tagged<Object>> Debug::OnThrow(DirectHandle<Object> exception,
+                                             bool is_stack_overflow) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   if (in_debug_scope() || ignore_events()) return {};
   // Temporarily clear any exception to allow evaluating
@@ -2490,7 +2491,8 @@ std::optional<Tagged<Object>> Debug::OnThrow(DirectHandle<Object> exception) {
                 catch_type == Isolate::CAUGHT_BY_ASYNC_AWAIT ||
                         catch_type == Isolate::CAUGHT_BY_PROMISE
                     ? v8::debug::kPromiseRejection
-                    : v8::debug::kException);
+                    : v8::debug::kException,
+                is_stack_overflow);
   }
   PrepareStepOnThrow();
   // If the OnException handler requested termination, then indicated this to
@@ -2531,12 +2533,12 @@ bool Debug::IsFrameBlackboxed(JavaScriptFrame* frame) {
 
 void Debug::OnException(DirectHandle<Object> exception,
                         MaybeDirectHandle<JSPromise> promise,
-                        v8::debug::ExceptionType exception_type) {
+                        v8::debug::ExceptionType exception_type,
+                        bool is_stack_overflow) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   // Do not trigger exception event on stack overflow. We cannot perform
   // anything useful for debugging in that situation.
-  StackLimitCheck stack_limit_check(isolate_);
-  if (stack_limit_check.JsHasOverflowed()) return;
+  if (is_stack_overflow) return;
 
   // Return if the event has nowhere to go.
   if (!debug_delegate_) return;

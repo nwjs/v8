@@ -21,7 +21,7 @@ class PrototypeSharedClosureInfo;
 #include "torque-generated/src/objects/prototype-info-tq.inc"
 
 // Container for metadata stored on each prototype map.
-V8_OBJECT class PrototypeInfo : public StructLayout {
+V8_OBJECT class PrototypeInfo : public Struct {
  public:
   // Accessors
   inline Tagged<UnionOf<JSModuleNamespace, Undefined>> module_namespace() const;
@@ -86,8 +86,6 @@ V8_OBJECT class PrototypeInfo : public StructLayout {
   static inline void AddDerivedMap(DirectHandle<PrototypeInfo> info,
                                    DirectHandle<Map> to, Isolate* isolate);
   inline Tagged<MaybeObject> GetDerivedMap(DirectHandle<Map> from);
-
-  static inline bool IsPrototypeInfoFast(Tagged<Object> object);
 
   DECL_BOOLEAN_ACCESSORS(should_be_fast_map)
 
