@@ -6,6 +6,7 @@
 #define V8_COMPILER_TURBOSHAFT_FAST_API_CALL_LOWERING_REDUCER_H_
 
 #include "include/v8-fast-api-calls.h"
+#include "src/base/logging.h"
 #include "src/compiler/fast-api-calls.h"
 #include "src/compiler/globals.h"
 #include "src/compiler/turboshaft/assembler.h"
@@ -26,8 +27,8 @@ class FastApiCallLoweringReducer : public Next {
   TURBOSHAFT_REDUCER_BOILERPLATE(FastApiCallLowering)
 
   OpIndex REDUCE(FastApiCall)(
-      V<FrameState> frame_state, V<Object> data_argument, V<Context> context,
-      base::Vector<const OpIndex> arguments,
+      V<LazyFrameState> frame_state, V<Object> data_argument,
+      V<Context> context, base::Vector<const OpIndex> arguments,
       const FastApiCallParameters* parameters,
       base::Vector<const RegisterRepresentation> out_reps) {
     __ data() -> set_graph_has_lowered_fast_api_calls();
@@ -349,6 +350,7 @@ class FastApiCallLoweringReducer : public Next {
       case CTypeInfo::Type::kUint8:
         UNREACHABLE();
     }
+    UNREACHABLE();
   }
 
   V<Any> ConvertReturnValue(const CFunctionInfo* c_signature, OpIndex result) {
@@ -391,6 +393,7 @@ class FastApiCallLoweringReducer : public Next {
       case CTypeInfo::Type::kUint8:
         UNREACHABLE();
     }
+    UNREACHABLE();
   }
 
   V<HeapObject> BuildAllocateJSExternalObject(V<WordPtr> pointer) {
@@ -442,7 +445,7 @@ class FastApiCallLoweringReducer : public Next {
   }
 
   OpIndex WrapFastCall(const TSCallDescriptor* descriptor, OpIndex callee,
-                       V<FrameState> frame_state, V<Context> context,
+                       V<LazyFrameState> frame_state, V<Context> context,
                        base::Vector<const OpIndex> arguments) {
     // CPU profiler support.
     OpIndex target_address =

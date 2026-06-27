@@ -1263,37 +1263,65 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
     Register dst_addr, Register offset_reg, uintptr_t offset_imm,
     LiftoffRegister expected, LiftoffRegister new_value, LiftoffRegister result,
     uint32_t* trapping_load_pc, LiftoffRegList pinned) {
-  AtomicCompareExchange(
-      dst_addr, offset_reg, offset_imm, expected, new_value, result,
-      COMPRESS_POINTERS_BOOL ? StoreType::kI32Store : StoreType::kI64Store,
-      trapping_load_pc, false);
+  // The result register may not alias with any of the inputs as the CAS
+  // instruction overwrites it in the loop.
+  DCHECK(!LiftoffRegList(dst_addr, expected, new_value).has(result));
+  DCHECK(offset_reg == no_reg || offset_reg != result.gp());
+  MemOperand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm);
 
-  if constexpr (COMPRESS_POINTERS_BOOL) {
-    add_d(result.gp(), result.gp(), kPtrComprCageBaseRegister);
-  }
+  Register temp0 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
+  Register temp1 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
+  Register temp2 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
 
-  if (v8_flags.disable_write_barriers) return;
-  // Emit the write barrier.
   Label exit;
-  JumpIfSmi(new_value.gp(), &exit);
-  CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask,
-                kZero, &exit);
-  CheckPageFlag(new_value.gp(), MemoryChunk::kPointersToHereAreInterestingMask,
-                kZero, &exit);
-
-  UseScratchRegisterScope temps(this);
-  Operand offset_op = Operand(offset_imm);
-  if (offset_reg.is_valid()) {
-    Register scratch = temps.Acquire();
-    bstrpick_d(scratch, offset_reg, 31, 0);
-    if (offset_imm) {
-      Add_d(scratch, scratch, offset_op);
-    }
-    offset_op = Operand(scratch);
+  Add_d(temp0, dst_op.base(), dst_op.offset());
+  if constexpr (COMPRESS_POINTERS_BOOL) {
+    Label compareExchange;
+    slli_w(temp1, expected.gp(), 0);
+    bind(&compareExchange);
+    Ll_w(result.gp(), MemOperand(temp0, 0),
+         reinterpret_cast<int*>(trapping_load_pc));
+    BranchShort(&exit, ne, temp1, Operand(result.gp()));
+    mov(temp2, new_value.gp());
+    Sc_w(temp2, MemOperand(temp0, 0));
+    BranchShort(&compareExchange, eq, temp2, Operand(zero_reg));
+  } else {
+    Label compareExchange;
+    bind(&compareExchange);
+    Ll_d(result.gp(), MemOperand(temp0, 0),
+         reinterpret_cast<int*>(trapping_load_pc));
+    BranchShort(&exit, ne, expected.gp(), Operand(result.gp()));
+    mov(temp1, new_value.gp());
+    Sc_d(temp1, MemOperand(temp0, 0));
+    BranchShort(&compareExchange, eq, temp1, Operand(zero_reg));
   }
-  CallRecordWriteStubSaveRegisters(dst_addr, offset_op, SaveFPRegsMode::kSave,
-                                   StubCallMode::kCallWasmRuntimeStub);
+
+  if (!v8_flags.disable_write_barriers) {
+    // Emit the write barrier.
+    JumpIfSmi(new_value.gp(), &exit);
+    CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask,
+                  kZero, &exit);
+    CheckPageFlag(new_value.gp(),
+                  MemoryChunk::kPointersToHereAreInterestingMask, kZero, &exit);
+
+    Operand offset_op = Operand(offset_imm);
+    if (offset_reg.is_valid()) {
+      bstrpick_d(temp0, offset_reg, 31, 0);
+      if (offset_imm) {
+        Add_d(temp0, temp0, offset_op);
+      }
+      offset_op = Operand(temp0);
+    }
+    CallRecordWriteStubSaveRegisters(dst_addr, offset_op, SaveFPRegsMode::kSave,
+                                     StubCallMode::kCallWasmRuntimeStub);
+  }
+
   bind(&exit);
+  dbar(0x14);
+  if constexpr (COMPRESS_POINTERS_BOOL) {
+    Bstrpick_d(result.gp(), result.gp(), 31, 0);
+    Or(result.gp(), result.gp(), kPtrComprCageBaseRegister);
+  }
 }
 
 void LiftoffAssembler::AtomicFence() { dbar(0); }
@@ -1341,7 +1369,7 @@ void LiftoffAssembler::MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
       break;
     case kS128:
       Vld(kSimd128ScratchReg, liftoff::GetStackSlot(src_offset));
-      Vst(kSimd128ScratchReg, liftoff::GetStackSlot(src_offset));
+      Vst(kSimd128ScratchReg, liftoff::GetStackSlot(dst_offset));
       break;
     default:
       UNREACHABLE();
@@ -1521,6 +1549,50 @@ void LiftoffAssembler::IncrementSmi(LiftoffRegister dst, int offset) {
   }
 }
 
+void LiftoffAssembler::DecrementMaxSteps(int32_t* max_steps_ptr,
+                                         MaxStepsVariant steps,
+                                         Label* trap_label,
+                                         LiftoffRegList pinned) {
+  Register addr = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
+  Register max_steps = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
+
+  li(addr, reinterpret_cast<uintptr_t>(max_steps_ptr));
+  Ld_w(max_steps, MemOperand(addr, 0));
+  if (auto* steps_const = std::get_if<int32_t>(&steps)) {
+    Sub_w(max_steps, max_steps, Operand(*steps_const));
+    St_w(max_steps, MemOperand(addr, 0));
+    Branch(trap_label, lt, max_steps, Operand(zero_reg));
+    return;
+  }
+
+  UseScratchRegisterScope temps(this);
+  Register scratch0 = temps.Acquire();
+  Register scratch1 = temps.Acquire();
+
+  auto [reg, kind] = std::get<std::pair<Register, ValueKind>>(steps);
+
+  // Decrement the counter. If it underflows, clamp to -1 to prevent
+  // wraparound into positive range.
+
+  if (kind == kI64) {
+    Sub_d(scratch0, max_steps, reg);
+  } else {
+    Sub_w(scratch0, max_steps, reg);
+    slli_w(scratch1, reg, 0);
+    reg = scratch1;
+  }
+
+  // If max_steps was `unsigned less than` reg, the subtraction wrapped around,
+  // clamp to -1.
+  Label no_underflow;
+  Branch(&no_underflow, hs, max_steps, Operand(reg));
+  li(scratch0, Operand(-1));
+  bind(&no_underflow);
+
+  St_w(scratch0, MemOperand(addr, 0));
+  Branch(trap_label, lt, scratch0, Operand(zero_reg));
+}
+
 void LiftoffAssembler::emit_i32_mul(Register dst, Register lhs, Register rhs) {
   MacroAssembler::Mul_w(dst, lhs, rhs);
 }
@@ -1629,6 +1701,39 @@ void LiftoffAssembler::emit_i64_addi(LiftoffRegister dst, LiftoffRegister lhs,
   MacroAssembler::Add_d(dst.gp(), lhs.gp(), Operand(imm));
 }
 
+void LiftoffAssembler::emit_i64_add128(Register dst_low, Register dst_high,
+                                       Register al, Register ah, Register bl,
+                                       Register bh) {
+  DCHECK_NE(dst_low, ah);
+  DCHECK_NE(dst_low, bh);
+  DCHECK_NE(dst_low, bl);
+  DCHECK_NE(dst_low, dst_high);
+
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+
+  Add_d(dst_low, al, bl);
+  Add_d(scratch, ah, bh);
+  Sltu(dst_high, dst_low, bl);
+  Add_d(dst_high, scratch, dst_high);
+}
+
+void LiftoffAssembler::emit_i64_sub128(Register dst_low, Register dst_high,
+                                       Register al, Register ah, Register bl,
+                                       Register bh) {
+  DCHECK_NE(dst_low, ah);
+  DCHECK_NE(dst_low, bh);
+  DCHECK_NE(dst_low, dst_high);
+
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+
+  Sltu(scratch, al, bl);
+  Sub_d(dst_low, al, bl);
+  Sub_d(dst_high, ah, bh);
+  Sub_d(dst_high, dst_high, scratch);
+}
+
 void LiftoffAssembler::emit_i64_mul(LiftoffRegister dst, LiftoffRegister lhs,
                                     LiftoffRegister rhs) {
   MacroAssembler::Mul_d(dst.gp(), lhs.gp(), rhs.gp());
@@ -1646,9 +1751,39 @@ void LiftoffAssembler::emit_i64_muli(LiftoffRegister dst, LiftoffRegister lhs,
   MacroAssembler::Mul_d(dst.gp(), lhs.gp(), scratch);
 }
 
-void LiftoffAssembler::emit_i64_mul_wide_s() { UNIMPLEMENTED(); }
+void LiftoffAssembler::emit_i64_mul_wide_s() {
+  DCHECK(!cache_state()->frozen);
+  LiftoffRegList pinned;
+  LiftoffRegister rhs = pinned.set(PopToRegister(pinned));
+  LiftoffRegister lhs = pinned.set(PopToRegister(pinned));
 
-void LiftoffAssembler::emit_i64_mul_wide_u() { UNIMPLEMENTED(); }
+  LiftoffRegister low_result = pinned.set(GetUnusedRegister(kGpReg, pinned));
+  LiftoffRegister high_result =
+      GetUnusedRegister(kGpReg, {lhs, rhs}, LiftoffRegList{low_result});
+
+  Mul_d(low_result.gp(), lhs.gp(), rhs.gp());
+  Mulh_d(high_result.gp(), lhs.gp(), rhs.gp());
+
+  PushRegister(kI64, low_result);
+  PushRegister(kI64, high_result);
+}
+
+void LiftoffAssembler::emit_i64_mul_wide_u() {
+  DCHECK(!cache_state()->frozen);
+  LiftoffRegList pinned;
+  LiftoffRegister rhs = pinned.set(PopToRegister(pinned));
+  LiftoffRegister lhs = pinned.set(PopToRegister(pinned));
+
+  LiftoffRegister low_result = pinned.set(GetUnusedRegister(kGpReg, pinned));
+  LiftoffRegister high_result =
+      GetUnusedRegister(kGpReg, {lhs, rhs}, LiftoffRegList{low_result});
+
+  Mul_d(low_result.gp(), lhs.gp(), rhs.gp());
+  Mulh_du(high_result.gp(), lhs.gp(), rhs.gp());
+
+  PushRegister(kI64, low_result);
+  PushRegister(kI64, high_result);
+}
 
 bool LiftoffAssembler::emit_i64_divs(LiftoffRegister dst, LiftoffRegister lhs,
                                      LiftoffRegister rhs,

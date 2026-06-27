@@ -69,8 +69,6 @@ void TestTwoSizeTArguments(Isolate* isolate) {
 class SomeObject : public HeapObject {
  public:
   void Method(Tagged<Object> a) { Print(a); }
-
-  OBJECT_CONSTRUCTORS(SomeObject, HeapObject);
 };
 
 void TestMethodCall(Isolate* isolate) {
@@ -390,6 +388,16 @@ void TestConservativePinningScopeConstWitness(
   Tagged<JSObject> raw_obj = *isolate->factory()->NewJSObjectWithNullProto();
   CauseGCRaw(raw_obj, isolate);
   Print(raw_obj);
+}
+
+void OutParameterFunction(Tagged<JSObject>* out_obj, Isolate* isolate) {
+  CauseGCRaw(*out_obj, isolate);
+  *out_obj = *isolate->factory()->NewJSObjectWithNullProto();
+}
+
+void TestOutParameter(Isolate* isolate) {
+  Tagged<JSObject> raw_obj;
+  OutParameterFunction(&raw_obj, isolate);
 }
 
 }  // namespace internal

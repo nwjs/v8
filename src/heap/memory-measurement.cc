@@ -358,12 +358,9 @@ void MemoryMeasurement::ReportResults() {
       contexts.push_back(context);
       size_in_bytes.push_back(request.sizes[i]);
     }
-    request.delegate->MeasurementComplete(
-        {{contexts.begin(), contexts.end()},
-         {size_in_bytes.begin(), size_in_bytes.end()},
-         request.shared,
-         request.wasm_code,
-         request.wasm_metadata});
+    request.delegate->MeasurementComplete({contexts, size_in_bytes,
+                                           request.shared, request.wasm_code,
+                                           request.wasm_metadata});
     isolate_->counters()->measure_memory_delay_ms()->AddSample(
         static_cast<int>(request.timer.Elapsed().InMilliseconds()));
   }
@@ -389,7 +386,20 @@ void NativeContextStats::IncrementExternalSize(Address context, Tagged<Map> map,
   InstanceType instance_type = map->instance_type();
   size_t external_size = 0;
   if (instance_type == JS_ARRAY_BUFFER_TYPE) {
-    external_size = Cast<JSArrayBuffer>(object)->GetByteLength();
+    auto js_array_buffer = Cast<JSArrayBuffer>(object);
+    if (js_array_buffer->is_resizable_by_js() &&
+        !js_array_buffer->is_shared()) {
+      // Reading the JS-visible byte length of a RAB during concurrent marking
+      // could cause a data race, because the main thread can update it
+      // concurrently. Instead, we use the atomically updated accounting length
+      // from the extension, which is the correct metric for GC memory
+      // measurement.
+      if (auto ext = js_array_buffer->extension()) {
+        external_size = ext->accounting_length();
+      }
+    } else {
+      external_size = js_array_buffer->GetByteLength();
+    }
   } else {
     DCHECK(InstanceTypeChecker::IsExternalString(instance_type));
     external_size = Cast<ExternalString>(object)->ExternalPayloadSize();

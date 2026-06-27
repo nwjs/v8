@@ -196,9 +196,8 @@ struct StaticReadOnlyRoot {
       kAliasedArgumentsEntryMap + 40;
   static constexpr Tagged_t kArrayBoilerplateDescriptionMap =
       kAllocationMementoMap + 40;
-  static constexpr Tagged_t kAsmWasmDataMap =
+  static constexpr Tagged_t kAsyncGeneratorRequestMap =
       kArrayBoilerplateDescriptionMap + 40;
-  static constexpr Tagged_t kAsyncGeneratorRequestMap = kAsmWasmDataMap + 40;
   static constexpr Tagged_t kBreakPointMap = kAsyncGeneratorRequestMap + 40;
   static constexpr Tagged_t kBreakPointInfoMap = kBreakPointMap + 40;
   static constexpr Tagged_t kBytecodeWrapperMap = kBreakPointInfoMap + 40;
@@ -242,7 +241,9 @@ struct StaticReadOnlyRoot {
       kAllocationSiteWithoutWeakNextMap + 40;
   static constexpr Tagged_t kLoadHandler2Map = kLoadHandler1Map + 40;
   static constexpr Tagged_t kLoadHandler3Map = kLoadHandler2Map + 40;
-  static constexpr Tagged_t kStoreHandler0Map = kLoadHandler3Map + 40;
+  static constexpr Tagged_t kLoadHandler4Map = kLoadHandler3Map + 40;
+  static constexpr Tagged_t kLoadHandler5Map = kLoadHandler4Map + 40;
+  static constexpr Tagged_t kStoreHandler0Map = kLoadHandler5Map + 40;
   static constexpr Tagged_t kStoreHandler1Map = kStoreHandler0Map + 40;
   static constexpr Tagged_t kStoreHandler2Map = kStoreHandler1Map + 40;
   static constexpr Tagged_t kStoreHandler3Map = kStoreHandler2Map + 40;
@@ -301,7 +302,8 @@ struct StaticReadOnlyRoot {
   static constexpr Tagged_t kSyntheticModuleMap = kSourceTextModuleMap + 40;
   static constexpr Tagged_t kContextCellMap = kSyntheticModuleMap + 40;
   static constexpr Tagged_t kWasmImportDataMap = kContextCellMap + 40;
-  static constexpr Tagged_t kWasmCapiFunctionDataMap = kWasmImportDataMap + 40;
+  static constexpr Tagged_t kAsmWasmDataMap = kWasmImportDataMap + 40;
+  static constexpr Tagged_t kWasmCapiFunctionDataMap = kAsmWasmDataMap + 40;
   static constexpr Tagged_t kWasmExportedFunctionDataMap =
       kWasmCapiFunctionDataMap + 40;
   static constexpr Tagged_t kWasmInternalFunctionMap =
@@ -1250,7 +1252,7 @@ struct StaticReadOnlyRoot {
   static constexpr Tagged_t kLastAllocatedRoot = 0x1a015d;
 };
 
-static constexpr std::array<Tagged_t, 1039> StaticReadOnlyRootsPointerTable = {
+static constexpr std::array<Tagged_t, 1041> StaticReadOnlyRootsPointerTable = {
     StaticReadOnlyRoot::kUndefinedValue,
     StaticReadOnlyRoot::kTheHoleValue,
     StaticReadOnlyRoot::kNullValue,
@@ -1345,6 +1347,7 @@ static constexpr std::array<Tagged_t, 1039> StaticReadOnlyRootsPointerTable = {
     StaticReadOnlyRoot::kSwissNameDictionaryMap,
     StaticReadOnlyRoot::kSyntheticModuleMap,
     StaticReadOnlyRoot::kWasmImportDataMap,
+    StaticReadOnlyRoot::kAsmWasmDataMap,
     StaticReadOnlyRoot::kWasmCapiFunctionDataMap,
     StaticReadOnlyRoot::kWasmDispatchTableMap,
     StaticReadOnlyRoot::kWasmDispatchTableForImportsMap,
@@ -2237,7 +2240,6 @@ static constexpr std::array<Tagged_t, 1039> StaticReadOnlyRootsPointerTable = {
     StaticReadOnlyRoot::kAliasedArgumentsEntryMap,
     StaticReadOnlyRoot::kAllocationMementoMap,
     StaticReadOnlyRoot::kArrayBoilerplateDescriptionMap,
-    StaticReadOnlyRoot::kAsmWasmDataMap,
     StaticReadOnlyRoot::kAsyncGeneratorRequestMap,
     StaticReadOnlyRoot::kBreakPointMap,
     StaticReadOnlyRoot::kBreakPointInfoMap,
@@ -2283,6 +2285,8 @@ static constexpr std::array<Tagged_t, 1039> StaticReadOnlyRootsPointerTable = {
     StaticReadOnlyRoot::kLoadHandler1Map,
     StaticReadOnlyRoot::kLoadHandler2Map,
     StaticReadOnlyRoot::kLoadHandler3Map,
+    StaticReadOnlyRoot::kLoadHandler4Map,
+    StaticReadOnlyRoot::kLoadHandler5Map,
     StaticReadOnlyRoot::kStoreHandler0Map,
     StaticReadOnlyRoot::kStoreHandler1Map,
     StaticReadOnlyRoot::kStoreHandler2Map,

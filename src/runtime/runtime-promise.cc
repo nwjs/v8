@@ -34,8 +34,10 @@ RUNTIME_FUNCTION(Runtime_PromiseRejectAfterResolved) {
   HandleScope scope(isolate);
   DirectHandle<JSPromise> promise = args.at<JSPromise>(0);
   DirectHandle<Object> reason = args.at(1);
+  START_ALLOW_USE_DEPRECATED();
   isolate->ReportPromiseReject(promise, reason,
                                v8::kPromiseRejectAfterResolved);
+  END_ALLOW_USE_DEPRECATED();
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -44,8 +46,10 @@ RUNTIME_FUNCTION(Runtime_PromiseResolveAfterResolved) {
   HandleScope scope(isolate);
   DirectHandle<JSPromise> promise = args.at<JSPromise>(0);
   DirectHandle<Object> resolution = args.at(1);
+  START_ALLOW_USE_DEPRECATED();
   isolate->ReportPromiseReject(promise, resolution,
                                v8::kPromiseResolveAfterResolved);
+  END_ALLOW_USE_DEPRECATED();
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -85,12 +89,28 @@ RUNTIME_FUNCTION(Runtime_RunMicrotaskCallback) {
   DCHECK_EQ(2, args.length());
   Tagged<Object> microtask_callback = args[0];
   Tagged<Object> microtask_data = args[1];
-  MicrotaskCallback callback =
-      ToCData<MicrotaskCallback, kMicrotaskCallbackTag>(isolate,
-                                                        microtask_callback);
-  void* data =
-      ToCData<void*, kMicrotaskCallbackDataTag>(isolate, microtask_data);
-  callback(data);
+  void* raw_callback = nullptr;
+  void* raw_data = nullptr;
+
+  if (IsForeign(microtask_data)) {
+    MicrotaskCallback callback =
+        ToCData<MicrotaskCallback, kMicrotaskCallbackTag>(isolate,
+                                                          microtask_callback);
+    void* data =
+        ToCData<void*, kMicrotaskCallbackDataTag>(isolate, microtask_data);
+    raw_callback = reinterpret_cast<void*>(callback);
+    raw_data = data;
+    callback(data);
+  } else {
+    MicrotaskCallbackWithData callback =
+        ToCData<MicrotaskCallbackWithData, kMicrotaskCallbackTag>(
+            isolate, microtask_callback);
+    v8::Local<v8::Data> local_data_cast = v8::Utils::Convert<Object, v8::Data>(
+        DirectHandle<Object>(microtask_data, isolate));
+    raw_callback = reinterpret_cast<void*>(callback);
+    raw_data = nullptr;
+    callback(local_data_cast);
+  }
 
   if (isolate->has_exception()) {
     if (isolate->is_execution_terminating()) {
@@ -112,7 +132,7 @@ RUNTIME_FUNCTION(Runtime_RunMicrotaskCallback) {
     // exception should be reported.
     // In case this happens, report a soft crash and swallow the exception.
     isolate->PushParamsAndContinue(
-        reinterpret_cast<void*>(callback), data,
+        raw_callback, raw_data,
         reinterpret_cast<void*>(isolate->exception().ptr()));
     isolate->clear_exception();
   }

@@ -486,7 +486,7 @@ V8_NOINLINE DirectHandle<JSFunction> CreateFunctionForBuiltinWithPrototype(
   // TODO(littledan): Why do we have this is_generator test when
   // NewFunctionPrototype already handles finding an appropriately
   // shared prototype?
-  if (!IsResumableFunction(info->kind()) && IsTheHole(*prototype, isolate)) {
+  if (!IsResumableFunction(info->kind()) && IsTheHole(*prototype)) {
     prototype = factory->NewFunctionPrototype(result);
   }
   JSFunction::SetInitialMap(isolate, result, initial_map,
@@ -583,7 +583,7 @@ V8_NOINLINE void SetConstructorInstanceType(
   DCHECK_NE(map, *isolate->strict_function_with_readonly_prototype_map());
   // Constructor function map is always a root map, and thus we don't have to
   // deal with updating the whole transition tree.
-  DCHECK(IsUndefined(map->GetBackPointer(), isolate));
+  DCHECK(IsUndefined(map->GetBackPointer()));
   DCHECK_EQ(JS_FUNCTION_TYPE, map->instance_type());
 
   map->set_instance_type(constructor_type);
@@ -1276,7 +1276,7 @@ namespace {
 void ReplaceAccessors(Isolate* isolate, DirectHandle<Map> map,
                       DirectHandle<String> name, PropertyAttributes attributes,
                       DirectHandle<AccessorPair> accessor_pair) {
-  Tagged<DescriptorArray> descriptors = map->instance_descriptors(isolate);
+  Tagged<DescriptorArray> descriptors = map->instance_descriptors();
   InternalIndex entry = descriptors->SearchWithCache(isolate, *name, *map);
   Descriptor d = Descriptor::AccessorConstant(name, accessor_pair, attributes);
   descriptors->Replace(entry, &d);
@@ -1384,7 +1384,7 @@ DirectHandle<JSGlobalObject> Genesis::CreateNewGlobals(
         Cast<FunctionTemplateInfo>(data->constructor()), isolate());
     DirectHandle<Object> proto_template(
         global_constructor->GetPrototypeTemplate(), isolate());
-    if (!IsUndefined(*proto_template, isolate())) {
+    if (!IsUndefined(*proto_template)) {
       js_global_object_template = Cast<ObjectTemplateInfo>(proto_template);
     }
   }
@@ -1453,9 +1453,9 @@ DirectHandle<JSGlobalObject> Genesis::CreateNewGlobals(
   // Set the global proxy of the native context. If the native context has been
   // deserialized, the global proxy is already correctly set up by the
   // deserializer. Otherwise it's undefined.
-  DCHECK(IsUndefined(native_context()->GetNoCell(Context::GLOBAL_PROXY_INDEX),
-                     isolate()) ||
-         native_context()->global_proxy_object() == *global_proxy);
+  DCHECK(
+      IsUndefined(native_context()->GetNoCell(Context::GLOBAL_PROXY_INDEX)) ||
+      native_context()->global_proxy_object() == *global_proxy);
   native_context()->set_global_proxy_object(*global_proxy);
 
   return global_object;
@@ -5544,6 +5544,8 @@ void Genesis::InitializeConsole(DirectHandle<JSObject> extras_binding) {
   void Genesis::InitializeGlobal_##id() {}
 
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_import_attributes)
+EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_import_text)
+EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_regexp_buffer_boundaries)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_regexp_modifiers)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_regexp_duplicate_named_groups)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_decorators)
@@ -5682,6 +5684,15 @@ void Genesis::InitializeGlobal_js_iterator_join() {
       native_context()->initial_iterator_prototype(), isolate());
   SimpleInstallFunction(isolate(), iterator_prototype, "join",
                         Builtin::kIteratorPrototypeJoin, 1, kAdapt);
+}
+
+void Genesis::InitializeGlobal_js_iterator_includes() {
+  if (!v8_flags.js_iterator_includes) return;
+
+  DirectHandle<JSObject> iterator_prototype(
+      native_context()->initial_iterator_prototype(), isolate());
+  SimpleInstallFunction(isolate(), iterator_prototype, "includes",
+                        Builtin::kIteratorPrototypeIncludes, 1, kDontAdapt);
 }
 
 void Genesis::InitializeGlobal_harmony_shadow_realm() {
@@ -6433,7 +6444,7 @@ bool Genesis::InstallABunchOfRandomThings() {
         FieldIndex index =
             FieldIndex::ForDescriptor(template_object->map(), descriptor_index);
         CHECK(index.is_inobject());
-        CHECK_EQ(index.offset(), TemplateLiteralObject::kRawOffset);
+        CHECK_EQ(index.offset(), offsetof(TemplateLiteralObject, raw_));
       }
 
       {
@@ -6445,7 +6456,7 @@ bool Genesis::InstallABunchOfRandomThings() {
             FieldIndex::ForDescriptor(template_object->map(), descriptor_index);
         CHECK(index.is_inobject());
         CHECK_EQ(index.offset(),
-                 TemplateLiteralObject::kFunctionLiteralIdOffset);
+                 offsetof(TemplateLiteralObject, function_literal_id_));
       }
 
       {
@@ -6456,7 +6467,7 @@ bool Genesis::InstallABunchOfRandomThings() {
         FieldIndex index =
             FieldIndex::ForDescriptor(template_object->map(), descriptor_index);
         CHECK(index.is_inobject());
-        CHECK_EQ(index.offset(), TemplateLiteralObject::kSlotIdOffset);
+        CHECK_EQ(index.offset(), offsetof(TemplateLiteralObject, slot_id_));
       }
     }
 
@@ -6842,7 +6853,7 @@ bool Genesis::ConfigureGlobalObject(
     DirectHandle<FunctionTemplateInfo> proxy_constructor(
         Cast<FunctionTemplateInfo>(global_proxy_data->constructor()),
         isolate());
-    if (!IsUndefined(proxy_constructor->GetPrototypeTemplate(), isolate())) {
+    if (!IsUndefined(proxy_constructor->GetPrototypeTemplate())) {
       DirectHandle<ObjectTemplateInfo> global_object_data(
           Cast<ObjectTemplateInfo>(proxy_constructor->GetPrototypeTemplate()),
           isolate());
@@ -6905,8 +6916,8 @@ void Genesis::TransferNamedProperties(DirectHandle<JSObject> from,
   // The global template must not create properties that already exist
   // in the snapshotted global object.
   if (from->HasFastProperties()) {
-    DirectHandle<DescriptorArray> descs(
-        from->map()->instance_descriptors(isolate()), isolate());
+    DirectHandle<DescriptorArray> descs(from->map()->instance_descriptors(),
+                                        isolate());
     for (InternalIndex i : from->map()->IterateOwnDescriptors()) {
       PropertyDetails details = descs->GetDetails(i);
       if (details.location() == PropertyLocation::kField) {
@@ -6937,7 +6948,7 @@ void Genesis::TransferNamedProperties(DirectHandle<JSObject> from,
         DirectHandle<Object> value(descs->GetStrongValue(i), isolate());
         PropertyDetails d(PropertyKind::kAccessor, details.attributes(),
                           PropertyCellType::kMutable);
-        JSObject::SetNormalizedProperty(to, key, value, d);
+        JSObject::SetNormalizedProperty(to, key, value, d).Check();
       }
     }
   } else if (IsJSGlobalObject(*from)) {
@@ -6956,7 +6967,7 @@ void Genesis::TransferNamedProperties(DirectHandle<JSObject> from,
       if (PropertyAlreadyExists(isolate(), to, key)) continue;
       // Set the property.
       DirectHandle<Object> value(cell->value(), isolate());
-      if (IsTheHole(*value, isolate())) continue;
+      if (IsTheHole(*value)) continue;
       PropertyDetails details = cell->property_details();
       if (details.kind() == PropertyKind::kData) {
         JSObject::AddProperty(isolate(), to, key, value, details.attributes());
@@ -6965,7 +6976,7 @@ void Genesis::TransferNamedProperties(DirectHandle<JSObject> from,
         DCHECK(!to->HasFastProperties());
         PropertyDetails d(PropertyKind::kAccessor, details.attributes(),
                           PropertyCellType::kMutable);
-        JSObject::SetNormalizedProperty(to, key, value, d);
+        JSObject::SetNormalizedProperty(to, key, value, d).Check();
       }
     }
 
@@ -6985,7 +6996,7 @@ void Genesis::TransferNamedProperties(DirectHandle<JSObject> from,
       // Set the property.
       DirectHandle<Object> value(properties->ValueAt(entry), isolate());
       DCHECK(!IsCell(*value));
-      DCHECK(!IsTheHole(*value, isolate()));
+      DCHECK(!IsTheHole(*value));
       PropertyDetails details = properties->DetailsAt(entry);
       DCHECK_EQ(PropertyKind::kData, details.kind());
       JSObject::AddProperty(isolate(), to, key, value, details.attributes());
@@ -7009,7 +7020,7 @@ void Genesis::TransferNamedProperties(DirectHandle<JSObject> from,
       // Set the property.
       DirectHandle<Object> value(properties->ValueAt(key_index), isolate());
       DCHECK(!IsCell(*value));
-      DCHECK(!IsTheHole(*value, isolate()));
+      DCHECK(!IsTheHole(*value));
       PropertyDetails details = properties->DetailsAt(key_index);
       DCHECK_EQ(PropertyKind::kData, details.kind());
       JSObject::AddProperty(isolate(), to, key, value, details.attributes());
@@ -7068,8 +7079,7 @@ DirectHandle<Map> Genesis::CreateInitialMapForArraySubclass(
   {
     Tagged<JSFunction> array_function = native_context()->array_function();
     DirectHandle<DescriptorArray> array_descriptors(
-        array_function->initial_map()->instance_descriptors(isolate()),
-        isolate());
+        array_function->initial_map()->instance_descriptors(), isolate());
     DirectHandle<String> length = factory()->length_string();
     InternalIndex old = array_descriptors->SearchWithCache(
         isolate(), *length, array_function->initial_map());

@@ -58,7 +58,7 @@ TNode<MaybeObject> AccessorAssembler::LoadHandlerDataField(
   // data_index is 1-indexed, so subtract one to make it 0-indexed.
   data_index -= 1;
   CHECK_GE(data_index, 0);
-  CHECK_LT(data_index, 3);
+  CHECK_LT(data_index, 5);
   int offset = DataHandler::OffsetOf(data_index);
   CSA_DCHECK(this, UintPtrGreaterThanOrEqual(
                        LoadMapInstanceSizeInWords(handler_map),
@@ -161,22 +161,25 @@ void AccessorAssembler::TryHomomorphicCase(TNode<Object> lookup_start_object,
 
   // Look up in map cache.
   // TODO(leszeks): Could avoid this lookup by fixing the length at build time.
-  TNode<IntPtrT> length =
-      LoadWeakFixedArrayLength(ReinterpretCast<WeakFixedArray>(array));
+  TNode<Uint32T> length =
+      LoadWeakFixedArrayLengthAsUint32(ReinterpretCast<WeakFixedArray>(array));
 
   // Hash: (map_ptr >> kTaggedSizeLog2) % length
   // We assume length is power of 2.
   TNode<IntPtrT> map_intptr = BitcastTaggedToWord(lookup_start_object_map);
-  TNode<IntPtrT> hash = WordSar(map_intptr, IntPtrConstant(kTaggedSizeLog2));
+  TNode<Uint32T> hash = Unsigned(TruncateIntPtrToInt32(
+      WordSar(map_intptr, IntPtrConstant(kTaggedSizeLog2))));
   // TODO(leszeks): Could avoid this subtraction by fixing the length at build
   // time.
-  TNode<IntPtrT> cache_index =
-      WordAnd(hash, IntPtrSub(length, IntPtrConstant(1)));
+  TNode<Word32T> cache_index =
+      Word32And(hash, Int32Sub(length, Int32Constant(1)));
+
+  TNode<IntPtrT> cache_index_intptr = Signed(ChangeUint32ToWord(cache_index));
 
   // Check if the cached map matches, and if it does, go immediately to handler
   // execution.
   TNode<MaybeObject> element = LoadWeakFixedArrayElement(
-      ReinterpretCast<WeakFixedArray>(array), cache_index);
+      ReinterpretCast<WeakFixedArray>(array), cache_index_intptr);
   GotoIf(TaggedEqual(element, MakeWeak(lookup_start_object_map)),
          &execute_handler);
 
@@ -268,7 +271,8 @@ void AccessorAssembler::TryHomomorphicCase(TNode<Object> lookup_start_object,
 
     // Update Cache: Overwrite at hash.
     StoreWeakFixedArrayElement(ReinterpretCast<WeakFixedArray>(array),
-                               cache_index, MakeWeak(lookup_start_object_map));
+                               cache_index_intptr,
+                               MakeWeak(lookup_start_object_map));
     Goto(&execute_handler);
   }
 
@@ -293,7 +297,8 @@ void AccessorAssembler::TryHomomorphicCase(TNode<Object> lookup_start_object,
   }
 }
 
-void AccessorAssembler::TryMegaDOMCase(TNode<Object> lookup_start_object,
+void AccessorAssembler::TryMegaDOMCase(TNode<Context> caller_context,
+                                       TNode<Object> lookup_start_object,
                                        TNode<Map> lookup_start_object_map,
                                        TVariable<MaybeObject>* var_handler,
                                        TNode<Object> vector,
@@ -337,7 +342,6 @@ void AccessorAssembler::TryMegaDOMCase(TNode<Object> lookup_start_object,
 
   // TODO(gsathya): This builtin throws an exception on interface check fail but
   // we should miss to the runtime.
-  TNode<Context> caller_context = context;
   exit_point->Return(CallBuiltin(Builtin::kCallFunctionTemplate_Generic,
                                  context, getter, Int32Constant(1),
                                  caller_context, lookup_start_object));
@@ -356,7 +360,7 @@ void AccessorAssembler::TryEnumeratedKeyedLoad(
   TNode<DescriptorArray> descriptors =
       LoadMapDescriptors(lookup_start_object_map);
   TNode<EnumCache> enum_cache = LoadObjectField<EnumCache>(
-      descriptors, DescriptorArray::kEnumCacheOffset);
+      descriptors, offsetof(DescriptorArray, enum_cache_));
   TNode<FixedArray> enum_keys =
       LoadObjectField<FixedArray>(enum_cache, offsetof(EnumCache, keys_));
   // |p->enum_index()| comes from the outer loop's ForIn state.
@@ -547,7 +551,8 @@ TNode<Code> AccessorAssembler::CastToCode(TNode<MaybeObject> code_candidate) {
   // to consolidate with a union of a Smi. The use of
   // TaggedMember<UnionOf<Smi,Code>> requires manual validation of the Code
   // object here.
-  code = LoadCodePointerFromObject(code, Code::kSelfIndirectPointerOffset);
+  code = LoadCodePointerFromObject(
+      code, offsetof(ExposedTrustedObject, self_indirect_pointer_));
 #endif
   return code;
 }
@@ -970,10 +975,27 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
     // handling with proxies which is currently not supported by builtins. So
     // for such cases, we should install a slow path and never reach here. Fix
     // it to not generate this for LoadGlobals.
+    Label slow_proxy(this);
+    GotoIf(TaggedIsSmi(handler), &slow_proxy);
+    TNode<HeapObject> handler_object = CAST(handler);
+    GotoIfNot(TaggedEqual(LoadMap(handler_object), LoadHandler5MapConstant()),
+              &slow_proxy);
+    {
+      TNode<DataHandler> data_handler = CAST(handler_object);
+      TNode<JSProxy> proxy_obj = CAST(p->lookup_start_object());
+      TNode<Object> result =
+          CallBuiltin(Builtin::kProxyGetPropertyFastPath, p->context(),
+                      proxy_obj, p->name(), p->receiver(), data_handler);
+      GotoIf(TaggedEqual(result, TheHoleConstant()), miss);
+      exit_point->Return(result);
+    }
+    BIND(&slow_proxy);
+
     CSA_DCHECK(this,
                WordNotEqual(IntPtrConstant(static_cast<int>(on_nonexistent)),
                             IntPtrConstant(static_cast<int>(
                                 OnNonExistent::kThrowReferenceError))));
+
     TVARIABLE(IntPtrT, var_index);
     TVARIABLE(Name, var_unique);
 
@@ -1114,8 +1136,8 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
     Comment("module export");
     TNode<UintPtrT> index =
         DecodeWordFromWord32<LoadHandler::ExportsIndexBits>(handler_word);
-    TNode<Module> module =
-        LoadObjectField<Module>(CAST(holder), JSModuleNamespace::kModuleOffset);
+    TNode<Module> module = LoadObjectField<Module>(
+        CAST(holder), offsetof(JSModuleNamespace, module_));
     TNode<ObjectHashTable> exports =
         LoadObjectField<ObjectHashTable>(module, offsetof(Module, exports_));
     TNode<Cell> cell = CAST(LoadFixedArrayElement(exports, index));
@@ -1740,8 +1762,8 @@ void AccessorAssembler::HandleStoreICTransitionMapHandlerCase(
     StoreTransitionMapFlags flags) {
   DCHECK_EQ(0, flags & ~kStoreTransitionMapFlagsMask);
   if (flags & kCheckPrototypeValidity) {
-    TNode<Object> maybe_validity_cell =
-        LoadObjectField(transition_map, Map::kPrototypeValidityCellOffset);
+    TNode<Object> maybe_validity_cell = LoadObjectField(
+        transition_map, offsetof(Map, prototype_validity_cell_));
     CheckPrototypeValidityCell(maybe_validity_cell, miss);
   }
 
@@ -2950,7 +2972,7 @@ void AccessorAssembler::InvalidateValidityCellIfPrototype(
   BIND(&is_prototype);
   {
     TNode<Object> maybe_prototype_info =
-        LoadObjectField(map, Map::kTransitionsOrPrototypeInfoOffset);
+        LoadObjectField(map, offsetof(Map, transitions_or_prototype_info_));
     // If there's no prototype info then there's nothing to invalidate.
     GotoIf(TaggedIsSmi(maybe_prototype_info), &cont);
 
@@ -3686,8 +3708,9 @@ void AccessorAssembler::LoadIC_Noninlined(const LoadICParameters* p,
 
     BIND(&try_megadom);
     {
-      TryMegaDOMCase(p->lookup_start_object(), lookup_start_object_map,
-                     var_handler, p->vector(), p->slot(), miss, exit_point);
+      TryMegaDOMCase(p->context(), p->lookup_start_object(),
+                     lookup_start_object_map, var_handler, p->vector(),
+                     p->slot(), miss, exit_point);
     }
   }
 }

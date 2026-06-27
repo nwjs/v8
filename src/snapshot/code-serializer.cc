@@ -272,8 +272,7 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
   CHECK(!InstanceTypeChecker::IsJSGlobalProxy(instance_type) &&
         !InstanceTypeChecker::IsJSGlobalObject(instance_type));
   // Embedded FixedArrays that need rehashing must support rehashing.
-  CHECK_IMPLIES(obj->NeedsRehashing(cage_base()),
-                obj->CanBeRehashed(cage_base()));
+  CHECK_IMPLIES(obj->NeedsRehashing(), obj->CanBeRehashed());
   // We expect no instantiated function objects or contexts.
   CHECK(!InstanceTypeChecker::IsJSFunction(instance_type) &&
         !InstanceTypeChecker::IsContext(instance_type));
@@ -479,6 +478,7 @@ const char* ToString(SerializedCodeSanityCheckResult result) {
     case SerializedCodeSanityCheckResult::kReadOnlySnapshotChecksumMismatch:
       return "read-only snapshot checksum mismatch";
   }
+  UNREACHABLE();
 }
 }  // namespace
 
@@ -695,6 +695,7 @@ CodeSerializer::FinishOffThreadDeserialize(
 #ifdef DEBUG
     if (!Cast<String>(result_script->source())->Equals(*source)) {
       isolate->PushStackTraceAndDie(
+          "deserialized script source mismatch",
           reinterpret_cast<void*>(result_script->source().ptr()),
           reinterpret_cast<void*>(source->ptr()));
     }

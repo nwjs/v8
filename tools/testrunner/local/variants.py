@@ -4,7 +4,7 @@
 
 # Use this to run several variants of the tests.
 ALL_VARIANT_FLAGS = {
-    "assert_types": ["--assert-types"],
+    "assert_types": ["--assert-types", "--maglev-assert-types"],
     "wasm_assert_types": ["--wasm-assert-types", "--no-liftoff"],
     "verify_turboshaft": ["--verify-turboshaft"],
     "code_serializer": ["--cache=code"],
@@ -159,9 +159,8 @@ ALL_VARIANT_FLAGS = {
     "stress_instruction_scheduling": [
         "--turbo-stress-instruction-scheduling", "--no-liftoff"
     ],
-    # Google3 variants.
-    "google3_icu": [],
-    "google3_noicu": [],
+    # Google3 variant.
+    "google3": [],
 }
 
 # Note these are specifically for the case when Turbofan is either fully
@@ -209,7 +208,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
     "nooptimization": [
         "--turbofan",
         "--turboshaft",
-        "--turboshaft-wasm-in-js-inlining",
+        "--wasm-in-js-inlining-body",
         "--turbolev",
         "--turbolev-future",
         "--maglev",
@@ -240,19 +239,22 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         # 'stress' disables Liftoff, which conflicts with flags that require
         # Liftoff support.
         "--liftoff-only",
-        "--wasm-dynamic-tiering"
+        "--wasm-dynamic-tiering",
+        "--wasm-deopt",
     ],
     "instruction_scheduling": [
         # instruction_scheduling disables Liftoff, which conflicts with flags
         # that require Liftoff support.
         "--liftoff-only",
-        "--wasm-dynamic-tiering"
+        "--wasm-dynamic-tiering",
+        "--wasm-deopt",
     ],
     "stress_instruction_scheduling": [
-        # instruction_scheduling disables Liftoff, which conflicts with flags
-        # that require Liftoff support.
+        # stress_instruction_scheduling disables Liftoff, which conflicts with
+        # flags that require Liftoff support.
         "--liftoff-only",
-        "--wasm-dynamic-tiering"
+        "--wasm-dynamic-tiering",
+        "--wasm-deopt",
     ],
     "sparkplug": ["--jitless", "--no-sparkplug"],
     "concurrent_sparkplug": ["--jitless"],
@@ -285,11 +287,11 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
     "stress_maglev_tests_with_turbofan": ["--jitless"],
     "turbolev_future": [
         "--no-turbolev",
-        "--no-turbolev-inline-js-wasm-wrappers",
+        "--no-wasm-in-js-inlining-wrapper",
     ],
     "stress_turbolev_future": [
         "--no-turbolev",
-        "--no-turbolev-inline-js-wasm-wrappers",
+        "--no-wasm-in-js-inlining-wrapper",
     ],
     "always_sparkplug": ["--jitless", "--no-sparkplug"],
     "always_sparkplug_and_stress_regexp_jit": ["--jitless", "--no-sparkplug"],
@@ -306,7 +308,13 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         "--concurrent-recompilation", "--stress_concurrent_inlining",
         "--no-assert-types"
     ],
-    "wasm_assert_types": ["--liftoff-only", "--wasm-dynamic-tiering"],
+    "wasm_assert_types": [
+        # 'wasm_assert_types' disables Liftoff, which conflicts with flags that
+        # require Liftoff support.
+        "--liftoff-only",
+        "--wasm-dynamic-tiering",
+        "--wasm-deopt",
+    ],
     "verify_turboshaft": ["--jitless"],
     "stress_wasm_stack_switching": ["--no-stress-wasm-stack-switching"],
 }
@@ -384,7 +392,6 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
 # The conflicts might be directly contradictory flags or be caused by the
 # implications defined in flag-definitions.h.
 INCOMPATIBLE_FLAGS_PER_EXTRA_FLAG = {
-    "--flush-bytecode": ["--jit-fuzzing"],
     "--concurrent-recompilation": [
         "--predictable", "--assert-types", "--turboshaft-assert-types",
         "--single-threaded"
@@ -399,6 +406,8 @@ INCOMPATIBLE_FLAGS_PER_EXTRA_FLAG = {
     "--turboshaft-assert-types": [
         "--concurrent-recompilation", "--stress-concurrent-inlining"
     ],
+    "--wasm-generate-compilation-hints": ["--single-threaded"],
+    "--trace-wasm-generate-compilation-hints": ["--single-threaded"],
 }
 
 SLOW_VARIANTS = set([

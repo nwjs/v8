@@ -56,35 +56,22 @@ class MaglevGraphOptimizer {
   KnownNodeAspects& known_node_aspects() {
     return kna_processor_.known_node_aspects();
   }
+  void set_known_node_aspects(KnownNodeAspects* known_node_aspects) {
+    kna_processor_.set_known_node_aspects(known_node_aspects);
+  }
 
   DeoptFrame* GetDeoptFrameForEagerDeopt() {
-    DCHECK(current_node()->properties().has_eager_deopt_info());
+    CHECK(current_node()->properties().has_eager_deopt_info());
     return &current_node()->eager_deopt_info()->top_frame();
   }
 
   std::tuple<DeoptFrame*, interpreter::Register, int> GetDeoptFrameForLazyDeopt(
       bool can_throw) {
-    DCHECK(current_node()->properties().can_lazy_deopt());
-    LazyDeoptInfo* info = current_node()->lazy_deopt_info();
-    return std::make_tuple(&info->top_frame(), info->result_location(),
-                           info->result_size());
+    CHECK(current_node()->properties().can_lazy_deopt());
+    return current_node()->lazy_deopt_info()->GetFrameForCloning();
   }
 
-  void AttachExceptionHandlerInfo(NodeBase* node) {
-    DCHECK(node->properties().can_throw());
-    DCHECK(current_node()->properties().can_throw());
-    DCHECK(!node->Is<CallKnownJSFunction>());
-    ExceptionHandlerInfo* info = current_node()->exception_handler_info();
-    if (info->ShouldLazyDeopt()) {
-      new (node->exception_handler_info())
-          ExceptionHandlerInfo(ExceptionHandlerInfo::kLazyDeopt);
-    } else if (!info->HasExceptionHandler()) {
-      new (node->exception_handler_info()) ExceptionHandlerInfo();
-    } else {
-      new (node->exception_handler_info())
-          ExceptionHandlerInfo(info->catch_block(), info->depth());
-    }
-  }
+  void AttachExceptionHandlerInfo(NodeBase* node);
 
   ReduceResult EmitUnconditionalDeopt(DeoptimizeReason);
   ReduceResult EmitThrow(Throw::Function function, ValueNode* input);
@@ -101,10 +88,16 @@ class MaglevGraphOptimizer {
     return ProcessResult::kTruncateBlock;
   }
 
+  bool HasPendingSplice() const { return reducer_.HasPendingSplice(); }
+  auto TakePendingSplice() { return reducer_.TakePendingSplice(); }
+
+  Graph* graph() const { return reducer_.graph(); }
+
  private:
   MaglevReducer<MaglevGraphOptimizer> reducer_;
   RecomputeKnownNodeAspectsProcessor& kna_processor_;
   NodeRanges* ranges_;
+  int loop_depth_ = 0;
 
   NodeBase* current_node_;
 
@@ -170,6 +163,60 @@ class MaglevGraphOptimizer {
   MaybeReduceResult EnsureType(
       ValueNode* node, NodeType type,
       DeoptimizeReason reason = DeoptimizeReason::kWrongValue);
+};
+
+// Optimizer-side Subgraph: synthesises an off-graph CFG (entry / branches /
+// labels / join) and records a pending splice when it goes out of scope, so
+// the GraphProcessor can stitch the new blocks into the live graph at the
+// node currently being visited.
+template <>
+class Subgraph<MaglevGraphOptimizer>
+    : public SubgraphBase<Subgraph<MaglevGraphOptimizer>,
+                          MaglevGraphOptimizer> {
+ public:
+  using Base =
+      SubgraphBase<Subgraph<MaglevGraphOptimizer>, MaglevGraphOptimizer>;
+  using Variable = Base::Variable;
+  using Label = Base::Label;
+
+  // TODO(victorgomes): support loops.
+  class LoopLabel {};
+
+  Subgraph(MaglevReducer<MaglevGraphOptimizer>* reducer, int variable_count);
+  ~Subgraph();
+
+  template <typename ControlNodeT, typename... Args>
+  ReduceResult GotoIfTrue(Label* true_target,
+                          std::initializer_list<ValueNode*> control_inputs,
+                          Args&&... args);
+  template <typename ControlNodeT, typename... Args>
+  ReduceResult GotoIfFalse(Label* false_target,
+                           std::initializer_list<ValueNode*> control_inputs,
+                           Args&&... args);
+
+  void Goto(Label* label);
+  void Bind(Label* label);
+
+  LoopLabel BeginLoop(std::initializer_list<Variable*> /*loop_vars*/) {
+    UNREACHABLE();
+  }
+  void EndLoop(LoopLabel* /*loop_label*/) { UNREACHABLE(); }
+
+ private:
+  void MergeIntoLabel(Label* label, BasicBlock* predecessor);
+
+  template <typename ControlNodeT, typename... Args>
+  ReduceResult GotoIfImpl(Label* jump_target, bool jump_on_true,
+                          std::initializer_list<ValueNode*> control_inputs,
+                          Args&&... args);
+
+  Zone* zone_;
+  ZoneVector<BasicBlock*> blocks_;
+  BasicBlock* saved_block_;
+  BasicBlockPosition saved_position_;
+  KnownNodeAspects* saved_kna_;
+  // Enclosing subgraph, or nullptr if this is a top-level subgraph.
+  Subgraph<MaglevGraphOptimizer>* parent_;
 };
 
 }  // namespace maglev

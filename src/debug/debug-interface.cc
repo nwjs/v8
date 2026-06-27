@@ -10,6 +10,7 @@
 
 #include "include/v8-function.h"
 #include "src/api/api-inl.h"
+#include "src/base/logging.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/script-details.h"
@@ -197,8 +198,9 @@ MaybeLocal<Array> GetInternalProperties(Isolate* v8_isolate,
   EnterV8NoScriptNoExceptionScope api_scope(isolate);
   i::DirectHandle<i::Object> val = Utils::OpenDirectHandle(*value);
   i::DirectHandle<i::JSArray> result;
-  if (!i::Runtime::GetInternalProperties(isolate, val).ToHandle(&result))
+  if (!i::Runtime::GetInternalProperties(isolate, val).ToHandle(&result)) {
     return MaybeLocal<Array>();
+  }
   return Utils::ToLocal(result);
 }
 
@@ -791,7 +793,13 @@ bool Script::SetInstrumentationBreakpoint(BreakpointId* id) const {
   i::SharedFunctionInfo::ScriptIterator it(isolate, *script);
   for (i::Tagged<i::SharedFunctionInfo> sfi = it.Next(); !sfi.is_null();
        sfi = it.Next()) {
-    if (sfi->is_toplevel()) {
+    // Node.js compiles CJS modules via ScriptCompiler::CompileFunction so that
+    // module-local bindings like __filename can be injected as function
+    // parameters without leaking into the global scope. The resulting Script
+    // carries two SFIs: a synthetic toplevel that just returns the wrapped
+    // function, and the wrapped SFI that the embedder actually invokes. For
+    // such scripts we should pick the wrapped SFI.
+    if (script->is_wrapped() ? sfi->is_wrapped() : sfi->is_toplevel()) {
       return isolate->debug()->SetBreakpointForFunction(
           handle(sfi, isolate), isolate->factory()->empty_string(), id,
           internal::Debug::kInstrumentation);
@@ -841,6 +849,7 @@ Maybe<WasmScript::DebugSymbols::Type> GetDebugSymbolType(
     case i::wasm::WasmDebugSymbols::Type::None:
       return {};
   }
+  UNREACHABLE();
 }
 
 std::vector<WasmScript::DebugSymbols> WasmScript::GetDebugSymbols() const {
@@ -861,8 +870,7 @@ std::vector<WasmScript::DebugSymbols> WasmScript::GetDebugSymbols() const {
         script->wasm_native_module()->wire_bytes());
     i::wasm::WasmName external_url =
         wire_bytes.GetNameOrNull(symbol.external_url);
-    MemorySpan<const char> span = {external_url.data(), external_url.size()};
-    debug_symbols.push_back({type.FromJust(), span});
+    debug_symbols.push_back({type.FromJust(), external_url});
   }
   return debug_symbols;
 }
@@ -1500,7 +1508,7 @@ MaybeLocal<Message> GetMessageFromPromise(Local<Promise> p) {
   i::DirectHandle<i::Object> maybeMessage =
       i::JSReceiver::GetDataProperty(isolate, promise, key);
 
-  if (!IsJSMessageObject(*maybeMessage, isolate)) return MaybeLocal<Message>();
+  if (!IsJSMessageObject(*maybeMessage)) return MaybeLocal<Message>();
   return ToApiHandle<Message>(i::Cast<i::JSMessageObject>(maybeMessage));
 }
 

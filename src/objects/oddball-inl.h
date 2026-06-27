@@ -57,13 +57,13 @@ Handle<Number> Oddball::ToNumber(Isolate* isolate,
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsBoolean) {
-  return IsOddball(obj, cage_base) &&
+  return IsOddball(obj) &&
          ((Cast<Oddball>(obj)->kind() & Oddball::kNotBooleanMask) == 0);
 }
 
 bool Boolean::ToBool(Isolate* isolate) const {
-  DCHECK(IsBoolean(this, isolate));
-  return IsTrue(this, isolate);
+  DCHECK(IsBoolean(this));
+  return IsTrue(this);
 }
 
 }  // namespace internal

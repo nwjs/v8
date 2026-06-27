@@ -796,13 +796,13 @@ std::pair<Tagged<GcSafeCode>, int> StackFrame::GcSafeLookupCodeAndOffset()
 
 Tagged<Code> StackFrame::LookupCode() const {
   DCHECK_NE(isolate()->heap()->gc_state(), Heap::MARK_COMPACT);
-  return GcSafeLookupCode()->UnsafeCastToCode();
+  return TrustedCast<Code>(GcSafeLookupCode());
 }
 
 std::pair<Tagged<Code>, int> StackFrame::LookupCodeAndOffset() const {
   DCHECK_NE(isolate()->heap()->gc_state(), Heap::MARK_COMPACT);
   auto gc_safe_pair = GcSafeLookupCodeAndOffset();
-  return {gc_safe_pair.first->UnsafeCastToCode(), gc_safe_pair.second};
+  return {TrustedCast<Code>(gc_safe_pair.first), gc_safe_pair.second};
 }
 
 void StackFrame::IteratePc(RootVisitor* v, Address* constant_pool_address,
@@ -815,9 +815,7 @@ void StackFrame::IteratePc(RootVisitor* v, Address* constant_pool_address,
 
   // Visit.
   Tagged<GcSafeCode> visited_holder = holder;
-  PtrComprCageBase code_cage_base{isolate()->code_cage_base()};
-  const Tagged<Object> old_istream =
-      holder->raw_instruction_stream(code_cage_base);
+  const Tagged<Object> old_istream = holder->raw_instruction_stream();
   Tagged<Object> visited_istream = old_istream;
   v->VisitRunningCode(FullObjectSlot{&visited_holder},
                       FullObjectSlot{&visited_istream});
@@ -972,8 +970,9 @@ StackFrame::Type StackFrameIterator::ComputeStackFrameType(
     }
     case CodeKind::BASELINE:
       // Baseline code can be deoptimized by DiscardBaselineCodeVisitor.
-      if (lookup_result.value()->marked_for_deoptimization())
+      if (lookup_result.value()->marked_for_deoptimization()) {
         return StackFrame::INTERPRETED;
+      }
       return StackFrame::BASELINE;
     case CodeKind::MAGLEV:
       if (StackFrame::IsTypeMarker(marker)) {
@@ -1240,7 +1239,8 @@ void ExitFrame::FillState(Address fp, Address sp, State* state) {
   state->constant_pool_address = nullptr;
 }
 
-FrameSummaries BuiltinExitFrame::Summarize(bool never_allocate) const {
+FrameSummaries BuiltinExitFrame::Summarize(
+    AllowAllocation allow_allocation) const {
   DisallowGarbageCollection no_gc;
   Tagged<Code> code;
   int code_offset = -1;
@@ -1278,7 +1278,7 @@ uint32_t BuiltinExitFrame::ComputeParametersCount() const {
 }
 
 bool BuiltinExitFrame::IsConstructor() const {
-  return !IsUndefined(new_target_slot_object(), isolate());
+  return !IsUndefined(new_target_slot_object());
 }
 
 // Ensure layout of v8::FunctionCallbackInfo is in sync with
@@ -1316,12 +1316,12 @@ static_assert(ArgOffset(FCA::kFirstJSArgumentIndex) ==
 }  // namespace ensure_FunctionCallbackInfo_layout
 
 DirectHandle<JSFunction> ApiCallbackExitFrame::GetFunction(
-    bool never_allocate) const {
+    AllowAllocation allow_allocation) const {
   Tagged<HeapObject> maybe_function = target();
   if (IsJSFunction(maybe_function)) {
     return DirectHandle<JSFunction>::FromSlot(target_slot().location());
   }
-  if (never_allocate) {
+  if (allow_allocation == AllowAllocation::kNo) {
     // Instantiation would allocate, return empty handle.
     return {};
   }
@@ -1357,8 +1357,8 @@ ApiCallbackExitFrame::GetFunctionTemplateInfo() const {
 }
 
 FrameSummaries ApiCallbackExitFrame::SummarizeApiFrame(
-    bool is_constructor, bool never_allocate) const {
-  DirectHandle<JSFunction> function = GetFunction(never_allocate);
+    bool is_constructor, AllowAllocation allow_allocation) const {
+  DirectHandle<JSFunction> function = GetFunction(allow_allocation);
   if (function.is_null()) {
     // GetFunction() would need to instantiate the function, skip this frame.
     return FrameSummaries{};
@@ -1404,7 +1404,8 @@ static_assert(FC::kPropertyCallbackInfoSetterApiArgsLength ==
 
 }  // namespace ensure_PropertyCallbackInfo_layout
 
-FrameSummaries ApiAccessorExitFrame::Summarize(bool never_allocate) const {
+FrameSummaries ApiAccessorExitFrame::Summarize(
+    AllowAllocation allow_allocation) const {
   // Theses kinds of frames are not supposed to appear in exception stack
   // traces.
   DCHECK_IMPLIES(
@@ -1435,8 +1436,8 @@ const char* StringForStackFrameType(StackFrame::Type type) {
 }
 }  // namespace
 
-void StackFrame::Print(StringStream* accumulator, PrintMode mode,
-                       int index) const {
+void StackFrame::Print(StringStream* accumulator, PrintMode mode, int index,
+                       AllowAllocation allow_allocation) const {
   DisallowGarbageCollection no_gc;
   PrintIndex(accumulator, mode, index);
   accumulator->Add(StringForStackFrameType(type()));
@@ -1445,7 +1446,8 @@ void StackFrame::Print(StringStream* accumulator, PrintMode mode,
 }
 
 void BuiltinExitFrame::Print(StringStream* accumulator, PrintMode mode,
-                             int index) const {
+                             int index,
+                             AllowAllocation allow_allocation) const {
   DisallowGarbageCollection no_gc;
   Tagged<Object> receiver = this->receiver();
   Tagged<JSFunction> function = this->function();
@@ -1473,18 +1475,34 @@ void BuiltinExitFrame::Print(StringStream* accumulator, PrintMode mode,
   accumulator->Add(")\n");
 }
 
-void ApiCallbackExitFrame::PrintApiFrame(StringStream* accumulator,
-                                         PrintMode mode, int index,
-                                         bool is_constructor) const {
-  DirectHandle<JSFunction> function = GetFunction();
-  DisallowGarbageCollection no_gc;
-  Tagged<Object> receiver = this->receiver();
+void ApiCallbackExitFrame::PrintApiFrame(
+    StringStream* accumulator, PrintMode mode, int index, bool is_constructor,
+    AllowAllocation allow_allocation) const {
+  DirectHandle<JSFunction> function = GetFunction(allow_allocation);
+  if (!function.is_null()) {
+    accumulator->PrintSecurityTokenIfChanged(isolate(), *function);
+  }
 
-  accumulator->PrintSecurityTokenIfChanged(isolate(), *function);
   PrintIndex(accumulator, mode, index);
   accumulator->Add("ApiCallbackExitFrame ");
   if (is_constructor) accumulator->Add("new ");
-  accumulator->PrintFunction(isolate(), *function, receiver);
+
+  DisallowGarbageCollection no_gc;
+  Tagged<Object> receiver = this->receiver();
+
+  if (function.is_null()) {
+    DirectHandle<FunctionTemplateInfo> ft_info = GetFunctionTemplateInfo();
+    accumulator->Add("<uninstantiated FunctionTemplateInfo: %p",
+                     reinterpret_cast<void*>(ft_info->ptr()));
+    Tagged<Object> class_name = ft_info->class_name();
+    if (IsString(class_name)) {
+      accumulator->Add(" class_name=");
+      accumulator->PrintName(class_name);
+    }
+    accumulator->Add(">");
+  } else {
+    accumulator->PrintFunction(isolate(), *function, receiver);
+  }
 
   accumulator->Add("(this=%o", receiver);
 
@@ -1498,17 +1516,20 @@ void ApiCallbackExitFrame::PrintApiFrame(StringStream* accumulator,
 }
 
 void ApiCallbackExitFrame::Print(StringStream* accumulator, PrintMode mode,
-                                 int index) const {
-  return PrintApiFrame(accumulator, mode, index, false);
+                                 int index,
+                                 AllowAllocation allow_allocation) const {
+  return PrintApiFrame(accumulator, mode, index, false, allow_allocation);
 }
 
 void ApiConstructExitFrame::Print(StringStream* accumulator, PrintMode mode,
-                                  int index) const {
-  return PrintApiFrame(accumulator, mode, index, true);
+                                  int index,
+                                  AllowAllocation allow_allocation) const {
+  return PrintApiFrame(accumulator, mode, index, true, allow_allocation);
 }
 
 void ApiNamedAccessorExitFrame::Print(StringStream* accumulator, PrintMode mode,
-                                      int index) const {
+                                      int index,
+                                      AllowAllocation allow_allocation) const {
   DisallowGarbageCollection no_gc;
 
   PrintIndex(accumulator, mode, index);
@@ -1519,8 +1540,9 @@ void ApiNamedAccessorExitFrame::Print(StringStream* accumulator, PrintMode mode,
   accumulator->Add("(holder=%o, name=%o)\n", holder, name);
 }
 
-void ApiIndexedAccessorExitFrame::Print(StringStream* accumulator,
-                                        PrintMode mode, int index) const {
+void ApiIndexedAccessorExitFrame::Print(
+    StringStream* accumulator, PrintMode mode, int index,
+    AllowAllocation allow_allocation) const {
   // These frames are not created yet.
   UNREACHABLE();
 }
@@ -1573,7 +1595,7 @@ void CommonFrame::ComputeCallerState(State* state) const {
       fp() + StandardFrameConstants::kConstantPoolOffset);
 }
 
-FrameSummaries CommonFrame::Summarize(bool never_allocate) const {
+FrameSummaries CommonFrame::Summarize(AllowAllocation allow_allocation) const {
   // This should only be called on frames which override this method.
   UNREACHABLE();
 }
@@ -2396,7 +2418,7 @@ int StubFrame::LookupExceptionHandlerInTable() {
   return table.LookupReturn(pc_offset);
 }
 
-FrameSummaries StubFrame::Summarize(bool never_allocate) const {
+FrameSummaries StubFrame::Summarize(AllowAllocation allow_allocation) const {
   FrameSummaries summaries;
 #if V8_ENABLE_WEBASSEMBLY
   Tagged<Code> code = LookupCode();
@@ -2499,11 +2521,12 @@ bool CommonFrameWithJSLinkage::IsConstructor() const {
   return IsConstructFrame(caller_fp());
 }
 
-FrameSummaries CommonFrameWithJSLinkage::Summarize(bool never_allocate) const {
+FrameSummaries CommonFrameWithJSLinkage::Summarize(
+    AllowAllocation allow_allocation) const {
   Tagged<GcSafeCode> gcsafe_code;
   int offset = -1;
   std::tie(gcsafe_code, offset) = GcSafeLookupCodeAndOffset();
-  DirectHandle<Code> code(gcsafe_code->UnsafeCastToCode(), isolate());
+  DirectHandle<Code> code(TrustedCast<Code>(gcsafe_code), isolate());
 #if V8_ENABLE_WEBASSEMBLY
   if (code->kind() == CodeKind::BUILTIN &&
       code->builtin_id() == Builtin::kWasmMethodWrapper) {
@@ -2562,11 +2585,9 @@ void JavaScriptFrame::PrintFunctionAndOffset(Isolate* isolate,
                                              Tagged<AbstractCode> code,
                                              int code_offset, FILE* file,
                                              bool print_line_number) {
-  PtrComprCageBase cage_base = GetPtrComprCageBase(function);
   PrintF(file, "%s",
-         CodeKindToMarker(code->kind(cage_base),
-                          code->is_context_specialized(cage_base),
-                          code->osr_offset(cage_base)));
+         CodeKindToMarker(code->kind(), code->is_context_specialized(),
+                          code->osr_offset()));
   function->PrintName(file);
   PrintF(file, "+%d", code_offset);
   if (print_line_number) {
@@ -2630,15 +2651,15 @@ void JavaScriptFrame::CollectFunctionAndOffsetForICStats(
     int code_offset) {
   auto ic_stats = ICStats::instance();
   ICInfo& ic_info = ic_stats->Current();
-  PtrComprCageBase cage_base = GetPtrComprCageBase(function);
-  Tagged<SharedFunctionInfo> shared = function->shared(cage_base);
+
+  Tagged<SharedFunctionInfo> shared = function->shared();
 
   ic_info.function_name = ic_stats->GetOrCacheFunctionName(isolate, function);
   ic_info.script_offset = code_offset;
 
   int source_pos = code->SourcePosition(isolate, code_offset);
-  Tagged<Object> maybe_script = shared->script(cage_base, kAcquireLoad);
-  if (IsScript(maybe_script, cage_base)) {
+  Tagged<Object> maybe_script = shared->script(kAcquireLoad);
+  if (IsScript(maybe_script)) {
     Tagged<Script> script = Cast<Script>(maybe_script);
     Script::PositionInfo info;
     script->GetPositionInfo(source_pos, &info);
@@ -2729,11 +2750,11 @@ FrameSummary::JavaScriptFrameSummary::JavaScriptFrameSummary(
       abstract_code_(abstract_code, isolate),
       code_offset_(code_offset),
       is_constructor_(is_constructor) {
-  DCHECK_IMPLIES(CodeKindIsOptimizedJSFunction(abstract_code->kind(isolate)),
+  DCHECK_IMPLIES(CodeKindIsOptimizedJSFunction(abstract_code->kind()),
                  // It might be an ApiCallbackBuiltin inlined into optimized
                  // code generated by Maglev.
                  (v8_flags.maglev_inline_api_calls &&
-                  abstract_code->kind(isolate) == CodeKind::MAGLEV &&
+                  abstract_code->kind() == CodeKind::MAGLEV &&
                   function->shared()->IsApiFunction()));
 }
 
@@ -2778,8 +2799,8 @@ Handle<Object> FrameSummary::JavaScriptFrameSummary::script() const {
   return handle(function_->shared()->script(), isolate());
 }
 
-DirectHandle<Context> FrameSummary::JavaScriptFrameSummary::native_context()
-    const {
+DirectHandle<NativeContext>
+FrameSummary::JavaScriptFrameSummary::native_context() const {
   return direct_handle(function_->native_context(), isolate());
 }
 
@@ -2847,7 +2868,8 @@ DirectHandle<WasmInstanceObject> FrameSummary::WasmFrameSummary::wasm_instance()
   return direct_handle(instance_data_->instance_object(), isolate());
 }
 
-DirectHandle<Context> FrameSummary::WasmFrameSummary::native_context() const {
+DirectHandle<NativeContext> FrameSummary::WasmFrameSummary::native_context()
+    const {
   return direct_handle(wasm_trusted_instance_data()->native_context(),
                        isolate());
 }
@@ -2892,8 +2914,8 @@ Handle<Script> FrameSummary::WasmInlinedFrameSummary::script() const {
   return handle(wasm_instance()->module_object()->script(), isolate());
 }
 
-DirectHandle<Context> FrameSummary::WasmInlinedFrameSummary::native_context()
-    const {
+DirectHandle<NativeContext>
+FrameSummary::WasmInlinedFrameSummary::native_context() const {
   return direct_handle(wasm_trusted_instance_data()->native_context(),
                        isolate());
 }
@@ -2934,7 +2956,7 @@ Handle<Script> FrameSummary::WasmInterpretedFrameSummary::script() const {
   return handle(wasm_instance()->module_object()->script(), Isolate::Current());
 }
 
-DirectHandle<Context>
+DirectHandle<NativeContext>
 FrameSummary::WasmInterpretedFrameSummary::native_context() const {
   return handle(wasm_instance_->trusted_data(isolate())->native_context(),
                 isolate());
@@ -2961,7 +2983,7 @@ Handle<Object> FrameSummary::BuiltinFrameSummary::script() const {
   return isolate()->factory()->undefined_value();
 }
 
-DirectHandle<Context> FrameSummary::BuiltinFrameSummary::native_context()
+DirectHandle<NativeContext> FrameSummary::BuiltinFrameSummary::native_context()
     const {
   return isolate()->native_context();
 }
@@ -3052,13 +3074,14 @@ FRAME_SUMMARY_DISPATCH(bool, is_subject_to_debugging)
 FRAME_SUMMARY_DISPATCH(Handle<Object>, script)
 FRAME_SUMMARY_DISPATCH(int, SourcePosition)
 FRAME_SUMMARY_DISPATCH(int, SourceStatementPosition)
-FRAME_SUMMARY_DISPATCH(DirectHandle<Context>, native_context)
+FRAME_SUMMARY_DISPATCH(DirectHandle<NativeContext>, native_context)
 FRAME_SUMMARY_DISPATCH(DirectHandle<StackFrameInfo>, CreateStackFrameInfo)
 
 #undef CASE_WASM_INTERPRETED
 #undef FRAME_SUMMARY_DISPATCH
 
-FrameSummaries OptimizedJSFrame::Summarize(bool never_allocate) const {
+FrameSummaries OptimizedJSFrame::Summarize(
+    AllowAllocation allow_allocation) const {
   DCHECK(is_optimized());
   FrameSummaries summaries;
 
@@ -3067,7 +3090,7 @@ FrameSummaries OptimizedJSFrame::Summarize(bool never_allocate) const {
   DirectHandle<Code> code(LookupCode(), isolate());
   if (code->kind() == CodeKind::BUILTIN ||
       code->kind() == CodeKind::FOR_TESTING_JS) {
-    return JavaScriptFrame::Summarize(never_allocate);
+    return JavaScriptFrame::Summarize(allow_allocation);
   }
   DCHECK_NE(code->kind(), CodeKind::FOR_TESTING);
 
@@ -3087,7 +3110,7 @@ FrameSummaries OptimizedJSFrame::Summarize(bool never_allocate) const {
     // heap allocation site in Turbofan. Heap allocation sites do not have a
     // DeoptimizationEntry in general. Instead of crashing we simply report here
     // just one frame.
-    if (code->is_maglevved() || never_allocate) {
+    if (code->is_maglevved() || allow_allocation == AllowAllocation::kNo) {
       DirectHandle<AbstractCode> abstract_code(
           Cast<AbstractCode>(function()->shared()->GetBytecodeArray(isolate())),
           isolate());
@@ -3199,15 +3222,15 @@ FrameSummaries OptimizedJSFrame::Summarize(bool never_allocate) const {
   }  // no_gc scope ends.
 
   if (needs_full_walk) {
-    return SummarizeFull(data, deopt_index, never_allocate);
+    return SummarizeFull(data, deopt_index, allow_allocation);
   }
 
   return summaries;
 }
 
-FrameSummaries OptimizedJSFrame::SummarizeFull(Tagged<DeoptimizationData> data,
-                                               int deopt_index,
-                                               bool never_allocate) const {
+FrameSummaries OptimizedJSFrame::SummarizeFull(
+    Tagged<DeoptimizationData> data, int deopt_index,
+    AllowAllocation allow_allocation) const {
   FrameSummaries summaries;
 
   DCHECK_NE(deopt_index, SafepointEntry::kNoDeoptIndex);
@@ -3245,7 +3268,7 @@ FrameSummaries OptimizedJSFrame::SummarizeFull(Tagged<DeoptimizationData> data,
       Tagged<Object> receiver_obj = translated_values->GetRawValue();
       DirectHandle<Object> receiver;
       if (receiver_obj == ReadOnlyRoots(isolate()).arguments_marker() &&
-          never_allocate) {
+          allow_allocation == AllowAllocation::kNo) {
         // Calling GetValue() would definitely trigger allocation but with
         // `never_allocate` allocations are not allowed. Simply pick `undefined`
         // as receiver instead even though it is off. `never_allocate` is
@@ -3474,7 +3497,8 @@ Tagged<Object> UnoptimizedJSFrame::ReadInterpreterRegister(
   return GetExpression(index + register_index);
 }
 
-FrameSummaries UnoptimizedJSFrame::Summarize(bool never_allocate) const {
+FrameSummaries UnoptimizedJSFrame::Summarize(
+    AllowAllocation allow_allocation) const {
   DirectHandle<AbstractCode> abstract_code(
       Cast<AbstractCode>(GetBytecodeArray()), isolate());
   FrameSummary::JavaScriptFrameSummary summary(
@@ -3540,8 +3564,8 @@ uint32_t BuiltinFrame::ComputeParametersCount() const {
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-void WasmFrame::Print(StringStream* accumulator, PrintMode mode,
-                      int index) const {
+void WasmFrame::Print(StringStream* accumulator, PrintMode mode, int index,
+                      AllowAllocation allow_allocation) const {
   PrintIndex(accumulator, mode, index);
 
 #if V8_ENABLE_DRUMBRAKE
@@ -3553,7 +3577,7 @@ void WasmFrame::Print(StringStream* accumulator, PrintMode mode,
   }
 #endif  // V8_ENABLE_DRUMBRAKE
 
-  if (function_index() == wasm::kAnonymousFuncIndex) {
+  if (wasm_code()->index() == wasm::kAnonymousFuncIndex) {
     accumulator->Add("Anonymous wasm wrapper [pc: %p]\n",
                      reinterpret_cast<void*>(pc()));
     return;
@@ -3561,22 +3585,25 @@ void WasmFrame::Print(StringStream* accumulator, PrintMode mode,
   wasm::WasmCodeRefScope code_ref_scope;
   accumulator->Add(is_wasm_to_js() ? "Wasm-to-JS [" : "Wasm [");
   accumulator->PrintName(script()->name());
-  Address instruction_start = wasm_code()->instruction_start();
+
+  FrameSummary::WasmFrameSummary top_summary =
+      FrameSummary::GetTop(this).AsWasm();
+  int func_index = static_cast<int>(top_summary.function_index());
   base::Vector<const uint8_t> raw_func_name =
-      module_object()->GetRawFunctionName(function_index());
+      module_object()->GetRawFunctionName(func_index);
   const int kMaxPrintedFunctionName = 64;
   char func_name[kMaxPrintedFunctionName + 1];
   int func_name_len = std::min(kMaxPrintedFunctionName, raw_func_name.length());
   memcpy(func_name, raw_func_name.begin(), func_name_len);
   func_name[func_name_len] = '\0';
-  int pos = position();
+  int pos = top_summary.SourcePosition();
   const wasm::WasmModule* module = trusted_instance_data()->module();
-  int func_index = function_index();
   int func_code_offset = module->functions[func_index].code.offset();
   accumulator->Add(
       "], function #%u ('%s'), pc=%p (+0x%x), pos=%d (+%d) instance=%p\n",
       func_index, func_name, reinterpret_cast<void*>(pc()),
-      static_cast<int>(pc() - instruction_start), pos, pos - func_code_offset,
+      static_cast<int>(pc() - top_summary.code()->instruction_start()), pos,
+      pos - func_code_offset,
       reinterpret_cast<void*>(trusted_instance_data()->ptr()));
   if (mode != OVERVIEW) accumulator->Add("\n");
 }
@@ -3606,20 +3633,31 @@ Tagged<WasmModuleObject> WasmFrame::module_object() const {
   return trusted_instance_data()->module_object();
 }
 
-int WasmFrame::function_index() const { return wasm_code()->index(); }
-
 Tagged<Script> WasmFrame::script() const { return module_object()->script(); }
 
-int WasmFrame::position() const {
-  const wasm::WasmModule* module = trusted_instance_data()->module();
-  return GetSourcePosition(module, function_index(), generated_code_offset(),
-                           at_to_number_conversion());
-}
-
-int WasmFrame::generated_code_offset() const {
+std::tuple<SourcePosition, int>
+WasmFrame::GetInnermostSourcePositionAndFunctionIndex() const {
   wasm::WasmCode* code = wasm_code();
   int offset = static_cast<int>(pc() - code->instruction_start());
-  return code->GetSourceOffsetBefore(offset);
+  SourcePosition pos = code->GetSourcePositionBefore(offset);
+  int func_index = code->index();
+  if (pos.isInlined()) {
+    func_index = std::get<0>(code->GetInliningPosition(pos.InliningId()));
+  }
+  return {pos, func_index};
+}
+
+int WasmFrame::position() const {
+  auto [pos, func_index] = GetInnermostSourcePositionAndFunctionIndex();
+  return GetSourcePosition(trusted_instance_data()->module(), func_index,
+                           pos.ScriptOffset(), at_to_number_conversion());
+}
+
+int WasmFrame::GetInnermostFunctionIndex() const {
+  if (auto* code = wasm_code(); code != nullptr && code->is_liftoff()) {
+    return code->index();
+  }
+  return std::get<1>(GetInnermostSourcePositionAndFunctionIndex());
 }
 
 bool WasmFrame::is_inspectable() const { return wasm_code()->is_inspectable(); }
@@ -3628,7 +3666,7 @@ Tagged<Object> WasmFrame::context() const {
   return trusted_instance_data()->native_context();
 }
 
-FrameSummaries WasmFrame::Summarize(bool never_allocate) const {
+FrameSummaries WasmFrame::Summarize(AllowAllocation allow_allocation) const {
   FrameSummaries summaries;
   // The {WasmCode*} escapes this scope via the {FrameSummary}, which is fine,
   // since this code object is part of our stack.
@@ -3737,7 +3775,8 @@ void WasmDebugBreakFrame::Iterate(RootVisitor* v) const {
 }
 
 void WasmDebugBreakFrame::Print(StringStream* accumulator, PrintMode mode,
-                                int index) const {
+                                int index,
+                                AllowAllocation allow_allocation) const {
   PrintIndex(accumulator, mode, index);
   accumulator->Add("WasmDebugBreak");
   if (mode != OVERVIEW) accumulator->Add("\n");
@@ -3750,8 +3789,8 @@ Tagged<WasmInstanceObject> WasmToJsFrame::wasm_instance() const {
       TrustedCast<WasmImportData>(Tagged<Object>{
           Memory<Address>(fp() + WasmFrameConstants::kWasmInstanceDataOffset)});
   // TODO(42204563): Avoid crashing if the instance object is not available.
-  CHECK(import_data->instance_data()->has_instance_object());
-  return import_data->instance_data()->instance_object();
+  CHECK(import_data->importing_instance_data()->has_instance_object());
+  return import_data->importing_instance_data()->instance_object();
 }
 
 Tagged<WasmTrustedInstanceData> WasmToJsFrame::trusted_instance_data() const {
@@ -3837,22 +3876,26 @@ void WasmInterpreterEntryFrame::Iterate(RootVisitor* v) const {
   //   fp-p |- - - - - - - - -|                     | no GC scan
   //        |  frame marker   |                     |
   //  fp-2p |- - - - - - - - -|  -------------------|-------------
-  //        | WasmInstanceObj |                     | GC scan
-  //  fp-3p |- - - - - - - - -|  -------------------|-------------
+  //        | WasmInstanceObj |                     |
+  //  fp-3p |- - - - - - - - -|                     | GC scan
+  //        | ref_params_array|                     |
+  //  fp-4p |- - - - - - - - -|  -------------------|-------------
   //        | function_index  |                     |
-  //  fp-4p |- - - - - - - - -|  -------------------| no GC scan
+  //  fp-5p |- - - - - - - - -|  -------------------| no GC scan
   //        |   array_start   |                     |
-  //  fp-5p |- - - - - - - - -|  -------------------|
+  //  fp-6p |- - - - - - - - -|  -------------------|
 
   static constexpr int kWasmInstanceObjOffset = -2 * kSystemPointerSize;
-  FullObjectSlot slot_base(&Memory<Address>(fp() + kWasmInstanceObjOffset));
+  static constexpr int kRefParamsArrayOffset = -3 * kSystemPointerSize;
+  FullObjectSlot slot_base(&Memory<Address>(fp() + kRefParamsArrayOffset));
   FullObjectSlot slot_limit(
       &Memory<Address>(fp() + kWasmInstanceObjOffset + kSystemPointerSize));
   v->VisitRootPointers(Root::kStackRoots, nullptr, slot_base, slot_limit);
 }
 
 void WasmInterpreterEntryFrame::Print(StringStream* accumulator, PrintMode mode,
-                                      int index) const {
+                                      int index,
+                                      AllowAllocation allow_allocation) const {
   PrintIndex(accumulator, mode, index);
   accumulator->Add("WASM INTERPRETER ENTRY [");
   Tagged<Script> script = this->script();
@@ -3861,7 +3904,8 @@ void WasmInterpreterEntryFrame::Print(StringStream* accumulator, PrintMode mode,
   if (mode != OVERVIEW) accumulator->Add("\n");
 }
 
-FrameSummaries WasmInterpreterEntryFrame::Summarize(bool never_allocate) const {
+FrameSummaries WasmInterpreterEntryFrame::Summarize(
+    AllowAllocation allow_allocation) const {
   FrameSummaries summaries;
   Handle<WasmInstanceObject> instance(wasm_instance(), isolate());
   std::vector<WasmInterpreterStackEntry> interpreted_stack =
@@ -4043,9 +4087,11 @@ void PrintFunctionSource(StringStream* accumulator,
 }  // namespace
 
 void JavaScriptFrame::Print(StringStream* accumulator, PrintMode mode,
-                            int index) const {
+                            int index, AllowAllocation allow_allocation) const {
   DirectHandle<SharedFunctionInfo> shared(function()->shared(), isolate());
-  SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate(), shared);
+  if (allow_allocation != AllowAllocation::kNo) {
+    SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate(), shared);
+  }
 
   DisallowGarbageCollection no_gc;
   Tagged<Object> receiver = this->receiver();

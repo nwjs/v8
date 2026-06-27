@@ -8,6 +8,7 @@
 #include "src/objects/js-regexp.h"
 // Include the non-inl header before the rest of the headers.
 
+#include "src/base/logging.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/smi-inl.h"
 #include "src/objects/string-inl.h"
@@ -24,12 +25,11 @@ namespace internal {
 #include "torque-generated/src/objects/js-regexp-tq-inl.inc"
 
 Tagged<Object> JSRegExp::last_index() const {
-  return TaggedField<Object, kLastIndexOffset>::load(*this);
+  return TaggedField<Object, kLastIndexOffset>::load(this);
 }
 void JSRegExp::set_last_index(Tagged<Object> value, WriteBarrierMode mode) {
-  TaggedField<Object, kLastIndexOffset>::store(*this, value);
-  CONDITIONAL_WRITE_BARRIER(Tagged<HeapObject>(this), kLastIndexOffset, value,
-                            mode);
+  TaggedField<Object, kLastIndexOffset>::store(this, value);
+  CONDITIONAL_WRITE_BARRIER(this, kLastIndexOffset, value, mode);
 }
 
 Tagged<String> JSRegExp::source(IsolateForSandbox isolate) const {
@@ -61,8 +61,8 @@ void JSRegExp::set_data(Tagged<RegExpData> value, ReleaseStoreTag,
 bool JSRegExp::has_data() const { return !data_.is_empty(); }
 bool JSRegExp::has_data_unpublished(IsolateForSandbox isolate) const {
   return TrustedPointerField::IsTrustedPointerFieldUnpublished(
-      Tagged<HeapObject>(this), kDataOffset, kRegExpDataIndirectPointerTag,
-      isolate);
+      Tagged<HeapObject>(this), offsetof(JSRegExp, data_),
+      kRegExpDataIndirectPointerTag, isolate);
 }
 void JSRegExp::clear_data() { data_.clear(this); }
 
@@ -138,6 +138,7 @@ int RegExpData::capture_count() const {
     case Type::IRREGEXP:
       return UncheckedCast<IrRegExpData>(this)->capture_count();
   }
+  UNREACHABLE();
 }
 
 Tagged<RegExpData> RegExpDataWrapper::data(IsolateForSandbox isolate) const {

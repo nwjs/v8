@@ -65,10 +65,10 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildToJSFunctionRef(
   V<WasmInternalFunction> internal = V<WasmInternalFunction>::Cast(
       __ LoadTrustedPointer(ret, LoadOp::Kind::TaggedBase(),
                             kWasmInternalFunctionIndirectPointerTag,
-                            WasmFuncRef::kTrustedInternalOffset));
+                            offsetof(WasmFuncRef, trusted_internal_)));
   V<Object> maybe_external = __ Load(internal, LoadOp::Kind::TaggedBase(),
                                      MemoryRepresentation::TaggedPointer(),
-                                     WasmInternalFunction::kExternalOffset);
+                                     offsetof(WasmInternalFunction, external_));
   ScopedVar<Object> result(this, OpIndex::Invalid());
   IF (__ TaggedEqual(maybe_external,
                      __ template LoadRoot<RootIndex::kUndefinedValue>())) {
@@ -79,6 +79,25 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildToJSFunctionRef(
     result = maybe_external;
   }
   return result;
+}
+
+template <typename Assembler>
+void WasmWrapperTSGraphBuilder<Assembler>::CheckAndConvertSharedString(
+    V<Object> ret, ScopedVar<Object>& result) {
+  IF (__ IsSmi(ret)) {
+    result = ret;
+  } ELSE {
+    V<Word32> instance_type = __ LoadInstanceTypeField(__ LoadMapField(ret));
+    V<Word32> is_string = __ Uint32LessThan(
+        instance_type, __ Word32Constant(FIRST_NONSTRING_TYPE));
+    IF (is_string) {
+      // Since this is a shared externref, the string will be shared.
+      result = __ WasmCallRuntime(__ phase_zone(), Runtime::kWasmWasmToJSObject,
+                                  {ret}, __ NoContextConstant());
+    } ELSE {
+      result = ret;
+    }
+  }
 }
 
 template <typename Assembler>
@@ -131,20 +150,21 @@ auto WasmWrapperTSGraphBuilder<Assembler>::ToJS(OpIndex ret,
   if (wasm::IsSubtypeOf(type, wasm::kWasmSharedExternRef)) {
     // We have to unshare shared strings before passing them to JS.
     ScopedVar<Object> result(this, OpIndex::Invalid());
-    IF (__ IsSmi(ret)) {
-      result = ret;
-    } ELSE {
-      OpIndex instance_type = LoadInstanceType(LoadMap(ret));
-      V<Word32> is_string = __ Uint32LessThan(
-          instance_type, __ Word32Constant(FIRST_NONSTRING_TYPE));
-      IF (is_string) {
-        // Since this is a shared externref, the string will be shared.
-        result =
-            __ WasmCallRuntime(__ phase_zone(), Runtime::kWasmWasmToJSObject,
-                               {ret}, __ NoContextConstant());
+    CheckAndConvertSharedString(ret, result);
+    return result;
+  }
+
+  if (type.is_reference_to(GenericKind::kAny) &&
+      type.is_shared() == SharedFlag::kYes) {
+    ScopedVar<Object> result(this, OpIndex::Invalid());
+    if (type.is_nullable()) {
+      IF (__ TaggedEqual(ret, __ template LoadRoot<RootIndex::kWasmNull>())) {
+        result = __ template LoadRoot<RootIndex::kNullValue>();
       } ELSE {
-        result = ret;
+        CheckAndConvertSharedString(ret, result);
       }
+    } else {
+      CheckAndConvertSharedString(ret, result);
     }
     return result;
   }
@@ -168,7 +188,7 @@ template <typename Assembler>
 void WasmWrapperTSGraphBuilder<Assembler>::BuildCallWasmFromWrapper(
     Zone* zone, const wasm::CanonicalSig* sig, V<Word32> callee,
     const base::Vector<OpIndex> args, base::Vector<OpIndex> returns,
-    OptionalV<FrameState> frame_state,
+    OptionalV<LazyFrameState> frame_state,
     compiler::LazyDeoptOnThrow lazy_deopt_on_throw) {
   const bool needs_frame_state = frame_state.valid();
 
@@ -214,7 +234,7 @@ auto WasmWrapperTSGraphBuilder<Assembler>::ConvertWasmResultsToJS(
 
     V<FixedArray> fixed_array = __ Load(jsval, LoadOp::Kind::TaggedBase(),
                                         MemoryRepresentation::TaggedPointer(),
-                                        JSObject::kElementsOffset);
+                                        offsetof(JSObject, elements_));
 
     for (int i = 0; i < return_count; ++i) {
       V<Object> value = ToJS(returns[i], sig_->GetReturn(i), js_context);
@@ -229,9 +249,9 @@ template <typename Assembler>
 auto WasmWrapperTSGraphBuilder<Assembler>::BuildJSToWasmWrapper(
     V<JSFunction> js_closure, V<Context> js_context,
     base::Vector<const OpIndex> arguments,
-    OptionalV<FrameState> lazy_frame_state,
+    OptionalV<LazyFrameState> lazy_frame_state,
     compiler::LazyDeoptOnThrow lazy_deopt_on_throw,
-    OptionalV<FrameState> caller_frame_state) -> V<Any> {
+    OptionalV<EagerFrameState> caller_frame_state) -> V<Any> {
   // JS-to-Wasm wrappers are compiled per isolate, so they can emit
   // isolate-dependent code.
   DCHECK_NOT_NULL(__ data()->isolate());
@@ -294,18 +314,19 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildJSToWasmWrapper(
   V<SharedFunctionInfo> sfi =
       __ Load(js_closure, LoadOp::Kind::TaggedBase().Immutable(),
               MemoryRepresentation::TaggedPointer(),
-              JSFunction::kSharedFunctionInfoOffset);
-  V<WasmFunctionData> function_data = V<WasmFunctionData>::Cast(
-      __ LoadTrustedPointer(sfi, LoadOp::Kind::TaggedBase().Immutable(),
-                            kWasmExportedFunctionDataIndirectPointerTag,
-                            SharedFunctionInfo::kTrustedFunctionDataOffset));
+              offsetof(JSFunction, shared_function_info_));
+  V<WasmFunctionData> function_data =
+      V<WasmFunctionData>::Cast(__ LoadTrustedPointer(
+          sfi, LoadOp::Kind::TaggedBase().Immutable(),
+          kWasmExportedFunctionDataIndirectPointerTag,
+          offsetof(SharedFunctionInfo, trusted_function_data_)));
 
   // If we are not inlining the Wasm body, we don't need the Wasm instance.
   V<WasmTrustedInstanceData> instance_data =
       inlined_function_data_.has_value()
           ? V<WasmTrustedInstanceData>::Cast(__ LoadProtectedPointerField(
                 function_data, LoadOp::Kind::TaggedBase().Immutable(),
-                WasmExportedFunctionData::kProtectedInstanceDataOffset))
+                offsetof(WasmExportedFunctionData, protected_instance_data_)))
           : OpIndex::Invalid();
 
   // Convert JS parameters to wasm numbers using the default transformation
@@ -323,7 +344,7 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildJSToWasmWrapper(
   compiler::turboshaft::WasmBodyInliningResult inlining_result;
   if constexpr (requires { &Assembler::TryInlineWasmBody; }) {
     if (inlined_function_data_.has_value()) {
-      CHECK(v8_flags.turboshaft_wasm_in_js_inlining);
+      CHECK(v8_flags.wasm_in_js_inlining_body);
       inlining_result = __ TryInlineWasmBody(
           inlined_function_data_.value(), VectorOf(args), lazy_deopt_on_throw);
       // If the body inlining traps unconditionally (e.g., due to an
@@ -344,7 +365,7 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildJSToWasmWrapper(
     V<WasmInternalFunction> internal =
         V<WasmInternalFunction>::Cast(__ LoadProtectedPointerField(
             function_data, LoadOp::Kind::TaggedBase().Immutable(),
-            WasmExportedFunctionData::kProtectedInternalOffset));
+            offsetof(WasmFunctionData, protected_internal_)));
     auto [target, implicit_arg] =
         this->BuildFunctionTargetAndImplicitArg(internal);
     args[0] = implicit_arg;
@@ -384,9 +405,9 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmToJSWrapper(
     wasm_params[i] = (__ Parameter(1 + i, rep));
   }
 
-  V<Context> native_context = __ Load(ref, LoadOp::Kind::TaggedBase(),
-                                      MemoryRepresentation::TaggedPointer(),
-                                      WasmImportData::kNativeContextOffset);
+  V<Context> native_context = __ Load(
+      ref, LoadOp::Kind::TaggedBase(), MemoryRepresentation::TaggedPointer(),
+      offsetof(WasmImportData, native_context_));
 
   if (kind == wasm::ImportCallKind::kRuntimeTypeError) {
     // =======================================================================
@@ -422,7 +443,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmToJSWrapper(
 
   V<JSFunction> callable_node = __ Load(ref, LoadOp::Kind::TaggedBase(),
                                         MemoryRepresentation::TaggedPointer(),
-                                        WasmImportData::kCallableOffset);
+                                        offsetof(WasmImportData, callable_));
   auto [old_sp, old_limit] = this->BuildSwitchToTheCentralStackIfNeeded();
   OpIndex suspender = OpIndex::Invalid();
   if (suspend == wasm::kSuspend) {
@@ -432,7 +453,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmToJSWrapper(
 
     if (v8_flags.stress_wasm_stack_switching) {
       V<Word32> for_stress_testing = __ TaggedEqual(
-          __ LoadTaggedField(suspender, WasmSuspenderObject::kResumeOffset),
+          __ LoadTaggedField(suspender, offsetof(WasmSuspenderObject, resume_)),
           __ template LoadRoot<RootIndex::kUndefinedValue>());
       IF (for_stress_testing) {
         __ WasmCallRuntime(__ phase_zone(), Runtime::kThrowWasmJSPISuspendError,
@@ -581,7 +602,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmStackEntryWrapper() {
   V<WasmInternalFunction> internal_function = V<WasmInternalFunction>::Cast(
       __ LoadTrustedPointer(func_ref, LoadOp::Kind::TaggedBase().Immutable(),
                             kWasmInternalFunctionIndirectPointerTag,
-                            WasmFuncRef::kTrustedInternalOffset));
+                            offsetof(WasmFuncRef, trusted_internal_)));
   auto [target, instance] =
       this->BuildFunctionTargetAndImplicitArg(internal_function);
 
@@ -661,15 +682,16 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildCapiCallWrapper() {
     offset += type.value_kind_size();
   }
 
-  V<Object> function_node =
-      __ LoadTaggedField(incoming_params[0], WasmImportData::kCallableOffset);
+  V<Object> function_node = __ LoadTaggedField(
+      incoming_params[0], offsetof(WasmImportData, callable_));
   V<HeapObject> shared = LoadSharedFunctionInfo(function_node);
-  V<WasmFunctionData> function_data = V<WasmFunctionData>::Cast(
-      __ LoadTrustedPointer(shared, LoadOp::Kind::TaggedBase(),
-                            kWasmCapiFunctionDataIndirectPointerTag,
-                            SharedFunctionInfo::kTrustedFunctionDataOffset));
+  V<WasmFunctionData> function_data =
+      V<WasmFunctionData>::Cast(__ LoadTrustedPointer(
+          shared, LoadOp::Kind::TaggedBase(),
+          kWasmCapiFunctionDataIndirectPointerTag,
+          offsetof(SharedFunctionInfo, trusted_function_data_)));
   V<Object> host_data_foreign = __ LoadTaggedField(
-      function_data, WasmCapiFunctionData::kEmbedderDataOffset);
+      function_data, offsetof(WasmCapiFunctionData, embedder_data_));
 
   OpIndex isolate_root = __ LoadRootRegister();
   OpIndex fp_value = __ FramePointer();
@@ -700,7 +722,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildCapiCallWrapper() {
         GetTargetForBuiltinCall(Builtin::kWasmRethrowExplicitContext);
     V<Context> context = __ Load(incoming_params[0], LoadOp::Kind::TaggedBase(),
                                  MemoryRepresentation::TaggedPointer(),
-                                 WasmImportData::kNativeContextOffset);
+                                 offsetof(WasmImportData, native_context_));
     __ Call(rethrow_call_target, {return_value, context}, ts_call_descriptor);
     __ Unreachable();
   }
@@ -749,7 +771,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildCWasmEntryWrapper() {
       __ LoadTrustedPointer(V<HeapObject>::Cast(object_ref),
                             LoadOp::Kind::TaggedBase().Immutable(),
                             kWasmTrustedInstanceDataIndirectPointerTag,
-                            WasmInstanceObject::kTrustedDataOffset));
+                            offsetof(WasmInstanceObject, trusted_data_)));
   args[pos++] = instance_data;
 
   int offset = 0;
@@ -769,7 +791,8 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildCWasmEntryWrapper() {
   OpIndex call;
   {
     typename Assembler::CatchScope scope(Asm(), catch_block);
-    OpIndex frame_state = OpIndex::Invalid();
+    OptionalV<LazyFrameState> frame_state =
+        OptionalV<LazyFrameState>::Nullopt();
     call = __ Call(code_entry, frame_state, base::VectorOf(args), descriptor,
                    OpEffects().CanCallAnything());
   }
@@ -808,7 +831,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildJSFastApiCallWrapper(
   }
 
   V<NativeContext> native_context = __ template LoadTaggedField<NativeContext>(
-      import_data, WasmImportData::kNativeContextOffset);
+      import_data, offsetof(WasmImportData, native_context_));
 
   __ StoreOffHeap(__ LoadRootRegister(),
                   __ BitcastHeapObjectToWordPtr(native_context),
@@ -818,15 +841,15 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildJSFastApiCallWrapper(
   V<JSFunction> target_node;
   V<Object> receiver_node;
   V<JSReceiver> callable_node = __ template LoadTaggedField<JSReceiver>(
-      import_data, WasmImportData::kCallableOffset);
+      import_data, offsetof(WasmImportData, callable_));
 
   if (IsJSBoundFunction(*callable)) {
     target = Cast<JSFunction>(
         Cast<JSBoundFunction>(callable)->bound_target_function());
     target_node = __ template LoadTaggedField<JSFunction>(
-        callable_node, JSBoundFunction::kBoundTargetFunctionOffset);
-    receiver_node =
-        __ LoadTaggedField(callable_node, JSBoundFunction::kBoundThisOffset);
+        callable_node, offsetof(JSBoundFunction, bound_target_function_));
+    receiver_node = __ LoadTaggedField(callable_node,
+                                       offsetof(JSBoundFunction, bound_this_));
   } else {
     target = Cast<JSFunction>(*callable);
     target_node = V<JSFunction>::Cast(callable_node);
@@ -853,7 +876,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildJSFastApiCallWrapper(
   V<FunctionTemplateInfo> function_template_info =
       __ template LoadTaggedField<FunctionTemplateInfo>(
           shared_function_info,
-          SharedFunctionInfo::kUntrustedFunctionDataOffset);
+          offsetof(SharedFunctionInfo, untrusted_function_data_));
 
   V<Object> api_data_argument = __ LoadTaggedField(
       function_template_info, offsetof(FunctionTemplateInfo, callback_data_));

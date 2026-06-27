@@ -642,6 +642,9 @@ ArchOpcode GetLoadOpcode(MemoryRepresentation loaded_rep,
       return kRiscvLoadDecompressTrapping;
     case MemoryRepresentation::IndirectPointer():
       UNREACHABLE();
+    case MemoryRepresentation::TrustedPointer():
+      // Only LoadTrustedPointer uses this representation.
+      UNREACHABLE();
     case MemoryRepresentation::SandboxedPointer():
       return kRiscvLoadDecodeSandboxedPointer;
     case MemoryRepresentation::Simd128():
@@ -681,6 +684,9 @@ ArchOpcode GetStoreOpcode(MemoryRepresentation stored_rep) {
       return kRiscvSd;
     case MemoryRepresentation::ProtectedPointer():
       // We never store directly to protected pointers from generated code.
+      UNREACHABLE();
+    case MemoryRepresentation::TrustedPointer():
+      // Only LoadTrustedPointer uses this representation.
       UNREACHABLE();
     case MemoryRepresentation::IndirectPointer():
       return kRiscvStoreIndirectPointer;
@@ -1080,7 +1086,52 @@ void InstructionSelector::VisitInt32Mul(OpIndex node) {
   VisitRRR(this, kRiscvMul32, node);
 }
 
-void InstructionSelector::VisitUint64Add128(OpIndex node) { UNIMPLEMENTED(); }
+namespace {
+
+void VisitWideAddSub(InstructionSelector* selector, OpIndex node, bool is_add) {
+  RiscvOperandGenerator g(selector);
+  const auto& op = selector->Get(node).Cast<Word64AddSub128BinopOp>();
+  InstructionCode opcode = is_add ? kRiscvAdd128 : kRiscvSub128;
+  InstructionCode opcode_no_high = is_add ? kRiscvAdd64 : kRiscvSub64;
+
+  OptionalOpIndex out_low = selector->FindProjection(node, 0);
+  OptionalOpIndex out_high = selector->FindProjection(node, 1);
+
+  DCHECK(out_low.valid());
+
+  if (!out_high.valid() || !selector->IsUsed(out_high.value())) {
+    InstructionOperand b_low_op = g.UseOperand(op.right_low(), opcode_no_high);
+    selector->Emit(opcode_no_high, g.DefineAsRegister(out_low.value()),
+                   g.UseRegister(op.left_low()), b_low_op);
+    return;
+  }
+
+  InstructionOperand inputs[4];
+  size_t input_count = 0;
+  InstructionOperand outputs[2];
+  size_t output_count = 0;
+
+  inputs[input_count++] = g.UseRegister(op.left_low());
+  inputs[input_count++] = g.UseRegister(op.right_low());
+
+  inputs[input_count++] = g.UseUniqueRegister(op.left_high());
+  inputs[input_count++] = g.UseUniqueRegister(op.right_high());
+
+  outputs[output_count++] = g.DefineAsRegister(out_low.value());
+  outputs[output_count++] = g.DefineAsRegister(out_high.value());
+
+  selector->Emit(opcode, output_count, outputs, input_count, inputs);
+}
+
+}  // namespace
+
+void InstructionSelector::VisitUint64Add128(OpIndex node) {
+  VisitWideAddSub(this, node, true);
+}
+
+void InstructionSelector::VisitUint64Sub128(OpIndex node) {
+  VisitWideAddSub(this, node, false);
+}
 
 void InstructionSelector::VisitInt32MulHigh(OpIndex node) {
   VisitRRR(this, kRiscvMulHigh32, node);
@@ -2704,7 +2755,8 @@ InstructionSelector::SupportedMachineOperatorFlags() {
              MachineOperatorBuilder::kWord64Popcnt;
   }
   if (CpuFeatures::IsSupported(ZFH)) {
-    flags |= MachineOperatorBuilder::kFloat16 |
+    flags |= MachineOperatorBuilder::kFloat16Arithmetic |
+             MachineOperatorBuilder::kFloat16MemAccess |
              MachineOperatorBuilder::kFloat16RawBitsConversion;
   }
   return flags;

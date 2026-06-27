@@ -311,10 +311,10 @@ class V8_NODISCARD LocalIsolateScope {
 void PrintFunctionSource(OptimizedCompilationInfo* info, Isolate* isolate,
                          int source_id,
                          DirectHandle<SharedFunctionInfo> shared) {
-  if (!IsUndefined(shared->script(), isolate)) {
+  if (!IsUndefined(shared->script())) {
     DirectHandle<Script> script(Cast<Script>(shared->script()), isolate);
 
-    if (!IsUndefined(script->source(), isolate)) {
+    if (!IsUndefined(script->source())) {
       CodeTracer::StreamScope tracing_scope(isolate->GetCodeTracer());
       Tagged<Object> source_name = script->name();
       auto& os = tracing_scope.stream();
@@ -607,7 +607,7 @@ void PrintCode(Isolate* isolate, DirectHandle<Code> code,
     if (print_source) {
       DirectHandle<SharedFunctionInfo> shared = info->shared_info();
       if (IsScript(shared->script()) &&
-          !IsUndefined(Cast<Script>(shared->script())->source(), isolate)) {
+          !IsUndefined(Cast<Script>(shared->script())->source())) {
         os << "--- Raw source ---\n";
         StringCharacterStream stream(
             Cast<String>(Cast<Script>(shared->script())->source()),
@@ -656,7 +656,7 @@ bool CheckNoDeprecatedMaps(DirectHandle<Code> code, Isolate* isolate) {
   int mode_mask = RelocInfo::EmbeddedObjectModeMask();
   for (RelocIterator it(*code, mode_mask); !it.done(); it.next()) {
     DCHECK(RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode()));
-    Tagged<HeapObject> obj = it.rinfo()->target_object(isolate);
+    Tagged<HeapObject> obj = it.rinfo()->target_object();
     if (Tagged<Map> map; TryCast<Map>(obj, &map) && map->is_deprecated()) {
       return false;
     }
@@ -701,6 +701,7 @@ PipelineCompilationJob::Status PipelineCompilationJob::PrepareJobImpl(
   // Ensure that the RuntimeCallStats table of main thread is available for
   // phases happening during PrepareJob.
   PipelineJobScope scope(&data_, isolate->counters()->runtime_call_stats());
+  compilation_info()->set_debug_name(compilation_info()->GetDebugName().get());
 
   if (compilation_info()->bytecode_array()->length() >
       v8_flags.max_optimized_bytecode_size) {
@@ -931,10 +932,10 @@ struct InliningPhase {
     JSNativeContextSpecialization native_context_specialization(
         &graph_reducer, data->jsgraph(), data->broker(), flags, temp_zone,
         info->zone());
-    JSInliningHeuristic inlining(
-        &graph_reducer, temp_zone, data->info(), data->jsgraph(),
-        data->broker(), data->source_positions(), data->node_origins(),
-        JSInliningHeuristic::kJSOnly, nullptr, nullptr);
+    JSInliningHeuristic inlining(&graph_reducer, temp_zone, data->info(),
+                                 data->jsgraph(), data->broker(),
+                                 data->source_positions(), data->node_origins(),
+                                 JSInliningHeuristic::kJSOnly, nullptr);
 
     JSIntrinsicLowering intrinsic_lowering(&graph_reducer, data->jsgraph(),
                                            data->broker());
@@ -989,19 +990,11 @@ struct JSWasmInliningPhase {
     CommonOperatorReducer common_reducer(
         &graph_reducer, data->graph(), data->broker(), data->common(),
         data->machine(), temp_zone, BranchSemantics::kMachine);
-    // If we want to inline in Turboshaft instead (i.e., later in the
-    // pipeline), only inline the wrapper here in TurboFan.
-    // TODO(dlehmann,353475584): Long-term, also inline the JS-to-Wasm wrappers
-    // in Turboshaft (or in Maglev, depending on the shared frontend).
-    JSInliningHeuristic::Mode mode =
-        (v8_flags.turboshaft_wasm_in_js_inlining)
-            ? JSInliningHeuristic::kWasmWrappersOnly
-            : JSInliningHeuristic::kWasmFullInlining;
     JSInliningHeuristic inlining(&graph_reducer, temp_zone, data->info(),
                                  data->jsgraph(), data->broker(),
                                  data->source_positions(), data->node_origins(),
-                                 mode, data->wasm_native_module_for_inlining(),
-                                 data->js_wasm_calls_sidetable());
+                                 JSInliningHeuristic::kWasmFullInlining,
+                                 data->wasm_native_module_for_inlining());
     AddReducer(data, &graph_reducer, &dead_code_elimination);
     AddReducer(data, &graph_reducer, &common_reducer);
     AddReducer(data, &graph_reducer, &inlining);
@@ -3072,11 +3065,11 @@ wasm::WasmCompilationResult Pipeline::GenerateWasmCode(
   turboshaft_data.InitializeGraphComponent(
       data.source_positions(), turboshaft::Graph::Origin::kPureTurboshaft);
 
-  wasm::BuildTSGraph(&turboshaft_data, env, detected, turboshaft_data.graph(),
-                     compilation_data.func_body,
-                     compilation_data.wire_bytes_storage,
-                     &compilation_data.assumptions, &inlining_positions,
-                     compilation_data.func_index, function_coverage_data);
+  wasm::BuildTSGraph(
+      &turboshaft_data, env, detected, turboshaft_data.graph(),
+      compilation_data.func_body, compilation_data.wire_bytes_storage,
+      compilation_data.validate_callees, &compilation_data.assumptions,
+      &inlining_positions, compilation_data.func_index, function_coverage_data);
   CodeTracer* code_tracer = nullptr;
   if (turboshaft_data.info()->trace_turbo_graph()) {
     // NOTE: We must not call `GetCodeTracer` if tracing is not enabled,

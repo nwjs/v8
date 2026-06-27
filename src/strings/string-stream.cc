@@ -104,8 +104,9 @@ void StringStream::Add(base::Vector<const char> format,
     // Skip over the whole control character sequence until the
     // format element type
     temp[format_length++] = format[offset++];
-    while (offset < format.length() && IsControlChar(format[offset]))
+    while (offset < format.length() && IsControlChar(format[offset])) {
       temp[format_length++] = format[offset++];
+    }
     if (offset >= format.length()) return;
     char type = format[offset];
     temp[format_length++] = type;
@@ -122,8 +123,9 @@ void StringStream::Add(base::Vector<const char> format,
       case 'w': {
         DCHECK_EQ(FmtElm::LC_STR, current.type_);
         base::Vector<const base::uc16> value = *current.data_.u_lc_str_;
-        for (int i = 0; i < value.length(); i++)
+        for (int i = 0; i < value.length(); i++) {
           Put(static_cast<char>(value[i]));
+        }
         break;
       }
       case 'o': {
@@ -304,7 +306,7 @@ void StringStream::PrintUsingMap(Isolate* isolate, Tagged<JSObject> js_object) {
   Tagged<Map> map = js_object->map();
   if (map->is_dictionary_map()) return;
 
-  Tagged<DescriptorArray> descs = map->instance_descriptors(isolate);
+  Tagged<DescriptorArray> descs = map->instance_descriptors();
   for (InternalIndex i : map->IterateOwnDescriptors()) {
     PropertyDetails details = descs->GetDetails(i);
     if (details.location() == PropertyLocation::kField) {
@@ -331,10 +333,9 @@ void StringStream::PrintUsingMap(Isolate* isolate, Tagged<JSObject> js_object) {
 }
 
 void StringStream::PrintFixedArray(Tagged<FixedArray> array, uint32_t limit) {
-  ReadOnlyRoots roots = GetReadOnlyRoots();
   for (uint32_t i = 0; i < 10 && i < limit; i++) {
     Tagged<Object> element = array->get(i);
-    if (IsTheHole(element, roots)) continue;
+    if (IsTheHole(element)) continue;
     for (int len = 1; len < 18; len++) {
       Put(' ');
     }
@@ -422,7 +423,7 @@ void StringStream::PrintPrototype(Isolate* isolate, Tagged<JSFunction> fun,
                                   Tagged<Object> receiver) {
   Tagged<Object> name = fun->shared()->Name();
   bool print_name = false;
-  if (IsNullOrUndefined(receiver, isolate) || IsTheHole(receiver, isolate) ||
+  if (IsNullOrUndefined(receiver) || IsTheHole(receiver) ||
       IsJSProxy(receiver) || IsWasmObject(receiver)) {
     print_name = true;
   } else if (!isolate->context().is_null()) {
@@ -436,7 +437,7 @@ void StringStream::PrintPrototype(Isolate* isolate, Tagged<JSFunction> fun,
          !iter.IsAtEnd(); iter.Advance()) {
       if (!IsJSObject(iter.GetCurrent())) break;
       Tagged<Object> key = iter.GetCurrent<JSObject>()->SlowReverseLookup(fun);
-      if (!IsUndefined(key, isolate)) {
+      if (!IsUndefined(key)) {
         if (!IsString(name) || !IsString(key) ||
             !Cast<String>(name)->Equals(Cast<String>(key))) {
           print_name = true;

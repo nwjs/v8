@@ -9,8 +9,10 @@
 // Include the non-inl header before the rest of the headers.
 
 #include "src/heap/heap-write-barrier-inl.h"
+#include "src/heap/local-heap.h"
 #include "src/objects/js-objects-inl.h"
 #include "src/objects/objects-inl.h"
+#include "src/sandbox/check.h"
 #include "src/utils/memcopy.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -39,67 +41,84 @@ size_t JSArrayBuffer::byte_length() const {
 }
 
 size_t JSArrayBuffer::byte_length_unchecked() const {
-  return ReadBoundedSizeField(kRawByteLengthOffset);
+  return ReadBoundedSizeField(offsetof(JSArrayBuffer, raw_byte_length_));
 }
 
 void JSArrayBuffer::set_byte_length(size_t value) {
-  WriteBoundedSizeField(kRawByteLengthOffset, value);
+  WriteBoundedSizeField(offsetof(JSArrayBuffer, raw_byte_length_), value);
 }
 
 size_t JSArrayBuffer::max_byte_length() const {
-  return ReadBoundedSizeField(kRawMaxByteLengthOffset);
+  return ReadBoundedSizeField(offsetof(JSArrayBuffer, raw_max_byte_length_));
 }
 
 void JSArrayBuffer::set_max_byte_length(size_t value) {
-  WriteBoundedSizeField(kRawMaxByteLengthOffset, value);
+  WriteBoundedSizeField(offsetof(JSArrayBuffer, raw_max_byte_length_), value);
 }
 
 void* JSArrayBuffer::backing_store() const {
-  return backing_store(GetPtrComprCageBase(*this));
+  return backing_store(GetPtrComprCageBase(this));
 }
 
 void* JSArrayBuffer::backing_store(PtrComprCageBase cage_base) const {
-  Address value = ReadSandboxedPointerField(kBackingStoreOffset, cage_base);
+  Address value = ReadSandboxedPointerField(
+      offsetof(JSArrayBuffer, backing_store_), cage_base);
   return reinterpret_cast<void*>(value);
 }
 
 void JSArrayBuffer::set_backing_store(Isolate* isolate, void* value) {
   Address addr = reinterpret_cast<Address>(value);
-  WriteSandboxedPointerField(kBackingStoreOffset, isolate, addr);
+  WriteSandboxedPointerField(offsetof(JSArrayBuffer, backing_store_), isolate,
+                             addr);
 }
 
 std::shared_ptr<BackingStore> JSArrayBuffer::GetBackingStore() const {
-  if (!extension()) return nullptr;
-  return extension()->backing_store();
+  auto* ext = extension();
+  return ext == nullptr ? nullptr : ext->backing_store();
 }
 
 size_t JSArrayBuffer::GetByteLength() const {
-  if (V8_UNLIKELY(is_shared() && is_resizable_by_js())) {
+  const bool is_shared_ = is_shared();
+  const bool is_resizable = is_resizable_by_js();
+  auto* ext = extension();
+  if (V8_UNLIKELY(is_shared_ && is_resizable)) {
     // Invariant: byte_length for GSAB is 0 (it needs to be read from the
     // BackingStore). Don't use the byte_length getter, which DCHECKs that it's
     // not used on growable SharedArrayBuffers.
     DCHECK_EQ(0, byte_length_unchecked());
 
-    // If the byte length is read after the JSArrayBuffer object is allocated
-    // but before it's attached to the backing store, GetBackingStore returns
-    // nullptr. This is rare, but can happen e.g., when memory measurements
-    // are enabled (via performance.measureMemory()).
-    auto backing_store = GetBackingStore();
-    if (!backing_store) {
+    // The extension might be null if the byte length is read after allocation
+    // but before the backing store is attached (e.g., during memory
+    // measurement).
+    if (ext == nullptr) {
       return 0;
     }
-
-    return backing_store->byte_length(std::memory_order_seq_cst);
+    SBXCHECK(ext->is_shared() && ext->is_resizable_by_js());
+    return ext->backing_store()->byte_length(std::memory_order_seq_cst);
   }
+
+  // We should not be reading the JS-visible byte length of a RAB from a
+  // background thread, unless the mutator is guaranteed to be paused. This
+  // happens during a GC pause, during teardown, or when the main thread is
+  // parked.
+  DCHECK_IMPLIES(
+      is_resizable_by_js() && !is_shared() && LocalHeap::Current() != nullptr &&
+          !LocalHeap::Current()->is_main_thread(),
+      LocalHeap::Current()->heap()->IsInGC() ||
+          LocalHeap::Current()->heap()->IsTearingDown() ||
+          LocalHeap::Current()->heap()->main_thread_local_heap()->IsParked());
+
   return byte_length();
 }
 
 uint32_t JSArrayBuffer::GetBackingStoreRefForDeserialization() const {
-  return static_cast<uint32_t>(ReadField<Address>(kBackingStoreOffset));
+  return static_cast<uint32_t>(
+      ReadField<Address>(offsetof(JSArrayBuffer, backing_store_)));
 }
 
 void JSArrayBuffer::SetBackingStoreRefForSerialization(uint32_t ref) {
-  WriteField<Address>(kBackingStoreOffset, static_cast<Address>(ref));
+  WriteField<Address>(offsetof(JSArrayBuffer, backing_store_),
+                      static_cast<Address>(ref));
 }
 
 void JSArrayBuffer::init_extension() {
@@ -231,8 +250,19 @@ BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, was_detached,
                     JSArrayBuffer::WasDetachedBit)
 BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_shared,
                     JSArrayBuffer::IsSharedBit)
-BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_resizable_by_js,
-                    JSArrayBuffer::IsResizableByJsBit)
+
+bool JSArrayBuffer::is_resizable_by_js() const {
+  return JSArrayBuffer::IsResizableByJsBit::decode(bit_field_);
+}
+
+void JSArrayBuffer::set_is_resizable_by_js(bool value) {
+  set_bit_field(JSArrayBuffer::IsResizableByJsBit::update(bit_field(), value));
+
+  if (auto* extension = this->extension()) {
+    extension->set_is_resizable_by_js(value);
+  }
+}
+
 BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_immutable,
                     JSArrayBuffer::IsImmutableBit)
 BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_node_js,
@@ -278,19 +308,19 @@ void JSArrayBufferView::set_bit_field(uint32_t value) {
 }
 
 size_t JSArrayBufferView::byte_offset() const {
-  return ReadBoundedSizeField(kRawByteOffsetOffset);
+  return ReadBoundedSizeField(offsetof(JSArrayBufferView, raw_byte_offset_));
 }
 
 void JSArrayBufferView::set_byte_offset(size_t value) {
-  WriteBoundedSizeField(kRawByteOffsetOffset, value);
+  WriteBoundedSizeField(offsetof(JSArrayBufferView, raw_byte_offset_), value);
 }
 
 size_t JSArrayBufferView::byte_length() const {
-  return ReadBoundedSizeField(kRawByteLengthOffset);
+  return ReadBoundedSizeField(offsetof(JSArrayBufferView, raw_byte_length_));
 }
 
 void JSArrayBufferView::set_byte_length(size_t value) {
-  WriteBoundedSizeField(kRawByteLengthOffset, value);
+  WriteBoundedSizeField(offsetof(JSArrayBufferView, raw_byte_length_), value);
 }
 
 bool JSArrayBufferView::WasDetached() const { return buffer()->was_detached(); }
@@ -344,11 +374,11 @@ JSTypedArray::TypeAndElementSizeFor(ElementsKind kind) {
 }
 
 size_t JSTypedArray::length() const {
-  return ReadBoundedSizeField(kRawLengthOffset);
+  return ReadBoundedSizeField(offsetof(JSTypedArray, raw_length_));
 }
 
 void JSTypedArray::set_length(size_t value) {
-  WriteBoundedSizeField(kRawLengthOffset, value);
+  WriteBoundedSizeField(offsetof(JSTypedArray, raw_length_), value);
 }
 
 Tagged<Object> JSTypedArray::base_pointer() const {
@@ -370,15 +400,17 @@ void JSTypedArray::set_base_pointer(Tagged<Object> value, ReleaseStoreTag,
 }
 
 Address JSTypedArray::external_pointer() const {
-  return external_pointer(GetPtrComprCageBase(*this));
+  return external_pointer(GetPtrComprCageBase(this));
 }
 
 Address JSTypedArray::external_pointer(PtrComprCageBase cage_base) const {
-  return ReadSandboxedPointerField(kExternalPointerOffset, cage_base);
+  return ReadSandboxedPointerField(offsetof(JSTypedArray, external_pointer_),
+                                   cage_base);
 }
 
 void JSTypedArray::set_external_pointer(Isolate* isolate, Address value) {
-  WriteSandboxedPointerField(kExternalPointerOffset, isolate, value);
+  WriteSandboxedPointerField(offsetof(JSTypedArray, external_pointer_), isolate,
+                             value);
 }
 
 size_t JSTypedArray::GetLengthOrOutOfBounds(bool& out_of_bounds) const {
@@ -438,12 +470,14 @@ Address JSTypedArray::ExternalPointerCompensationForOnHeapArray(
 
 uint32_t JSTypedArray::GetExternalBackingStoreRefForDeserialization() const {
   DCHECK(!is_on_heap());
-  return static_cast<uint32_t>(ReadField<Address>(kExternalPointerOffset));
+  return static_cast<uint32_t>(
+      ReadField<Address>(offsetof(JSTypedArray, external_pointer_)));
 }
 
 void JSTypedArray::SetExternalBackingStoreRefForSerialization(uint32_t ref) {
   DCHECK(!is_on_heap());
-  WriteField<Address>(kExternalPointerOffset, static_cast<Address>(ref));
+  WriteField<Address>(offsetof(JSTypedArray, external_pointer_),
+                      static_cast<Address>(ref));
 }
 
 void JSTypedArray::RemoveExternalPointerCompensationForSerialization(
@@ -451,14 +485,15 @@ void JSTypedArray::RemoveExternalPointerCompensationForSerialization(
   DCHECK(is_on_heap());
   Address offset =
       external_pointer() - ExternalPointerCompensationForOnHeapArray(isolate);
-  WriteField<Address>(kExternalPointerOffset, offset);
+  WriteField<Address>(offsetof(JSTypedArray, external_pointer_), offset);
 }
 
 void JSTypedArray::AddExternalPointerCompensationForDeserialization(
     Isolate* isolate) {
   DCHECK(is_on_heap());
-  Address pointer = ReadField<Address>(kExternalPointerOffset) +
-                    ExternalPointerCompensationForOnHeapArray(isolate);
+  Address pointer =
+      ReadField<Address>(offsetof(JSTypedArray, external_pointer_)) +
+      ExternalPointerCompensationForOnHeapArray(isolate);
   set_external_pointer(isolate, pointer);
 }
 
@@ -548,19 +583,21 @@ MaybeDirectHandle<JSTypedArray> JSTypedArray::Validate(
 //
 
 void* JSDataViewOrRabGsabDataView::data_pointer() const {
-  return data_pointer(GetPtrComprCageBase(*this));
+  return data_pointer(GetPtrComprCageBase(this));
 }
 
 void* JSDataViewOrRabGsabDataView::data_pointer(
     PtrComprCageBase cage_base) const {
-  Address value = ReadSandboxedPointerField(kDataPointerOffset, cage_base);
+  Address value = ReadSandboxedPointerField(
+      offsetof(JSDataViewOrRabGsabDataView, data_pointer_), cage_base);
   return reinterpret_cast<void*>(value);
 }
 
 void JSDataViewOrRabGsabDataView::set_data_pointer(Isolate* isolate,
                                                    void* ptr) {
   Address value = reinterpret_cast<Address>(ptr);
-  WriteSandboxedPointerField(kDataPointerOffset, isolate, value);
+  WriteSandboxedPointerField(
+      offsetof(JSDataViewOrRabGsabDataView, data_pointer_), isolate, value);
 }
 
 size_t JSRabGsabDataView::GetByteLength() const {

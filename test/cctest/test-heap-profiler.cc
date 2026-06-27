@@ -31,6 +31,7 @@
 
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "include/v8-function.h"
@@ -99,8 +100,9 @@ class NamedEntriesDetector {
         v8::base::HashMap::Entry* entry = visited.LookupOrInsert(
             reinterpret_cast<void*>(child),
             static_cast<uint32_t>(reinterpret_cast<uintptr_t>(child)));
-        if (entry->value)
+        if (entry->value) {
           continue;
+        }
         entry->value = reinterpret_cast<void*>(1);
         list.push_back(child);
         CheckEntry(child);
@@ -214,8 +216,31 @@ const v8::HeapGraphNode* GetProperty(v8::Isolate* isolate,
   for (int i = 0, count = node->GetChildrenCount(); i < count; ++i) {
     const v8::HeapGraphEdge* prop = node->GetChild(i);
     v8::String::Utf8Value prop_name(isolate, prop->GetName());
-    if (prop->GetType() == type && strcmp(name, *prop_name) == 0)
+    if (prop->GetType() == type && strcmp(name, *prop_name) == 0) {
       return prop->GetToNode();
+    }
+  }
+  return nullptr;
+}
+
+const v8::HeapGraphEdge* FindEphemeronEdge(v8::Isolate* isolate,
+                                           const v8::HeapGraphNode* table,
+                                           const v8::HeapGraphNode* key) {
+  v8::String::Utf8Value key_name(isolate, key->GetName());
+  std::string prefix = "part of key (" + std::string(*key_name) + " @" +
+                       std::to_string(key->GetId()) + ") -> value (";
+  std::string suffix =
+      ") pair in WeakMap (table @" + std::to_string(table->GetId()) + ")";
+
+  for (int i = 0, count = table->GetChildrenCount(); i < count; ++i) {
+    const v8::HeapGraphEdge* prop = table->GetChild(i);
+    if (prop->GetType() != v8::HeapGraphEdge::kInternal) continue;
+    v8::String::Utf8Value name(isolate, prop->GetName());
+    std::string name_str(*name);
+    if (name_str.find(prefix) != std::string::npos &&
+        name_str.find(suffix) != std::string::npos) {
+      return prop;
+    }
   }
   return nullptr;
 }
@@ -571,7 +596,14 @@ TEST(HeapSnapshotHeapNumbers) {
   const v8::HeapSnapshot* snapshot = heap_profiler->TakeHeapSnapshot();
   CHECK(ValidateSnapshot(snapshot));
   const v8::HeapGraphNode* global = GetGlobalObject(snapshot);
-  CHECK(!GetProperty(env.isolate(), global, v8::HeapGraphEdge::kProperty, "a"));
+  const v8::HeapGraphNode* a =
+      GetProperty(env.isolate(), global, v8::HeapGraphEdge::kProperty, "a");
+  CHECK(a);
+  CHECK_EQ(1, a->GetChildrenCount());
+  v8::String::Utf8Value value_a(CcTest::isolate(),
+                                a->GetChild(0)->GetToNode()->GetName());
+  CHECK_EQ(0, strcmp("1", *value_a));
+
   const v8::HeapGraphNode* b =
       GetProperty(env.isolate(), global, v8::HeapGraphEdge::kProperty, "b");
   CHECK(b);
@@ -931,16 +963,19 @@ TEST(HeapSnapshotWeakCollection) {
   const v8::HeapGraphNode* ws_table =
       GetProperty(env.isolate(), ws, v8::HeapGraphEdge::kInternal, "table");
   CHECK_EQ(v8::HeapGraphNode::kArray, ws_table->GetType());
-  CHECK_GT(ws_table->GetChildrenCount(), 0);
-  int weak_entries = 0;
+  CHECK_EQ(3, ws_table->GetChildrenCount());
+  // Verify that WeakSet table has NO edges to k and v.
   for (int i = 0, count = ws_table->GetChildrenCount(); i < count; ++i) {
     const v8::HeapGraphEdge* prop = ws_table->GetChild(i);
-    if (prop->GetType() != v8::HeapGraphEdge::kWeak) continue;
-    if (k->GetId() == prop->GetToNode()->GetId()) {
-      ++weak_entries;
-    }
+    CHECK_NE(k->GetId(), prop->GetToNode()->GetId());
   }
-  CHECK_EQ(1, weak_entries);
+  const v8::HeapGraphEdge* edge_k =
+      FindEphemeronEdge(env.isolate(), ws_table, k);
+  const v8::HeapGraphEdge* edge_v =
+      FindEphemeronEdge(env.isolate(), ws_table, v);
+  CHECK_NOT_NULL(edge_k);
+  CHECK_NOT_NULL(edge_v);
+  CHECK_EQ(edge_k->GetToNode()->GetId(), edge_v->GetToNode()->GetId());
   const v8::HeapGraphNode* ws_s =
       GetProperty(env.isolate(), ws, v8::HeapGraphEdge::kProperty, "str");
   CHECK(ws_s);
@@ -956,16 +991,32 @@ TEST(HeapSnapshotWeakCollection) {
       GetProperty(env.isolate(), wm, v8::HeapGraphEdge::kInternal, "table");
   CHECK_EQ(v8::HeapGraphNode::kArray, wm_table->GetType());
   CHECK_GT(wm_table->GetChildrenCount(), 0);
-  weak_entries = 0;
+  int wm_ephemeron_edges_to_v = 0;
   for (int i = 0, count = wm_table->GetChildrenCount(); i < count; ++i) {
     const v8::HeapGraphEdge* prop = wm_table->GetChild(i);
-    if (prop->GetType() != v8::HeapGraphEdge::kWeak) continue;
-    const v8::SnapshotObjectId to_node_id = prop->GetToNode()->GetId();
-    if (to_node_id == k->GetId() || to_node_id == v->GetId()) {
-      ++weak_entries;
+    // Verify NO edge to k.
+    CHECK_NE(k->GetId(), prop->GetToNode()->GetId());
+    if (prop->GetToNode()->GetId() == v->GetId()) {
+      CHECK_EQ(v8::HeapGraphEdge::kInternal, prop->GetType());
+      v8::String::Utf8Value prop_name(env.isolate(), prop->GetName());
+      CHECK_NOT_NULL(strstr(*prop_name, "pair in WeakMap"));
+      ++wm_ephemeron_edges_to_v;
     }
   }
-  CHECK_EQ(2, weak_entries);  // Key and value are weak.
+  CHECK_EQ(1, wm_ephemeron_edges_to_v);
+
+  // Verify that k has an ephemeron edge to v.
+  int k_ephemeron_edges_to_v = 0;
+  for (int i = 0, count = k->GetChildrenCount(); i < count; ++i) {
+    const v8::HeapGraphEdge* prop = k->GetChild(i);
+    if (prop->GetToNode()->GetId() == v->GetId()) {
+      CHECK_EQ(v8::HeapGraphEdge::kInternal, prop->GetType());
+      v8::String::Utf8Value prop_name(env.isolate(), prop->GetName());
+      CHECK_NOT_NULL(strstr(*prop_name, "pair in WeakMap"));
+      ++k_ephemeron_edges_to_v;
+    }
+  }
+  CHECK_EQ(1, k_ephemeron_edges_to_v);
   const v8::HeapGraphNode* wm_s =
       GetProperty(env.isolate(), wm, v8::HeapGraphEdge::kProperty, "str");
   CHECK(wm_s);
@@ -1174,11 +1225,13 @@ TEST(HeapSnapshotAddressReuse) {
   int wrong_count = 0;
   for (int i = 0, count = array_node->GetChildrenCount(); i < count; ++i) {
     const v8::HeapGraphEdge* prop = array_node->GetChild(i);
-    if (prop->GetType() != v8::HeapGraphEdge::kElement)
+    if (prop->GetType() != v8::HeapGraphEdge::kElement) {
       continue;
+    }
     v8::SnapshotObjectId id = prop->GetToNode()->GetId();
-    if (id < maxId1)
+    if (id < maxId1) {
       ++wrong_count;
+    }
   }
   CHECK_EQ(0, wrong_count);
 }
@@ -1480,8 +1533,9 @@ class TestStatsStream : public v8::OutputStream {
     CHECK(updates_written);
     updates_written_ += updates_written;
     entries_count_ = 0;
-    if (first_interval_index_ == -1 && updates_written != 0)
+    if (first_interval_index_ == -1 && updates_written != 0) {
       first_interval_index_ = buffer[0].index;
+    }
     for (int i = 0; i < updates_written; ++i) {
       entries_count_ += buffer[i].count;
       entries_size_ += buffer[i].size;
@@ -1514,8 +1568,9 @@ static TestStatsStream GetHeapStatsUpdate(
   int64_t timestamp = -1;
   v8::SnapshotObjectId last_seen_id =
       heap_profiler->GetHeapStats(&stream, &timestamp);
-  if (object_id)
+  if (object_id) {
     *object_id = last_seen_id;
+  }
   CHECK_NE(-1, timestamp);
   CHECK_EQ(1, stream.eos_signaled());
   return stream;
@@ -1651,8 +1706,9 @@ TEST(HeapSnapshotObjectsStats) {
     CHECK_EQ(8, stats_update.first_interval_index());
   }
 
-  for (int i = 0; i < 100; ++i)
+  for (int i = 0; i < 100; ++i) {
     array.Get(isolate)->Set(env.local(), i, v8_num(i)).FromJust();
+  }
 
   {
     // Single chunk of data with 1 entry expected in update.
@@ -2340,8 +2396,9 @@ TEST(NodesIteration) {
   const int nodes_count = snapshot->GetNodesCount();
   int count = 0;
   for (int i = 0; i < nodes_count; ++i) {
-    if (snapshot->GetNode(i) == global)
+    if (snapshot->GetNode(i) == global) {
       ++count;
+    }
   }
   CHECK_EQ(1, count);
 }
@@ -2415,8 +2472,9 @@ TEST(GetHeapValueForDeletedObject) {
 static int StringCmp(const char* ref, i::Tagged<i::String> act) {
   std::unique_ptr<char[]> s_act = act->ToCString();
   int result = strcmp(ref, s_act.get());
-  if (result != 0)
+  if (result != 0) {
     fprintf(stderr, "Expected: \"%s\", Actual: \"%s\"\n", ref, s_act.get());
+  }
   return result;
 }
 

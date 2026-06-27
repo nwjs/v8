@@ -6,6 +6,7 @@
 
 #include <optional>
 
+#include "src/base/logging.h"
 #include "src/base/memory.h"
 #include "src/base/numerics/safe_conversions.h"
 #include "src/codegen/interface-descriptors-inl.h"
@@ -587,8 +588,9 @@ Address Deoptimizer::EnsureValidReturnAddress(Isolate* isolate,
 
   // NotifyDeoptimized is used for continuation.
   if (builtins->code(Builtin::kNotifyDeoptimized)->instruction_start() ==
-      address)
+      address) {
     return address;
+  }
 
 #if V8_ENABLE_WEBASSEMBLY
   if (v8_flags.wasm_deopt &&
@@ -621,6 +623,7 @@ const char* Deoptimizer::MessageFor(DeoptimizeKind kind) {
     case DeoptimizeKind::kLazy:
       return "deopt-lazy";
   }
+  UNREACHABLE();
 }
 
 Deoptimizer::Deoptimizer(Isolate* isolate, Tagged<JSFunction> function,
@@ -819,6 +822,7 @@ Builtin Deoptimizer::GetDeoptimizationEntry(DeoptimizeKind kind) {
     case DeoptimizeKind::kLazy:
       return Builtin::kDeoptimizationEntry_Lazy;
   }
+  UNREACHABLE();
 }
 
 namespace {
@@ -856,6 +860,7 @@ const char* CodeValidityToString(Deoptimizer::CodeValidity code_validity) {
     case Deoptimizer::CodeValidity::kUnknown:
       return "unknown";
   }
+  UNREACHABLE();
 }
 
 }  // namespace
@@ -1522,10 +1527,10 @@ void Deoptimizer::GetWasmStackSlotsCounts(const wasm::FunctionSig* sig,
   }
   sig = GetI32Sig(&*zone_, sig);
 #endif
-  int untagged_slots, untagged_return_slots;  // Unused.
-  wasm::IterateSignatureImpl(sig, false, result_collector, &untagged_slots,
-                             parameter_stack_slots, &untagged_return_slots,
-                             return_stack_slots);
+  wasm::IterateSignatureImpl(
+      sig, false, result_collector, nullptr /* untagged_slots */,
+      parameter_stack_slots, nullptr /* untagged_return_slots */,
+      return_stack_slots);
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -2025,12 +2030,15 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
   {
     AllowSandboxAccess sandbox_access(
         "Fetching DebugBytecodeArray via SFI. This is probably unsafe but we "
-        "only do it when debugging is enabled. See the TODO below");
+        "only do it when debugging is enabled. Just in case the defence in "
+        "depth checks below should protect against swaps.");
     std::optional<Tagged<DebugInfo>> debug_info =
         translated_frame->raw_shared_info()->TryGetDebugInfo(isolate());
     if (debug_info.has_value() && debug_info.value()->HasBreakInfo()) {
-      // TODO(leszeks): Validate this bytecode.
       bytecode_array = debug_info.value()->DebugBytecodeArray(isolate());
+      // Defence-in-depth in case bytecode is swapped.
+      SBXCHECK_EQ(bytecode_array->parameter_count(), parameters_count);
+      SBXCHECK_EQ(bytecode_array->register_count(), locals_count);
     }
   }
 
@@ -2368,8 +2376,9 @@ void Deoptimizer::DoComputeInlinedExtraArguments(
     // frame will do that.
     value_iterator++;  // Skip function.
     value_iterator++;  // Skip receiver.
-    for (int i = 0; i < formal_parameter_count_without_receiver; i++)
+    for (int i = 0; i < formal_parameter_count_without_receiver; i++) {
       value_iterator++;
+    }
     frame_writer.PushStackJSArguments(value_iterator, extra_argument_count);
   }
 }

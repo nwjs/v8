@@ -95,20 +95,6 @@ V8_OBJECT class AliasedArgumentsEntry : public Struct {
   TaggedMember<Smi> aliased_context_slot_;
 } V8_OBJECT_END;
 
-class SloppyArgumentsElementsShape final : public AllStatic {
- public:
-  using ElementT = UnionOf<Smi, Hole>;
-  using CompressionScheme = V8HeapCompressionScheme;
-  static constexpr RootIndex kMapRootIndex =
-      RootIndex::kSloppyArgumentsElementsMap;
-  static constexpr bool kLengthEqualsCapacity = true;
-
-  V8_ARRAY_EXTRA_FIELDS({
-    TaggedMember<Context> context_;
-    TaggedMember<UnionOf<FixedArray, NumberDictionary>> arguments_;
-  });
-};
-
 // Helper class to access FAST_ and SLOW_SLOPPY_ARGUMENTS_ELEMENTS, dividing
 // arguments into two types for a given SloppyArgumentsElements object:
 // mapped and unmapped.
@@ -160,9 +146,12 @@ class SloppyArgumentsElementsShape final : public AllStatic {
 // - FAST_SLOPPY_ARGUMENTS_ELEMENTS: HOLEY_ELEMENTS
 // - SLOW_SLOPPY_ARGUMENTS_ELEMENTS: DICTIONARY_ELEMENTS
 class SloppyArgumentsElements
-    : public TaggedArrayBase<SloppyArgumentsElements,
-                             SloppyArgumentsElementsShape> {
+    : public TaggedArrayBase<SloppyArgumentsElements, UnionOf<Smi, Hole>> {
+  using Super = TaggedArrayBase<SloppyArgumentsElements, UnionOf<Smi, Hole>>;
+
  public:
+  static constexpr RootIndex kMapRootIndex =
+      RootIndex::kSloppyArgumentsElementsMap;
   inline Tagged<Context> context() const;
   inline void set_context(Tagged<Context> value,
                           WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
@@ -185,9 +174,19 @@ class SloppyArgumentsElements
 
   class BodyDescriptor;
 
-  static constexpr uint32_t kLengthOffset = HeapObject::kHeaderSize;
+  static constexpr uint32_t kLengthOffset = sizeof(HeapObject);
   static constexpr uint32_t kHeaderSize =
-      kLengthOffset + (TAGGED_SIZE_8_BYTES ? kTaggedSize : kApiInt32Size);
+      kLengthOffset + (TAGGED_SIZE_8_BYTES ? kTaggedSize : kApiInt32Size) +
+      2 * kTaggedSize;
+
+ public:
+  uint32_t length_;
+#if TAGGED_SIZE_8_BYTES
+  uint32_t optional_padding_;
+#endif
+  TaggedMember<Context> context_;
+  TaggedMember<UnionOf<FixedArray, NumberDictionary>> arguments_;
+  FLEXIBLE_ARRAY_MEMBER(typename Super::ElementMemberT, objects);
 };
 
 }  // namespace internal

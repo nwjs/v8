@@ -9,6 +9,7 @@
 #include <optional>
 
 #include "src/base/iterator.h"
+#include "src/base/logging.h"
 #include "src/base/small-vector.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/wasm/function-body-decoder.h"
@@ -1079,6 +1080,19 @@ class BodyGen {
   void op_with_prefix(DataRange* data) {
     Generate<Args...>(data);
     builder_->EmitWithPrefix(Op);
+  }
+
+  template <WasmOpcode Op, ValueKind... Args>
+  void wide_arithmetic_op(DataRange* data) {
+    if (!v8_flags.experimental_wasm_wide_arithmetic) {
+      GenerateI64(data);
+      return;
+    }
+    Generate<Args...>(data);
+    builder_->EmitWithPrefix(Op);
+    constexpr ValueType kReturns[] = {kWasmI64, kWasmI64};
+    constexpr ValueType kWanted[] = {kWasmI64};
+    ConsumeAndGenerate(base::VectorOf(kReturns), base::VectorOf(kWanted), data);
   }
 
   void simd_const(DataRange* data) {
@@ -2481,6 +2495,7 @@ class BodyGen {
       case GenericKind::kNoWaitqueue:
         return type;
     }
+    UNREACHABLE();
   }
 
   bool br_on_cast(HeapType type, DataRange* data, Nullability nullable) {
@@ -3261,6 +3276,11 @@ class BodyGen {
         &BodyGen::op_with_prefix<kExprI64SConvertSatF64, kF64>,
         &BodyGen::op_with_prefix<kExprI64UConvertSatF64, kF64>,
 
+        &BodyGen::wide_arithmetic_op<kExprI64Add128, kI64, kI64, kI64, kI64>,
+        &BodyGen::wide_arithmetic_op<kExprI64Sub128, kI64, kI64, kI64, kI64>,
+        &BodyGen::wide_arithmetic_op<kExprI64MulWideS, kI64, kI64>,
+        &BodyGen::wide_arithmetic_op<kExprI64MulWideU, kI64, kI64>,
+
         &BodyGen::block<kI64>,            //
         &BodyGen::loop<kI64>,             //
         &BodyGen::finite_loop<kI64>,      //
@@ -3959,8 +3979,9 @@ class BodyGen {
         // Try generating one of the alternatives and continue to the rest of
         // the methods in case it fails.
         if (random >= arrays_.size()) {
-          if (GenerateOneOf(alternatives_other, type, data, nullability))
+          if (GenerateOneOf(alternatives_other, type, data, nullability)) {
             return;
+          }
           random = data->get<uint8_t>() % arrays_.size();
         }
         ModuleTypeIndex index = arrays_[random];
@@ -5130,6 +5151,7 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
     case kBottom:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 }  // namespace

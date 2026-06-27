@@ -959,17 +959,18 @@ Scope* Scope::FinalizeBlockScope() {
   // Reparent inner scopes.
   if (inner_scope_ != nullptr) {
     Scope* scope = inner_scope_;
-    scope->outer_scope_ = outer_scope();
-    if (private_name_lookup_skips_outer_class()) {
-      scope->set_private_name_lookup_skips_outer_class(true);
-    }
-    while (scope->sibling_ != nullptr) {
-      scope = scope->sibling_;
+    do {
       scope->outer_scope_ = outer_scope();
       if (private_name_lookup_skips_outer_class()) {
         scope->set_private_name_lookup_skips_outer_class(true);
       }
-    }
+      if (scope->is_function_scope()) {
+        scope->set_is_hoisted_in_context(false);
+      }
+      if (scope->sibling_ == nullptr) break;
+      scope = scope->sibling_;
+    } while (true);
+
     scope->sibling_ = outer_scope()->inner_scope_;
     outer_scope()->inner_scope_ = inner_scope_;
     inner_scope_ = nullptr;
@@ -1405,8 +1406,9 @@ Declaration* DeclarationScope::CheckConflictingVarDeclarations(
         decl->AsVariableDeclaration()->AsNested() != nullptr) {
       Scope* current = decl->AsVariableDeclaration()->AsNested()->scope();
       if (decl->var()->mode() != VariableMode::kVar &&
-          decl->var()->mode() != VariableMode::kDynamic)
+          decl->var()->mode() != VariableMode::kDynamic) {
         continue;
+      }
       // Iterate through all scopes until the declaration scope.
       do {
         // There is a conflict if there exists a non-VAR binding.
@@ -2001,10 +2003,11 @@ void PrintLocation(Variable* var) {
 void PrintVar(int indent, Variable* var) {
   Indent(indent, VariableMode2String(var->mode()));
   PrintF(" ");
-  if (var->raw_name()->IsEmpty())
+  if (var->raw_name()->IsEmpty()) {
     PrintF(".%p", reinterpret_cast<void*>(var));
-  else
+  } else {
     PrintName(var->raw_name());
+  }
   PrintF(";  // (%p) ", reinterpret_cast<void*>(var));
   PrintLocation(var);
   bool comma = !var->IsUnallocated();
@@ -2498,6 +2501,19 @@ bool UpdateNeedsHoleCheck(Variable* var, VariableProxy* proxy, Scope* scope,
     return needs_check;
   }
 
+  if (var->mode() == VariableMode::kDynamic) {
+    if (var->has_local_if_not_shadowed()) {
+      bool needs_check = UpdateNeedsHoleCheck(var->local_if_not_shadowed(),
+                                              proxy, scope, access_position);
+      if (needs_check) {
+        // Dynamic variables are fully handled in the runtime so don't need a
+        // hole check.
+        proxy->clear_needs_hole_check(var);
+      }
+    }
+    return false;
+  }
+
   if (var->initialization_flag() == kCreatedInitialized) return false;
 
   // It's impossible to eliminate module import hole checks here, because it's
@@ -2752,13 +2768,15 @@ void Scope::AllocateNonParameterLocalsAndDeclaredGlobals() {
     // temporaries to make the local variable ordering stable when reparsing to
     // collect source positions.
     for (Variable* local : locals_) {
-      if (local->mode() != VariableMode::kTemporary)
+      if (local->mode() != VariableMode::kTemporary) {
         AllocateNonParameterLocal(local);
+      }
     }
 
     for (Variable* local : locals_) {
-      if (local->mode() == VariableMode::kTemporary)
+      if (local->mode() == VariableMode::kTemporary) {
         AllocateNonParameterLocal(local);
+      }
     }
   } else {
     for (Variable* local : locals_) {
@@ -2919,10 +2937,8 @@ void Scope::AllocateScopeInfosRecursively(
                                     closure_function_kind);
 #ifdef DEBUG
     // Mark this ID as being used.
-    if (v8_flags.reuse_scope_infos) {
-      scope_infos_to_reuse[UniqueIdInScript()] = {};
-      DCHECK_EQ(UniqueIdInScript(), scope_info_->UniqueIdInScript());
-    }
+    scope_infos_to_reuse[UniqueIdInScript()] = {};
+    DCHECK_EQ(UniqueIdInScript(), scope_info_->UniqueIdInScript());
 #endif
   }
 
@@ -2948,7 +2964,7 @@ void Scope::AllocateScopeInfosRecursively(
               : closure_function_kind;
       scope->AllocateScopeInfosRecursively(
           isolate, next_outer_scope, scope_infos_to_reuse, inner_closure_kind);
-    } else if (v8_flags.reuse_scope_infos) {
+    } else {
       auto scope_it = scope_infos_to_reuse.find(scope->UniqueIdInScript());
       if (scope_it != scope_infos_to_reuse.end()) {
         scope->scope_info_ = scope_it->second;
@@ -3039,7 +3055,7 @@ void DeclarationScope::AllocateScopeInfos(ParseInfo* parse_info,
 
   Tagged<WeakFixedArray> infos = script->infos();
   std::unordered_map<int, Handle<ScopeInfo>> scope_infos_to_reuse;
-  if (v8_flags.reuse_scope_infos && infos->ulength().value() != 0) {
+  if (infos->ulength().value() != 0) {
     Tagged<SharedFunctionInfo> parse_info_sfi =
         *parse_info->literal()->shared_function_info();
     Tagged<ScopeInfo> outer = parse_info_sfi->HasOuterScopeInfo()
@@ -3050,7 +3066,7 @@ void DeclarationScope::AllocateScopeInfos(ParseInfo* parse_info,
     // scope info if it exists.
     for (int i = parse_info->literal()->function_literal_id();
          i <= parse_info->max_info_id(); ++i) {
-      Tagged<MaybeObject> maybe_info = infos->get(i);
+      Tagged<MaybeObject> maybe_info = infos->get(i, kAcquireLoad);
       if (maybe_info.IsWeak()) {
         Tagged<Object> info = maybe_info.GetHeapObjectAssumeWeak();
         Tagged<ScopeInfo> scope_info;

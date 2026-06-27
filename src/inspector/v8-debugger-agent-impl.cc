@@ -17,6 +17,7 @@
 #include "include/v8-function.h"
 #include "include/v8-inspector.h"
 #include "include/v8-microtask-queue.h"
+#include "src/base/logging.h"
 #include "src/base/numerics/safe_conversions.h"
 #include "src/debug/debug-interface.h"
 #include "src/inspector/crc32.h"
@@ -233,8 +234,9 @@ std::unique_ptr<protocol::DictionaryValue> breakpointHint(
 void adjustBreakpointLocation(const V8DebuggerScript& script,
                               const protocol::DictionaryValue* hintObject,
                               int* lineNumber, int* columnNumber) {
-  if (*lineNumber < script.startLine() || *lineNumber > script.endLine())
+  if (*lineNumber < script.startLine() || *lineNumber > script.endLine()) {
     return;
+  }
   if (*lineNumber == script.startLine() &&
       *columnNumber < script.startColumn()) {
     return;
@@ -251,8 +253,9 @@ void adjustBreakpointLocation(const V8DebuggerScript& script,
                          &prefixLength);
   String16 hint;
   if (!hintObject->getString(DebuggerAgentState::breakpointHintText, &hint) ||
-      hint.isEmpty())
+      hint.isEmpty()) {
     return;
+  }
 
   intptr_t searchRegionOffset = std::max(
       sourceOffset - kBreakpointHintMaxSearchOffset, static_cast<intptr_t>(0));
@@ -398,10 +401,12 @@ protocol::DictionaryValue* getOrCreateObject(protocol::DictionaryValue* object,
 }
 
 Response isValidPosition(protocol::Debugger::ScriptPosition* position) {
-  if (position->getLineNumber() < 0)
+  if (position->getLineNumber() < 0) {
     return Response::ServerError("Position missing 'line' or 'line' < 0.");
-  if (position->getColumnNumber() < 0)
+  }
+  if (position->getColumnNumber() < 0) {
     return Response::ServerError("Position missing 'column' or 'column' < 0.");
+  }
   return Response::Success();
 }
 
@@ -410,8 +415,9 @@ Response isValidRangeOfPositions(
   for (size_t i = 1; i < positions.size(); ++i) {
     if (positions[i - 1].first < positions[i].first) continue;
     if (positions[i - 1].first == positions[i].first &&
-        positions[i - 1].second < positions[i].second)
+        positions[i - 1].second < positions[i].second) {
       continue;
+    }
     return Response::ServerError(
         "Input positions array is not sorted or contains duplicate values.");
   }
@@ -467,8 +473,9 @@ void V8DebuggerAgentImpl::enableImpl() {
 
 Response V8DebuggerAgentImpl::enable(std::optional<double> maxScriptsCacheSize,
                                      String16* outDebuggerId) {
-  if (m_enableState == kStopping)
+  if (m_enableState == kStopping) {
     return Response::ServerError("Debugger is stopping");
+  }
   m_maxScriptCacheSize = v8::base::saturated_cast<size_t>(
       maxScriptsCacheSize.value_or(std::numeric_limits<double>::max()));
   m_state->setDouble(DebuggerAgentState::maxScriptCacheSize,
@@ -477,8 +484,9 @@ Response V8DebuggerAgentImpl::enable(std::optional<double> maxScriptsCacheSize,
       m_debugger->debuggerIdFor(m_session->contextGroupId()).toString();
   if (enabled()) return Response::Success();
 
-  if (!m_inspector->client()->canExecuteScripts(m_session->contextGroupId()))
+  if (!m_inspector->client()->canExecuteScripts(m_session->contextGroupId())) {
     return Response::ServerError("Script execution is prohibited");
+  }
 
   enableImpl();
   return Response::Success();
@@ -530,10 +538,12 @@ Response V8DebuggerAgentImpl::disable() {
 
 void V8DebuggerAgentImpl::restore() {
   DCHECK(m_enableState == kDisabled);
-  if (!m_state->booleanProperty(DebuggerAgentState::debuggerEnabled, false))
+  if (!m_state->booleanProperty(DebuggerAgentState::debuggerEnabled, false)) {
     return;
-  if (!m_inspector->client()->canExecuteScripts(m_session->contextGroupId()))
+  }
+  if (!m_inspector->client()->canExecuteScripts(m_session->contextGroupId())) {
     return;
+  }
 
   enableImpl();
 
@@ -640,8 +650,9 @@ Response V8DebuggerAgentImpl::setBreakpointByUrl(
   int columnNumber = 0;
   if (optionalColumnNumber.has_value()) {
     columnNumber = optionalColumnNumber.value();
-    if (columnNumber < 0)
+    if (columnNumber < 0) {
       return Response::ServerError("Incorrect column number");
+    }
   }
 
   BreakpointType type = BreakpointType::kByUrl;
@@ -772,8 +783,9 @@ Response V8DebuggerAgentImpl::setBreakpoint(
                                       optionalCondition.value_or(String16()),
                                       location->getLineNumber(),
                                       location->getColumnNumber(0));
-  if (!*actualLocation)
+  if (!*actualLocation) {
     return Response::ServerError("Could not resolve breakpoint");
+  }
   *outBreakpointId = breakpointId;
   return Response::Success();
 }
@@ -930,22 +942,25 @@ Response V8DebuggerAgentImpl::getPossibleBreakpoints(
         locations) {
   String16 scriptId = start->getScriptId();
 
-  if (start->getLineNumber() < 0 || start->getColumnNumber(0) < 0)
+  if (start->getLineNumber() < 0 || start->getColumnNumber(0) < 0) {
     return Response::ServerError(
         "start.lineNumber and start.columnNumber should be >= 0");
+  }
 
   v8::debug::Location v8Start(start->getLineNumber(),
                               start->getColumnNumber(0));
   v8::debug::Location v8End;
   if (end) {
-    if (end->getScriptId() != scriptId)
+    if (end->getScriptId() != scriptId) {
       return Response::ServerError(
           "Locations should contain the same scriptId");
+    }
     int line = end->getLineNumber();
     int column = end->getColumnNumber(0);
-    if (line < 0 || column < 0)
+    if (line < 0 || column < 0) {
       return Response::ServerError(
           "end.lineNumber and end.columnNumber should be >= 0");
+    }
     v8End = v8::debug::Location(line, column);
   }
   std::shared_ptr<V8DebuggerScript> script;
@@ -1013,8 +1028,9 @@ Response V8DebuggerAgentImpl::continueToLocation(
   int contextId = script->executionContextId();
   std::shared_ptr<InspectedContext> inspected =
       m_inspector->getContext(contextId);
-  if (!inspected)
+  if (!inspected) {
     return Response::ServerError("Cannot continue to specified location");
+  }
   v8::HandleScope handleScope(m_isolate);
   v8::Context::Scope contextScope(inspected->context());
   return m_debugger->continueToLocation(
@@ -1037,12 +1053,14 @@ Response V8DebuggerAgentImpl::getStackTrace(
   } else {
     debuggerId = m_debugger->debuggerIdFor(m_session->contextGroupId());
   }
-  if (!debuggerId.isValid())
+  if (!debuggerId.isValid()) {
     return Response::ServerError("Invalid stack trace id");
+  }
 
   V8StackTraceId v8StackTraceId(id, debuggerId.pair());
-  if (v8StackTraceId.IsInvalid())
+  if (v8StackTraceId.IsInvalid()) {
     return Response::ServerError("Invalid stack trace id");
+  }
   auto stack =
       m_debugger->stackTraceFor(m_session->contextGroupId(), v8StackTraceId);
   if (!stack) {
@@ -1135,9 +1153,11 @@ bool V8DebuggerAgentImpl::acceptsPause(bool isOOMBreak) const {
   return enabled() && (isOOMBreak || !m_skipAllPauses);
 }
 
-std::unique_ptr<protocol::Debugger::Location> V8DebuggerAgentImpl::setBreakpointImpl(
-    const String16& breakpointId, const String16& scriptId,
-    const String16& condition, int lineNumber, int columnNumber) {
+std::unique_ptr<protocol::Debugger::Location>
+V8DebuggerAgentImpl::setBreakpointImpl(const String16& breakpointId,
+                                       const String16& scriptId,
+                                       const String16& condition,
+                                       int lineNumber, int columnNumber) {
   v8::HandleScope handles(m_isolate);
   DCHECK(enabled());
 
@@ -1202,8 +1222,9 @@ Response V8DebuggerAgentImpl::searchInContent(
       script = m_scripts.at(scriptId);
     }
   }
-  if (!script)
+  if (!script) {
     return Response::ServerError("No script for id: " + scriptId.utf8());
+  }
 
   *results = std::make_unique<protocol::Array<protocol::Debugger::SearchMatch>>(
       searchInTextByLinesImpl(m_inspector, script->source(0), query,
@@ -1231,6 +1252,7 @@ const char* buildStatus(v8::debug::LiveEditResult::Status status) {
     case v8::debug::LiveEditResult::FEATURE_DISABLED:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 }  // namespace
 
@@ -1347,8 +1369,8 @@ Response V8DebuggerAgentImpl::getScriptSource(
                      });
     if (cachedScriptIt != m_cachedScripts.end()) {
       *scriptSource = cachedScriptIt->source;
-      *bytecode = protocol::Binary::fromSpan(v8::MemorySpan<const uint8_t>(
-          cachedScriptIt->bytecode.begin(), cachedScriptIt->bytecode.size()));
+      *bytecode = protocol::Binary::fromSpan(
+          v8::MemorySpan<const uint8_t>(cachedScriptIt->bytecode));
       return Response::Success();
     }
     return Response::ServerError("No script for id: " + scriptId.utf8());
@@ -1531,8 +1553,9 @@ Response V8DebuggerAgentImpl::getWasmBytecode(const String16& scriptId,
       script = m_scripts.at(scriptId);
     }
   }
-  if (!script)
+  if (!script) {
     return Response::ServerError("No script for id: " + scriptId.utf8());
+  }
   std::vector<uint8_t> bytes;
   if (!script->getWasmBytecode(kWasmBytecodeMaxLength).MoveTo(&bytes)) {
     return Response::ServerError("Script with id " + scriptId.utf8() +
@@ -1702,7 +1725,13 @@ Response V8DebuggerAgentImpl::evaluateOnCallFrame(
   InjectedScript::CallFrameScope scope(m_session, callFrameId);
   Response response = scope.initialize();
   if (!response.IsSuccess()) return response;
-  if (includeCommandLineAPI.value_or(false)) scope.installCommandLineAPI();
+
+  if (includeCommandLineAPI.value_or(false)) {
+    scope.installCommandLineAPI();
+    if (scope.tryCatch().HasCaught()) {
+      return Response::ServerError("Failed to install command line API");
+    }
+  }
   if (silent.value_or(false)) scope.ignoreExceptionsAndMuteConsole();
 
   int frameOrdinal = static_cast<int>(scope.frameOrdinal());
@@ -1728,8 +1757,9 @@ Response V8DebuggerAgentImpl::evaluateOnCallFrame(
   WrapOptions wrapOptions = generatePreview.value_or(false)
                                 ? WrapOptions({WrapMode::kPreview})
                                 : WrapOptions({WrapMode::kIdOnly});
-  if (returnByValue.value_or(false))
+  if (returnByValue.value_or(false)) {
     wrapOptions = WrapOptions({WrapMode::kJson});
+  }
   return scope.injectedScript()->wrapEvaluateResult(
       maybeResultValue, scope.tryCatch(), objectGroup.value_or(""), wrapOptions,
       throwOnSideEffect.value_or(false), result, exceptionDetails);
@@ -1845,9 +1875,10 @@ Response V8DebuggerAgentImpl::setBlackboxExecutionContexts(
 Response V8DebuggerAgentImpl::setBlackboxPattern(const String16& pattern) {
   std::unique_ptr<V8Regex> regex(new V8Regex(
       m_inspector, pattern, true /** caseSensitive */, false /** multiline */));
-  if (!regex->isValid())
+  if (!regex->isValid()) {
     return Response::ServerError("Pattern parser error: " +
                                  regex->errorMessage().utf8());
+  }
   m_blackboxPattern = std::move(regex);
   return Response::Success();
 }
@@ -1869,8 +1900,9 @@ Response V8DebuggerAgentImpl::setBlackboxedRanges(
       script = m_scripts.at(scriptId);
     }
   }
-  if (!script)
+  if (!script) {
     return Response::ServerError("No script with passed id.");
+  }
 
   if (inPositions->empty()) {
     m_blackboxedPositions.erase(scriptId);
@@ -1909,9 +1941,10 @@ Response V8DebuggerAgentImpl::currentCallFrames(
   for (; !iterator->Done(); iterator->Advance(), frameOrdinal++) {
     int contextId = iterator->GetContextId();
     InjectedScript* injectedScript = nullptr;
-    std::shared_ptr<InspectedContext> context;
+    std::shared_ptr<InspectedContext> inspectedContext;
     if (contextId) {
-      m_session->findInjectedScript(contextId, injectedScript, &context);
+      m_session->findInjectedScript(contextId, injectedScript,
+                                    &inspectedContext);
     }
     String16 callFrameId = RemoteCallFrameId::serialize(
         m_inspector->isolateId(), contextId, frameOrdinal);
@@ -2015,6 +2048,7 @@ static String16 getScriptLanguage(const V8DebuggerScript& script) {
     case V8DebuggerScript::Language::JavaScript:
       return protocol::Debugger::ScriptLanguageEnum::JavaScript;
   }
+  UNREACHABLE();
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -2031,6 +2065,7 @@ static const char* getDebugSymbolTypeName(
       return v8_inspector::protocol::Debugger::DebugSymbols::TypeEnum::
           ExternalDWARF;
   }
+  UNREACHABLE();
 }
 
 static void getDebugSymbols(
@@ -2201,8 +2236,9 @@ void V8DebuggerAgentImpl::didParseSource(
       std::unique_ptr<protocol::Debugger::Location> location =
           setBreakpointImpl(breakpointId, scriptId, condition, lineNumber,
                             columnNumber);
-      if (location)
+      if (location) {
         resolvedBreakpoints.emplace(breakpointId, std::move(location));
+      }
     }
   }
 
@@ -2270,8 +2306,9 @@ void V8DebuggerAgentImpl::didPauseOnInstrumentation(
 
   std::unique_ptr<Array<CallFrame>> protocolCallFrames;
   Response response = currentCallFrames(&protocolCallFrames);
-  if (!response.IsSuccess())
+  if (!response.IsSuccess()) {
     protocolCallFrames = std::make_unique<Array<CallFrame>>();
+  }
 
   if (m_debuggerBreakpointIdToBreakpointId.find(instrumentationId) !=
       m_debuggerBreakpointIdToBreakpointId.end()) {
@@ -2316,8 +2353,8 @@ void V8DebuggerAgentImpl::didPause(
         protocol::Debugger::Paused::ReasonEnum::Assert, nullptr));
   } else if (breakReasons.contains(v8::debug::BreakReason::kException)) {
     InjectedScript* injectedScript = nullptr;
-    std::shared_ptr<InspectedContext> context;
-    m_session->findInjectedScript(contextId, injectedScript, &context);
+    std::shared_ptr<InspectedContext> inspectedContext;
+    m_session->findInjectedScript(contextId, injectedScript, &inspectedContext);
     if (injectedScript) {
       String16 breakReason =
           exceptionType == v8::debug::kPromiseRejection
@@ -2398,8 +2435,9 @@ void V8DebuggerAgentImpl::didPause(
       std::unique_ptr<protocol::DictionaryValue> reason =
           protocol::DictionaryValue::create();
       reason->setString("reason", hitReasons[i].first);
-      if (hitReasons[i].second)
+      if (hitReasons[i].second) {
         reason->setObject("auxData", std::move(hitReasons[i].second));
+      }
       reasons->pushValue(std::move(reason));
     }
     breakAuxData = protocol::DictionaryValue::create();
@@ -2408,8 +2446,9 @@ void V8DebuggerAgentImpl::didPause(
 
   std::unique_ptr<Array<CallFrame>> protocolCallFrames;
   Response response = currentCallFrames(&protocolCallFrames);
-  if (!response.IsSuccess())
+  if (!response.IsSuccess()) {
     protocolCallFrames = std::make_unique<Array<CallFrame>>();
+  }
 
   m_frontend.paused(std::move(protocolCallFrames), breakReason,
                     std::move(breakAuxData), std::move(hitBreakpointIds),
@@ -2520,8 +2559,9 @@ Response V8DebuggerAgentImpl::processSkipList(
     String16 scriptId = range->getScriptId();
 
     auto it = m_scripts.find(scriptId);
-    if (it == m_scripts.end())
+    if (it == m_scripts.end()) {
       return Response::ServerError("No script with passed id.");
+    }
 
     Response res = isValidPosition(start);
     if (res.IsError()) return res;

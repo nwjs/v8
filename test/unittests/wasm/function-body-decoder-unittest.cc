@@ -84,9 +84,6 @@ class TestModuleBuilder {
  public:
   explicit TestModuleBuilder(ModuleOrigin origin = kWasmOrigin) : mod(origin) {
     mod.num_declared_functions = 1;
-    mod.validated_functions = std::make_unique<std::atomic<uint8_t>[]>(1);
-    // Asm.js functions are valid by design.
-    if (is_asmjs_module(&mod)) mod.validated_functions[0] = 0xff;
   }
   uint8_t AddGlobal(ValueType type, bool mutability = true) {
     // TODO(14616): Extend this to shared globals.
@@ -4911,6 +4908,53 @@ TEST_F(FunctionBodyDecoderTest, AtomicMemoryOrderAcqRelFeatureGated) {
     };
     ExpectFailure(sigs.v_i(), code, kAppendEnd, error_msg);
   }
+}
+
+TEST_F(FunctionBodyDecoderTest, AtomicMemoryOrderInvalidOnNonAtomic) {
+  if (!CpuFeatures::SupportsSimd128()) {
+    return;
+  }
+  WASM_FEATURE_SCOPE(acquire_release);
+  WASM_FEATURE_SCOPE(fp16);
+  builder.AddMemory();
+
+  auto TestOpcodeError = [&](uint32_t opcode, bool has_lane = false) {
+    std::vector<uint8_t> code;
+    code.push_back(kExprLocalGet);
+    code.push_back(0);
+    code.push_back(kExprLocalGet);
+    code.push_back(1);
+    code.push_back(kExprLocalGet);
+    code.push_back(2);
+    if (opcode > 0xff) {
+      code.push_back(opcode >> 8);
+      code.push_back(opcode & 0xff);
+    } else {
+      code.push_back(static_cast<uint8_t>(opcode));
+    }
+    code.push_back(0x20);  // Alignment + memory order bit
+    code.push_back(0);     // sequential consistency
+    code.push_back(0);     // offset
+    if (has_lane) code.push_back(0);
+    ExpectFailure(sigs.i_iii(), base::VectorOf(code), kAppendEnd,
+                  "memory ordering immediate invalid on non-atomic operation");
+  };
+
+#define TEST_LOAD(name, opcode, sig, ...) TestOpcodeError(opcode);
+  FOREACH_LOAD_MEM_OPCODE(TEST_LOAD)
+#undef TEST_LOAD
+
+#define TEST_STORE(name, opcode, sig, ...) TestOpcodeError(opcode);
+  FOREACH_STORE_MEM_OPCODE(TEST_STORE)
+#undef TEST_STORE
+
+#define TEST_SIMD(name, opcode, sig, ...) TestOpcodeError(opcode);
+  FOREACH_SIMD_MEM_OPCODE(TEST_SIMD)
+#undef TEST_SIMD
+
+#define TEST_SIMD_LANE(name, opcode, sig, ...) TestOpcodeError(opcode, true);
+  FOREACH_SIMD_MEM_1_OPERAND_OPCODE(TEST_SIMD_LANE)
+#undef TEST_SIMD_LANE
 }
 
 TEST_F(FunctionBodyDecoderTest, AtomicRMWMemoryOrderValid) {

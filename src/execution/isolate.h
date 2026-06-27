@@ -799,6 +799,19 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return &thread_local_top()->topmost_script_having_context_;
   }
 
+  Tagged<NativeContext> last_entered_context() const {
+    return thread_local_top()->last_entered_context_;
+  }
+
+  void set_last_entered_context(Tagged<NativeContext> value) {
+    thread_local_top()->last_entered_context_ = value;
+  }
+
+  Address last_entered_context_address() {
+    return reinterpret_cast<Address>(
+        &thread_local_top()->last_entered_context_);
+  }
+
   // Access to current thread id.
   inline void set_thread_id(ThreadId id) {
     thread_local_top()->thread_id_.store(id, std::memory_order_relaxed);
@@ -951,8 +964,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
                               PrintCurrentStackTraceFilterCallback
                                   should_include_frame_callback = nullptr);
   void PrintStack(StringStream* accumulator,
-                  PrintStackMode mode = kPrintStackVerbose);
-  void PrintStack(FILE* out, PrintStackMode mode = kPrintStackVerbose);
+                  PrintStackMode mode = kPrintStackVerbose,
+                  AllowAllocation allow_allocation = AllowAllocation::kYes);
+  void PrintStack(FILE* out, PrintStackMode mode = kPrintStackVerbose,
+                  AllowAllocation allow_allocation = AllowAllocation::kYes);
 
   // Prints minimal stack trace without allocating on the V8 heap (native
   // allocations are allowed). Used for printing the JS stack on OOM errors.
@@ -966,12 +981,14 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Stores a stack trace in a stack-allocated temporary buffer which will
   // end up in the minidump for debugging purposes.
   [[noreturn]] V8_NOINLINE void PushStackTraceAndDie(
-      void* ptr1 = nullptr, void* ptr2 = nullptr, void* ptr3 = nullptr,
-      void* ptr4 = nullptr, void* ptr5 = nullptr, void* ptr6 = nullptr);
+      const char* reason, void* ptr1 = nullptr, void* ptr2 = nullptr,
+      void* ptr3 = nullptr, void* ptr4 = nullptr, void* ptr5 = nullptr,
+      void* ptr6 = nullptr);
   // Similar to the above but without collecting the stack trace.
   [[noreturn]] V8_NOINLINE void PushParamsAndDie(
-      void* ptr1 = nullptr, void* ptr2 = nullptr, void* ptr3 = nullptr,
-      void* ptr4 = nullptr, void* ptr5 = nullptr, void* ptr6 = nullptr);
+      const char* reason, void* ptr1 = nullptr, void* ptr2 = nullptr,
+      void* ptr3 = nullptr, void* ptr4 = nullptr, void* ptr5 = nullptr,
+      void* ptr6 = nullptr);
   // Like PushStackTraceAndDie but uses DumpWithoutCrashing to continue
   // execution.
   V8_NOINLINE void PushStackTraceAndContinue(
@@ -1009,6 +1026,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool GetStackTraceLimit(Isolate* isolate, int* result);
 
   Address GetAbstractPC(int* line, int* column);
+  Address GetAbstractPCNoGC(int* line, int* column,
+                            DisallowGarbageCollection& no_gc);
 
   // Returns if the given context may access the given global object. If
   // the result is false, the exception is guaranteed to be

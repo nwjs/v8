@@ -522,6 +522,27 @@ bool is_inbounds(float_t v) {
 #define IF_WASM(V, ...)
 #endif  // V8_ENABLE_WEBASSEMBLY
 
+#if V8_ENABLE_WEBASSEMBLY
+#define V8_ENABLE_SIMD128 1
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+#define V8_ENABLE_SIMD256 1
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
+#endif  // V8_ENABLE_WEBASSEMBLY
+
+#if V8_ENABLE_SIMD128
+#define IF_SIMD128(V, ...) EXPAND(V(__VA_ARGS__))
+#else
+#define IF_SIMD128(V, ...)
+#endif  // V8_ENABLE_SIMD128
+
+#if V8_ENABLE_SIMD256
+// 256 bit simd cannot be enabled without 128 bit simd.
+static_assert(V8_ENABLE_SIMD128);
+#define IF_SIMD256(V, ...) EXPAND(V(__VA_ARGS__))
+#else
+#define IF_SIMD256(V, ...)
+#endif  // V8_ENABLE_SIMD256
+
 #ifdef V8_ENABLE_DRUMBRAKE
 #define IF_WASM_DRUMBRAKE(V, ...) EXPAND(V(__VA_ARGS__))
 #else
@@ -573,13 +594,16 @@ bool is_inbounds(float_t v) {
 #define IF_SHADOW_STACK(V, ...)
 #endif  // V8_ENABLE_CET_SHADOW_STACK
 
-// Defines IF_TARGET_ARCH_64_BIT, to be used in macro lists for elements that
-// should only be there if the target architecture is a 64-bit one.
+// Defines IF_TARGET_ARCH_64_BIT and IF_TARGET_ARCH_32_BIT, to be used in macro
+// lists for elements that should only be there if the target architecture is
+// 64-bit or 32-bit respectively.
 #if V8_TARGET_ARCH_64_BIT
 // EXPAND is needed to work around MSVC's broken __VA_ARGS__ expansion.
 #define IF_TARGET_ARCH_64_BIT(V, ...) EXPAND(V(__VA_ARGS__))
+#define IF_TARGET_ARCH_32_BIT(V, ...)
 #else
 #define IF_TARGET_ARCH_64_BIT(V, ...)
+#define IF_TARGET_ARCH_32_BIT(V, ...) EXPAND(V(__VA_ARGS__))
 #endif  // V8_TARGET_ARCH_64_BIT
 
 // Defines IF_V8_WASM_RANDOM_FUZZERS and IF_NO_V8_WASM_RANDOM_FUZZERS, to be

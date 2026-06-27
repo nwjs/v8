@@ -415,7 +415,8 @@ class WasmLoadEliminationAnalyzer {
         memory_(data, phase_zone, non_aliasing_objects_, replacements_, graph_),
         block_to_snapshot_mapping_(graph.block_count(), phase_zone),
         predecessor_alias_snapshots_(phase_zone),
-        predecessor_memory_snapshots_(phase_zone) {}
+        predecessor_memory_snapshots_(phase_zone),
+        phi_replacements_backups_(phase_zone, &graph_) {}
 
   void Run() {
     LoopFinder loop_finder(phase_zone_, &graph_, LoopFinder::Config{});
@@ -483,6 +484,7 @@ class WasmLoadEliminationAnalyzer {
   void ProcessAllocate(OpIndex op_idx, const AllocateOp& op);
   void ProcessCall(OpIndex op_idx, const CallOp& op);
   void ProcessPhi(OpIndex op_idx, const PhiOp& op);
+  OpIndex MaybeReplacePhi(const PhiOp& phi);
 
 #if V8_ENABLE_WEBASSEMBLY
   void ProcessAtomicRMW(OpIndex op_idx, const StructAtomicRMWOp& op);
@@ -529,6 +531,10 @@ class WasmLoadEliminationAnalyzer {
   // to process a block. We store them as members to avoid reallocation.
   ZoneVector<AliasSnapshot> predecessor_alias_snapshots_;
   ZoneVector<MemorySnapshot> predecessor_memory_snapshots_;
+
+  // When figuring out whether a Phi change should cause a loop revisit, we
+  // need to temporarily store all loop Phis' previous replacements.
+  SparseOpIndexSideTable<OpIndex> phi_replacements_backups_;
 };
 
 template <class Next>
@@ -974,12 +980,7 @@ void WasmLoadEliminationAnalyzer::ProcessAllocate(OpIndex op_idx,
   non_aliasing_objects_.Set(op_idx, true);
 }
 
-void WasmLoadEliminationAnalyzer::ProcessPhi(OpIndex op_idx, const PhiOp& phi) {
-  InvalidateAllNonAliasingInputs(phi);
-
-  // For robustness, unset the replacement by default.
-  replacements_[op_idx] = OpIndex::Invalid();
-
+OpIndex WasmLoadEliminationAnalyzer::MaybeReplacePhi(const PhiOp& phi) {
   base::Vector<const OpIndex> inputs = phi.inputs();
   // This copies some of the functionality of {RequiredOptimizationReducer}:
   // Phis whose inputs are all the same value can be replaced by that value.
@@ -998,8 +999,14 @@ void WasmLoadEliminationAnalyzer::ProcessPhi(OpIndex op_idx, const PhiOp& phi) {
     }
   }
   if (same_inputs) {
-    replacements_[op_idx] = first;
+    return first;
   }
+  return OpIndex::Invalid();
+}
+
+void WasmLoadEliminationAnalyzer::ProcessPhi(OpIndex op_idx, const PhiOp& phi) {
+  InvalidateAllNonAliasingInputs(phi);
+  replacements_[op_idx] = MaybeReplacePhi(phi);
 }
 
 void WasmLoadEliminationAnalyzer::FinishBlock(const Block* block) {
@@ -1105,6 +1112,50 @@ bool WasmLoadEliminationAnalyzer::BeginBlock(const Block* block) {
   };
   memory_.StartNewSnapshot(base::VectorOf(predecessor_memory_snapshots_),
                            merge_memory);
+
+  if constexpr (for_loop_revisit) {
+    phi_replacements_backups_.clear();
+    // Back up and clear all existing loop Phi replacements. Clearing is
+    // necessary because loop Phis can depend on each other, and are
+    // conceptually processed in parallel.
+    for (OpIndex op_idx : graph_.OperationIndices(*block)) {
+      if (graph_.Get(op_idx).Is<PhiOp>() && replacements_[op_idx].valid()) {
+        phi_replacements_backups_[op_idx] = replacements_[op_idx];
+        replacements_[op_idx] = OpIndex::Invalid();
+      }
+    }
+    // Check if any loop Phi replacement would change.
+    // Importantly, we do not store the computed {new_replacement}; we'll let
+    // the actual loop revisitation do that. The reason is that looking at Phis
+    // multiple times can find more replacements, so if we stored replacements
+    // here then the loop revisit might find more, and then next time we get
+    // here we'd erroneously conclude that those need to be reset and the loop
+    // needs to be revisited again, endlessly.
+    //
+    // We could be more ambitious: whenever a loop Phi is replaced, we could
+    // revisit any other loop Phis for which it is an input, until we find no
+    // more replacements. That would cost more time, but would yield more
+    // optimizations. For example, consider a chain of Phis, which before the
+    // loop are all set to o.x, and inside the loop we have:
+    //   phi1 = phi2; phi2 = phi3; ...; phiN-1 = phiN; phiN = o.x.
+    // Checking them all only once, in order, we'll replace only phiN. Visiting
+    // either the entire block N times, or visiting each Phi consumer of a
+    // replaced Phi, we could replace all of them.
+    for (auto [phi_idx, backup] : phi_replacements_backups_) {
+      const PhiOp& phi = graph_.Get(phi_idx).Cast<PhiOp>();
+      OpIndex new_replacement = MaybeReplacePhi(phi);
+      if (new_replacement != backup) {
+        loop_needs_revisit = true;
+        break;
+      }
+    }
+    // If we're not going to revisit, restore the replacements we had.
+    if (!loop_needs_revisit) {
+      for (auto [phi_idx, backup] : phi_replacements_backups_) {
+        replacements_[phi_idx] = backup;
+      }
+    }
+  }
 
   if (block->IsLoop()) return loop_needs_revisit;
   return false;

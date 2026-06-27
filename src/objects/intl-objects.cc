@@ -863,7 +863,7 @@ Maybe<std::vector<std::string>> Intl::CanonicalizeLocaleList(
     Isolate* isolate, DirectHandle<Object> locales,
     bool only_return_one_result) {
   // 1. If locales is undefined, then
-  if (IsUndefined(*locales, isolate)) {
+  if (IsUndefined(*locales)) {
     // 1a. Return a new empty List.
     return Just(std::vector<std::string>());
   }
@@ -954,8 +954,9 @@ MaybeDirectHandle<String> Intl::StringLocaleConvertCase(
     Isolate* isolate, DirectHandle<String> s, bool to_upper,
     DirectHandle<Object> locales) {
   std::vector<std::string> requested_locales;
-  if (!CanonicalizeLocaleList(isolate, locales, true).To(&requested_locales))
+  if (!CanonicalizeLocaleList(isolate, locales, true).To(&requested_locales)) {
     return {};
+  }
   std::string_view requested_locale = requested_locales.empty()
                                           ? isolate->DefaultLocale()
                                           : requested_locales[0];
@@ -1000,7 +1001,7 @@ template <class IsolateT>
 Intl::CompareStringsOptions Intl::CompareStringsOptionsFor(
     IsolateT* isolate, DirectHandle<Object> locales,
     DirectHandle<Object> options) {
-  if (!IsUndefined(*options, isolate)) {
+  if (!IsUndefined(*options)) {
     return CompareStringsOptions::kNone;
   }
 
@@ -1018,7 +1019,7 @@ Intl::CompareStringsOptions Intl::CompareStringsOptionsFor(
       "sl",    "sv", "sw", "vi",    "en-DE", "en-GB",
   };
 
-  if (IsUndefined(*locales, isolate)) {
+  if (IsUndefined(*locales)) {
     const std::string& default_locale = isolate->DefaultLocale();
     for (const char* fast_locale : kFastLocales) {
       if (strcmp(fast_locale, default_locale.c_str()) == 0) {
@@ -1057,8 +1058,7 @@ std::optional<int> Intl::StringLocaleCompare(Isolate* isolate,
   // options is undefined, as that is the only case when the specified
   // side-effects of examining those arguments are unobservable.
   const bool can_cache =
-      (IsString(*locales) || IsUndefined(*locales, isolate)) &&
-      IsUndefined(*options, isolate);
+      (IsString(*locales) || IsUndefined(*locales)) && IsUndefined(*options);
   // We may be able to take the fast path, depending on the `locales` and
   // `options` arguments.
   const CompareStringsOptions compare_strings_options =
@@ -1161,6 +1161,22 @@ constexpr uint8_t kCollationWeightsL3[256] = {
 constexpr int kCollationWeightsLength = arraysize(kCollationWeightsL1);
 static_assert(kCollationWeightsLength == arraysize(kCollationWeightsL3));
 // clang-format on
+
+// The inlined localeCompare fast path bails on a byte >= 128 in the
+// byte-equality prefix loop, rather than entering L1 weight lookup. This is
+// sound only as long as kCollationWeightsL1[i] == 0 for all i >= 128, in
+// which case the Torque path also bails (via the weight==0 check). If
+// non-zero L1 weights are ever introduced for high-byte indices, the
+// inlined fast path must be updated to match.
+static_assert(
+    []() constexpr {
+      for (int i = 128; i < kCollationWeightsLength; ++i) {
+        if (kCollationWeightsL1[i] != 0) return false;
+      }
+      return true;
+    }(),
+    "kCollationWeightsL1 entries with index >= 128 must be 0; the inlined "
+    "ASCII localeCompare fast path depends on this invariant.");
 
 // Converts the result of lhs vs. rhs comparison to UCollationResult.
 constexpr UCollationResult ToUCollationResult(uint32_t lhs, uint32_t rhs) {
@@ -1554,8 +1570,8 @@ MaybeDirectHandle<String> Intl::NumberToLocaleString(
   // We only cache the instance when locales is a string/undefined and
   // options is undefined, as that is the only case when the specified
   // side-effects of examining those arguments are unobservable.
-  bool can_cache = (IsString(*locales) || IsUndefined(*locales, isolate)) &&
-                   IsUndefined(*options, isolate);
+  bool can_cache =
+      (IsString(*locales) || IsUndefined(*locales)) && IsUndefined(*options);
   if (can_cache) {
     icu::number::LocalizedNumberFormatter* cached_number_format =
         static_cast<icu::number::LocalizedNumberFormatter*>(
@@ -1749,15 +1765,13 @@ Maybe<Intl::NumberFormatDigitOptions> Intl::SetNumberFormatDigitOptions(
   // a. Set hasSd to true.
   // 18. Else,
   // a. Set hasSd to false.
-  bool has_sd =
-      (!IsUndefined(*mnsd_obj, isolate)) || (!IsUndefined(*mxsd_obj, isolate));
+  bool has_sd = (!IsUndefined(*mnsd_obj)) || (!IsUndefined(*mxsd_obj));
 
   // 19. If mnfd is not undefined or mxfd is not undefined, then
   // a. Set hasFd to true.
   // 22. Else,
   // a. Set hasFd to false.
-  bool has_fd =
-      (!IsUndefined(*mnfd_obj, isolate)) || (!IsUndefined(*mxfd_obj, isolate));
+  bool has_fd = (!IsUndefined(*mnfd_obj)) || (!IsUndefined(*mxfd_obj));
 
   // 21. Let needSd be true.
   bool need_sd = true;
@@ -1824,9 +1838,9 @@ Maybe<Intl::NumberFormatDigitOptions> Intl::SetNumberFormatDigitOptions(
         return Nothing<NumberFormatDigitOptions>();
       }
       // iii. If mnfd is undefined, set mnfd to min(mnfdDefault, mxfd).
-      if (IsUndefined(*mnfd_obj, isolate)) {
+      if (IsUndefined(*mnfd_obj)) {
         mnfd = std::min(mnfd_default, mxfd);
-      } else if (IsUndefined(*mxfd_obj, isolate)) {
+      } else if (IsUndefined(*mxfd_obj)) {
         // iv. Else if mxfd is undefined, set mxfd to max(mxfdDefault,
         // mnfd).
         mxfd = std::max(mxfd_default, mnfd);
@@ -2054,7 +2068,7 @@ icu::LocaleMatcher BuildLocaleMatcher(
 
 class Iterator : public icu::Locale::Iterator {
  public:
-  Iterator(const std::vector<icu::Locale>& locales)
+  explicit Iterator(const std::vector<icu::Locale>& locales)
       : locales_(locales), iter_(locales.cbegin()) {}
   ~Iterator() override = default;
 
@@ -2659,7 +2673,7 @@ MaybeDirectHandle<String> Intl::Normalize(Isolate* isolate,
                                           DirectHandle<Object> form_input) {
   const char* form_name;
   UNormalization2Mode form_mode;
-  if (IsUndefined(*form_input, isolate)) {
+  if (IsUndefined(*form_input)) {
     // default is FNC
     form_name = "nfc";
     form_mode = UNORM2_COMPOSE;
@@ -3095,6 +3109,7 @@ DirectHandle<String> Intl::SourceString(Isolate* isolate,
     case FormatRangeSource::kEndRange:
       return isolate->factory()->endRange_string();
   }
+  UNREACHABLE();
 }
 
 MaybeHandle<String> Intl::TimeZoneIdToString(Isolate* isolate,

@@ -18,6 +18,18 @@ namespace v8::internal {
 
 TNode<WasmTrustedInstanceData>
 WasmBuiltinsAssembler::LoadInstanceDataFromFrame() {
+#ifdef DEBUG
+  TNode<Object> marker_or_context =
+      LoadFromParentFrame(CommonFrameConstants::kContextOrFrameTypeOffset);
+  // We can only load the instance from Wasm frames, which is not the case for
+  // builtins called from a Wasm-in-JS inlined function.
+  TNode<IntPtrT> marker = BitcastTaggedToWord(marker_or_context);
+  CSA_DCHECK(this,
+             Word32Or(WordEqual(marker, IntPtrConstant(StackFrame::TypeToMarker(
+                                            StackFrame::WASM))),
+                      WordEqual(marker, IntPtrConstant(StackFrame::TypeToMarker(
+                                            StackFrame::WASM_SEGMENT_START)))));
+#endif
   return TrustedCast<WasmTrustedInstanceData>(
       LoadFromParentFrame(WasmFrameConstants::kWasmInstanceDataOffset),
       "from trusted stack slot");
@@ -28,7 +40,7 @@ WasmBuiltinsAssembler::LoadTrustedDataFromInstance(
     TNode<WasmInstanceObject> instance_object) {
   return LoadTrustedPointerFromObject<
       kWasmTrustedInstanceDataIndirectPointerTag>(
-      instance_object, WasmInstanceObject::kTrustedDataOffset);
+      instance_object, offsetof(WasmInstanceObject, trusted_data_));
 }
 
 TNode<NativeContext> WasmBuiltinsAssembler::LoadContextFromWasmOrJsFrame() {
@@ -154,7 +166,7 @@ TF_BUILTIN(WasmToJsWrapperInvalidSig, WasmBuiltinsAssembler) {
   TNode<WasmImportData> data =
       UncheckedParameter<WasmImportData>(Descriptor::kWasmImportData);
   TNode<Context> context =
-      LoadObjectField<Context>(data, WasmImportData::kNativeContextOffset);
+      LoadObjectField<Context>(data, offsetof(WasmImportData, native_context_));
 
   CallRuntime(Runtime::kWasmThrowJSTypeError, context);
   Unreachable();

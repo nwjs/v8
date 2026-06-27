@@ -228,6 +228,10 @@ int FunctionLiteral::start_position() const {
 
 int FunctionLiteral::end_position() const { return scope()->end_position(); }
 
+bool FunctionLiteral::is_hoisted_in_context() const {
+  return scope_->is_hoisted_in_context();
+}
+
 LanguageMode FunctionLiteral::language_mode() const {
   return scope()->language_mode();
 }
@@ -767,15 +771,14 @@ void ArrayLiteralBoilerplateBuilder::BuildBoilerplateDescription(
 
       if (literal && literal->type() == Literal::kTheHole) {
         DCHECK(IsHoleyElementsKind(kind));
-        DCHECK(IsTheHole(*GetBoilerplateValue(element, isolate), isolate));
+        DCHECK(IsTheHole(*GetBoilerplateValue(element, isolate)));
         Cast<FixedDoubleArray>(*elements)->set_the_hole(array_index);
         continue;
       } else if (literal && literal->IsNumber()) {
         Cast<FixedDoubleArray>(*elements)->set(array_index,
                                                literal->AsNumber());
       } else {
-        DCHECK(IsUninitializedHole(*GetBoilerplateValue(element, isolate),
-                                   isolate));
+        DCHECK(IsUninitializedHole(*GetBoilerplateValue(element, isolate)));
         Cast<FixedDoubleArray>(*elements)->set(array_index, 0);
       }
 
@@ -792,19 +795,18 @@ void ArrayLiteralBoilerplateBuilder::BuildBoilerplateDescription(
       // We shouldn't allocate after creating the boilerplate value.
       DisallowGarbageCollection no_gc;
 
-      if (IsTheHole(boilerplate_value, isolate)) {
+      if (IsTheHole(boilerplate_value)) {
         DCHECK(IsHoleyElementsKind(kind));
         continue;
       }
 
-      if (IsUninitializedHole(boilerplate_value, isolate)) {
+      if (IsUninitializedHole(boilerplate_value)) {
         boilerplate_value = Smi::zero();
       }
 
-      DCHECK_EQ(kind, GetMoreGeneralElementsKind(
-                          kind, Object::OptimalElementsKind(
-                                    boilerplate_value,
-                                    GetPtrComprCageBase(*elements))));
+      DCHECK_EQ(kind,
+                GetMoreGeneralElementsKind(
+                    kind, Object::OptimalElementsKind(boilerplate_value)));
 
       Cast<FixedArray>(*elements)->set(array_index, boilerplate_value);
     }

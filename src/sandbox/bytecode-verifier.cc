@@ -4,6 +4,7 @@
 
 #include "src/sandbox/bytecode-verifier.h"
 
+#include "src/base/numerics/checked_math.h"
 #include "src/codegen/handler-table.h"
 #include "src/flags/flags.h"
 #include "src/interpreter/bytecode-array-iterator.h"
@@ -78,8 +79,13 @@ void BytecodeVerifier::VerifyLight(IsolateForSandbox isolate,
     unsigned handler = table.GetRangeHandler(i);
     Check(end <= bytecode_length && start <= end,
           "Invalid exception handler range");
+    Check(handler >= end, "Exception handler must be after the try-range");
     Check(handler < bytecode_length && valid_offsets.Contains(handler),
           "Invalid exception handler offset");
+    int data = table.GetRangeData(i);
+    Check(data == interpreter::Register::invalid_value().index() ||
+              (data >= 0 && data < bytecode->register_count()),
+          "Invalid exception handler data");
   }
 }
 
@@ -175,12 +181,15 @@ void BytecodeVerifier::VerifyFull(IsolateForSandbox isolate,
         case interpreter::OperandType::kRegOutList: {
           bool is_output =
               interpreter::Bytecodes::IsRegisterOutputOperandType(operand_type);
-          int count = iterator.GetRegisterOperandRange(i);
+          uint32_t count = iterator.GetRegisterOperandRange(i);
           if (count > 0) {
             interpreter::Register start = iterator.GetRegisterOperand(i);
             VerifyRegister(start, is_output);
             if (count > 1) {
-              interpreter::Register end(start.index() + count - 1);
+              base::internal::CheckedNumeric<int> end_index = start.index();
+              end_index += count - 1;
+              Check(end_index.IsValid(), "Register range end overflows");
+              interpreter::Register end(end_index.ValueOrDie());
               VerifyRegister(end, is_output);
               Check(start.is_parameter() == end.is_parameter(),
                     "Register range crosses parameter/local boundary");
@@ -260,16 +269,24 @@ bool BytecodeVerifier::IsAllowedRuntimeFunction(Runtime::FunctionId id) {
   // It's unclear if we'll ever need this in production, but if we decide to
   // use it, we should do a more thorough audit to determine which functions
   // should be disallowed here.
+
+  if (!v8_flags.fuzzing) return true;
+
   switch (id) {
 #if V8_ENABLE_WEBASSEMBLY
-    case Runtime::kWasmTriggerTierUp:
-    case Runtime::kWasmTraceEnter:
-    case Runtime::kWasmTraceExit:
-    case Runtime::kTrapHandlerThrowWasmError:
-    case Runtime::kWasmInternalFunctionCreateExternal:
-    case Runtime::kWasmArrayCopy:
-      return false;
+#define CASE_WASM_INTRINSIC(Name, ...) case Runtime::k##Name:
+#define CASE_WASM_INTRINSIC_INLINE(Name, ...) case Runtime::kInline##Name:
+    // Only allow fuzzing-safe Wasm intrinsics because these intrinsics are
+    // never called by JS bytecode in production and inappropriate calls often
+    // lead to uninteresting fuzzer crashes.
+    FOR_EACH_INTRINSIC_WASM(CASE_WASM_INTRINSIC, CASE_WASM_INTRINSIC_INLINE)
+    FOR_EACH_INTRINSIC_WASM_TEST(CASE_WASM_INTRINSIC,
+                                 CASE_WASM_INTRINSIC_INLINE)
+#undef CASE_WASM_INTRINSIC_INLINE
+#undef CASE_WASM_INTRINSIC
+    return Runtime::IsEnabledForFuzzing(id);
 #endif  // V8_ENABLE_WEBASSEMBLY
+
     default:
       return true;
   }

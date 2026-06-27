@@ -9,11 +9,12 @@
 #include "src/compiler/js-heap-broker-inl.h"
 #include "src/heap/local-factory-inl.h"
 #include "src/maglev/maglev-ir.h"
+#include "src/objects/function-kind.h"
 #include "src/objects/objects-inl.h"
 
 namespace v8::internal::maglev {
 
-Constant* Graph::GetHeapNumberConstant(double constant) {
+HeapConstant* Graph::GetHeapNumberConstant(double constant) {
   uint64_t bits = Float64(constant).get_bits();
   auto it = heap_number_constants_.find(bits);
   if (it == heap_number_constants_.end()) {
@@ -24,7 +25,7 @@ Constant* Graph::GetHeapNumberConstant(double constant) {
             ->NewHeapNumberFromBits<AllocationType::kOld>(bits);
     compiler::HeapNumberRef number_ref =
         MakeRef(broker(), broker()->CanonicalPersistentHandle(number));
-    Constant* node = CreateNewConstantNode<Constant>(0, number_ref);
+    HeapConstant* node = CreateNewConstantNode<HeapConstant>(0, number_ref);
     heap_number_constants_.emplace(bits, node);
     return node;
   }
@@ -135,8 +136,23 @@ ValueNode* Graph::GetConstant(compiler::ObjectRef ref) {
     }
   }
 
-  return GetOrAddNewConstantNode(constants_, ref.AsHeapObject());
+  return GetOrAddNewConstantNode(heap_constants_, ref.AsHeapObject());
 }
+
+#ifdef DEBUG
+bool Graph::MayNeedContextPhis() const {
+  if (is_osr()) return true;
+  if (IsResumableFunction(compilation_info_->toplevel_compilation_unit()
+                              ->shared_function_info()
+                              .kind())) {
+    return true;
+  }
+  for (const auto& fun : inlined_functions_) {
+    if (IsResumableFunction(fun.shared_info->kind())) return true;
+  }
+  return false;
+}
+#endif  // DEBUG
 
 ValueNode* Graph::GetTrustedConstant(compiler::HeapObjectRef ref,
                                      IndirectPointerTag tag) {

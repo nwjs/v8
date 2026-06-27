@@ -187,8 +187,9 @@ RUNTIME_FUNCTION(Runtime_CountUnoptimizedWasmToJSWrapper) {
     for (int entry_index = 0; entry_index < table_size; ++entry_index) {
       WasmCodePointer target = table->target(entry_index);
       if (target != wasm::kInvalidWasmCodePointer &&
-          cpt->EntrypointEqualTo(target, wrapper_entry))
+          cpt->EntrypointEqualTo(target, wrapper_entry)) {
         ++result;
+      }
     }
   }
   return Smi::FromInt(result);
@@ -202,8 +203,9 @@ RUNTIME_FUNCTION(Runtime_HasUnoptimizedWasmToJSWrapper) {
   }
   Tagged<JSFunction> function = Cast<JSFunction>(args[0]);
   Tagged<SharedFunctionInfo> sfi = function->shared();
-  if (!sfi->HasWasmFunctionData(isolate))
+  if (!sfi->HasWasmFunctionData(isolate)) {
     return isolate->heap()->ToBoolean(false);
+  }
   Tagged<WasmFunctionData> func_data = sfi->wasm_function_data();
   WasmCodePointer call_target = func_data->internal()->call_target();
 
@@ -232,7 +234,7 @@ RUNTIME_FUNCTION(Runtime_WasmTraceEnter) {
   WasmFrame* frame = WasmFrame::cast(it.frame());
 
   // Find the function name.
-  int func_index = frame->function_index();
+  int func_index = frame->GetInnermostFunctionIndex();
   const wasm::WasmModule* module = frame->trusted_instance_data()->module();
   wasm::ModuleWireBytes wire_bytes =
       wasm::ModuleWireBytes(frame->native_module()->wire_bytes());
@@ -272,7 +274,7 @@ RUNTIME_FUNCTION(Runtime_WasmTraceExit) {
   DCHECK(!it.is_wasm_interpreter_entry());
 #endif  // V8_ENABLE_DRUMBRAKE
   WasmFrame* frame = WasmFrame::cast(it.frame());
-  int func_index = frame->function_index();
+  int func_index = frame->GetInnermostFunctionIndex();
   const wasm::WasmModule* module = frame->trusted_instance_data()->module();
   const wasm::FunctionSig* sig = module->functions[func_index].sig;
 
@@ -557,7 +559,7 @@ RUNTIME_FUNCTION(Runtime_GetWasmExceptionValues) {
       // can't handle.
       if (IsByteArray(*value) ||  // Probably a stringview_wtf8.
           IsWasmContinuationObject(*value) || IsWasmExceptionPackage(*value) ||
-          IsWasmStringViewIter(*value)) {
+          IsWasmStringViewIter(*value) || IsForeign(*value)) {
         return CrashUnlessFuzzing(isolate);
       }
       value = wasm::WasmToJSObject(isolate, value);
@@ -635,7 +637,7 @@ RUNTIME_FUNCTION(Runtime_WasmTraceGlobal) {
       instance->trusted_data(isolate)->GetGlobalValue(isolate, global);
 
   wasm::GlobalTraceEntry trace_entry = {
-      .function_index = frame->function_index(),
+      .function_index = frame->GetInnermostFunctionIndex(),
       .global_index = info->global_index,
       .frame_position = frame->position(),
       .tier = tier,
@@ -680,8 +682,8 @@ RUNTIME_FUNCTION(Runtime_WasmTraceMemory) {
   // Find the caller wasm frame.
   wasm::WasmCodeRefScope wasm_code_ref_scope;
   DebuggableStackFrameIterator it(isolate);
-  DCHECK(!it.done());
-  DCHECK(it.is_wasm());
+  CHECK(!it.done());
+  CHECK(it.is_wasm());
 #if V8_ENABLE_DRUMBRAKE
   DCHECK(!it.is_wasm_interpreter_entry());
 #endif  // V8_ENABLE_DRUMBRAKE
@@ -700,7 +702,7 @@ RUNTIME_FUNCTION(Runtime_WasmTraceMemory) {
 
   wasm::MemoryTraceEntry trace_entry = {
       .offset = info->offset,
-      .function_index = frame->function_index(),
+      .function_index = frame->GetInnermostFunctionIndex(),
       .mem_index = info->mem_index,
       .frame_position = frame->position(),
       .tier = tier,
@@ -725,34 +727,6 @@ RUNTIME_FUNCTION(Runtime_WasmTraceMemory) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-namespace {
-// Validate a function now if not already validated. Returns false on validation
-// failure, true otherwise.
-V8_WARN_UNUSED_RESULT
-bool ValidateFunctionNowIfNeeded(Isolate* isolate,
-                                 wasm::NativeModule* native_module,
-                                 int func_index) {
-  const wasm::WasmModule* module = native_module->module();
-  if (module->function_was_validated(func_index)) return true;
-  DCHECK(v8_flags.wasm_lazy_validation);
-  Zone validation_zone(isolate->allocator(), ZONE_NAME);
-  wasm::WasmDetectedFeatures unused_detected_features;
-  const wasm::WasmFunction* func = &module->functions[func_index];
-  SharedFlag is_shared = module->type(func->sig_index).is_shared;
-  base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();
-  wasm::FunctionBody body{
-      func->sig, func->code.offset(), wire_bytes.begin() + func->code.offset(),
-      wire_bytes.begin() + func->code.end_offset(), is_shared};
-  if (ValidateFunctionBody(&validation_zone, native_module->enabled_features(),
-                           module, &unused_detected_features, body)
-          .failed()) {
-    return false;
-  }
-  module->set_function_validated(func_index);
-  return true;
-}
-}  // namespace
-
 RUNTIME_FUNCTION(Runtime_WasmTierUpFunction) {
   SealHandleScope shs(isolate);
   DisallowGarbageCollection no_gc;
@@ -776,9 +750,6 @@ RUNTIME_FUNCTION(Runtime_WasmTierUpFunction) {
   const wasm::WasmModule* module = native_module->module();
   if (static_cast<uint32_t>(func_index) < module->num_imported_functions ||
       static_cast<uint32_t>(func_index) >= module->functions.size()) {
-    return CrashUnlessFuzzing(isolate);
-  }
-  if (!ValidateFunctionNowIfNeeded(isolate, native_module, func_index)) {
     return CrashUnlessFuzzing(isolate);
   }
   wasm::TierUpNowForTesting(isolate, trusted_data, func_index);
@@ -808,9 +779,6 @@ RUNTIME_FUNCTION(Runtime_WasmTriggerTierUpForTesting) {
   const wasm::WasmModule* module = native_module->module();
   if (static_cast<uint32_t>(func_index) < module->num_imported_functions ||
       static_cast<uint32_t>(func_index) >= module->functions.size()) {
-    return CrashUnlessFuzzing(isolate);
-  }
-  if (!ValidateFunctionNowIfNeeded(isolate, native_module, func_index)) {
     return CrashUnlessFuzzing(isolate);
   }
   wasm::TriggerTierUp(isolate, trusted_data, func_index);
@@ -850,8 +818,8 @@ static Tagged<Object> CreateWasmObject(Isolate* isolate,
   const wasm::WasmModule* module = module_object->native_module()->module();
   wasm::WasmValue value(int64_t{0x7AADF00DBAADF00D});
   wasm::ModuleTypeIndex type_index{0};
-  Tagged<Map> map = Tagged<Map>::cast(
-      instance->trusted_data(isolate)->managed_object_maps()->get(
+  Tagged<Map> map =
+      Cast<Map>(instance->trusted_data(isolate)->managed_object_maps()->get(
           type_index.index));
   if (is_struct) {
     const wasm::StructType* struct_type = module->struct_type(type_index);

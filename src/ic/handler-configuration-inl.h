@@ -27,8 +27,10 @@ LoadHandler::Kind LoadHandler::GetHandlerKind(Tagged<Smi> smi_handler) {
   return KindBits::decode(smi_handler.value());
 }
 
-Handle<Smi> LoadHandler::LoadNormal(Isolate* isolate, InternalIndex entry) {
+Handle<Smi> LoadHandler::LoadNormal(Isolate* isolate, InternalIndex entry,
+                                    bool is_data_property) {
   auto encoding = KindBits::encode(Kind::kNormal);
+  encoding = IsDataPropertyBits::update(encoding, is_data_property);
   encoding =
       entry.is_found() && entry.as_uint32() < DictionaryIndexBits::kMax
           ? DictionaryIndexBits::update(encoding, entry.as_uint32())
@@ -103,6 +105,18 @@ DirectHandle<Smi> LoadHandler::LoadAccessorFromPrototype(Isolate* isolate) {
 Handle<Smi> LoadHandler::LoadProxy(Isolate* isolate) {
   int config = KindBits::encode(Kind::kProxy);
   return handle(Smi::FromInt(config), isolate);
+}
+
+bool LoadHandler::IsFastProxyHandler(Tagged<MaybeObject> handler) {
+  Tagged<HeapObject> heap_object;
+  if (!handler.GetHeapObject(&heap_object)) return false;
+  if (Tagged<DataHandler> data_handler; TryCast(heap_object, &data_handler)) {
+    if (data_handler->data_field_count() != kProxyDataFieldCount) return false;
+    DCHECK_EQ(KindBits::decode(Cast<Smi>(data_handler->smi_handler()).value()),
+              Kind::kProxy);
+    return true;
+  }
+  return false;
 }
 
 Handle<Smi> LoadHandler::LoadNativeDataProperty(Isolate* isolate,

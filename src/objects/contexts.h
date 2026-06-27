@@ -289,7 +289,8 @@ enum ContextLookupFlags {
   V(MAP_VALUE_ITERATOR_MAP_INDEX, Map, map_value_iterator_map)                 \
   V(MATH_RANDOM_INDEX_INDEX, Smi, math_random_index)                           \
   V(MATH_RANDOM_STATE_INDEX, ByteArray, math_random_state)                     \
-  V(MATH_RANDOM_CACHE_INDEX, FixedDoubleArray, math_random_cache)              \
+  V(MATH_RANDOM_CACHE_INDEX, (UnionOf<Undefined, FixedDoubleArray>),           \
+    math_random_cache)                                                         \
   V(NORMALIZED_MAP_CACHE_INDEX, Object, normalized_map_cache)                  \
   V(NUMBER_FUNCTION_INDEX, JSFunction, number_function)                        \
   V(OBJECT_FUNCTION_INDEX, JSFunction, object_function)                        \
@@ -324,6 +325,8 @@ enum ContextLookupFlags {
     initial_regexp_string_iterator_prototype_map)                              \
   V(SCRIPT_CONTEXT_TABLE_INDEX, ScriptContextTable, script_context_table)      \
   V(SCRIPT_EXECUTION_CALLBACK_INDEX, Object, script_execution_callback)        \
+  V(TEMPORAL_GET_EPOCH_NANOSECONDS_CALLBACK_INDEX, Object,                     \
+    temporal_get_epoch_nanoseconds_callback)                                   \
   V(SECURITY_TOKEN_INDEX, Object, security_token)                              \
   V(SERIALIZED_OBJECTS, HeapObject, serialized_objects)                        \
   V(SET_VALUE_ITERATOR_MAP_INDEX, Map, set_value_iterator_map)                 \
@@ -493,7 +496,7 @@ enum ContextLookupFlags {
 // Script contexts from all top-level scripts are gathered in
 // ScriptContextTable.
 
-V8_OBJECT class Context : public HeapObjectLayout {
+V8_OBJECT class Context : public HeapObject {
  public:
   inline int length() const;
   inline void set_length(int value);
@@ -518,10 +521,6 @@ V8_OBJECT class Context : public HeapObjectLayout {
                                     DirectHandle<Object> new_value,
                                     Isolate* isolate);
 
-  // Back-compat offset constants. Defined out-of-line below the class so
-  // they can use `offsetof(Context, ...)` / `OFFSET_OF_DATA_START(Context)`
-  // (which require the type to be complete).
-  static const int kLengthOffset;
   static const int kElementsOffset;
   static const int kHeaderSize;
   static const int kScopeInfoOffset;
@@ -650,8 +649,6 @@ V8_OBJECT class Context : public HeapObjectLayout {
   inline bool IsScriptContext() const;
   inline bool HasContextCells() const;
 
-  inline bool HasSameSecurityTokenAs(Tagged<Context> that) const;
-
   Handle<Object> ErrorMessageForCodeGenerationFromStrings();
   DirectHandle<Object> ErrorMessageForWasmCodeGeneration();
 
@@ -749,10 +746,6 @@ V8_OBJECT class Context : public HeapObjectLayout {
   FLEXIBLE_ARRAY_MEMBER(TaggedMember<Object>, elements);
 } V8_OBJECT_END;
 
-// Back-compat offset constants. Defined here because `offsetof` /
-// `OFFSET_OF_DATA_START` on a not-yet-complete class cannot appear inside
-// the class body.
-inline constexpr int Context::kLengthOffset = offsetof(Context, length_);
 inline constexpr int Context::kElementsOffset = OFFSET_OF_DATA_START(Context);
 inline constexpr int Context::kHeaderSize = Context::kElementsOffset;
 inline constexpr int Context::kScopeInfoOffset = Context::kElementsOffset;
@@ -780,6 +773,8 @@ inline constexpr int Context::SlotOffset(int index) {
 class NativeContext : public Context {
  public:
   // TODO(neis): Move some stuff from Context here.
+
+  inline bool HasSameSecurityTokenAs(Tagged<NativeContext> that) const;
 
   // NativeContext fields are read concurrently from background threads; any
   // concurrent writes of affected fields must have acquire-release semantics,
@@ -863,31 +858,24 @@ class NativeContext : public Context {
                 Internals::kNativeContextEmbedderDataOffset);
 };
 
-class ScriptContextTableShape final : public AllStatic {
- public:
-  using ElementT = Context;
-  using CompressionScheme = V8HeapCompressionScheme;
-  static constexpr RootIndex kMapRootIndex = RootIndex::kScriptContextTableMap;
-  static constexpr bool kLengthEqualsCapacity = false;
-
-  V8_ARRAY_EXTRA_FIELDS({
-    uint32_t length_;
-    TaggedMember<NameToIndexHashTable> names_to_context_index_;
-  });
-};
 
 // A table of all script contexts. Every loaded top-level script with top-level
 // lexical declarations contributes its ScriptContext into this table.
-class ScriptContextTable
-    : public TaggedArrayBase<ScriptContextTable, ScriptContextTableShape> {
-  using Super = TaggedArrayBase<ScriptContextTable, ScriptContextTableShape>;
+class ScriptContextTable : public TaggedArrayBase<ScriptContextTable, Context> {
+  using Super = TaggedArrayBase<ScriptContextTable, Context>;
 
  public:
-  using Shape = ScriptContextTableShape;
+  static constexpr RootIndex kMapRootIndex = RootIndex::kScriptContextTableMap;
 
   static Handle<ScriptContextTable> New(
       Isolate* isolate, uint32_t capacity,
       AllocationType allocation = AllocationType::kYoung);
+
+  inline SafeHeapObjectSize length() const {
+    return SafeHeapObjectSize(length_);
+  }
+  inline SafeHeapObjectSize ulength() const { return length(); }
+  inline void set_length(uint32_t value) { length_ = value; }
 
   inline SafeHeapObjectSize length(AcquireLoadTag) const;
   inline void set_length(uint32_t value, ReleaseStoreTag);
@@ -918,14 +906,22 @@ class ScriptContextTable
 
   class BodyDescriptor;
 
-  static constexpr uint32_t kCapacityOffset = HeapObject::kHeaderSize;
+  static constexpr uint32_t kCapacityOffset = sizeof(HeapObject);
   static constexpr uint32_t kLengthOffset = kCapacityOffset + kApiInt32Size;
-  static constexpr uint32_t kHeaderSize = kLengthOffset + kApiInt32Size;
+  static constexpr uint32_t kHeaderSize =
+      kLengthOffset + kApiInt32Size +
+      (TAGGED_SIZE_8_BYTES ? kTaggedSize : kApiInt32Size);
+
+ public:
+  uint32_t capacity_;
+  uint32_t length_;
+  TaggedMember<NameToIndexHashTable> names_to_context_index_;
+  FLEXIBLE_ARRAY_MEMBER(typename Super::ElementMemberT, objects);
 };
 
 using ContextField = Context::Field;
 
-V8_OBJECT class ContextCell : public HeapObjectLayout {
+V8_OBJECT class ContextCell : public HeapObject {
  public:
   enum State : int32_t {
     kConst = 0,

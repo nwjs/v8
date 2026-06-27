@@ -15,7 +15,9 @@
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/osr.h"
 #include "src/heap/mutable-page.h"
-
+#include "src/objects/js-function-inl.h"
+#include "src/objects/shared-function-info-inl.h"
+#include "src/sandbox/js-dispatch-table-inl.h"
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
@@ -743,39 +745,68 @@ void CodeGenerator::AssembleArchSelect(Instruction* instr,
                                        FlagsCondition condition) {
   ASM_CODE_COMMENT(masm());
   RiscvOperandConverter i(this, instr);
-  // The result register is always the last output of the instruction.
-  size_t output_index = instr->OutputCount() - 1;
-  MachineRepresentation rep =
-      LocationOperand::cast(instr->OutputAt(output_index))->representation();
-  Condition cc = FlagsConditionToConditionCmp(condition);
   DCHECK_GE(instr->InputCount(), 3);
-  Register left = i.InputRegister(0);
-  Operand right = i.InputOperand(1);
-  if (instr->arch_opcode() == kRiscvCmpZero ||
-      instr->arch_opcode() == kRiscvCmpZero32) {
-    right = Operand(zero_reg);
-  } else if (instr->arch_opcode() == kRiscvTst32 ||
-             instr->arch_opcode() == kRiscvTst64) {
-    left = kScratchReg;
-    right = Operand(zero_reg);
-  } else {
-    DCHECK(instr->arch_opcode() == kRiscvCmp32 ||
-           instr->arch_opcode() == kRiscvCmp);
-  }
-  // We don't know how many inputs were consumed by the condition, so we have to
-  // calculate the indices of the last two inputs.
+  // We don't know how many inputs were consumed by the condition, so we have
+  // to calculate the indices of the last two inputs.
   size_t true_value_index = instr->InputCount() - 2;
   size_t false_value_index = instr->InputCount() - 1;
-
-  if ((rep == MachineRepresentation::kFloat32) ||
-      (rep == MachineRepresentation::kFloat64)) {
-    UNREACHABLE();
-  } else if ((rep == MachineRepresentation::kWord32) ||
-             (rep == MachineRepresentation::kWord64)) {
+  // The result register is always the last output of the instruction.
+  size_t output_index = instr->OutputCount() - 1;
+  MachineRepresentation output_rep =
+      LocationOperand::cast(instr->OutputAt(output_index))->representation();
+  MachineRepresentation input_rep =
+      LocationOperand::cast(instr->InputAt(0))->representation();
+  if (input_rep != MachineRepresentation::kFloat32 &&
+      input_rep != MachineRepresentation::kFloat64) {
+    Condition cc = FlagsConditionToConditionCmp(condition);
+    Register left = i.InputRegister(0);
+    Operand right = i.InputOperand(1);
+    if (instr->arch_opcode() == kRiscvCmpZero ||
+        instr->arch_opcode() == kRiscvCmpZero32) {
+      right = Operand(zero_reg);
+    } else if (instr->arch_opcode() == kRiscvTst32 ||
+               instr->arch_opcode() == kRiscvTst64) {
+      left = kScratchReg;
+      right = Operand(zero_reg);
+    } else {
+      DCHECK(instr->arch_opcode() == kRiscvCmp32 ||
+             instr->arch_opcode() == kRiscvCmp);
+    }
+    if ((output_rep == MachineRepresentation::kFloat32) ||
+        (output_rep == MachineRepresentation::kFloat64)) {
+      UNREACHABLE();
+    } else if ((output_rep == MachineRepresentation::kWord32) ||
+               (output_rep == MachineRepresentation::kWord64)) {
+      auto true_op = i.InputOperand(true_value_index);
+      auto false_op = i.InputOperand(false_value_index);
+      Label true_label, end_label;
+      __ Branch(&true_label, cc, left, right);
+      if (false_op.is_reg()) {
+        __ Move(i.OutputRegister(output_index), false_op.rm());
+      } else {
+        __ li(i.OutputRegister(output_index), false_op);
+      }
+      __ Branch(&end_label);
+      __ bind(&true_label);
+      if (true_op.is_reg()) {
+        __ Move(i.OutputRegister(output_index), true_op.rm());
+      } else {
+        __ li(i.OutputRegister(output_index), true_op);
+      }
+      __ bind(&end_label);
+    }
+  } else {
+    bool predicate;
+    FlagsConditionToConditionCmpFPU(&predicate, instr->flags_condition());
     auto true_op = i.InputOperand(true_value_index);
     auto false_op = i.InputOperand(false_value_index);
     Label true_label, end_label;
-    __ Branch(&true_label, cc, left, right);
+    // floating-point compare result is set in kScratchReg
+    if (predicate) {
+      __ BranchTrueF(kScratchReg, &true_label);
+    } else {
+      __ BranchFalseF(kScratchReg, &true_label);
+    }
     if (false_op.is_reg()) {
       __ Move(i.OutputRegister(output_index), false_op.rm());
     } else {
@@ -1013,8 +1044,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         Register func = i.InputOrZeroRegister(0);
         if (v8_flags.debug_code) {
           // Check the function's context matches the context argument.
-          __ LoadTaggedField(kScratchReg,
-                             FieldMemOperand(func, JSFunction::kContextOffset));
+          __ LoadTaggedField(
+              kScratchReg,
+              FieldMemOperand(func, offsetof(JSFunction, context_)));
           __ Assert(eq, AbortReason::kWrongFunctionContext, cp,
                     Operand(kScratchReg));
         }
@@ -1444,6 +1476,25 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kRiscvSub64:
       __ Sub64(i.OutputRegister(), i.InputOrZeroRegister(0), i.InputOperand(1));
       break;
+    case kRiscvAdd128: {
+      Register out_low = i.OutputRegister(0);
+      Register out_high = i.OutputRegister(1);
+      __ AddWord(out_low, i.InputRegister(0), i.InputOperand(1));
+      __ Sltu(kScratchReg, out_low, i.InputOperand(1));
+      __ AddWord(out_high, i.InputRegister(2), i.InputOperand(3));
+      __ AddWord(out_high, out_high, kScratchReg);
+      break;
+    }
+    case kRiscvSub128: {
+      Register out_low = i.OutputRegister(0);
+      Register out_high = i.OutputRegister(1);
+
+      __ Sltu(kScratchReg, i.InputRegister(0), i.InputOperand(1));
+      __ SubWord(out_low, i.InputRegister(0), i.InputOperand(1));
+      __ SubWord(out_high, i.InputRegister(2), i.InputOperand(3));
+      __ SubWord(out_high, out_high, kScratchReg);
+      break;
+    }
     case kRiscvMulHigh32:
       __ Mulh32(i.OutputRegister(), i.InputOrZeroRegister(0),
                 i.InputOperand(1));
@@ -2534,6 +2585,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
 #if V8_TARGET_ARCH_RISCV64
     case kAtomicCompareExchangeWithWriteBarrier: {
+      Register expect_value = i.InputRegister(2);
+      Register new_value = i.InputRegister(3);
+      Register out_value = i.OutputRegister(0);
+      Label exit;
+      __ AddWord(i.TempRegister(0), i.InputRegister(0), i.InputOperand(1));
       if constexpr (COMPRESS_POINTERS_BOOL) {
         // We need sign extend the expected value(i.InputRegister(2))) to be
         // compared, so we don't use ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER.
@@ -2541,45 +2597,49 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         // There are have chance to use a same register for i.InputRegister(2)
         // and i.OutputRegister(0).
         Label compareExchange;
-        Label exit;
-        __ AddWord(i.TempRegister(0), i.InputRegister(0), i.InputOperand(1));
-        __ sync();
         __ bind(&compareExchange);
-        __ SignExtendWord(i.TempRegister(1), i.InputRegister(2));
-        __ Ll(i.OutputRegister(0), MemOperand(i.TempRegister(0), 0), trapper);
-        DCHECK_NE(i.TempRegister(1), i.OutputRegister(0));
-        __ BranchShort(&exit, ne, i.TempRegister(1),
-                       Operand(i.OutputRegister(0)));
-        __ Move(i.TempRegister(2), i.InputRegister(3));
+        Register expect_signed = i.TempRegister(1);
+        __ SignExtendWord(expect_signed, expect_value);
+        __ Ll(out_value, MemOperand(i.TempRegister(0), 0), trapper);
+        DCHECK_NE(expect_signed, out_value);
+        __ BranchShort(&exit, ne, expect_signed, Operand(out_value));
+        __ Move(i.TempRegister(2), new_value);
         __ Sc(i.TempRegister(2), MemOperand(i.TempRegister(0), 0));
         __ BranchShort(&compareExchange, ne, i.TempRegister(2),
                        Operand(zero_reg));
         __ bind(&exit);
-        __ sync();
-        __ ZeroExtendWord(i.OutputRegister(), i.OutputRegister());
-        __ AddWord(i.OutputRegister(), i.OutputRegister(),
-                   kPtrComprCageBaseRegister);
       } else {
-        ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER(Lld, Scd);
+        Label compare_exchange;
+        __ bind(&compare_exchange);
+        __ Lld(out_value, MemOperand(i.TempRegister(0), 0), trapper);
+        __ BranchShort(&exit, ne, expect_value, Operand(out_value));
+        __ Move(i.TempRegister(1), new_value);
+        __ Scd(i.TempRegister(1), MemOperand(i.TempRegister(0), 0));
+        __ BranchShort(&compare_exchange, ne, i.TempRegister(1),
+                       Operand(zero_reg));
       }
-      if (v8_flags.disable_write_barriers) break;
-      // Emit the write barrier.
-      // We only need a write barrier if the CAS was successful (i.e., the
-      // value was actually written). Compare the result with the expected
-      // value to determine if the CAS succeeded.
-      Register object = i.InputRegister(0);
-      Operand offset = i.InputOperand(1);
-      Register new_value = i.InputRegister(3);
-      auto ool = zone()->New<OutOfLineRecordWrite>(
-          this, object, offset, new_value, RecordWriteMode::kValueIsAny,
-          DetermineStubCallMode());
-      __ Branch(ool->exit(), ne, i.OutputRegister(0),
-                Operand(i.InputRegister(2)));
-      __ JumpIfSmi(new_value, ool->exit());
-
-      __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
-                       ne, ool->entry());
-      __ bind(ool->exit());
+      if (!v8_flags.disable_write_barriers) {
+        // Emit the write barrier. We only need a write barrier if the CAS
+        // was successful (i.e., the value was actually written). Compare the
+        // result (still compressed) with the sign-extended expected value to
+        // determine if the CAS succeeded.
+        Register object = i.InputRegister(0);
+        Operand offset = i.InputOperand(1);
+        Register new_value = i.InputRegister(3);
+        auto ool = zone()->New<OutOfLineRecordWrite>(
+            this, object, offset, new_value, RecordWriteMode::kValueIsAny,
+            DetermineStubCallMode());
+        __ JumpIfSmi(new_value, ool->exit());
+        __ CheckPageFlag(object,
+                         MemoryChunk::kPointersFromHereAreInterestingMask, ne,
+                         ool->entry());
+        __ bind(ool->exit());
+      }
+      __ bind(&exit);
+      __ sync();
+      if constexpr (COMPRESS_POINTERS_BOOL) {
+        __ DecompressTagged(i.OutputRegister(), i.OutputRegister());
+      }
       break;
     }
     case kRiscvWord64AtomicCompareExchangeUint64:
@@ -2745,7 +2805,53 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ DecompressProtected(i.OutputRegister(), i.MemoryOperand(), trapper);
       break;
     }
+#if V8_ENABLE_SANDBOX
+    case kArchLoadTrustedPointer: {
+      CHECK(instr->HasOutput());
+      Register base = i.InputRegister(0);
+      int32_t offset = i.InputInt32(1);
+      Register table = i.InputRegister(2);
+      IndirectPointerTag first =
+          static_cast<IndirectPointerTag>(i.InputInt32(3));
+      IndirectPointerTag last =
+          static_cast<IndirectPointerTag>(i.InputInt32(4));
+      IndirectPointerTagRange tag_range(first, last);
+      Register destination = i.OutputRegister();
+      Register handle = i.TempRegister(0);
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ Lw(handle, MemOperand(base, offset));
+      __ Srl64(handle, handle, kTrustedPointerHandleShift);
+      __ CalcScaledAddress(destination, table, handle,
+                           kTrustedPointerTableEntrySizeLog2);
+      __ LoadWord(destination, MemOperand(destination, 0));
+      if (IsFastIndirectPointerTagRange(tag_range)) {
+        uint64_t mask =
+            ComputeUntaggingMaskForFastIndirectPointerTag(tag_range);
+        __ And(destination, destination, Operand(mask));
+      } else {
+        Register tag = handle;  // Reuse handle for tag
+        __ Srl64(tag, destination, kTrustedPointerTableTagShift);
+        UseScratchRegisterScope scope(masm());
+        Register scratch = scope.Acquire();
+        if (tag_range.Size() == 1) {
+          __ SubWord(scratch, tag, static_cast<int32_t>(tag_range.first));
+          __ LoadZeroIfConditionNotZero(destination, scratch);
+        } else {
+          __ SubWord(tag, tag, static_cast<int32_t>(tag_range.first));
+          Label done;
+          __ Branch(
+              &done, le, tag,
+              Operand(static_cast<int32_t>(tag_range.last - tag_range.first)));
+          __ li(destination, 0);
+          __ bind(&done);
+        }
+        __ And(destination, destination,
+               Operand(kTrustedPointerTablePayloadMask));
+      }
+      break;
+    }
 #endif
+#endif  // V8_TARGET_ARCH_RISCV64
     case kRiscvRvvSt: {
       __ VU.SetSimd128(VSew::E8);
       auto memOperand = i.MemoryOperand(1);

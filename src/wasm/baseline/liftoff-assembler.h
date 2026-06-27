@@ -595,14 +595,8 @@ class LiftoffAssembler : public MacroAssembler {
   void SpillRegisters(Regs... regs) {
     for (LiftoffRegister r : {LiftoffRegister(regs)...}) {
       if (cache_state_.is_free(r)) continue;
-      if (r.is_gp() && cache_state_.cached_instance_data == r.gp()) {
-        cache_state_.ClearCachedInstanceRegister();
-      } else if (r.is_gp() && cache_state_.cached_mem_start == r.gp()) {
-        V8_ASSUME(cache_state_.cached_mem_index >= 0);
-        cache_state_.ClearCachedMemStartRegister();
-      } else {
-        SpillRegister(r);
-      }
+      SpillRegister(r);
+      DCHECK(cache_state_.is_free(r));
     }
   }
 
@@ -738,6 +732,19 @@ class LiftoffAssembler : public MacroAssembler {
                                        uint32_t* trapping_store_pc = nullptr);
   // Warning: may clobber {dst} on some architectures!
   inline void IncrementSmi(LiftoffRegister dst, int offset);
+#if V8_TARGET_ARCH_64_BIT
+  static_assert(!kNeedI64RegPair);
+  // Use `ValueKind` to differentiate between 32 and 64-bit values in
+  // `Register`.
+  using MaxStepsVariant = std::variant<int32_t, std::pair<Register, ValueKind>>;
+#else
+  static_assert(kNeedI64RegPair);
+  // 64-bit values are passed in a register pair, encoded as `LiftoffRegister`.
+  using MaxStepsVariant = std::variant<int32_t, LiftoffRegister>;
+#endif
+
+  inline void DecrementMaxSteps(int32_t* max_steps_ptr, MaxStepsVariant steps,
+                                Label* trap_label, LiftoffRegList pinned);
   inline void Load(LiftoffRegister dst, Register src_addr, Register offset_reg,
                    uintptr_t offset_imm, LoadType type,
                    uint32_t* trapping_load_pc = nullptr,
@@ -890,6 +897,8 @@ class LiftoffAssembler : public MacroAssembler {
   inline void emit_i64_addi(LiftoffRegister dst, LiftoffRegister lhs,
                             int64_t imm);
   inline void emit_i64_add128(Register dst_low, Register dst_high, Register al,
+                              Register ah, Register bl, Register bh);
+  inline void emit_i64_sub128(Register dst_low, Register dst_high, Register al,
                               Register ah, Register bl, Register bh);
   inline void emit_i64_sub(LiftoffRegister dst, LiftoffRegister lhs,
                            LiftoffRegister rhs);

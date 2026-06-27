@@ -2905,6 +2905,61 @@ TEST_F(TurboshaftInstructionSelectorTest, AddReduce) {
   }
 }
 
+TEST_F(TurboshaftInstructionSelectorTest, I64x2Mul) {
+  StreamBuilder m(this, MachineType::Simd128(), MachineType::Simd128(),
+                  MachineType::Simd128());
+  V<Simd128> lhs = m.Parameter<Simd128>(0);
+  V<Simd128> rhs = m.Parameter<Simd128>(1);
+  V<Simd128> prod = m.Simd128Binop(lhs, rhs, Simd128BinopOp::Kind::kI64x2Mul);
+  m.Return(prod);
+  Stream s = m.Build();
+
+  ASSERT_EQ(7U, s.size());
+
+  EXPECT_EQ(kArm64S128Rev64, s[0]->arch_opcode());
+  EXPECT_EQ(32, LaneSizeBits(LaneSizeField::decode(s[0]->opcode())));
+  ASSERT_EQ(1U, s[0]->InputCount());
+  EXPECT_EQ(s.ToVreg(rhs), s.ToVreg(s[0]->InputAt(0)));
+
+  EXPECT_EQ(kArm64IMul, s[1]->arch_opcode());
+  EXPECT_EQ(32, LaneSizeBits(LaneSizeField::decode(s[1]->opcode())));
+  ASSERT_EQ(2U, s[1]->InputCount());
+  EXPECT_EQ(s.ToVreg(s[0]->Output()), s.ToVreg(s[1]->InputAt(0)));
+  EXPECT_EQ(s.ToVreg(lhs), s.ToVreg(s[1]->InputAt(1)));
+
+  EXPECT_EQ(kArm64S128ExtractNarrow, s[2]->arch_opcode());
+  EXPECT_EQ(32, LaneSizeBits(LaneSizeField::decode(s[2]->opcode())));
+  EXPECT_EQ(64, VectorLengthBits(VectorLengthField::decode(s[2]->opcode())));
+  ASSERT_EQ(1U, s[2]->InputCount());
+  EXPECT_EQ(s.ToVreg(lhs), s.ToVreg(s[2]->InputAt(0)));
+
+  EXPECT_EQ(kArm64IAddp, s[3]->arch_opcode());
+  EXPECT_EQ(32, LaneSizeBits(LaneSizeField::decode(s[3]->opcode())));
+  ASSERT_EQ(2U, s[3]->InputCount());
+  EXPECT_EQ(s.ToVreg(s[1]->Output()), s.ToVreg(s[3]->InputAt(0)));
+  EXPECT_EQ(s.ToVreg(s[1]->Output()), s.ToVreg(s[3]->InputAt(1)));
+
+  EXPECT_EQ(kArm64S128ExtractNarrow, s[4]->arch_opcode());
+  EXPECT_EQ(32, LaneSizeBits(LaneSizeField::decode(s[4]->opcode())));
+  EXPECT_EQ(64, VectorLengthBits(VectorLengthField::decode(s[4]->opcode())));
+  ASSERT_EQ(1U, s[4]->InputCount());
+  EXPECT_EQ(s.ToVreg(rhs), s.ToVreg(s[4]->InputAt(0)));
+
+  EXPECT_EQ(kArm64IShll, s[5]->arch_opcode());
+  EXPECT_EQ(64, LaneSizeBits(LaneSizeField::decode(s[5]->opcode())));
+  ASSERT_EQ(1U, s[5]->InputCount());
+  EXPECT_EQ(s.ToVreg(s[3]->Output()), s.ToVreg(s[5]->InputAt(0)));
+
+  EXPECT_EQ(kArm64Umlal, s[6]->arch_opcode());
+  EXPECT_EQ(64, LaneSizeBits(LaneSizeField::decode(s[6]->opcode())));
+  ASSERT_EQ(3U, s[6]->InputCount());
+  EXPECT_EQ(s.ToVreg(s[5]->Output()), s.ToVreg(s[6]->InputAt(0)));
+  EXPECT_EQ(s.ToVreg(s[4]->Output()), s.ToVreg(s[6]->InputAt(1)));
+  EXPECT_EQ(s.ToVreg(s[2]->Output()), s.ToVreg(s[6]->InputAt(2)));
+  ASSERT_EQ(1U, s[6]->OutputCount());
+  EXPECT_EQ(s.ToVreg(prod), s.ToVreg(s[6]->Output()));
+}
+
 TEST_F(TurboshaftInstructionSelectorTest, ExtractLaneZero) {
   {
     StreamBuilder m(this, MachineType::Float32(), MachineType::Simd128());
@@ -10062,5 +10117,47 @@ TEST_F(TurboshaftInstructionSelectorTest, Word64ShiftLeftWithWord64And) {
     }
   }
 }
+
+struct AddOrSub128 {
+  Word64AddSub128BinopOp::Kind kind;
+  ArchOpcode expected;
+};
+
+std::ostream& operator<<(std::ostream& os, const AddOrSub128& op) {
+  return os << (op.kind == Word64AddSub128BinopOp::Kind::kAdd ? "Add" : "Sub");
+}
+
+using TurboshaftInstructionSelectorAddSub128Test =
+    TurboshaftInstructionSelectorTestWithParam<AddOrSub128>;
+
+const AddOrSub128 kAddOrSub128[] = {
+    {Word64AddSub128BinopOp::Kind::kAdd, kArm64Add128},
+    {Word64AddSub128BinopOp::Kind::kSub, kArm64Sub128},
+};
+
+TEST_P(TurboshaftInstructionSelectorAddSub128Test, Word64AddSub128) {
+  const AddOrSub128 param = GetParam();
+  StreamBuilder m(this, MachineType::Uint64(), MachineType::Uint64(),
+                  MachineType::Uint64(), MachineType::Uint64(),
+                  MachineType::Uint64());
+  V<Word64> p0 = m.Parameter<Word64>(0);
+  V<Word64> p1 = m.Parameter<Word64>(1);
+  V<Word64> p2 = m.Parameter<Word64>(2);
+  V<Word64> p3 = m.Parameter<Word64>(3);
+  V<Word64Pair> res = m.Word64AddSub128Binop(p0, p1, p2, p3, param.kind);
+  OpIndex low = m.Projection(res, 0);
+  OpIndex high = m.Projection(res, 1);
+  m.Return(m.Word64Add(low, high));
+  Stream s = m.Build();
+  ASSERT_EQ(2U, s.size());
+  EXPECT_EQ(param.expected, s[0]->arch_opcode());
+  EXPECT_EQ(kArm64Add, s[1]->arch_opcode());
+  ASSERT_EQ(4U, s[0]->InputCount());
+  ASSERT_EQ(2U, s[0]->OutputCount());
+}
+
+INSTANTIATE_TEST_SUITE_P(TurboshaftInstructionSelectorTest,
+                         TurboshaftInstructionSelectorAddSub128Test,
+                         ::testing::ValuesIn(kAddOrSub128));
 
 }  // namespace v8::internal::compiler::turboshaft

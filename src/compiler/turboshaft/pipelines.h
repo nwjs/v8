@@ -25,6 +25,7 @@
 #include "src/compiler/turboshaft/machine-lowering-phase.h"
 #include "src/compiler/turboshaft/memory-optimization-phase.h"
 #include "src/compiler/turboshaft/phase.h"
+#include "src/compiler/turboshaft/random-rescheduling-phase.h"
 #include "src/compiler/turboshaft/register-allocation-phase.h"
 #include "src/compiler/turboshaft/sidetable.h"
 #include "src/compiler/turboshaft/tracing.h"
@@ -212,8 +213,8 @@ class V8_EXPORT_PRIVATE Pipeline {
     // complete and cleaned-up, move its reducer into the beginning of the
     // `MachineLoweringPhase` since we can reuse the `DataViewLoweringReducer`
     // there and avoid a separate phase.
-    if (v8_flags.turboshaft_wasm_in_js_inlining ||
-        (v8_flags.turbolev_inline_js_wasm_wrappers &&
+    if (v8_flags.wasm_in_js_inlining_body ||
+        (v8_flags.wasm_in_js_inlining_wrapper &&
          data_->turbolev_graph_has_inlineable_wasm_calls())) {
       RUN_MAYBE_ABORT(turboshaft::WasmInJSInliningPhase);
     }
@@ -228,6 +229,10 @@ class V8_EXPORT_PRIVATE Pipeline {
     RUN_MAYBE_ABORT(turboshaft::LoadEliminationPhase);
 
     RUN_MAYBE_ABORT(turboshaft::MemoryOptimizationPhase);
+
+    if (v8_flags.turboshaft_random_rescheduling) {
+      RUN_MAYBE_ABORT(turboshaft::RandomReschedulingPhase);
+    }
 
     if (v8_flags.turboshaft_typed_optimizations) {
       RUN_MAYBE_ABORT(turboshaft::TypedOptimizationsPhase);

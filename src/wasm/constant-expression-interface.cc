@@ -4,10 +4,12 @@
 
 #include "src/wasm/constant-expression-interface.h"
 
+#include "src/base/logging.h"
 #include "src/base/overflowing-math.h"
 #include "src/execution/isolate.h"
 #include "src/handles/handles-inl.h"
 #include "src/objects/fixed-array-inl.h"
+#include "src/objects/managed-inl.h"
 #include "src/objects/map-inl.h"
 #include "src/wasm/decoder.h"
 #include "src/wasm/wasm-objects-inl.h"
@@ -290,6 +292,7 @@ WasmValue DefaultValueForType(ValueType type, Isolate* isolate,
     case kBottom:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 }  // namespace
 

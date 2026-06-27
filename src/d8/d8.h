@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "include/v8-array-buffer.h"
+#include "include/v8-data.h"
+#include "include/v8-external.h"
 #include "include/v8-isolate.h"
 #include "include/v8-script.h"
 #include "include/v8-value-serializer.h"
@@ -39,7 +41,7 @@ class D8Console;
 class Message;
 class TryCatch;
 
-enum class ModuleType { kJavaScript, kJSON, kWebAssembly, kInvalid };
+enum class ModuleType { kJavaScript, kJSON, kWebAssembly, kText, kInvalid };
 
 namespace internal {
 class CancelableTaskManager;
@@ -373,6 +375,7 @@ class PerIsolateData {
   bool ignore_unhandled_promises_;
   std::vector<std::tuple<Global<Promise>, Global<Message>, Global<Value>>>
       unhandled_promises_;
+  std::vector<int> realm_stack_;
   AsyncHooks* async_hooks_wrapper_;
   std::unordered_set<DynamicImportData*> import_data_;
   Global<FunctionTemplate> test_api_object_ctor_;
@@ -391,6 +394,8 @@ class PerIsolateData {
   int RealmIndexOrThrow(const v8::FunctionCallbackInfo<v8::Value>& info,
                         int arg_offset);
   int RealmFind(Local<Context> context);
+
+  static constexpr int kMainRealmIndex = 0;
 };
 
 extern bool check_d8_flag_contradictions;
@@ -566,10 +571,34 @@ class Shell : public i::AllStatic {
   };
   enum class CodeType { kFileName, kString, kFunction, kInvalid, kNone };
 
+  class Source {
+   public:
+    enum class Type { kString, kFile };
+    static Source FromString(Local<String> string) {
+      return Source(Type::kString, string, nullptr);
+    }
+    static Source FromFile(const char* filename) {
+      return Source(Type::kFile, Local<String>(), filename);
+    }
+
+    Type type() const { return type_; }
+    Local<String> string() const { return string_; }
+    const char* filename() const { return filename_; }
+    MaybeLocal<String> ConvertToString(Isolate* isolate) const;
+
+   private:
+    Source(Type type, Local<String> string, const char* filename)
+        : type_(type), string_(string), filename_(filename) {}
+
+    Type type_;
+    Local<String> string_;
+    const char* filename_;
+  };
+
   // Boolean return values (for any method below) typically denote "success".
   // We return `false` on uncaught exceptions, except for termination
   // exceptions.
-  static bool ExecuteString(Isolate* isolate, Local<String> source,
+  static bool ExecuteSource(Isolate* isolate, const Source& source,
                             Local<String> name,
                             ReportExceptions report_exceptions,
                             Global<Value>* out_result = nullptr);
@@ -715,7 +744,8 @@ class Shell : public i::AllStatic {
   static void FreeUnicodeFilenameArgs();
 #endif
   static void SetTimeout(const v8::FunctionCallbackInfo<v8::Value>& info);
-  static void ReadCodeTypeAndArguments(
+  // Returns false if any exception occurred. Otherwise returns true.
+  static bool ReadCodeTypeAndArguments(
       const v8::FunctionCallbackInfo<v8::Value>& info, int index,
       CodeType* code_type, Local<Value>* arguments = nullptr);
   static bool FunctionAndArgumentsToString(Local<Function> function,
@@ -802,10 +832,8 @@ class Shell : public i::AllStatic {
   static void Fuzzilli(const v8::FunctionCallbackInfo<v8::Value>& info);
 #endif  // V8_FUZZILLI
 
-  // Data is of type DynamicImportData*. We use void* here to be able
-  // to conform with MicrotaskCallback interface and enqueue this
-  // function in the microtask queue.
-  static void DoHostImportModuleDynamically(void* data);
+  // Data is of type DynamicImportData* wrapped in v8::External.
+  static void DoHostImportModuleDynamically(v8::Local<v8::Data> data);
   static void AddOSMethods(v8::Isolate* isolate,
                            Local<ObjectTemplate> os_template);
 
@@ -872,6 +900,10 @@ class Shell : public i::AllStatic {
   static std::atomic<bool> script_executed_;
   static std::atomic<bool> valid_fuzz_script_;
 
+  static bool ValidateRealmIndex(Isolate* isolate, PerIsolateData* data,
+                                 int index);
+  static bool ValidateRestrictedRealmIndex(Isolate* isolate,
+                                           PerIsolateData* data, int index);
   // Append LCOV coverage data to file.
   static void WriteLcovData(v8::Isolate* isolate, const char* file);
   static Counter* GetCounter(const char* name, bool is_histogram);
@@ -912,10 +944,12 @@ class Shell : public i::AllStatic {
 
   static MaybeLocal<Value> JSONModuleEvaluationSteps(Local<Context> context,
                                                      Local<Module> module);
+  static MaybeLocal<Value> TextModuleEvaluationSteps(Local<Context> context,
+                                                     Local<Module> module);
 
   template <class T>
-  static MaybeLocal<T> CompileString(Isolate* isolate, Local<Context> context,
-                                     Local<String> source,
+  static MaybeLocal<T> CompileSource(Isolate* isolate, Local<Context> context,
+                                     const Source& source,
                                      const ScriptOrigin& origin);
 
   static ScriptCompiler::CachedData* LookupCodeCache(Isolate* isolate,

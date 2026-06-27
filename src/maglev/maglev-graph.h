@@ -70,7 +70,7 @@ class Graph final : public ZoneObject {
         allocations_escape_map_(zone()),
         allocations_elide_map_(zone()),
         register_inputs_(),
-        constants_(zone()),
+        heap_constants_(zone()),
         trusted_constants_(zone()),
         inlined_functions_(zone()),
         inlining_tree_debug_info_(nullptr) {}
@@ -97,6 +97,12 @@ class Graph final : public ZoneObject {
       block->set_id(max_block_id_++);
     }
     blocks_.push_back(block);
+  }
+
+  void AddBlocksAt(ZoneVector<BasicBlock*>& new_blocks, size_t index) {
+    for (BasicBlock* bb : new_blocks) bb->set_id(max_block_id_++);
+    blocks_.insert(blocks_.begin() + index + 1, new_blocks.begin(),
+                   new_blocks.end());
   }
 
   void set_blocks(ZoneVector<BasicBlock*> blocks) { blocks_ = blocks; }
@@ -150,8 +156,9 @@ class Graph final : public ZoneObject {
   int total_nodes() const { return total_nodes_; }
   void increment_total_nodes() { total_nodes_++; }
 
-  compiler::ZoneRefMap<compiler::HeapObjectRef, Constant*>& constants() {
-    return constants_;
+  compiler::ZoneRefMap<compiler::HeapObjectRef, HeapConstant*>&
+  heap_constants() {
+    return heap_constants_;
   }
   ZoneMap<RootIndex, RootConstant*>& root() { return root_constants_; }
   ZoneMap<int, SmiConstant*>& smi() { return smi_constants_; }
@@ -165,7 +172,9 @@ class Graph final : public ZoneObject {
   ZoneMap<uint64_t, HoleyFloat64Constant*>& holey_float64() {
     return holey_float64_constants_;
   }
-  ZoneMap<uint64_t, Constant*>& heap_number() { return heap_number_constants_; }
+  ZoneMap<uint64_t, HeapConstant*>& heap_number() {
+    return heap_number_constants_;
+  }
   compiler::ZoneRefMap<compiler::HeapObjectRef, TrustedConstant*>&
   trusted_constants() {
     return trusted_constants_;
@@ -228,6 +237,15 @@ class Graph final : public ZoneObject {
   bool is_osr() const {
     return compilation_info_->toplevel_compilation_unit()->is_osr();
   }
+
+#ifdef DEBUG
+  // True when graph building may produce Phis for the context register. The
+  // context is normally statically known, but resumable functions and OSR
+  // lose that static knowledge across the resume / OSR entry. Consumed by a
+  // DCHECK in MergePointInterpreterFrameState::MergeValue.
+  bool MayNeedContextPhis() const;
+#endif
+
   uint32_t min_maglev_stackslots_for_unoptimized_frame_size() {
     DCHECK(is_osr());
     if (osr_values().size() == 0) {
@@ -293,7 +311,7 @@ class Graph final : public ZoneObject {
                                    constant.get_bits());
   }
 
-  Constant* GetHeapNumberConstant(double constant);
+  HeapConstant* GetHeapNumberConstant(double constant);
 
   RootConstant* GetRootConstant(RootIndex index) {
     return GetOrAddNewConstantNode(root_constants_, index);
@@ -302,6 +320,12 @@ class Graph final : public ZoneObject {
   RootConstant* GetBooleanConstant(bool value) {
     return GetRootConstant(value ? RootIndex::kTrueValue
                                  : RootIndex::kFalseValue);
+  }
+
+  DeadValue* GetDeadValue() {
+    DeadValue* dead_value = NodeBase::New<DeadValue>(zone(), 0);
+    if (has_graph_labeller()) graph_labeller()->RegisterNode(dead_value);
+    return dead_value;
   }
 
   ValueNode* GetConstant(compiler::ObjectRef ref);
@@ -344,7 +368,7 @@ class Graph final : public ZoneObject {
   // Use the bits of the float as the key.
   ZoneMap<uint64_t, Float64Constant*> float64_constants_;
   ZoneMap<uint64_t, HoleyFloat64Constant*> holey_float64_constants_;
-  ZoneMap<uint64_t, Constant*> heap_number_constants_;
+  ZoneMap<uint64_t, HeapConstant*> heap_number_constants_;
   ZoneVector<ValueNode*> parameters_;
   ZoneAbslFlatHashSet<DeoptFrame*> eager_deopt_top_frames_;
   ZoneAbslFlatHashMap<DeoptFrame*, std::pair<interpreter::Register, int>>
@@ -353,7 +377,7 @@ class Graph final : public ZoneObject {
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_escape_map_;
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_elide_map_;
   RegList register_inputs_;
-  compiler::ZoneRefMap<compiler::HeapObjectRef, Constant*> constants_;
+  compiler::ZoneRefMap<compiler::HeapObjectRef, HeapConstant*> heap_constants_;
   compiler::ZoneRefMap<compiler::HeapObjectRef, TrustedConstant*>
       trusted_constants_;
   ZoneVector<OptimizedCompilationInfo::InlinedFunctionHolder>

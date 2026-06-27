@@ -233,7 +233,7 @@ Handle<UnionOf<JSAny, Hole>> Object::NewStorageFor(
     Representation representation) {
   if (!representation.IsDouble()) return object;
   Handle<HeapNumber> result = isolate->factory()->NewHeapNumberWithHoleNaN();
-  if (IsUninitializedHole(*object, isolate)) {
+  if (IsUninitializedHole(*object)) {
     result->set_value_as_bits(kHoleNanInt64);
   } else if (IsHeapNumber(*object)) {
     // Ensure that all bits of the double value are preserved.
@@ -247,7 +247,7 @@ Handle<UnionOf<JSAny, Hole>> Object::NewStorageFor(
 template <AllocationType allocation_type, typename IsolateT>
 Handle<JSAny> Object::WrapForRead(IsolateT* isolate, Handle<JSAny> object,
                                   Representation representation) {
-  DCHECK(!IsUninitializedHole(*object, isolate));
+  DCHECK(!IsUninitializedHole(*object));
   if (!representation.IsDouble()) {
     DCHECK(Object::FitsRepresentation(*object, representation));
     return object;
@@ -296,7 +296,7 @@ MaybeHandle<JSReceiver> Object::ToObjectImpl(Isolate* isolate,
 MaybeDirectHandle<JSReceiver> Object::ConvertReceiver(
     Isolate* isolate, DirectHandle<Object> object) {
   if (IsJSReceiver(*object)) return Cast<JSReceiver>(object);
-  if (IsNullOrUndefined(*object, isolate)) {
+  if (IsNullOrUndefined(*object)) {
     return isolate->global_proxy();
   }
   return Object::ToObject(isolate, object);
@@ -407,9 +407,10 @@ template <template <typename> typename HandleType>
 typename HandleType<Number>::MaybeType Object::ConvertToUint32(
     Isolate* isolate, HandleType<Object> input) {
   ASSIGN_RETURN_ON_EXCEPTION(isolate, input, ConvertToNumber(isolate, input));
-  if (IsSmi(*input))
+  if (IsSmi(*input)) {
     return typename HandleType<Number>::MaybeType(
         Smi::ToUint32Smi(Cast<Smi>(*input)), isolate);
+  }
   return isolate->factory()->NewNumberFromUint(
       DoubleToUint32(Cast<HeapNumber>(*input)->value()));
 }
@@ -576,7 +577,7 @@ MaybeDirectHandle<String> Object::NoSideEffectsToMaybeString(
     Isolate* isolate, DirectHandle<Object> input) {
   DisallowJavascriptExecution no_js(isolate);
 
-  if (IsAnyHole(*input, isolate)) {
+  if (IsAnyHole(*input)) {
     ReadOnlyRoots roots(isolate);
 #define HOLE_CASE(CamelName, snake_name, _)                           \
   if (Is##CamelName(*input)) {                                        \
@@ -758,8 +759,9 @@ template <template <typename> typename HandleType>
   requires(std::is_convertible_v<HandleType<Object>, DirectHandle<Object>>)
 typename HandleType<Number>::MaybeType Object::ConvertToIndex(
     Isolate* isolate, HandleType<Object> input, MessageTemplate error_index) {
-  if (IsUndefined(*input, isolate))
+  if (IsUndefined(*input)) {
     return HandleType<Number>(Smi::zero(), isolate);
+  }
   ASSIGN_RETURN_ON_EXCEPTION(isolate, input, ToNumber(isolate, input));
   if (IsSmi(*input) && Smi::ToInt(*input) >= 0) return Cast<Smi>(input);
   double len = DoubleToInteger(Object::NumberValue(Cast<Number>(*input)));
@@ -784,8 +786,8 @@ bool Object::BooleanValue(Tagged<Object> obj, IsolateT* isolate) {
 #ifdef V8_ENABLE_WEBASSEMBLY
   DCHECK(!IsWasmNull(obj));
 #endif
-  if (IsBoolean(obj)) return IsTrue(obj, isolate);
-  if (IsNullOrUndefined(obj, isolate)) return false;
+  if (IsBoolean(obj)) return IsTrue(obj);
+  if (IsNullOrUndefined(obj)) return false;
   if (IsUndetectable(obj)) return false;  // Undetectable object is false.
   if (IsString(obj)) return Cast<String>(obj)->length() != 0;
   if (IsHeapNumber(obj)) return DoubleToBoolean(Cast<HeapNumber>(obj)->value());
@@ -1008,8 +1010,9 @@ bool Object::StrictEquals(Tagged<Object> obj, Tagged<Object> that) {
 // static
 Handle<String> Object::TypeOf(Isolate* isolate, DirectHandle<Object> object) {
   if (IsNumber(*object)) return isolate->factory()->number_string();
-  if (IsOddball(*object))
+  if (IsOddball(*object)) {
     return handle(Cast<Oddball>(*object)->type_of(), isolate);
+  }
   if (IsUndetectable(*object)) {
     return isolate->factory()->undefined_string();
   }
@@ -1105,7 +1108,7 @@ MaybeHandle<Object> Object::InstanceOf(Isolate* isolate,
       isolate, inst_of_handler,
       Object::GetMethod(isolate, Cast<JSReceiver>(callable),
                         isolate->factory()->has_instance_symbol()));
-  if (!IsUndefined(*inst_of_handler, isolate)) {
+  if (!IsUndefined(*inst_of_handler)) {
     // Call the {inst_of_handler} on the {callable}.
     DirectHandle<Object> result;
     DirectHandle<Object> args[] = {object};
@@ -1136,7 +1139,7 @@ MaybeDirectHandle<Object> Object::GetMethod(Isolate* isolate,
   Handle<Object> func;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, func,
                              JSReceiver::GetProperty(isolate, receiver, name));
-  if (IsNullOrUndefined(*func, isolate)) {
+  if (IsNullOrUndefined(*func)) {
     return isolate->factory()->undefined_value();
   }
   if (!IsCallable(*func)) {
@@ -1416,7 +1419,7 @@ MaybeHandle<JSAny> JSProxy::GetProperty(Isolate* isolate,
       isolate, trap,
       Object::GetMethod(isolate, Cast<JSReceiver>(handler), trap_name));
   // 7. If trap is undefined, then
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     // 7.a Return target.[[Get]](P, Receiver).
     PropertyKey key(isolate, name);
     LookupIterator it(isolate, receiver, key, target);
@@ -1477,12 +1480,12 @@ MaybeHandle<JSAny> JSProxy::CheckGetSetTrapResult(
     if (access_kind == kGet) {
       inconsistent = PropertyDescriptor::IsAccessorDescriptor(&target_desc) &&
                      !target_desc.configurable() &&
-                     IsUndefined(*target_desc.get(), isolate) &&
-                     !IsUndefined(*trap_result, isolate);
+                     IsUndefined(*target_desc.get()) &&
+                     !IsUndefined(*trap_result);
     } else {
       inconsistent = PropertyDescriptor::IsAccessorDescriptor(&target_desc) &&
                      !target_desc.configurable() &&
-                     IsUndefined(*target_desc.set(), isolate);
+                     IsUndefined(*target_desc.set());
     }
     if (inconsistent) {
       if (access_kind == kGet) {
@@ -1542,7 +1545,7 @@ MaybeDirectHandle<JSPrototype> JSProxy::GetPrototype(
   ASSIGN_RETURN_ON_EXCEPTION(isolate, trap,
                              Object::GetMethod(isolate, handler, trap_name));
   // 6. If trap is undefined, then return target.[[GetPrototypeOf]]().
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     return JSReceiver::GetPrototype(isolate, target);
   }
   // 7. Let handlerProto be ? Call(trap, handler, «target»).
@@ -1831,12 +1834,12 @@ MaybeDirectHandle<Object> Object::ArraySpeciesConstructor(
           isolate, constructor,
           JSReceiver::GetProperty(isolate, Cast<JSReceiver>(constructor),
                                   isolate->factory()->species_symbol()));
-      if (IsNull(*constructor, isolate)) {
+      if (IsNull(*constructor)) {
         constructor = isolate->factory()->undefined_value();
       }
     }
   }
-  if (IsUndefined(*constructor, isolate)) {
+  if (IsUndefined(*constructor)) {
     return default_species;
   } else {
     if (!IsConstructor(*constructor)) {
@@ -1857,7 +1860,7 @@ V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Object::SpeciesConstructor(
       JSReceiver::GetProperty(isolate, recv,
                               isolate->factory()->constructor_string()));
 
-  if (IsUndefined(*ctor_obj, isolate)) return default_ctor;
+  if (IsUndefined(*ctor_obj)) return default_ctor;
 
   if (!IsJSReceiver(*ctor_obj)) {
     THROW_NEW_ERROR(isolate,
@@ -1872,7 +1875,7 @@ V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Object::SpeciesConstructor(
       JSReceiver::GetProperty(isolate, ctor,
                               isolate->factory()->species_symbol()));
 
-  if (IsNullOrUndefined(*species, isolate)) {
+  if (IsNullOrUndefined(*species)) {
     return default_ctor;
   }
 
@@ -1990,38 +1993,30 @@ void CallableTask::BriefPrintDetails(std::ostream& os) {
   os << " callable=" << Brief(callable());
 }
 
-int HeapObjectLayout::SizeFromMap(Tagged<Map> map) const {
-  return Tagged<HeapObject>(this)->SizeFromMap(map);
-}
-
-SafeHeapObjectSize HeapObjectLayout::SafeSizeFromMap(Tagged<Map> map) const {
-  return Tagged<HeapObject>(this)->SafeSizeFromMap(map);
-}
-
 int HeapObject::SizeFromMap(Tagged<Map> map) const {
   int instance_size = map->instance_size();
   if (instance_size != kVariableSizeSentinel) return instance_size;
   // Only inline the most frequent cases.
   InstanceType instance_type = map->instance_type();
   if (InstanceTypeChecker::IsMap(instance_type)) {
-    return UncheckedCast<Map>(*this)->AllocatedSize();
+    return UncheckedCast<Map>(this)->AllocatedSize();
   }
   if (base::IsInRange(instance_type, FIRST_FIXED_ARRAY_TYPE,
                       LAST_FIXED_ARRAY_TYPE)) {
-    return UncheckedCast<FixedArray>(*this)->AllocatedSize();
+    return UncheckedCast<FixedArray>(this)->AllocatedSize();
   }
-#define CASE(TypeCamelCase, TYPE_UPPER_CASE)                     \
-  if (instance_type == TYPE_UPPER_CASE##_TYPE) {                 \
-    return UncheckedCast<TypeCamelCase>(*this)->AllocatedSize(); \
+#define CASE(TypeCamelCase, TYPE_UPPER_CASE)                    \
+  if (instance_type == TYPE_UPPER_CASE##_TYPE) {                \
+    return UncheckedCast<TypeCamelCase>(this)->AllocatedSize(); \
   }
   SIMPLE_HEAP_OBJECT_LIST2(CASE)
 #undef CASE
   if (instance_type == SLOPPY_ARGUMENTS_ELEMENTS_TYPE) {
-    return UncheckedCast<SloppyArgumentsElements>(*this)->AllocatedSize();
+    return UncheckedCast<SloppyArgumentsElements>(this)->AllocatedSize();
   }
   if (base::IsInRange(instance_type, FIRST_CONTEXT_TYPE, LAST_CONTEXT_TYPE)) {
     if (instance_type == NATIVE_CONTEXT_TYPE) return NativeContext::kSize;
-    return Context::SizeFor(UncheckedCast<Context>(*this)->length());
+    return Context::SizeFor(UncheckedCast<Context>(this)->length());
   }
   if (instance_type == SEQ_ONE_BYTE_STRING_TYPE ||
       instance_type == INTERNALIZED_ONE_BYTE_STRING_TYPE ||
@@ -2029,14 +2024,14 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
     // Strings may get concurrently truncated, hence we have to access its
     // length synchronized.
     return SeqOneByteString::SizeFor(
-        UncheckedCast<SeqOneByteString>(*this)->length(kAcquireLoad));
+        UncheckedCast<SeqOneByteString>(this)->length(kAcquireLoad));
   }
   if (instance_type == BYTECODE_ARRAY_TYPE) {
     return BytecodeArray::SizeFor(
-        UncheckedCast<BytecodeArray>(*this)->length(kAcquireLoad));
+        UncheckedCast<BytecodeArray>(this)->length(kAcquireLoad));
   }
   if (instance_type == FREE_SPACE_TYPE) {
-    return UncheckedCast<FreeSpace>(*this)->size(kRelaxedLoad);
+    return UncheckedCast<FreeSpace>(this)->size(kRelaxedLoad);
   }
   if (instance_type == SEQ_TWO_BYTE_STRING_TYPE ||
       instance_type == INTERNALIZED_TWO_BYTE_STRING_TYPE ||
@@ -2044,127 +2039,127 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
     // Strings may get concurrently truncated, hence we have to access its
     // length synchronized.
     return SeqTwoByteString::SizeFor(
-        UncheckedCast<SeqTwoByteString>(*this)->length(kAcquireLoad));
+        UncheckedCast<SeqTwoByteString>(this)->length(kAcquireLoad));
   }
   if (instance_type == FIXED_DOUBLE_ARRAY_TYPE) {
-    return UncheckedCast<FixedDoubleArray>(*this)->AllocatedSize();
+    return UncheckedCast<FixedDoubleArray>(this)->AllocatedSize();
   }
   if (instance_type == TRUSTED_FIXED_ARRAY_TYPE) {
-    return UncheckedCast<TrustedFixedArray>(*this)->AllocatedSize();
+    return UncheckedCast<TrustedFixedArray>(this)->AllocatedSize();
   }
   if (instance_type == PROTECTED_FIXED_ARRAY_TYPE) {
-    return UncheckedCast<ProtectedFixedArray>(*this)->AllocatedSize();
+    return UncheckedCast<ProtectedFixedArray>(this)->AllocatedSize();
   }
   if (instance_type == PROTECTED_WEAK_FIXED_ARRAY_TYPE) {
-    return UncheckedCast<ProtectedWeakFixedArray>(*this)->AllocatedSize();
+    return UncheckedCast<ProtectedWeakFixedArray>(this)->AllocatedSize();
   }
   if (instance_type == TRUSTED_WEAK_FIXED_ARRAY_TYPE) {
-    return UncheckedCast<TrustedWeakFixedArray>(*this)->AllocatedSize();
+    return UncheckedCast<TrustedWeakFixedArray>(this)->AllocatedSize();
   }
   if (instance_type == TRUSTED_BYTE_ARRAY_TYPE) {
-    return UncheckedCast<TrustedByteArray>(*this)->AllocatedSize();
+    return UncheckedCast<TrustedByteArray>(this)->AllocatedSize();
   }
   if (instance_type == FEEDBACK_METADATA_TYPE) {
-    return UncheckedCast<FeedbackMetadata>(*this)->AllocatedSize();
+    return UncheckedCast<FeedbackMetadata>(this)->AllocatedSize();
   }
   if (base::IsInRange(instance_type, FIRST_DESCRIPTOR_ARRAY_TYPE,
                       LAST_DESCRIPTOR_ARRAY_TYPE)) {
     return DescriptorArray::SizeFor(
-        UncheckedCast<DescriptorArray>(*this)->number_of_all_descriptors());
+        UncheckedCast<DescriptorArray>(this)->number_of_all_descriptors());
   }
   if (base::IsInRange(instance_type, FIRST_WEAK_FIXED_ARRAY_TYPE,
                       LAST_WEAK_FIXED_ARRAY_TYPE)) {
-    return UncheckedCast<WeakFixedArray>(*this)->AllocatedSize();
+    return UncheckedCast<WeakFixedArray>(this)->AllocatedSize();
   }
   if (instance_type == WEAK_ARRAY_LIST_TYPE) {
-    return UncheckedCast<WeakArrayList>(*this)->AllocatedSize();
+    return UncheckedCast<WeakArrayList>(this)->AllocatedSize();
   }
   if (instance_type == SMALL_ORDERED_HASH_SET_TYPE) {
     return SmallOrderedHashSet::SizeFor(
-        UncheckedCast<SmallOrderedHashSet>(*this)->Capacity());
+        UncheckedCast<SmallOrderedHashSet>(this)->Capacity());
   }
   if (instance_type == SMALL_ORDERED_HASH_MAP_TYPE) {
     return SmallOrderedHashMap::SizeFor(
-        UncheckedCast<SmallOrderedHashMap>(*this)->Capacity());
+        UncheckedCast<SmallOrderedHashMap>(this)->Capacity());
   }
   if (instance_type == SMALL_ORDERED_NAME_DICTIONARY_TYPE) {
     return SmallOrderedNameDictionary::SizeFor(
-        UncheckedCast<SmallOrderedNameDictionary>(*this)->Capacity());
+        UncheckedCast<SmallOrderedNameDictionary>(this)->Capacity());
   }
   if (instance_type == SWISS_NAME_DICTIONARY_TYPE) {
     return SwissNameDictionary::SizeFor(
-        UncheckedCast<SwissNameDictionary>(*this)->Capacity());
+        UncheckedCast<SwissNameDictionary>(this)->Capacity());
   }
   if (instance_type == PROPERTY_ARRAY_TYPE) {
     return PropertyArray::SizeFor(
-        UncheckedCast<PropertyArray>(*this)->length(kAcquireLoad).value());
+        UncheckedCast<PropertyArray>(this)->length(kAcquireLoad).value());
   }
   if (instance_type == SCOPE_INFO_TYPE) {
-    return UncheckedCast<ScopeInfo>(*this)->AllocatedSize();
+    return UncheckedCast<ScopeInfo>(this)->AllocatedSize();
   }
   if (instance_type == FEEDBACK_VECTOR_TYPE) {
     return FeedbackVector::SizeFor(
-        UncheckedCast<FeedbackVector>(*this)->length());
+        UncheckedCast<FeedbackVector>(this)->length());
   }
   if (instance_type == BIGINT_TYPE) {
-    return BigInt::SizeFor(UncheckedCast<BigInt>(*this)->length());
+    return BigInt::SizeFor(UncheckedCast<BigInt>(this)->length());
   }
   if (instance_type == PREPARSE_DATA_TYPE) {
-    Tagged<PreparseData> data = UncheckedCast<PreparseData>(*this);
+    Tagged<PreparseData> data = UncheckedCast<PreparseData>(this);
     return PreparseData::SizeFor(data->data_length(), data->children_length());
   }
   if (instance_type == INSTRUCTION_STREAM_TYPE) {
-    return UncheckedCast<InstructionStream>(*this)->Size();
+    return UncheckedCast<InstructionStream>(this)->Size();
   }
   if (instance_type == COVERAGE_INFO_TYPE) {
     return CoverageInfo::SizeFor(
-        UncheckedCast<CoverageInfo>(*this)->slot_count());
+        UncheckedCast<CoverageInfo>(this)->slot_count());
   }
 #if V8_ENABLE_WEBASSEMBLY
   if (instance_type == WASM_TYPE_INFO_TYPE) {
     return WasmTypeInfo::SizeFor(
-        UncheckedCast<WasmTypeInfo>(*this)->supertypes_length());
+        UncheckedCast<WasmTypeInfo>(this)->supertypes_length());
   }
   if (instance_type == WASM_STRUCT_TYPE) {
     return WasmStruct::GcSafeSize(map);
   }
   if (instance_type == WASM_ARRAY_TYPE) {
-    return WasmArray::SizeFor(map, UncheckedCast<WasmArray>(*this)->length());
+    return WasmArray::SizeFor(map, UncheckedCast<WasmArray>(this)->length());
   }
   if (instance_type == WASM_NULL_TYPE) {
     return WasmNull::kSize;
   }
   if (instance_type == WASM_DISPATCH_TABLE_TYPE) {
     return WasmDispatchTable::SizeFor(
-        UncheckedCast<WasmDispatchTable>(*this)->capacity());
+        UncheckedCast<WasmDispatchTable>(this)->capacity());
   }
   if (instance_type == WASM_DISPATCH_TABLE_FOR_IMPORTS_TYPE) {
     return WasmDispatchTableForImports::SizeFor(
-        UncheckedCast<WasmDispatchTableForImports>(*this)->length());
+        UncheckedCast<WasmDispatchTableForImports>(this)->length());
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   if (instance_type == DOUBLE_STRING_CACHE_TYPE) {
     return DoubleStringCache::SizeFor(
-        UncheckedCast<DoubleStringCache>(*this)->capacity());
+        UncheckedCast<DoubleStringCache>(this)->capacity());
   }
   if (instance_type == EMBEDDER_DATA_ARRAY_TYPE) {
     return EmbedderDataArray::SizeFor(
-        UncheckedCast<EmbedderDataArray>(*this)->length());
+        UncheckedCast<EmbedderDataArray>(this)->length());
   }
   if (instance_type == HOLE_TYPE) {
     return sizeof(Hole);
   }
   if (instance_type == TURBOSHAFT_WORD32_SET_TYPE_TYPE) {
     return TurboshaftWord32SetType::SizeFor(
-        UncheckedCast<TurboshaftWord32SetType>(*this)->set_size());
+        UncheckedCast<TurboshaftWord32SetType>(this)->set_size());
   }
   if (instance_type == TURBOSHAFT_WORD64_SET_TYPE_TYPE) {
     return TurboshaftWord64SetType::SizeFor(
-        UncheckedCast<TurboshaftWord64SetType>(*this)->set_size());
+        UncheckedCast<TurboshaftWord64SetType>(this)->set_size());
   }
   if (instance_type == TURBOSHAFT_FLOAT64_SET_TYPE_TYPE) {
     return TurboshaftFloat64SetType::SizeFor(
-        UncheckedCast<TurboshaftFloat64SetType>(*this)->set_size());
+        UncheckedCast<TurboshaftFloat64SetType>(this)->set_size());
   }
   UNREACHABLE();
 }
@@ -2177,25 +2172,18 @@ SafeHeapObjectSize HeapObject::SafeSizeFromMap(Tagged<Map> map) const {
   return SafeHeapObjectSize(static_cast<uint32_t>(unsafe_size));
 }
 
-bool HeapObject::NeedsRehashing(PtrComprCageBase cage_base) const {
-  return NeedsRehashing(map(cage_base)->instance_type());
+bool HeapObject::NeedsRehashing() const {
+  return NeedsRehashing(map()->instance_type());
 }
 
 bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
-  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
-    // Use map() only when it's guaranteed that it's not an InstructionStream
-    // object.
-    DCHECK_IMPLIES(instance_type != INSTRUCTION_STREAM_TYPE,
-                   instance_type == map()->instance_type());
-  } else {
-    DCHECK_EQ(instance_type, map()->instance_type());
-  }
+  DCHECK_EQ(instance_type, map()->instance_type());
   switch (instance_type) {
     case DESCRIPTOR_ARRAY_TYPE:
     case STRONG_DESCRIPTOR_ARRAY_TYPE:
-      return Cast<DescriptorArray>(*this)->number_of_descriptors() > 1;
+      return Cast<DescriptorArray>(this)->number_of_descriptors() > 1;
     case TRANSITION_ARRAY_TYPE:
-      return Cast<TransitionArray>(*this)->number_of_transitions() > 1;
+      return Cast<TransitionArray>(this)->number_of_transitions() > 1;
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
       return false;  // We'll rehash from the JSMap or JSSet referencing them.
@@ -2219,9 +2207,9 @@ bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
   UNREACHABLE();
 }
 
-bool HeapObject::CanBeRehashed(PtrComprCageBase cage_base) const {
-  DCHECK(NeedsRehashing(cage_base));
-  switch (map(cage_base)->instance_type()) {
+bool HeapObject::CanBeRehashed() const {
+  DCHECK(NeedsRehashing());
+  switch (map()->instance_type()) {
     case JS_MAP_TYPE:
     case JS_SET_TYPE:
       return true;
@@ -2244,11 +2232,11 @@ bool HeapObject::CanBeRehashed(PtrComprCageBase cage_base) const {
     case TRANSITION_ARRAY_TYPE:
       return true;
     case SMALL_ORDERED_HASH_MAP_TYPE:
-      return Cast<SmallOrderedHashMap>(*this)->NumberOfElements() == 0;
+      return Cast<SmallOrderedHashMap>(this)->NumberOfElements() == 0;
     case SMALL_ORDERED_HASH_SET_TYPE:
-      return Cast<SmallOrderedHashMap>(*this)->NumberOfElements() == 0;
+      return Cast<SmallOrderedHashMap>(this)->NumberOfElements() == 0;
     case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
-      return Cast<SmallOrderedNameDictionary>(*this)->NumberOfElements() == 0;
+      return Cast<SmallOrderedNameDictionary>(this)->NumberOfElements() == 0;
     default:
       return false;
   }
@@ -2257,71 +2245,72 @@ bool HeapObject::CanBeRehashed(PtrComprCageBase cage_base) const {
 
 template <typename IsolateT>
 void HeapObject::RehashBasedOnMap(IsolateT* isolate) {
-  switch (map(isolate)->instance_type()) {
+  switch (map()->instance_type()) {
     case HASH_TABLE_TYPE:
-      Cast<ObjectHashTable>(*this)->Rehash(isolate);
+      Cast<ObjectHashTable>(this)->Rehash();
       break;
     case NAME_DICTIONARY_TYPE:
-      Cast<NameDictionary>(*this)->Rehash(isolate);
+      Cast<NameDictionary>(this)->Rehash();
       break;
     case NAME_TO_INDEX_HASH_TABLE_TYPE:
-      Cast<NameToIndexHashTable>(*this)->Rehash(isolate);
+      Cast<NameToIndexHashTable>(this)->Rehash();
       break;
     case REGISTERED_SYMBOL_TABLE_TYPE:
-      Cast<RegisteredSymbolTable>(*this)->Rehash(isolate);
+      Cast<RegisteredSymbolTable>(this)->Rehash();
       break;
     case SWISS_NAME_DICTIONARY_TYPE:
-      Cast<SwissNameDictionary>(*this)->Rehash(isolate);
+      Cast<SwissNameDictionary>(this)->Rehash(isolate);
       break;
     case GLOBAL_DICTIONARY_TYPE:
-      Cast<GlobalDictionary>(*this)->Rehash(isolate);
+      Cast<GlobalDictionary>(this)->Rehash();
       break;
     case NUMBER_DICTIONARY_TYPE:
-      Cast<NumberDictionary>(*this)->Rehash(isolate);
+      Cast<NumberDictionary>(this)->Rehash();
       break;
     case SIMPLE_NAME_DICTIONARY_TYPE:
-      Cast<SimpleNameDictionary>(*this)->Rehash(isolate);
+      Cast<SimpleNameDictionary>(this)->Rehash();
       break;
     case SIMPLE_NUMBER_DICTIONARY_TYPE:
-      Cast<SimpleNumberDictionary>(*this)->Rehash(isolate);
+      Cast<SimpleNumberDictionary>(this)->Rehash();
       break;
     case DESCRIPTOR_ARRAY_TYPE:
     case STRONG_DESCRIPTOR_ARRAY_TYPE:
-      DCHECK_LE(1, Cast<DescriptorArray>(*this)->number_of_descriptors());
-      Cast<DescriptorArray>(*this)->Sort();
+      DCHECK_LE(1, Cast<DescriptorArray>(this)->number_of_descriptors());
+      Cast<DescriptorArray>(this)->Sort();
       break;
     case TRANSITION_ARRAY_TYPE:
-      Cast<TransitionArray>(*this)->Sort(true);
+      Cast<TransitionArray>(this)->Sort(true);
       break;
     case SMALL_ORDERED_HASH_MAP_TYPE:
-      DCHECK_EQ(0, Cast<SmallOrderedHashMap>(*this)->NumberOfElements());
+      DCHECK_EQ(0, Cast<SmallOrderedHashMap>(this)->NumberOfElements());
       break;
     case SMALL_ORDERED_HASH_SET_TYPE:
-      DCHECK_EQ(0, Cast<SmallOrderedHashSet>(*this)->NumberOfElements());
+      DCHECK_EQ(0, Cast<SmallOrderedHashSet>(this)->NumberOfElements());
       break;
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
       UNREACHABLE();  // We'll rehash from the JSMap or JSSet referencing them.
     case JS_MAP_TYPE: {
-      Cast<JSMap>(*this)->Rehash(isolate->AsIsolate());
+      Cast<JSMap>(this)->Rehash(isolate->AsIsolate());
       break;
     }
     case JS_SET_TYPE: {
-      Cast<JSSet>(*this)->Rehash(isolate->AsIsolate());
+      Cast<JSSet>(this)->Rehash(isolate->AsIsolate());
       break;
     }
     case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
-      DCHECK_EQ(0, Cast<SmallOrderedNameDictionary>(*this)->NumberOfElements());
+      DCHECK_EQ(0, Cast<SmallOrderedNameDictionary>(this)->NumberOfElements());
       break;
     case INTERNALIZED_ONE_BYTE_STRING_TYPE:
     case INTERNALIZED_TWO_BYTE_STRING_TYPE:
       // Rare case, rehash read-only space strings before they are sealed.
-      DCHECK(ReadOnlyHeap::Contains(*this));
-      Cast<String>(*this)->EnsureHash();
+      DCHECK(ReadOnlyHeap::Contains(this));
+      Cast<String>(this)->EnsureHash();
       break;
     default:
       // TODO(ishell): remove once b/326043780 is no longer an issue.
       isolate->AsIsolate()->PushParamsAndDie(
+          "unexpected instance type in RehashBasedOnMap",
           reinterpret_cast<void*>(ptr()), reinterpret_cast<void*>(map().ptr()),
           reinterpret_cast<void*>(
               static_cast<uintptr_t>(map()->instance_type())));
@@ -2553,7 +2542,7 @@ bool Object::CheckContextualStoreToJSGlobalObject(
     LookupIterator* it, Maybe<ShouldThrow> should_throw) {
   Isolate* isolate = it->isolate();
 
-  if (IsJSGlobalObject(*it->GetReceiver(), isolate) &&
+  if (IsJSGlobalObject(*it->GetReceiver()) &&
       (GetShouldThrow(isolate, should_throw) == ShouldThrow::kThrowOnError)) {
     if (it->state() == LookupIterator::TRANSITION) {
       // The property cell that we have created is garbage because we are going
@@ -2775,7 +2764,7 @@ Maybe<bool> Object::RedefineIncompatibleProperty(
 Maybe<bool> Object::SetDataProperty(LookupIterator* it,
                                     DirectHandle<Object> value) {
   Isolate* isolate = it->isolate();
-  DCHECK_IMPLIES(IsJSProxy(*it->GetReceiver(), isolate),
+  DCHECK_IMPLIES(IsJSProxy(*it->GetReceiver()),
                  it->GetName()->IsAnyPrivateName());
   DCHECK_IMPLIES(!it->IsElement() && it->GetName()->IsAnyPrivateName(),
                  it->state() == LookupIterator::DATA);
@@ -2786,9 +2775,8 @@ Maybe<bool> Object::SetDataProperty(LookupIterator* it,
 
   DirectHandle<Object> to_assign = value;
   // Convert the incoming value to a number for storing into typed arrays.
-  if (it->IsElement() && IsJSObject(*receiver, isolate) &&
-      Cast<JSObject>(*receiver)->HasTypedArrayOrRabGsabTypedArrayElements(
-          isolate)) {
+  if (it->IsElement() && IsJSObject(*receiver) &&
+      Cast<JSObject>(*receiver)->HasTypedArrayOrRabGsabTypedArrayElements()) {
     auto receiver_ta = Cast<JSTypedArray>(receiver);
     ElementsKind elements_kind = Cast<JSObject>(*receiver)->GetElementsKind();
     if (IsBigIntTypedArrayElementsKind(elements_kind)) {
@@ -2798,7 +2786,7 @@ Maybe<bool> Object::SetDataProperty(LookupIterator* it,
                       it->index() >= receiver_ta->GetLength())) {
         return Just(true);
       }
-    } else if (!IsNumber(*value) && !IsUndefined(*value, isolate)) {
+    } else if (!IsNumber(*value) && !IsUndefined(*value)) {
       ASSIGN_RETURN_ON_EXCEPTION(isolate, to_assign,
                                  Object::ToNumber(isolate, value));
       if (V8_UNLIKELY(receiver_ta->IsDetachedOrOutOfBounds() ||
@@ -2808,9 +2796,8 @@ Maybe<bool> Object::SetDataProperty(LookupIterator* it,
     }
   }
 
-  DCHECK(!IsWasmObject(*receiver, isolate));
-  if (V8_UNLIKELY(IsJSSharedStruct(*receiver, isolate) ||
-                  IsJSSharedArray(*receiver, isolate))) {
+  DCHECK(!IsWasmObject(*receiver));
+  if (V8_UNLIKELY(IsJSSharedStruct(*receiver) || IsJSSharedArray(*receiver))) {
     // Shared structs can only point to primitives or shared values.
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, to_assign, Object::Share(isolate, to_assign, kThrowOnError));
@@ -3087,7 +3074,7 @@ Maybe<bool> JSProxy::HasProperty(Isolate* isolate, DirectHandle<JSProxy> proxy,
       Object::GetMethod(isolate, Cast<JSReceiver>(handler),
                         isolate->factory()->has_string()));
   // 7. If trap is undefined, then
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     // 7a. Return target.[[HasProperty]](P).
     return JSReceiver::HasProperty(isolate, target, name);
   }
@@ -3157,7 +3144,7 @@ Maybe<bool> JSProxy::SetProperty(DirectHandle<JSProxy> proxy,
   DirectHandle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, trap,
                              Object::GetMethod(isolate, handler, trap_name));
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     PropertyKey key(isolate, name);
     LookupIterator it(isolate, receiver, key, target);
 
@@ -3207,7 +3194,7 @@ Maybe<bool> JSProxy::DeletePropertyOrElement(DirectHandle<JSProxy> proxy,
   DirectHandle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, trap,
                              Object::GetMethod(isolate, handler, trap_name));
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     return JSReceiver::DeletePropertyOrElement(isolate, target, name,
                                                language_mode);
   }
@@ -3521,7 +3508,7 @@ Maybe<bool> JSProxy::DefineOwnProperty(Isolate* isolate,
       isolate, trap,
       Object::GetMethod(isolate, Cast<JSReceiver>(handler), trap_name));
   // 7. If trap is undefined, then:
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     // 7a. Return target.[[DefineOwnProperty]](P, Desc).
     return JSReceiver::DefineOwnProperty(isolate, target, key, desc,
                                          should_throw);
@@ -3690,7 +3677,7 @@ Maybe<bool> JSProxy::GetOwnPropertyDescriptor(Isolate* isolate,
       isolate, trap,
       Object::GetMethod(isolate, Cast<JSReceiver>(handler), trap_name));
   // 7. If trap is undefined, then
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     // 7a. Return target.[[GetOwnProperty]](P).
     return JSReceiver::GetOwnPropertyDescriptor(isolate, target, name, desc);
   }
@@ -3703,8 +3690,7 @@ Maybe<bool> JSProxy::GetOwnPropertyDescriptor(Isolate* isolate,
           Execution::Call(isolate, trap, handler, base::VectorOf(args))));
   // 9. If Type(trapResultObj) is neither Object nor Undefined, throw a
   //    TypeError exception.
-  if (!IsJSReceiver(*trap_result_obj) &&
-      !IsUndefined(*trap_result_obj, isolate)) {
+  if (!IsJSReceiver(*trap_result_obj) && !IsUndefined(*trap_result_obj)) {
     isolate->Throw(*isolate->factory()->NewTypeError(
         MessageTemplate::kProxyGetOwnPropertyDescriptorInvalid, name));
     return Nothing<bool>();
@@ -3715,7 +3701,7 @@ Maybe<bool> JSProxy::GetOwnPropertyDescriptor(Isolate* isolate,
       JSReceiver::GetOwnPropertyDescriptor(isolate, target, name, &target_desc);
   MAYBE_RETURN(found, Nothing<bool>());
   // 11. If trapResultObj is undefined, then
-  if (IsUndefined(*trap_result_obj, isolate)) {
+  if (IsUndefined(*trap_result_obj)) {
     // 11a. If targetDesc is undefined, return undefined.
     if (!found.FromJust()) return Just(false);
     // 11b. If targetDesc.[[Configurable]] is false, throw a TypeError
@@ -3806,7 +3792,7 @@ Maybe<bool> JSProxy::PreventExtensions(DirectHandle<JSProxy> proxy,
   DirectHandle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, trap,
                              Object::GetMethod(isolate, handler, trap_name));
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     return JSReceiver::PreventExtensions(isolate, target, should_throw);
   }
 
@@ -3849,7 +3835,7 @@ Maybe<bool> JSProxy::IsExtensible(DirectHandle<JSProxy> proxy) {
   DirectHandle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, trap,
                              Object::GetMethod(isolate, handler, trap_name));
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     return JSReceiver::IsExtensible(isolate, target);
   }
 
@@ -4204,7 +4190,7 @@ Handle<JSAny> AccessorPair::GetComponent(
     accessor_pair->set(component, *function, kReleaseStore);
     return function;
   }
-  if (IsNull(*accessor, isolate)) {
+  if (IsNull(*accessor)) {
     return isolate->factory()->undefined_value();
   }
   return Cast<JSAny>(accessor);
@@ -4230,7 +4216,7 @@ MaybeDirectHandle<String> Name::ToFunctionName(Isolate* isolate,
   if (IsString(*name)) return Cast<String>(name);
   // ES6 section 9.2.11 SetFunctionName, step 4.
   DirectHandle<Object> description(Cast<Symbol>(name)->description(), isolate);
-  if (IsUndefined(*description, isolate)) {
+  if (IsUndefined(*description)) {
     return isolate->factory()->empty_string();
   }
   IncrementalStringBuilder builder(isolate);
@@ -4523,7 +4509,7 @@ Maybe<bool> JSProxy::SetPrototype(Isolate* isolate, DirectHandle<JSProxy> proxy,
   STACK_CHECK(isolate, Nothing<bool>());
   DirectHandle<Name> trap_name = isolate->factory()->setPrototypeOf_string();
   // 1. Assert: Either Type(V) is Object or Type(V) is Null.
-  DCHECK(IsJSReceiver(*value) || IsNull(*value, isolate));
+  DCHECK(IsJSReceiver(*value) || IsNull(*value));
   // 2. Let handler be the value of the [[ProxyHandler]] internal slot of O.
   DirectHandle<Object> handler(proxy->handler(), isolate);
   // 3. If handler is null, throw a TypeError exception.
@@ -4541,7 +4527,7 @@ Maybe<bool> JSProxy::SetPrototype(Isolate* isolate, DirectHandle<JSProxy> proxy,
       isolate, trap,
       Object::GetMethod(isolate, Cast<JSReceiver>(handler), trap_name));
   // 7. If trap is undefined, then return target.[[SetPrototypeOf]]().
-  if (IsUndefined(*trap, isolate)) {
+  if (IsUndefined(*trap)) {
     return JSReceiver::SetPrototype(isolate, target, value, from_javascript,
                                     should_throw);
   }
@@ -4588,7 +4574,7 @@ bool JSArray::SetLengthWouldNormalize(uint32_t new_length) {
   uint32_t new_capacity;
   return JSArray::SetLengthWouldNormalize(Isolate::Current()->heap(),
                                           new_length) &&
-         ShouldConvertToSlowElements(*this, capacity, new_length - 1,
+         ShouldConvertToSlowElements(this, capacity, new_length - 1,
                                      &new_capacity);
 }
 
@@ -5167,8 +5153,7 @@ Handle<Derived> HashTable<Derived, Shape>::NewInternal(
 }
 
 template <typename Derived, typename Shape>
-void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base,
-                                       Tagged<Derived> new_table) {
+void HashTable<Derived, Shape>::Rehash(Tagged<Derived> new_table) {
   DisallowGarbageCollection no_gc;
   WriteBarrierModeScope mode = new_table->GetWriteBarrierMode(no_gc);
 
@@ -5187,7 +5172,7 @@ void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base,
     if (!IsKey(roots, k)) continue;
     uint32_t hash = TodoShape::HashForObject(roots, k);
     uint32_t insertion_index =
-        EntryToIndex(new_table->FindInsertionEntry(cage_base, roots, hash));
+        EntryToIndex(new_table->FindInsertionEntry(roots, hash));
     new_table->set_key(insertion_index, get(from_index), *mode);
     for (int j = 1; j < TodoShape::kEntrySize; j++) {
       new_table->set(insertion_index + j, get(from_index + j), *mode);
@@ -5233,7 +5218,7 @@ void HashTable<Derived, Shape>::Swap(InternalIndex entry1, InternalIndex entry2,
 }
 
 template <typename Derived, typename Shape>
-void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base) {
+void HashTable<Derived, Shape>::Rehash() {
   DisallowGarbageCollection no_gc;
   WriteBarrierModeScope mode = GetWriteBarrierMode(no_gc);
   EarlyReadOnlyRoots roots = EarlyGetReadOnlyRoots();
@@ -5245,7 +5230,7 @@ void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base) {
     done = true;
     for (InternalIndex current(0); current.raw_value() < capacity;
          /* {current} is advanced manually below, when appropriate.*/) {
-      Tagged<Object> current_key = KeyAt(cage_base, current);
+      Tagged<Object> current_key = KeyAt(current);
       if (!IsKey(roots, current_key)) {
         ++current;  // Advance to next entry.
         continue;
@@ -5255,7 +5240,7 @@ void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base) {
         ++current;  // Advance to next entry.
         continue;
       }
-      Tagged<Object> target_key = KeyAt(cage_base, target);
+      Tagged<Object> target_key = KeyAt(target);
       if (!IsKey(roots, target_key) ||
           EntryForProbe(roots, target_key, probe, target) != target) {
         // Put the current element into the correct position.
@@ -5275,7 +5260,7 @@ void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base) {
   Tagged<HeapObject> undefined = roots.undefined_value();
   Derived* self = static_cast<Derived*>(this);
   for (InternalIndex current : InternalIndex::Range(capacity)) {
-    if (KeyAt(cage_base, current) == the_hole) {
+    if (KeyAt(current) == the_hole) {
       self->set_key(EntryToIndex(current) + kEntryKeyIndex, undefined,
                     SKIP_WRITE_BARRIER);
     }
@@ -5301,7 +5286,34 @@ HandleType<Derived> HashTable<Derived, Shape>::EnsureCapacity(
       isolate, new_nof,
       should_pretenure ? AllocationType::kOld : AllocationType::kYoung);
 
-  table->Rehash(isolate, *new_table);
+  table->Rehash(*new_table);
+  return new_table;
+}
+
+template <typename Derived, typename Shape>
+template <typename IsolateT, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<Derived>, DirectHandle<Derived>>)
+typename HandleType<Derived>::MaybeType
+HashTable<Derived, Shape>::TryEnsureCapacity(IsolateT* isolate,
+                                             HandleType<Derived> table, int n,
+                                             AllocationType allocation) {
+  if (table->HasSufficientCapacityToAdd(n)) return table;
+
+  int capacity = table->Capacity();
+  int new_nof = table->NumberOfElements() + n;
+
+  bool should_pretenure = allocation == AllocationType::kOld ||
+                          ((capacity > kMinCapacityForPretenure) &&
+                           !HeapLayout::InYoungGeneration(*table));
+  HandleType<Derived> new_table;
+  if (!HashTable::TryNew(
+           isolate, new_nof,
+           should_pretenure ? AllocationType::kOld : AllocationType::kYoung)
+           .To(&new_table)) {
+    return {};
+  }
+
+  table->Rehash(*new_table);
   return new_table;
 }
 
@@ -5364,19 +5376,19 @@ HandleType<Derived> HashTable<Derived, Shape>::Shrink(Isolate* isolate,
                      pretenure ? AllocationType::kOld : AllocationType::kYoung,
                      USE_CUSTOM_MINIMUM_CAPACITY);
 
-  table->Rehash(isolate, *new_table);
+  table->Rehash(*new_table);
   return new_table;
 }
 
 template <typename Derived, typename Shape>
-InternalIndex HashTable<Derived, Shape>::FindInsertionEntry(
-    PtrComprCageBase cage_base, ReadOnlyRoots roots, uint32_t hash) {
+InternalIndex HashTable<Derived, Shape>::FindInsertionEntry(ReadOnlyRoots roots,
+                                                            uint32_t hash) {
   uint32_t capacity = Capacity();
   uint32_t count = 1;
   // EnsureCapacity will guarantee the hash table is never full.
   for (InternalIndex entry = FirstProbe(hash, capacity);;
        entry = NextProbe(entry, count++, capacity)) {
-    if (!IsKey(roots, KeyAt(cage_base, entry))) return entry;
+    if (!IsKey(roots, KeyAt(entry))) return entry;
   }
 }
 
@@ -5390,7 +5402,6 @@ GlobalDictionary::TryFindPropertyCellForConcurrentLookupIterator(
   //   repeated load (unsafe with concurrent modifications).
 
   DisallowGarbageCollection no_gc;
-  PtrComprCageBase cage_base{isolate};
   ReadOnlyRoots roots(isolate);
   const int32_t hash = TodoShape::Hash(roots, name);
   const uint32_t capacity = Capacity();
@@ -5400,12 +5411,12 @@ GlobalDictionary::TryFindPropertyCellForConcurrentLookupIterator(
   // EnsureCapacity will guarantee the hash table is never full.
   for (InternalIndex entry = FirstProbe(hash, capacity);;
        entry = NextProbe(entry, count++, capacity)) {
-    Tagged<Object> element = KeyAt(cage_base, entry, kRelaxedLoad);
+    Tagged<Object> element = KeyAt(entry, kRelaxedLoad);
     if (isolate->heap()->IsPendingAllocation(element)) return {};
     if (element == undefined) return {};
     if (TodoShape::kMatchNeedsHoleCheck && element == the_hole) continue;
     if (!TodoShape::IsMatch(name, element)) continue;
-    CHECK(IsPropertyCell(element, cage_base));
+    CHECK(IsPropertyCell(element));
     return Cast<PropertyCell>(element);
   }
 }
@@ -5487,7 +5498,7 @@ int BaseNameDictionary<Derived, Shape>::NextEnumerationIndex(
     for (uint32_t i = 0; i < length; i++) {
       InternalIndex internal_index(Smi::ToInt(iteration_order->get(i)));
       DCHECK(dictionary->IsKey(GetReadOnlyRoots(),
-                               dictionary->KeyAt(isolate, internal_index)));
+                               dictionary->KeyAt(internal_index)));
 
       int enum_index = PropertyDetails::kInitialIndex + i;
 
@@ -5584,9 +5595,24 @@ HandleType<Derived>::MaybeType BaseNameDictionary<Derived, Shape>::Add(
     THROW_NEW_ERROR(isolate,
                     NewRangeError(MessageTemplate::kTooManyProperties));
   }
+  // If the dictionary needs to grow, use TryEnsureCapacity to avoid a
+  // fatal OOM crash in HashTable::New if the maximum table capacity would
+  // be exceeded.  After this, the EnsureCapacity inside Dictionary::Add
+  // is a no-op.
+  if (V8_UNLIKELY(!dictionary->HasSufficientCapacityToAdd(1))) {
+    if (!Derived::TryEnsureCapacity(isolate, dictionary).To(&dictionary)) {
+      THROW_NEW_ERROR(isolate,
+                      NewRangeError(MessageTemplate::kTooManyProperties));
+    }
+  }
   details = details.set_index(index);
+  HandleType<Derived> original_dictionary = dictionary;
   dictionary = AddNoUpdateNextEnumerationIndex(isolate, dictionary, key, value,
                                                details, entry_out);
+  // AddNoUpdateNextEnumerationIndex should not have reallocated the dictionary
+  // since we ensured capacity above.
+  DCHECK(original_dictionary.is_identical_to(dictionary));
+  USE(original_dictionary);
   // Update enumeration index here in order to avoid potential modification of
   // the canonical empty dictionary which lives in read only space.
   dictionary->set_next_enumeration_index(index + 1);
@@ -5612,10 +5638,10 @@ HandleType<Derived> Dictionary<Derived, Shape>::Add(
   DirectHandle<Object> k =
       TodoShape::template AsHandle<key_allocation>(isolate, key);
 
-  InternalIndex entry = dictionary->FindInsertionEntry(isolate, roots, hash);
+  InternalIndex entry = dictionary->FindInsertionEntry(roots, hash);
   dictionary->SetEntry(entry, *k, *value, details);
-  DCHECK(IsNumber(dictionary->KeyAt(isolate, entry)) ||
-         IsUniqueName(TodoShape::Unwrap(dictionary->KeyAt(isolate, entry))));
+  DCHECK(IsNumber(dictionary->KeyAt(entry)) ||
+         IsUniqueName(TodoShape::Unwrap(dictionary->KeyAt(entry))));
   dictionary->ElementAdded();
   if (entry_out) *entry_out = entry;
   return dictionary;
@@ -5640,10 +5666,10 @@ void Dictionary<Derived, Shape>::UncheckedAdd(IsolateT* isolate,
   DirectHandle<Object> k =
       TodoShape::template AsHandle<key_allocation>(isolate, key);
 
-  InternalIndex entry = dictionary->FindInsertionEntry(isolate, roots, hash);
+  InternalIndex entry = dictionary->FindInsertionEntry(roots, hash);
   dictionary->SetEntry(entry, *k, *value, details);
-  DCHECK(IsNumber(dictionary->KeyAt(isolate, entry)) ||
-         IsUniqueName(TodoShape::Unwrap(dictionary->KeyAt(isolate, entry))));
+  DCHECK(IsNumber(dictionary->KeyAt(entry)) ||
+         IsUniqueName(TodoShape::Unwrap(dictionary->KeyAt(entry))));
 }
 
 template <typename Derived, typename Shape>
@@ -5812,12 +5838,12 @@ void ObjectHashTableBase<Derived, Shape>::FillEntriesWithHoles(
 
 template <typename Derived, typename Shape>
 Tagged<Object> ObjectHashTableBase<Derived, Shape>::Lookup(
-    PtrComprCageBase cage_base, DirectHandle<Object> key, int32_t hash) {
+    DirectHandle<Object> key, int32_t hash) {
   DisallowGarbageCollection no_gc;
   ReadOnlyRoots roots = GetReadOnlyRoots();
   DCHECK(this->IsKey(roots, *key));
 
-  InternalIndex entry = this->FindEntry(cage_base, roots, key, hash);
+  InternalIndex entry = this->FindEntry(roots, key, hash);
   if (entry.is_not_found()) return roots.the_hole_value();
   return this->get(Derived::EntryToIndex(entry) + 1);
 }
@@ -5826,10 +5852,9 @@ Tagged<Object> ObjectHashTableBase<Derived, Shape>::Lookup(
 // CodeStubAssembler::NameToIndexHashTableLookup.
 int NameToIndexHashTable::Lookup(Tagged<Name> key) {
   DisallowGarbageCollection no_gc;
-  PtrComprCageBase cage_base = GetPtrComprCageBase(this);
   ReadOnlyRoots roots = GetReadOnlyRoots();
 
-  InternalIndex entry = this->FindEntry(cage_base, roots, key, key->hash());
+  InternalIndex entry = this->FindEntry(roots, key, key->hash());
   if (entry.is_not_found()) return -1;
   return Cast<Smi>(this->get(EntryToValueIndex(entry))).value();
 }
@@ -5839,22 +5864,15 @@ Tagged<Object> ObjectHashTableBase<Derived, Shape>::Lookup(
     DirectHandle<Object> key) {
   DisallowGarbageCollection no_gc;
 
-  PtrComprCageBase cage_base = GetPtrComprCageBase(this);
   ReadOnlyRoots roots = GetReadOnlyRoots();
   DCHECK(this->IsKey(roots, *key));
 
   // If the object does not have an identity hash, it was never used as a key.
   Tagged<Object> hash = Object::GetHash(*key);
-  if (IsUndefined(hash, roots)) {
+  if (IsUndefined(hash)) {
     return roots.the_hole_value();
   }
-  return Lookup(cage_base, key, Smi::ToInt(hash));
-}
-
-template <typename Derived, typename Shape>
-Tagged<Object> ObjectHashTableBase<Derived, Shape>::Lookup(
-    DirectHandle<Object> key, int32_t hash) {
-  return Lookup(GetPtrComprCageBase(this), key, hash);
+  return Lookup(key, Smi::ToInt(hash));
 }
 
 template <typename Derived, typename Shape>
@@ -5886,7 +5904,7 @@ Handle<Derived> ObjectHashTableBase<Derived, Shape>::Put(
     Isolate* isolate, Handle<Derived> table, DirectHandle<Object> key,
     DirectHandle<Object> value) {
   DCHECK(table->IsKey(ReadOnlyRoots(isolate), *key));
-  DCHECK(!IsTheHole(*value, ReadOnlyRoots(isolate)));
+  DCHECK(!IsTheHole(*value));
 
   // Make sure the key object has an identity hash code.
   int32_t hash = Object::GetOrCreateHash(*key, isolate).value();
@@ -5902,7 +5920,7 @@ void RehashObjectHashTableAndGCIfNeeded(Isolate* isolate, HandleType<T> table) {
   // Rehash if more than 33% of the entries are deleted entries.
   // TODO(verwaest): Consider to shrink the fixed array in place.
   if ((table->NumberOfDeletedElements() << 1) > table->NumberOfElements()) {
-    table->Rehash(isolate);
+    table->Rehash();
   }
   // If we're out of luck, we didn't get a GC recently, and so rehashing
   // isn't enough to avoid a crash.
@@ -5914,7 +5932,7 @@ void RehashObjectHashTableAndGCIfNeeded(Isolate* isolate, HandleType<T> table) {
         isolate->heap()->CollectAllGarbage(
             GCFlag::kNoFlags, GarbageCollectionReason::kFullHashtable);
       }
-      table->Rehash(isolate);
+      table->Rehash();
     }
   }
 }
@@ -5927,9 +5945,9 @@ Handle<Derived> ObjectHashTableBase<Derived, Shape>::Put(
     DirectHandle<Object> value, int32_t hash) {
   ReadOnlyRoots roots(isolate);
   DCHECK(table->IsKey(roots, *key));
-  DCHECK(!IsTheHole(*value, roots));
+  DCHECK(!IsTheHole(*value));
 
-  InternalIndex entry = table->FindEntry(isolate, roots, key, hash);
+  InternalIndex entry = table->FindEntry(roots, key, hash);
 
   // Key is already in table, just overwrite value.
   if (entry.is_found()) {
@@ -5967,7 +5985,7 @@ Handle<Derived> ObjectHashTableBase<Derived, Shape>::Remove(
   ReadOnlyRoots roots = GetReadOnlyRoots();
   DCHECK(table->IsKey(roots, *key));
 
-  InternalIndex entry = table->FindEntry(isolate, roots, key, hash);
+  InternalIndex entry = table->FindEntry(roots, key, hash);
   if (entry.is_not_found()) {
     *was_present = false;
     return table;
@@ -5999,24 +6017,18 @@ void ObjectHashTableBase<Derived, Shape>::RemoveEntry(InternalIndex entry) {
 template <typename Derived, int N>
 std::array<Tagged<Object>, N> ObjectMultiHashTableBase<Derived, N>::Lookup(
     DirectHandle<Object> key) {
-  return Lookup(GetPtrComprCageBase(this), key);
-}
-
-template <typename Derived, int N>
-std::array<Tagged<Object>, N> ObjectMultiHashTableBase<Derived, N>::Lookup(
-    PtrComprCageBase cage_base, DirectHandle<Object> key) {
   DisallowGarbageCollection no_gc;
 
   ReadOnlyRoots roots = GetReadOnlyRoots();
   DCHECK(this->IsKey(roots, *key));
 
   Tagged<Object> hash_obj = Object::GetHash(*key);
-  if (IsUndefined(hash_obj, roots)) {
+  if (IsUndefined(hash_obj)) {
     return {roots.the_hole_value(), roots.the_hole_value()};
   }
   int32_t hash = Smi::ToInt(hash_obj);
 
-  InternalIndex entry = this->FindEntry(cage_base, roots, key, hash);
+  InternalIndex entry = this->FindEntry(roots, key, hash);
   if (entry.is_not_found()) {
     return {roots.the_hole_value(), roots.the_hole_value()};
   }
@@ -6040,7 +6052,7 @@ Handle<Derived> ObjectMultiHashTableBase<Derived, N>::Put(
   DCHECK(table->IsKey(roots, *key));
 
   int32_t hash = Object::GetOrCreateHash(*key, isolate).value();
-  InternalIndex entry = table->FindEntry(isolate, roots, key, hash);
+  InternalIndex entry = table->FindEntry(roots, key, hash);
 
   // Overwrite values if entry is found.
   if (entry.is_found()) {
@@ -6206,7 +6218,7 @@ void JSDisposableStackBase::InitializeJSDisposableStackBase(
 }
 
 void PropertyCell::ClearAndInvalidate(Isolate* isolate) {
-  DCHECK(!IsPropertyCellHole(value(), isolate));
+  DCHECK(!IsPropertyCellHole(value()));
   PropertyDetails details = property_details();
   details = details.set_cell_type(PropertyCellType::kConstant);
   Transition(details, isolate->factory()->property_cell_hole_value());
@@ -6250,8 +6262,8 @@ static bool RemainsConstantType(Tagged<PropertyCell> cell,
 // static
 PropertyCellType PropertyCell::InitialType(Isolate* isolate,
                                            Tagged<Object> value) {
-  return IsUndefined(value, isolate) ? PropertyCellType::kUndefined
-                                     : PropertyCellType::kConstant;
+  return IsUndefined(value) ? PropertyCellType::kUndefined
+                            : PropertyCellType::kConstant;
 }
 
 // static
@@ -6410,7 +6422,7 @@ Tagged<AccessCheckInfo> AccessCheckInfo::Get(Isolate* isolate,
   if (IsFunctionTemplateInfo(maybe_constructor)) {
     Tagged<Object> data_obj =
         Cast<FunctionTemplateInfo>(maybe_constructor)->GetAccessCheckInfo();
-    if (IsUndefined(data_obj, isolate)) return {};
+    if (IsUndefined(data_obj)) return {};
     return Cast<AccessCheckInfo>(data_obj);
   }
   // Might happen for a detached context.
@@ -6421,7 +6433,7 @@ Tagged<AccessCheckInfo> AccessCheckInfo::Get(Isolate* isolate,
 
   Tagged<Object> data_obj =
       constructor->shared()->api_func_data()->GetAccessCheckInfo();
-  if (IsUndefined(data_obj, isolate)) return {};
+  if (IsUndefined(data_obj)) return {};
 
   return Cast<AccessCheckInfo>(data_obj);
 }
@@ -6524,39 +6536,47 @@ bool MapWord::IsMapOrForwarded(Tagged<Map> map) {
 // Please note this list is compiler dependent.
 // Keep this at the end of this file
 
-#define EXTERN_DEFINE_HASH_TABLE(DERIVED, SHAPE)                             \
-  template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)                   \
-      HashTable<DERIVED, SHAPE>;                                             \
-                                                                             \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) MaybeHandle<DERIVED>    \
-  HashTable<DERIVED, SHAPE>::TryNew(Isolate*, uint32_t, AllocationType,      \
-                                    MinimumCapacity);                        \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) MaybeHandle<DERIVED>    \
-  HashTable<DERIVED, SHAPE>::TryNew(LocalIsolate*, uint32_t, AllocationType, \
-                                    MinimumCapacity);                        \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>         \
-  HashTable<DERIVED, SHAPE>::New(Isolate*, uint32_t, AllocationType,         \
-                                 MinimumCapacity);                           \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>         \
-  HashTable<DERIVED, SHAPE>::New(LocalIsolate*, uint32_t, AllocationType,    \
-                                 MinimumCapacity);                           \
-                                                                             \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>         \
-  HashTable<DERIVED, SHAPE>::EnsureCapacity(Isolate*, Handle<DERIVED>, int,  \
-                                            AllocationType);                 \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>         \
-  HashTable<DERIVED, SHAPE>::EnsureCapacity(LocalIsolate*, Handle<DERIVED>,  \
-                                            int, AllocationType);            \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) DirectHandle<DERIVED>   \
-  HashTable<DERIVED, SHAPE>::EnsureCapacity(Isolate*, DirectHandle<DERIVED>, \
-                                            int, AllocationType);            \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) DirectHandle<DERIVED>   \
-  HashTable<DERIVED, SHAPE>::EnsureCapacity(                                 \
-      LocalIsolate*, DirectHandle<DERIVED>, int, AllocationType);            \
-                                                                             \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>         \
-  HashTable<DERIVED, SHAPE>::Shrink(Isolate*, Handle<DERIVED>, int);         \
-  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) DirectHandle<DERIVED>   \
+#define EXTERN_DEFINE_HASH_TABLE(DERIVED, SHAPE)                               \
+  template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)                     \
+      HashTable<DERIVED, SHAPE>;                                               \
+                                                                               \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) MaybeHandle<DERIVED>      \
+  HashTable<DERIVED, SHAPE>::TryNew(Isolate*, uint32_t, AllocationType,        \
+                                    MinimumCapacity);                          \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) MaybeHandle<DERIVED>      \
+  HashTable<DERIVED, SHAPE>::TryNew(LocalIsolate*, uint32_t, AllocationType,   \
+                                    MinimumCapacity);                          \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>           \
+  HashTable<DERIVED, SHAPE>::New(Isolate*, uint32_t, AllocationType,           \
+                                 MinimumCapacity);                             \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>           \
+  HashTable<DERIVED, SHAPE>::New(LocalIsolate*, uint32_t, AllocationType,      \
+                                 MinimumCapacity);                             \
+                                                                               \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>           \
+  HashTable<DERIVED, SHAPE>::EnsureCapacity(Isolate*, Handle<DERIVED>, int,    \
+                                            AllocationType);                   \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>           \
+  HashTable<DERIVED, SHAPE>::EnsureCapacity(LocalIsolate*, Handle<DERIVED>,    \
+                                            int, AllocationType);              \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) DirectHandle<DERIVED>     \
+  HashTable<DERIVED, SHAPE>::EnsureCapacity(Isolate*, DirectHandle<DERIVED>,   \
+                                            int, AllocationType);              \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) DirectHandle<DERIVED>     \
+  HashTable<DERIVED, SHAPE>::EnsureCapacity(                                   \
+      LocalIsolate*, DirectHandle<DERIVED>, int, AllocationType);              \
+                                                                               \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) MaybeHandle<DERIVED>      \
+  HashTable<DERIVED, SHAPE>::TryEnsureCapacity(Isolate*, Handle<DERIVED>, int, \
+                                               AllocationType);                \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)                           \
+      MaybeDirectHandle<DERIVED>                                               \
+      HashTable<DERIVED, SHAPE>::TryEnsureCapacity(                            \
+          Isolate*, DirectHandle<DERIVED>, int, AllocationType);               \
+                                                                               \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) Handle<DERIVED>           \
+  HashTable<DERIVED, SHAPE>::Shrink(Isolate*, Handle<DERIVED>, int);           \
+  template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) DirectHandle<DERIVED>     \
   HashTable<DERIVED, SHAPE>::Shrink(Isolate*, DirectHandle<DERIVED>, int);
 
 #define EXTERN_DEFINE_OBJECT_BASE_HASH_TABLE(DERIVED, SHAPE) \

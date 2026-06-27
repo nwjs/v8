@@ -34,6 +34,7 @@
     {"app_args": "--no-lazy", "app_name": "d8", "probability": 0.05},
     {"app_args": "--no-baseline-batch-compilation", "app_name": "d8", "probability": 0.8},
     {"app_args": "--no-lazy-feedback-allocation", "app_name": "d8", "probability": 0.8},
+    {"app_args": "--stress-lazy", "app_name": "d8", "probability": 0.9},
     {"app_args": "--stress-lazy-source-positions", "app_name": "d8", "probability": 0.5},
     {"app_args": "--no-use-ic", "app_name": "d8", "probability": 0.25},
     {"app_args": "--no-wasm-generic-wrapper", "app_name": "d8", "probability": 0.1},
@@ -68,7 +69,6 @@
     {"app_args": "--maglev-untagged-phis", "app_name": "d8", "probability": 0.5},
     {"app_args": "--no-maglev-loop-peeling", "app_name": "d8", "probability": 0.1},
     {"app_args": "--stress-wasm-code-gc", "app_name": "d8", "probability": 0.1},
-    {"app_args": "--lazy", "app_name": "d8", "probability": 0.1},
     {"app_args": "--wasm-staging", "app_name": "d8", "probability": 0.25},
     {"app_args": "--stress-wasm-memory-moving", "app_name": "d8", "probability": 0.1},
     {"app_args": "--stress-scavenger-conservative-object-pinning-random", "app_name": "d8", "probability": 0.1},
@@ -80,5 +80,7 @@
     {"app_args": "--proto-assign-seq-lazy-func-opt --proto-assign-seq-opt-count=1", "app_name": "d8", "probability": 0.5},
     {"app_args": "--scavenger-chaos-mode", "app_name": "d8", "probability": 0.1},
     {"app_args": "--private-field-bytecodes", "app_name": "d8", "probability": 0.5},
-    {"app_args": "--stress-branch-hinting", "app_name": "d8", "probability": 0.1}
+    {"app_args": "--stress-branch-hinting", "app_name": "d8", "probability": 0.1},
+    {"app_args": "--verify-bytecode-full", "app_name": "d8", "probability": 0.4, "contradicts": ["--verify-bytecode-light"]},
+    {"app_args": "--verify-bytecode-light", "app_name": "d8", "probability": 0.4, "contradicts": ["--verify-bytecode-full"]}
 ]

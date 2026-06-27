@@ -20,6 +20,7 @@
 #include "src/common/message-template.h"
 #include "src/common/scoped-modification.h"
 #include "src/compiler-dispatcher/lazy-compile-dispatcher.h"
+#include "src/heap/local-heap-inl.h"
 #include "src/heap/parked-scope.h"
 #include "src/logging/counters.h"
 #include "src/logging/log.h"
@@ -30,6 +31,7 @@
 #include "src/parsing/parse-info.h"
 #include "src/parsing/rewriter.h"
 #include "src/runtime/runtime.h"
+#include "src/sandbox/sandbox-malloc.h"
 #include "src/strings/char-predicates-inl.h"
 #include "src/strings/string-stream.h"
 #include "src/strings/unicode-inl.h"
@@ -422,9 +424,8 @@ const AstRawString* Parser::GetBigIntAsSymbol() {
   if (literal[0] != '0' || literal.length() == 1) {
     return ast_value_factory()->GetOneByteString(literal);
   }
-  std::unique_ptr<char[]> decimal =
-      BigIntLiteralToDecimal(local_isolate_, literal);
-  return ast_value_factory()->GetOneByteString(decimal.get());
+  auto [decimal, length] = BigIntLiteralToDecimal(local_isolate_, literal);
+  return ast_value_factory()->GetOneByteString({decimal.get(), length});
 }
 
 Expression* Parser::BuildUnaryExpression(Expression* expression,
@@ -2781,13 +2782,13 @@ void Parser::DeclareArrowFunctionFormalParameters(
 }
 
 void Parser::ReindexArrowFunctionFormalParameters(
-    ParserFormalParameters* parameters) {
+    ParserFormalParameters* parameters, const AllowReindexScope& scope) {
   // Make space for the arrow function above the formal parameters.
   AstFunctionLiteralIdReindexer reindexer(stack_limit_, 1);
   for (auto p : parameters->params) {
-    if (p->pattern != nullptr) reindexer.Reindex(p->pattern);
+    if (p->pattern != nullptr) reindexer.Reindex(p->pattern, scope);
     if (p->initializer() != nullptr) {
-      reindexer.Reindex(p->initializer());
+      reindexer.Reindex(p->initializer(), scope);
     }
     if (reindexer.HasStackOverflow()) {
       reindexer.ClearStackOverflow();
@@ -2797,11 +2798,12 @@ void Parser::ReindexArrowFunctionFormalParameters(
   }
 }
 
-void Parser::ReindexComputedMemberName(Expression* computed_name) {
+void Parser::ReindexComputedMemberName(Expression* computed_name,
+                                       const AllowReindexScope& scope) {
   // Make space for the member initializer function above the computed property
   // name.
   AstFunctionLiteralIdReindexer reindexer(stack_limit_, 1);
-  reindexer.Reindex(computed_name);
+  reindexer.Reindex(computed_name, scope);
   if (reindexer.HasStackOverflow()) {
     reindexer.ClearStackOverflow();
     set_stack_overflow();
@@ -2956,7 +2958,11 @@ FunctionLiteral* Parser::ParseFunctionLiteral(
   DeclarationScope* scope = NewFunctionScope(kind, parse_zone);
   SetLanguageMode(scope, language_mode);
   if (function_syntax_kind == FunctionSyntaxKind::kDeclaration) {
-    scope->set_is_hoisted_in_context(true);
+    if (flags().is_reparse()) {
+      scope->set_is_hoisted_in_context(flags().is_hoisted_in_context());
+    } else {
+      scope->set_is_hoisted_in_context(true);
+    }
   }
   if (is_wrapped) {
     scope->set_is_wrapped_function();
@@ -3118,6 +3124,7 @@ bool Parser::SkipFunction(int function_literal_id,
 
   reusable_preparser()->set_has_generator_in_scope_chain(
       has_generator_in_scope_chain());
+  reusable_preparser()->set_max_drift(this->max_drift());
   PreParser::PreParseResult result = reusable_preparser()->PreParseFunction(
       function_literal_id, function_name, kind, function_syntax_kind,
       function_scope, use_counts_, produced_preparse_data);
@@ -3605,7 +3612,7 @@ void Parser::HandleDebugMagicComments(IsolateT* isolate,
   // The API can provide a source map URL and the API should take precedence.
   // Let's make sure we do not override the API with the magic comment.
   if (!source_mapping_url.is_null() &&
-      IsUndefined(script->source_mapping_url(), isolate)) {
+      IsUndefined(script->source_mapping_url())) {
     script->set_source_mapping_url(*source_mapping_url);
   }
 
@@ -3780,12 +3787,13 @@ Expression* Parser::CloseTemplateLiteral(TemplateLiteralState* state, int start,
 
 void Parser::SetLanguageMode(Scope* scope, LanguageMode mode) {
   v8::Isolate::UseCounterFeature feature;
-  if (is_sloppy(mode))
+  if (is_sloppy(mode)) {
     feature = v8::Isolate::kSloppyMode;
-  else if (is_strict(mode))
+  } else if (is_strict(mode)) {
     feature = v8::Isolate::kStrictMode;
-  else
+  } else {
     UNREACHABLE();
+  }
   ++use_counts_[feature];
   scope->SetLanguageMode(mode);
 }

@@ -4579,12 +4579,13 @@ UNINITIALIZED_TEST(SerializeContextData) {
         // provided), but in the wide pointer case we don't actually know
         // whether it's a pointer or a Smi, so we just let these values pass
         // through.
-        if (V8_ENABLE_SANDBOX_BOOL)
+        if (V8_ENABLE_SANDBOX_BOOL) {
           CHECK_NULL(
               context->GetAlignedPointerFromEmbedderData(1, kRawDataTag));
-        else
+        } else {
           CHECK_EQ(raw_data,
                    context->GetAlignedPointerFromEmbedderData(1, kRawDataTag));
+        }
       }
       isolate->Dispose();
     }
@@ -6079,7 +6080,7 @@ void CheckInfosAreWeak(Tagged<WeakFixedArray> sfis, Isolate* isolate) {
     Tagged<HeapObject> heap_object;
     CHECK(!maybe_object.GetHeapObjectIfWeak(isolate, &heap_object) ||
           (maybe_object.GetHeapObjectIfStrong(&heap_object) &&
-           IsUndefined(heap_object, isolate)) ||
+           IsUndefined(heap_object)) ||
           Is<SharedFunctionInfo>(heap_object) || Is<ScopeInfo>(heap_object));
     if (maybe_object.IsWeak()) {
       ++no_of_weak;

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "include/v8-fast-api-calls.h"
 #include "src/api/api-inl.h"
 #include "src/base/macros.h"
 #include "src/common/assert-scope.h"
@@ -149,7 +150,7 @@ Tagged<FunctionTemplateRareData>
 FunctionTemplateInfo::AllocateFunctionTemplateRareData(
     Isolate* isolate,
     DirectHandle<FunctionTemplateInfo> function_template_info) {
-  DCHECK(IsUndefined(function_template_info->rare_data(kAcquireLoad), isolate));
+  DCHECK(IsUndefined(function_template_info->rare_data(kAcquireLoad)));
   DirectHandle<FunctionTemplateRareData> rare_data =
       isolate->factory()->NewFunctionTemplateRareData();
   function_template_info->set_rare_data(*rare_data, kReleaseStore);
@@ -168,7 +169,7 @@ std::optional<Tagged<Name>> FunctionTemplateInfo::TryGetCachedPropertyName(
   // Check if the accessor uses a cached property.
   Tagged<Object> maybe_name =
       Cast<FunctionTemplateInfo>(getter)->cached_property_name();
-  if (IsTheHole(maybe_name, isolate)) return {};
+  if (IsTheHole(maybe_name)) return {};
   return Cast<Name>(maybe_name);
 }
 
@@ -180,9 +181,12 @@ uint32_t FunctionTemplateInfo::GetCFunctionsCount() const {
 CFunctionWithSignature FunctionTemplateInfo::GetCFunction(
     uint32_t index) const {
   i::DisallowGarbageCollection no_gc;
-  return *Cast<Managed<CFunctionWithSignature>>(
-              Cast<FixedArray>(GetCFunctionOverloads())->get(index))
-              ->raw(no_gc);
+  const CFunction* c_function = reinterpret_cast<const CFunction*>(
+      Cast<Foreign>(Cast<FixedArray>(GetCFunctionOverloads())->get(index))
+          ->template foreign_address<kCFunctionTag>());
+  return CFunctionWithSignature(
+      reinterpret_cast<Address>(c_function->GetAddress()),
+      c_function->GetTypeInfo());
 }
 
 // static
@@ -346,7 +350,7 @@ DirectHandle<JSObject> DictionaryTemplateInfo::NewInstance(
           isolate, property_names, property_values, num_properties_set);
     }
     JSObject::MigrateToMap(isolate, object, current_map);
-    PropertyDetails details = current_map->GetLastDescriptorDetails(isolate);
+    PropertyDetails details = current_map->GetLastDescriptorDetails();
     object->WriteToField(InternalIndex(current_property_index), details,
                          *value);
     current_property_index++;

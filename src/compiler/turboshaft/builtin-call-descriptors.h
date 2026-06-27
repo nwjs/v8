@@ -142,7 +142,6 @@ struct builtin : CallDescriptorBuilder {
     struct Arguments : ArgumentsBase {
       ARG(V<Object>, object)
       ARG(V<Smi>, type)
-      ARG(V<Smi>, allow_widening_smi_to_int32)
     };
     using returns_t = std::tuple<V<Object>>;
 
@@ -315,6 +314,20 @@ struct builtin : CallDescriptorBuilder {
       FindOrderedHashEntry<Builtin::kFindOrderedHashMapEntry>;
   using FindOrderedHashSetEntry =
       FindOrderedHashEntry<Builtin::kFindOrderedHashSetEntry>;
+
+  struct WeakMapLookupHashIndex : public Descriptor<WeakMapLookupHashIndex> {
+    static constexpr auto kFunction = Builtin::kWeakMapLookupHashIndex;
+    struct Arguments : ArgumentsBase {
+      ARG(V<EphemeronHashTable>, table)
+      ARG(V<Object>, key)
+    };
+    using returns_t = std::tuple<V<Smi>>;
+
+    static constexpr bool kCanTriggerLazyDeopt = false;
+    static constexpr bool kNeedsContext = true;
+    static constexpr Operator::Properties kProperties = Operator::kEliminatable;
+    static constexpr OpEffects kEffects = base_effects.CanReadMemory();
+  };
 
   template <Builtin B>
   struct GrowFastElements : public Descriptor<GrowFastElements<B>> {
@@ -586,6 +599,24 @@ struct builtin : CallDescriptorBuilder {
                                               .CanAllocateWithoutIdentity()
                                               .CanDependOnChecks();
   };
+
+  struct StringFastLocaleCompare : public Descriptor<StringFastLocaleCompare> {
+    static constexpr auto kFunction = Builtin::kStringFastLocaleCompare;
+    struct Arguments : ArgumentsBase {
+      ARG(V<JSFunction>, locale_compare_fn)
+      ARG(V<Object>, left)
+      ARG(V<Object>, right)
+      ARG(V<StringOrUndefined>, locales)
+    };
+    using returns_t = std::tuple<V<Smi>>;
+
+    static constexpr bool kCanTriggerLazyDeopt = true;
+    static constexpr bool kNeedsContext = true;
+    static constexpr Operator::Properties kProperties = Operator::kNoProperties;
+    // The bailout calls back into JS via String.prototype.localeCompare, so
+    // worst-case effects.
+    static constexpr OpEffects kEffects = base_effects.CanCallAnything();
+  };
 #endif  // V8_INTL_SUPPORT
 
   struct StringToNumber : public Descriptor<StringToNumber> {
@@ -787,6 +818,22 @@ struct builtin : CallDescriptorBuilder {
     static constexpr OpEffects kEffects = base_effects.RequiredWhenUnused();
   };
 #endif  // V8_ENABLE_WEBASSEMBLY
+
+  struct LoadIC : public Descriptor<LoadIC> {
+    static constexpr auto kFunction = Builtin::kLoadIC;
+    struct Arguments : ArgumentsBase {
+      ARG(V<Object>, object)
+      ARG(V<Name>, name)
+      ARG(V<Object>, slot)
+      ARG(V<HeapObject>, vector)
+    };
+    using returns_t = std::tuple<V<JSAny>>;
+
+    static constexpr bool kCanTriggerLazyDeopt = true;
+    static constexpr bool kNeedsContext = true;
+    static constexpr Operator::Properties kProperties = Operator::kNoProperties;
+    static constexpr OpEffects kEffects = base_effects.CanCallAnything();
+  };
 };
 
 // TODO(nicohartmann): These call descriptors are deprecated and shall be
@@ -961,7 +1008,7 @@ struct BuiltinCallDescriptor {
     static constexpr bool kNeedsFrameState = false;
     static constexpr bool kNeedsContext = true;
     static constexpr Operator::Properties kProperties =
-        Operator::kNoDeopt | Operator::kNoThrow;
+        Operator::kNoDeopt | Operator::kNoWrite;
     static constexpr OpEffects kEffects =
         base_effects.CanReadMemory().CanAllocateWithoutIdentity();
   };
@@ -1018,7 +1065,8 @@ struct BuiltinCallDescriptor {
 
   struct WasmRefFunc : public Descriptor<WasmRefFunc> {
     static constexpr auto kFunction = Builtin::kWasmRefFunc;
-    using arguments_t = std::tuple<V<Word32>, V<Word32>>;
+    using arguments_t =
+        std::tuple<V<WasmTrustedInstanceData>, V<Word32>, V<Word32>>;
     using results_t = std::tuple<V<WasmFuncRef>>;
 
     static constexpr bool kNeedsFrameState = false;

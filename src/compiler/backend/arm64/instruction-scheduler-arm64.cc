@@ -15,6 +15,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
   switch (instr->arch_opcode()) {
     case kArm64Add:
     case kArm64Add32:
+    case kArm64Add128:
+    case kArm64Sub128:
     case kArm64And:
     case kArm64And32:
     case kArm64Bic:
@@ -236,17 +238,17 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArm64INeg:
     case kArm64Mla:
     case kArm64Mls:
+    case kArm64IShll:
     case kArm64IShl:
     case kArm64IShrS:
     case kArm64IShrU:
-    case kArm64I64x2Mul:
+    case kArm64IMul:
     case kArm64I64x2BitMask:
     case kArm64I32x4SConvertF32x4:
     case kArm64Sxtl:
     case kArm64Sxtl2:
     case kArm64Uxtl:
     case kArm64Uxtl2:
-    case kArm64I32x4Mul:
     case kArm64I32x4UConvertF32x4:
     case kArm64I32x4BitMask:
     case kArm64I32x4DotI8x16AddS:
@@ -260,7 +262,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArm64IExtractLaneU:
     case kArm64IExtractLaneS:
     case kArm64I16x8SConvertI32x4:
-    case kArm64I16x8Mul:
     case kArm64I16x8UConvertI32x4:
     case kArm64I16x8Q15MulRSatS:
     case kArm64I16x8BitMask:
@@ -296,6 +297,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArm64I8x16Swizzle:
     case kArm64I8x16Shuffle:
     case kArm64S128Extract:
+    case kArm64S128ExtractNarrow:
     case kArm64V128AnyTrue:
     case kArm64AllTrue:
     case kArm64RoundingAverageU:

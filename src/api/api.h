@@ -336,8 +336,9 @@ class HandleScopeImplementer {
 
     ~EnteredContextRewindScope() {
       DCHECK_LE(saved_entered_context_count_, hsi_->EnteredContextCount());
-      while (saved_entered_context_count_ < hsi_->EnteredContextCount())
+      while (saved_entered_context_count_ < hsi_->EnteredContextCount()) {
         hsi_->LeaveContext();
+      }
     }
 
    private:
@@ -397,6 +398,7 @@ class HandleScopeImplementer {
     saved_contexts_.detach();
     spare_ = nullptr;
     last_handle_before_persistent_block_.reset();
+    isolate_->set_last_entered_context(Tagged<NativeContext>());
   }
 
   void Free() {
@@ -463,6 +465,9 @@ bool HandleScopeImplementer::HasSavedContexts() {
 void HandleScopeImplementer::LeaveContext() {
   DCHECK(!entered_contexts_.empty());
   entered_contexts_.pop_back();
+  isolate_->set_last_entered_context(entered_contexts_.empty()
+                                         ? Tagged<NativeContext>()
+                                         : entered_contexts_.back());
 }
 
 bool HandleScopeImplementer::LastEnteredContextWas(

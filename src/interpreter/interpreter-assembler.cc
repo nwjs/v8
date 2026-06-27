@@ -7,6 +7,7 @@
 #include <limits>
 #include <ostream>
 
+#include "src/base/logging.h"
 #include "src/builtins/builtins-inl.h"
 #include "src/codegen/code-stub-assembler-inl.h"
 #include "src/codegen/interface-descriptors-inl.h"
@@ -541,6 +542,7 @@ TNode<Int32T> InterpreterAssembler::BytecodeSignedOperand(
     case OperandSize::kNone:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 TNode<Uint32T> InterpreterAssembler::BytecodeUnsignedOperand(
@@ -557,6 +559,7 @@ TNode<Uint32T> InterpreterAssembler::BytecodeUnsignedOperand(
     case OperandSize::kNone:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 TNode<Uint32T> InterpreterAssembler::BytecodeOperandCount(int operand_index) {
@@ -770,7 +773,8 @@ TNode<IntPtrT> InterpreterAssembler::BytecodeOperandOffset(int operand_index) {
 TNode<Object> InterpreterAssembler::LoadConstantPoolEntry(TNode<WordT> index) {
   TNode<TrustedFixedArray> constant_pool =
       LoadProtectedPointerField<TrustedFixedArray>(
-          BytecodeArrayTaggedPointer(), BytecodeArray::kConstantPoolOffset);
+          BytecodeArrayTaggedPointer(),
+          offsetof(BytecodeArray, constant_pool_));
   return CAST(LoadArrayElement(constant_pool,
                                OFFSET_OF_DATA_START(TrustedFixedArray),
                                UncheckedCast<IntPtrT>(index), 0));
@@ -1047,7 +1051,7 @@ TNode<Object> InterpreterAssembler::ConstructWithSpread(
           // Check that the JSFunction {current} is in the current native
           // context.
           TNode<Context> current_context =
-              CAST(LoadObjectField(current, JSFunction::kContextOffset));
+              CAST(LoadObjectField(current, offsetof(JSFunction, context_)));
           TNode<NativeContext> current_native_context =
               LoadNativeContext(current_context);
           Branch(
@@ -1059,7 +1063,7 @@ TNode<Object> InterpreterAssembler::ConstructWithSpread(
         {
           // Continue with the [[BoundTargetFunction]] of {current}.
           var_current = LoadObjectField<HeapObject>(
-              current, JSBoundFunction::kBoundTargetFunctionOffset);
+              current, offsetof(JSBoundFunction, bound_target_function_));
           Goto(&loop);
         }
       }
@@ -1158,8 +1162,8 @@ InterpreterAssembler::CallRuntimeN(TNode<Uint32T> function_id,
 TNode<Int32T> InterpreterAssembler::UpdateInterruptBudget(
     TNode<Int32T> weight) {
   TNode<JSFunction> function = LoadFunctionClosure();
-  TNode<FeedbackCell> feedback_cell =
-      LoadObjectField<FeedbackCell>(function, JSFunction::kFeedbackCellOffset);
+  TNode<FeedbackCell> feedback_cell = LoadObjectField<FeedbackCell>(
+      function, offsetof(JSFunction, feedback_cell_));
   TNode<Int32T> old_budget = LoadObjectField<Int32T>(
       feedback_cell, offsetof(FeedbackCell, interrupt_budget_));
 
@@ -1467,9 +1471,10 @@ void InterpreterAssembler::UpdateInterruptBudgetOnReturn() {
 TNode<Int8T> InterpreterAssembler::LoadOsrState(
     TNode<FeedbackVector> feedback_vector) {
   // We're loading an 8-bit field, mask it.
-  return UncheckedCast<Int8T>(Word32And(
-      LoadObjectField<Int8T>(feedback_vector, FeedbackVector::kOsrStateOffset),
-      0xFF));
+  return UncheckedCast<Int8T>(
+      Word32And(LoadObjectField<Int8T>(feedback_vector,
+                                       offsetof(FeedbackVector, osr_state_)),
+                0xFF));
 }
 
 void InterpreterAssembler::Abort(AbortReason abort_reason) {
@@ -1540,7 +1545,7 @@ void InterpreterAssembler::OnStackReplacement(
     BIND(&maybe_osr_to_opt);
     {
       TNode<Uint16T> flags = LoadObjectField<Uint16T>(
-          feedback_vector, FeedbackVector::kFlagsOffset);
+          feedback_vector, offsetof(FeedbackVector, flags_));
       TNode<Word32T> in_progress = Word32And(
           flags, Int32Constant(FeedbackVector::OsrTieringInProgressBit::kMask));
       GotoIf(Word32Equal(in_progress, 0), &osr_to_opt);
@@ -1554,7 +1559,7 @@ void InterpreterAssembler::OnStackReplacement(
     } else {
       DCHECK_EQ(params, OnStackReplacementParams::kDefault);
       TNode<SharedFunctionInfo> sfi = LoadObjectField<SharedFunctionInfo>(
-          LoadFunctionClosure(), JSFunction::kSharedFunctionInfoOffset);
+          LoadFunctionClosure(), offsetof(JSFunction, shared_function_info_));
       GotoIfSharedFunctionInfoHasBaselineCode(sfi, &osr_to_sparkplug);
       JumpBackward(relative_jump);
     }

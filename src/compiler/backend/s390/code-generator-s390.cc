@@ -13,6 +13,9 @@
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/osr.h"
 #include "src/heap/mutable-page.h"
+#include "src/objects/js-function-inl.h"
+#include "src/objects/shared-function-info-inl.h"
+#include "src/sandbox/js-dispatch-table-inl.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-linkage.h"
@@ -1347,8 +1350,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         Register func = i.InputRegister(0);
         if (v8_flags.debug_code) {
           // Check the function's context matches the context argument.
-          __ LoadTaggedField(kScratchReg,
-                             FieldMemOperand(func, JSFunction::kContextOffset));
+          __ LoadTaggedField(
+              kScratchReg,
+              FieldMemOperand(func, offsetof(JSFunction, context_)));
           __ CmpS64(cp, kScratchReg);
           __ Assert(eq, AbortReason::kWrongFunctionContext);
         }
@@ -2386,9 +2390,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           is_uint12(operand.offset())) {
         __ vlbr(dst, operand, Condition(4));
       } else {
-        __ lrvg(r0, operand);
-        __ lrvg(r1, MemOperand(operand.rx(), operand.rb(),
-                               operand.offset() + kSystemPointerSize));
+        __ LoadReversedU64(r0, operand);
+        __ LoadReversedU64(r1,
+                           MemOperand(operand.rx(), operand.rb(),
+                                      operand.offset() + kSystemPointerSize));
         __ vlvgp(dst, r1, r0);
       }
       break;
@@ -2449,9 +2454,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                 Condition(3));
         __ vlgv(r1, i.InputSimd128Register(index), MemOperand(r0, 0),
                 Condition(3));
-        __ strvg(r0, operand);
-        __ strvg(r1, MemOperand(operand.rx(), operand.rb(),
-                                operand.offset() + kSystemPointerSize));
+        __ StoreReversedU64(r0, operand);
+        __ StoreReversedU64(r1,
+                            MemOperand(operand.rx(), operand.rb(),
+                                       operand.offset() + kSystemPointerSize));
       }
       break;
     }
@@ -2719,7 +2725,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // Emit the write barrier.
       Register object = i.InputRegister(2);
       auto ool = zone()->New<OutOfLineRecordWrite>(
-          this, object, op, r1, ip, new_val, RecordWriteMode::kValueIsAny,
+          this, object, op, new_val, ip, r1, RecordWriteMode::kValueIsAny,
           DetermineStubCallMode(), &unwinding_info_writer_);
       __ bne(ool->exit());
       __ JumpIfSmi(new_val, ool->exit());

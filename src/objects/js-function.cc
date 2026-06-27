@@ -98,8 +98,7 @@ void JSFunction::TraceOptimizationStatus(const char* format, ...) {
         PrintF(" .");
       } else {
         Tagged<Code> code =
-            Tagged<CodeWrapper>::cast(value.GetHeapObjectAssumeWeak())
-                ->code(isolate);
+            Cast<CodeWrapper>(value.GetHeapObjectAssumeWeak())->code(isolate);
         PrintF(" %i:", code->osr_offset().ToInt());
         if (code->kind() == CodeKind::MAGLEV) {
           PrintF("m");
@@ -270,14 +269,14 @@ void JSFunction::RequestOptimization(Isolate* isolate, CodeKind target_kind,
     if (tiering_in_progress()) {
       if (v8_flags.trace_concurrent_recompilation) {
         PrintF("  ** Not marking ");
-        ShortPrint(Tagged<HeapObject>(this));
+        ShortPrint(this);
         PrintF(" -- already in optimization queue.\n");
       }
       return;
     }
     if (v8_flags.trace_concurrent_recompilation) {
       PrintF("  ** Marking ");
-      ShortPrint(Tagged<HeapObject>(this));
+      ShortPrint(this);
       PrintF(" for concurrent %s recompilation.\n",
              CodeKindToString(target_kind));
     }
@@ -322,7 +321,7 @@ void JSFunction::SetInterruptBudget(
     std::optional<CodeKind> override_active_tier) {
   int32_t current = raw_feedback_cell()->interrupt_budget();
   int32_t new_budget =
-      TieringManager::InterruptBudgetFor(isolate, *this, override_active_tier);
+      TieringManager::InterruptBudgetFor(isolate, this, override_active_tier);
   switch (kind) {
     case BudgetModification::kRaise:
       new_budget = std::max(current, new_budget);
@@ -690,8 +689,7 @@ void JSFunction::CreateAndAttachFeedbackVector(
       function->closure_feedback_cell_array(), isolate);
   DirectHandle<FeedbackVector> feedback_vector = FeedbackVector::New(
       isolate, shared, closure_feedback_cell_array,
-      direct_handle(function->raw_feedback_cell(isolate), isolate),
-      compiled_scope);
+      direct_handle(function->raw_feedback_cell(), isolate), compiled_scope);
   USE(feedback_vector);
   // EnsureClosureFeedbackCellArray should handle the special case where we need
   // to allocate a new feedback cell. Please look at comment in that function
@@ -1355,7 +1353,7 @@ bool UseFastFunctionNameLookup(Isolate* isolate, Tagged<Map> map) {
   DCHECK(!map->is_dictionary_map());
   Tagged<HeapObject> value;
   ReadOnlyRoots roots(isolate);
-  auto descriptors = map->instance_descriptors(isolate);
+  auto descriptors = map->instance_descriptors();
   InternalIndex kNameIndex{JSFunction::kNameDescriptorIndex};
   if (descriptors->GetKey(kNameIndex) != roots.name_string() ||
       !descriptors->GetValue(kNameIndex)
@@ -1368,7 +1366,8 @@ bool UseFastFunctionNameLookup(Isolate* isolate, Tagged<Map> map) {
 }  // namespace
 
 DirectHandle<String> JSFunction::GetDebugName(
-    Isolate* isolate, DirectHandle<JSFunction> function) {
+    Isolate* isolate, DirectHandle<JSFunction> function,
+    AllowAllocation allow_allocation) {
   // Below we use the same fast-path that we already established for
   // Function.prototype.bind(), where we avoid a slow "name" property
   // lookup if the DescriptorArray for the |function| still has the
@@ -1388,7 +1387,7 @@ DirectHandle<String> JSFunction::GetDebugName(
     if (IsString(*name)) return Cast<String>(name);
   }
   return SharedFunctionInfo::DebugName(
-      isolate, direct_handle(function->shared(), isolate));
+      isolate, direct_handle(function->shared(), isolate), allow_allocation);
 }
 
 bool JSFunction::SetName(Isolate* isolate, DirectHandle<JSFunction> function,

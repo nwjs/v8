@@ -4,6 +4,8 @@
 
 #include <json/json.h>
 
+#include "src/objects/hash-table-inl.h"
+#include "src/objects/js-collection-inl.h"
 #include "src/profiler/heap-profiler.h"
 #include "src/profiler/heap-snapshot-generator.h"
 #include "test/unittests/profiler/heap-snapshot-utils.h"
@@ -74,10 +76,11 @@ TEST_F(HeapSnapshotTest, PositionOnSharedFunctionInfo) {
   const HeapEntry* lazy = nullptr;
   for (const HeapEntry& entry : snapshot->entries()) {
     if (entry.type() == HeapEntry::kClosure) {
-      if (strcmp(entry.name(), "compiled") == 0)
+      if (strcmp(entry.name(), "compiled") == 0) {
         compiled = &entry;
-      else if (strcmp(entry.name(), "lazy") == 0)
+      } else if (strcmp(entry.name(), "lazy") == 0) {
         lazy = &entry;
+      }
     }
   }
   CHECK_NOT_NULL(compiled);
@@ -168,10 +171,11 @@ TEST_F(HeapSnapshotTest, ScopeInfoProperties) {
   const HeapEntry* f_closure = nullptr;
   for (const HeapEntry& entry : snapshot->entries()) {
     if (entry.type() == HeapEntry::kClosure) {
-      if (strcmp(entry.name(), "g_func") == 0)
+      if (strcmp(entry.name(), "g_func") == 0) {
         g_closure = &entry;
-      else if (strcmp(entry.name(), "f_func") == 0)
+      } else if (strcmp(entry.name(), "f_func") == 0) {
         f_closure = &entry;
+      }
     }
   }
   ASSERT_NE(nullptr, g_closure);
@@ -407,4 +411,190 @@ TEST_F(HeapSnapshotTest, StringProperties) {
   EXPECT_EQ(HeapEntry::kSlicedString, sliced->type());
   EXPECT_TRUE(HasNamedEdge(*sliced, "parent"));
 }
+
+TEST_F(HeapSnapshotTest, ScriptName) {
+  v8::HandleScope scope(v8_isolate());
+  v8::Local<v8::Context> context = v8_context();
+
+  // 1. Anonymous script
+  RunJS("const anonymous_script_var = 1;");
+
+  // 2. Named script
+  v8::Local<v8::String> source = NewString("const named_script_var = 2;");
+  v8::Local<v8::String> origin_url = NewString("foo.js");
+  v8::Local<v8::Script> v8_script =
+      CompileWithOrigin(source, origin_url, false);
+  std::ignore = v8_script->Run(context);
+
+  // Extract the internal Script object for the named script.
+  i::Handle<i::JSFunction> fun = v8::Utils::OpenHandle(*v8_script);
+  Tagged<Object> script_obj = fun->shared()->script();
+  ASSERT_TRUE(IsScript(script_obj));
+  Tagged<Script> script = Cast<Script>(script_obj);
+
+  HeapSnapshot* snapshot = TakeHeapSnapshot();
+
+  // Verify the named Script entry in the snapshot.
+  const HeapEntry* entry = GetEntryFor(i_isolate(), snapshot, script);
+  ASSERT_NE(nullptr, entry);
+  EXPECT_EQ(HeapEntry::kCode, entry->type());
+  EXPECT_STREQ("system / Script / foo.js", entry->name());
+
+  // Verify that at least one anonymous Script entry exists.
+  const HeapEntry* anonymous_entry =
+      GetEntryByName(snapshot, "system / Script");
+  ASSERT_NE(nullptr, anonymous_entry);
+  EXPECT_EQ(HeapEntry::kCode, anonymous_entry->type());
+}
+
+TEST_F(HeapSnapshotTest, LongScriptName) {
+  v8::HandleScope scope(v8_isolate());
+  v8::Local<v8::Context> context = v8_context();
+
+  // Set string limit to unlimited to allow very long names.
+  v8_flags.heap_snapshot_string_limit = 0;
+  // Re-initialize StringsStorage to pick up the new flag value.
+  i_isolate()->heap()->heap_profiler()->DeleteAllSnapshots();
+
+  // Create a 5000-character script name.
+  std::string long_name_str(5000, 'a');
+  v8::Local<v8::String> source = NewString("const long_script_var = 3;");
+  v8::Local<v8::String> origin_url = NewString(long_name_str.c_str());
+  v8::Local<v8::Script> v8_script =
+      CompileWithOrigin(source, origin_url, false);
+  std::ignore = v8_script->Run(context);
+
+  // Extract the internal Script object.
+  i::Handle<i::JSFunction> fun = v8::Utils::OpenHandle(*v8_script);
+  Tagged<Object> script_obj = fun->shared()->script();
+  ASSERT_TRUE(IsScript(script_obj));
+  Tagged<Script> script = Cast<Script>(script_obj);
+
+  HeapSnapshot* snapshot = TakeHeapSnapshot();
+
+  // Verify the Script entry in the snapshot.
+  const HeapEntry* entry = GetEntryFor(i_isolate(), snapshot, script);
+  ASSERT_NE(nullptr, entry);
+  EXPECT_EQ(HeapEntry::kCode, entry->type());
+
+  // The name should start with the prefix, but be truncated to 4095 characters.
+  std::string expected_prefix = "system / Script / ";
+  EXPECT_EQ(0, strncmp(entry->name(), expected_prefix.c_str(),
+                       expected_prefix.length()));
+  EXPECT_EQ(4095u, strlen(entry->name()));
+  // It should NOT be the raw format string.
+  EXPECT_STRNE("%s / %s", entry->name());
+}
+
+TEST_F(HeapSnapshotTest, EphemeronHashTableEdges) {
+  HandleScope scope(i_isolate());
+
+  v8::Local<v8::Value> weak_map_val =
+      RunJS("const weak_map = new WeakMap(); weak_map");
+  v8::Local<v8::Value> key_val = RunJS("const key = {name: 'my_key'}; key");
+  v8::Local<v8::Value> val_val = RunJS("const val = {name: 'my_val'}; val");
+
+  Handle<JSWeakMap> weak_map =
+      Cast<JSWeakMap>(v8::Utils::OpenHandle(*weak_map_val));
+  Handle<JSObject> key = Cast<JSObject>(v8::Utils::OpenHandle(*key_val));
+  Handle<JSObject> val = Cast<JSObject>(v8::Utils::OpenHandle(*val_val));
+
+  RunJS("weak_map.set(key, val);");
+
+  HeapSnapshot* snapshot = TakeHeapSnapshot();
+
+  const HeapEntry* weak_map_entry =
+      GetEntryFor(i_isolate(), snapshot, *weak_map);
+  const HeapEntry* key_entry = GetEntryFor(i_isolate(), snapshot, *key);
+  const HeapEntry* val_entry = GetEntryFor(i_isolate(), snapshot, *val);
+
+  ASSERT_NE(nullptr, weak_map_entry);
+  ASSERT_NE(nullptr, key_entry);
+  ASSERT_NE(nullptr, val_entry);
+
+  // The WeakMap has 3 edges: map + proto + table.
+  EXPECT_EQ(3, weak_map_entry->children_count());
+  EXPECT_EQ(nullptr, FindFirstEdgeTo(*weak_map_entry, *key_entry));
+  EXPECT_EQ(nullptr, FindFirstEdgeTo(*weak_map_entry, *val_entry));
+
+  Tagged<EphemeronHashTable> table =
+      Cast<EphemeronHashTable>(weak_map->table());
+  const HeapEntry* table_entry = GetEntryFor(i_isolate(), snapshot, table);
+  ASSERT_NE(nullptr, table_entry);
+
+  // There should be exactly 2 edges: 1) the map and 2) the ephemeron edge from
+  // table -> value.
+  EXPECT_EQ(2, table_entry->children_count());
+
+  // Verify that there are NO edges from table to key.
+  const HeapGraphEdge* table_to_key_edge =
+      FindFirstEdgeTo(*table_entry, *key_entry);
+  EXPECT_EQ(nullptr, table_to_key_edge);
+
+  std::string expected_name =
+      " / part of key (" + std::string(key_entry->name()) + " @" +
+      std::to_string(key_entry->id()) + ") -> value (" +
+      std::string(val_entry->name()) + " @" + std::to_string(val_entry->id()) +
+      ") pair in WeakMap (table @" + std::to_string(table_entry->id()) + ")";
+
+  // Verify that the only edge from table to val is the ephemeron edge.
+  const HeapGraphEdge* table_to_val_edge =
+      FindFirstEdgeTo(*table_entry, *val_entry);
+  ASSERT_NE(nullptr, table_to_val_edge);
+  EXPECT_EQ(HeapGraphEdge::kInternal, table_to_val_edge->type());
+  EXPECT_TRUE(
+      std::string_view(table_to_val_edge->name()).ends_with(expected_name));
+
+  // Verify that the edge from key to val is the ephemeron edge.
+  const HeapGraphEdge* key_to_val_edge =
+      FindFirstEdgeTo(*key_entry, *val_entry);
+  ASSERT_NE(nullptr, key_to_val_edge);
+  EXPECT_EQ(HeapGraphEdge::kInternal, key_to_val_edge->type());
+  EXPECT_TRUE(
+      std::string_view(key_to_val_edge->name()).ends_with(expected_name));
+}
+
+#if V8_CAN_CREATE_SHARED_HEAP_BOOL && !COMPRESS_POINTERS_IN_MULTIPLE_CAGES_BOOL
+using HeapSnapshotSharedHeapTest = TestJSSharedMemoryWithIsolate;
+
+TEST_F(HeapSnapshotSharedHeapTest, ClientIsolateSnapshot) {
+  IsolateWrapper isolate_wrapper(kNoCounters, false);
+  v8::Isolate* client_isolate = isolate_wrapper.isolate();
+  Isolate* i_client_isolate = reinterpret_cast<Isolate*>(client_isolate);
+  EXPECT_FALSE(i_client_isolate->is_shared_space_isolate());
+
+  v8::Isolate::Scope isolate_scope(client_isolate);
+  HandleScope handle_scope(i_client_isolate);
+  v8::Local<v8::Context> context = v8::Context::New(client_isolate);
+  v8::Context::Scope context_scope(context);
+
+  i_client_isolate->factory()->NewFixedArray(10, AllocationType::kSharedOld);
+
+  HeapProfiler* heap_profiler = i_client_isolate->heap()->heap_profiler();
+  v8::HeapProfiler::HeapSnapshotOptions options;
+  HeapSnapshot* snapshot = heap_profiler->TakeSnapshot(options);
+
+  ASSERT_NE(nullptr, snapshot);
+  EXPECT_GT(snapshot->entries().size(), 0u);
+}
+
+TEST_F(HeapSnapshotSharedHeapTest, MainIsolateSnapshot) {
+  EXPECT_TRUE(i_isolate()->is_shared_space_isolate());
+
+  HandleScope handle_scope(i_isolate());
+  v8::Local<v8::Context> context = v8::Context::New(v8_isolate());
+  v8::Context::Scope context_scope(context);
+
+  i_isolate()->factory()->NewFixedArray(10, AllocationType::kSharedOld);
+
+  HeapProfiler* heap_profiler = i_isolate()->heap()->heap_profiler();
+  v8::HeapProfiler::HeapSnapshotOptions options;
+  HeapSnapshot* snapshot = heap_profiler->TakeSnapshot(options);
+
+  ASSERT_NE(nullptr, snapshot);
+  EXPECT_GT(snapshot->entries().size(), 0u);
+}
+#endif  // V8_CAN_CREATE_SHARED_HEAP_BOOL &&
+        // !COMPRESS_POINTERS_IN_MULTIPLE_CAGES_BOOL
+
 }  // namespace v8::internal

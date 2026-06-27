@@ -1620,12 +1620,13 @@ void BytecodeGenerator::AllocateDeferredConstants(IsolateT* isolate,
   for (std::pair<Call*, Scope*> call : eval_calls_) {
     Tagged<ScopeInfo> current;
     int index = call.first->eval_scope_info_index();
-    if (script->infos()->get(index).GetHeapObjectIfWeak(&current) &&
-        v8_flags.reuse_scope_infos) {
+    if (script->infos()
+            ->get(index, kAcquireLoad)
+            .GetHeapObjectIfWeak(&current)) {
       CHECK_EQ(current, *call.second->scope_info());
     } else {
       script->infos()->set(call.first->eval_scope_info_index(),
-                           MakeWeak(*call.second->scope_info()));
+                           MakeWeak(*call.second->scope_info()), kReleaseStore);
     }
   }
 
@@ -2944,6 +2945,8 @@ void BytecodeGenerator::BuildTryCatch(
   // that is intercepting 'throw' control commands.
   try_control_builder.BeginTry(context);
 
+  ThrowTrackingScope throw_tracker(builder());
+
   HoleCheckElisionMergeScope merge_elider(this);
 
   {
@@ -2963,16 +2966,18 @@ void BytecodeGenerator::BuildTryCatch(
     HoleCheckElisionMergeScope::Branch branch_elider(merge_elider);
     try_body_func();
   }
-  try_control_builder.EndTry();
 
-  {
+  bool emit_catch = throw_tracker.HasEmittedThrowingBytecode() ||
+                    block_coverage_builder_ != nullptr;
+  try_control_builder.EndTry(emit_catch);
+
+  if (emit_catch) {
     HoleCheckElisionMergeScope::Branch branch_elider(merge_elider);
     catch_body_func(context);
+    try_control_builder.EndCatch();
   }
 
   merge_elider.Merge();
-
-  try_control_builder.EndCatch();
 }
 
 template <typename TryBodyFunc, typename FinallyBodyFunc>
@@ -3354,9 +3359,8 @@ void BytecodeGenerator::VisitForOfStatement(ForOfStatement* stmt) {
   // exit, and the 'done' value in a dedicated register so that it can be
   // changed and accessed independently of the iteration result.
   IteratorRecord iterator = BuildGetIteratorRecord(stmt->type());
-  RegisterList output = register_allocator()->NewRegisterList(2);
-  Register next_result = output[0];
-  Register done = output[1];
+  Register next_result = register_allocator()->NewRegister();
+  Register done = register_allocator()->NewRegister();
   builder()->LoadFalse();
   builder()->StoreAccumulatorInRegister(done);
 
@@ -3383,16 +3387,18 @@ void BytecodeGenerator::VisitForOfStatement(ForOfStatement* stmt) {
           if (v8_flags.for_of_optimization &&
               iterator.type() != IteratorType::kAsync) {
             FeedbackSlot call_slot = feedback_spec()->AddCallICSlot();
+            feedback_spec()->AddLoadICSlot();  // iterated_object_slot
             feedback_spec()->AddLoadICSlot();  // value_slot
             feedback_spec()->AddLoadICSlot();  // done_slot
 
             builder()
-                ->ForOfNext(iterator.object(), iterator.next(), output,
+                ->ForOfNext(iterator.object(), iterator.next(),
                             feedback_index(call_slot))
-                .LoadAccumulatorWithRegister(done);
-            // TODO(rezvan): Perform ToBoolean conversion inside ForOfNext.
-            loop_builder.BreakIfTrue(ToBooleanMode::kConvertToBoolean);
+                .StoreAccumulatorInRegister(next_result);
 
+            // TODO(marja): Consider adding a BreakIfHole helper.
+            builder()->LoadTheHole().CompareReference(next_result);
+            loop_builder.BreakIfTrue(ToBooleanMode::kAlreadyBoolean);
           } else {
             BuildIteratorNext(iterator, next_result);
             builder()->LoadNamedProperty(
@@ -3405,13 +3411,15 @@ void BytecodeGenerator::VisitForOfStatement(ForOfStatement* stmt) {
                 ->LoadNamedProperty(
                     next_result, ast_string_constants()->value_string(),
                     feedback_index(feedback_spec()->AddLoadICSlot()));
-            // done = false, before the assignment to each happens, so that done
-            // is false if the assignment throws.
-            builder()
-                ->StoreAccumulatorInRegister(next_result)
-                .LoadFalse()
-                .StoreAccumulatorInRegister(done);
+            builder()->StoreAccumulatorInRegister(next_result);
           }
+
+          // done = false, before the assignment to each happens, so that done
+          // is false if the assignment throws.
+
+          // TODO(marja): consider removing "done" completely and passing
+          // next_result directly to BuildFinalizeIteration.
+          builder()->LoadFalse().StoreAccumulatorInRegister(done);
 
           // Assign to the 'each' target.
           builder()->SetExpressionAsStatementPosition(stmt->each());

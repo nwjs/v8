@@ -196,7 +196,7 @@ Tagged<Smi> ScriptHash(Tagged<String> source,
   DisallowGarbageCollection no_gc;
   size_t hash = base::hash_combine(source->EnsureHash());
   if (DirectHandle<Object> name;
-      maybe_name.ToHandle(&name) && IsString(*name, isolate)) {
+      maybe_name.ToHandle(&name) && IsString(*name)) {
     hash =
         base::hash_combine(hash, Cast<String>(*name)->EnsureHash(), line_offset,
                            column_offset, origin_options.Flags());
@@ -217,14 +217,13 @@ bool ScriptCacheKey::MatchesScript(Tagged<Script> script) {
   // an undefined name to have the same origin.
   Handle<Object> name;
   if (!name_.ToHandle(&name)) {
-    return IsUndefined(script->name(), isolate_);
+    return IsUndefined(script->name());
   }
   // Do the fast bailout checks first.
   if (line_offset_ != script->line_offset()) return false;
   if (column_offset_ != script->column_offset()) return false;
   // Check that both names are strings. If not, no match.
-  if (!IsString(*name, isolate_) || !IsString(script->name(), isolate_))
-    return false;
+  if (!IsString(*name) || !IsString(script->name())) return false;
   // Are the origin_options same?
   if (origin_options_.Flags() != script->origin_options().Flags()) {
     return false;
@@ -409,7 +408,7 @@ CompilationCacheScriptLookupResult CompilationCacheTable::LookupScript(
 
   Tagged<Object> obj = table->PrimaryValueAt(entry);
   Tagged<SharedFunctionInfo> toplevel_sfi;
-  if (!IsUndefined(obj, isolate)) {
+  if (!IsUndefined(obj)) {
     toplevel_sfi = Cast<SharedFunctionInfo>(obj);
     DCHECK_EQ(toplevel_sfi->script(), script);
   }
@@ -461,7 +460,7 @@ Handle<CompilationCacheTable> CompilationCacheTable::EnsureScriptTableCapacity(
     DisallowGarbageCollection no_gc;
     for (InternalIndex entry : cache->IterateEntries()) {
       Tagged<Object> key;
-      if (!cache->ToKey(isolate, entry, &key)) continue;
+      if (!cache->ToKey(entry, &key)) continue;
       if (Cast<WeakFixedArray>(key)
               ->get(ScriptCacheKey::kWeakScript)
               .IsCleared()) {
@@ -481,7 +480,7 @@ DirectHandle<CompilationCacheTable> CompilationCacheTable::PutScript(
   src = String::Flatten(isolate, src);
   DirectHandle<Script> script(Cast<Script>(value->script()), isolate);
   MaybeHandle<Object> script_name;
-  if (IsString(script->name(), isolate)) {
+  if (IsString(script->name())) {
     script_name = handle(script->name(), isolate);
   }
   Handle<FixedArray> host_defined_options(script->host_defined_options(),

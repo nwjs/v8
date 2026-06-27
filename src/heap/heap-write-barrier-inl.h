@@ -18,7 +18,6 @@
 #include "src/heap/memory-chunk.h"
 #include "src/objects/compressed-slots-inl.h"
 #include "src/objects/cpp-heap-object-wrapper.h"
-#include "src/objects/descriptor-array.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/maybe-object-inl.h"
 
@@ -139,7 +138,7 @@ void WriteBarrier::ForValue(Tagged<HeapObject> host, MaybeObjectSlot slot,
 
 // static
 template <typename T>
-void WriteBarrier::ForValue(HeapObjectLayout* host, TaggedMemberBase* slot,
+void WriteBarrier::ForValue(HeapObject* host, TaggedMemberBase* slot,
                             Tagged<T> value, WriteBarrierMode mode) {
   if (IsSkipWriteBarrierMode(mode)) {
 #if V8_VERIFY_WRITE_BARRIERS
@@ -157,7 +156,7 @@ void WriteBarrier::ForValue(HeapObjectLayout* host, TaggedMemberBase* slot,
 
 // static
 template <typename T>
-void WriteBarrier::ForValue(HeapObjectLayout* host, MaybeObjectSlot slot,
+void WriteBarrier::ForValue(HeapObject* host, MaybeObjectSlot slot,
                             Tagged<T> value, WriteBarrierMode mode) {
   if (IsSkipWriteBarrierMode(mode)) {
 #if V8_VERIFY_WRITE_BARRIERS
@@ -274,7 +273,7 @@ void WriteBarrier::ForIndirectPointer(Tagged<HeapObject> host,
 
 // static
 template <typename T, IndirectPointerTagRange kTagRange>
-void WriteBarrier::ForIndirectPointer(HeapObjectLayout* host,
+void WriteBarrier::ForIndirectPointer(HeapObject* host,
                                       TrustedPointerMember<T, kTagRange>* slot,
                                       Tagged<T> value, WriteBarrierMode mode) {
   // Indirect pointers are only used when the sandbox is enabled.
@@ -306,7 +305,7 @@ void WriteBarrier::ForJSDispatchHandle(Tagged<HeapObject> host,
 }
 
 // static
-void WriteBarrier::ForJSDispatchHandle(HeapObjectLayout* host,
+void WriteBarrier::ForJSDispatchHandle(HeapObject* host,
                                        JSDispatchHandle handle,
                                        WriteBarrierMode mode) {
   ForJSDispatchHandle(Tagged(host), handle, mode);
@@ -336,9 +335,8 @@ void WriteBarrier::ForProtectedPointer(Tagged<TrustedObject> host,
 
 // static
 template <typename T>
-void WriteBarrier::ForProtectedPointer(HeapObjectLayout* host,
-                                       TaggedMemberBase* slot, Tagged<T> value,
-                                       WriteBarrierMode mode) {
+void WriteBarrier::ForProtectedPointer(HeapObject* host, TaggedMemberBase* slot,
+                                       Tagged<T> value, WriteBarrierMode mode) {
   // Only a host in trusted space may hold a ProtectedTaggedMember (i.e. a
   // TaggedMember<T, TrustedSpaceCompressionScheme>). The type already implies
   // trusted space, but DCHECK to catch misuse.
@@ -517,7 +515,7 @@ void WriteBarrier::GenerationalBarrierForCppHeapPointer(
 #ifdef V8_VERIFY_WRITE_BARRIERS
 // static
 template <typename T>
-bool WriteBarrier::IsRequired(const HeapObjectLayout* host, T value) {
+bool WriteBarrier::IsRequired(const HeapObject* host, T value) {
   return IsRequiredCommon(host, value);
 }
 
@@ -540,7 +538,7 @@ bool WriteBarrier::IsRequiredCommon(HostType host, ValueType value) {
   if (ReadOnlyHeap::Contains(target)) {
     return false;
   }
-  if constexpr (std::is_same_v<HostType, const HeapObjectLayout*>) {
+  if constexpr (std::is_same_v<HostType, const HeapObject*>) {
     return !IsMostRecentYoungAllocation(host->address());
   } else {
     return !IsMostRecentYoungAllocation(host.address());

@@ -26,6 +26,7 @@
 #include "src/regexp/regexp-interpreter.h"
 #include "src/regexp/regexp-macro-assembler-arch.h"
 #include "src/regexp/regexp-parser.h"
+#include "src/regexp/regexp-stack.h"
 #include "src/strings/char-predicates-inl.h"
 #include "src/strings/string-stream.h"
 #include "src/strings/unicode-inl.h"
@@ -1936,8 +1937,7 @@ TEST_F(RegExpTest, PeepholeSkipUntilChar) {
   const uint32_t length_expected =
       regexp::Bytecodes::Size(REB::kLoadCurrentCharacter) +
       regexp::Bytecodes::Size(REB::kCheckCharacter) +
-      regexp::Bytecodes::Size(REB::kAdvanceCurrentPosition) +
-      regexp::Bytecodes::Size(REB::kGoTo) +
+      regexp::Bytecodes::Size(REB::kAdvanceCpAndGoto) +
       regexp::Bytecodes::Size(REB::kBacktrack);
   const uint32_t length_optimized_expected =
       regexp::Bytecodes::Size(REB::kSkipUntilChar) +
@@ -1997,8 +1997,7 @@ TEST_F(RegExpTest, PeepholeSkipUntilBitInTable) {
   const uint32_t length_expected =
       regexp::Bytecodes::Size(REB::kLoadCurrentCharacter) +
       regexp::Bytecodes::Size(REB::kCheckBitInTable) +
-      regexp::Bytecodes::Size(REB::kAdvanceCurrentPosition) +
-      regexp::Bytecodes::Size(REB::kGoTo) +
+      regexp::Bytecodes::Size(REB::kAdvanceCpAndGoto) +
       regexp::Bytecodes::Size(REB::kBacktrack);
   const uint32_t length_optimized_expected =
       regexp::Bytecodes::Size(REB::kSkipUntilBitInTable) +
@@ -2053,8 +2052,7 @@ TEST_F(RegExpTest, PeepholeSkipUntilCharPosChecked) {
       regexp::Bytecodes::Size(REB::kCheckPosition) +
       regexp::Bytecodes::Size(REB::kLoadCurrentCharacterUnchecked) +
       regexp::Bytecodes::Size(REB::kCheckCharacter) +
-      regexp::Bytecodes::Size(REB::kAdvanceCurrentPosition) +
-      regexp::Bytecodes::Size(REB::kGoTo) +
+      regexp::Bytecodes::Size(REB::kAdvanceCpAndGoto) +
       regexp::Bytecodes::Size(REB::kBacktrack);
   const uint32_t length_optimized_expected =
       regexp::Bytecodes::Size(REB::kSkipUntilCharPosChecked) +
@@ -2108,8 +2106,7 @@ TEST_F(RegExpTest, PeepholeSkipUntilCharAnd) {
       regexp::Bytecodes::Size(REB::kCheckPosition) +
       regexp::Bytecodes::Size(REB::kLoadCurrentCharacterUnchecked) +
       regexp::Bytecodes::Size(REB::kCheckCharacterAfterAnd) +
-      regexp::Bytecodes::Size(REB::kAdvanceCurrentPosition) +
-      regexp::Bytecodes::Size(REB::kGoTo) +
+      regexp::Bytecodes::Size(REB::kAdvanceCpAndGoto) +
       regexp::Bytecodes::Size(REB::kBacktrack);
   const uint32_t length_optimized_expected =
       regexp::Bytecodes::Size(REB::kSkipUntilCharAnd) +
@@ -2165,8 +2162,7 @@ TEST_F(RegExpTest, PeepholeSkipUntilCharOrChar) {
       regexp::Bytecodes::Size(REB::kLoadCurrentCharacter) +
       regexp::Bytecodes::Size(REB::kCheckCharacter) +
       regexp::Bytecodes::Size(REB::kCheckCharacter) +
-      regexp::Bytecodes::Size(REB::kAdvanceCurrentPosition) +
-      regexp::Bytecodes::Size(REB::kGoTo) +
+      regexp::Bytecodes::Size(REB::kAdvanceCpAndGoto) +
       regexp::Bytecodes::Size(REB::kBacktrack);
   const uint32_t length_optimized_expected =
       regexp::Bytecodes::Size(REB::kSkipUntilCharOrChar) +
@@ -2232,8 +2228,7 @@ TEST_F(RegExpTest, PeepholeSkipUntilGtOrNotBitInTable) {
       regexp::Bytecodes::Size(REB::kCheckCharacterGT) +
       regexp::Bytecodes::Size(REB::kCheckBitInTable) +
       regexp::Bytecodes::Size(REB::kGoTo) +
-      regexp::Bytecodes::Size(REB::kAdvanceCurrentPosition) +
-      regexp::Bytecodes::Size(REB::kGoTo) +
+      regexp::Bytecodes::Size(REB::kAdvanceCpAndGoto) +
       regexp::Bytecodes::Size(REB::kBacktrack);
   const uint32_t length_optimized_expected =
       regexp::Bytecodes::Size(REB::kSkipUntilGtOrNotBitInTable) +
@@ -2291,13 +2286,13 @@ TEST_F(RegExpTest, PeepholeLabelFixupsInside) {
 
   CHECK_EQ(0x00, dummy_before.pos());
   CHECK_EQ(0x28, dummy_inside.pos());
-  CHECK_EQ(0x3C, dummy_after.pos());
+  CHECK_EQ(0x38, dummy_after.pos());
 
   const Label* labels[] = {&dummy_before, &dummy_after, &dummy_inside};
   const int label_positions[4][3] = {
-      {0x04, 0x40},  // dummy_before
-      {0x0C, 0x48},  // dummy after
-      {0x14, 0x50}   // dummy inside
+      {0x04, 0x3C},  // dummy_before
+      {0x0C, 0x44},  // dummy after
+      {0x14, 0x4C}   // dummy inside
   };
 
   DirectHandle<String> source = factory->NewStringFromStaticChars("dummy");
@@ -2320,13 +2315,13 @@ TEST_F(RegExpTest, PeepholeLabelFixupsInside) {
 
   const int pos_fixups[] = {
       0,  // Position before optimization should be unchanged.
-      0,  // Position after first replacement should be 0 (optimized size (36) -
-          // original size (36)).
+      4,  // Position after first replacement should be 4 (optimized size (20) -
+          // original size (32) + preserve length (16)).
   };
   const int target_fixups[] = {
       0,  // dummy_before should be unchanged
-      0,  // dummy_after should be unchanged
-      4   // dummy_inside should be 4
+      4,  // dummy_inside should be 4
+      4   // dummy_after should be 4
   };
 
   for (int label_idx = 0; label_idx < 3; label_idx++) {
@@ -2397,17 +2392,17 @@ TEST_F(RegExpTest, PeepholeLabelFixupsComplex) {
                                            &dummy_after, &dummy_inside);
 
   CHECK_EQ(0x00, dummy_before.pos());
-  CHECK_EQ(0x44, dummy_between.pos());
-  CHECK_EQ(0x74, dummy_inside.pos());
-  CHECK_EQ(0x88, dummy_after.pos());
+  CHECK_EQ(0x40, dummy_between.pos());
+  CHECK_EQ(0x70, dummy_inside.pos());
+  CHECK_EQ(0x80, dummy_after.pos());
 
   const Label* labels[] = {&dummy_before, &dummy_between, &dummy_after,
                            &dummy_inside};
   const int label_positions[4][3] = {
-      {0x04, 0x48, 0x8C},  // dummy_before
-      {0x0C, 0x50, 0x94},  // dummy between
-      {0x14, 0x58, 0x9C},  // dummy after
-      {0x1C, 0x60, 0xA4}   // dummy inside
+      {0x04, 0x44, 0x84},  // dummy_before
+      {0x0C, 0x4C, 0x8C},  // dummy between
+      {0x14, 0x54, 0x94},  // dummy after
+      {0x1C, 0x5C, 0x9C}   // dummy inside
   };
 
   DirectHandle<String> source = factory->NewStringFromStaticChars("dummy");
@@ -2430,14 +2425,17 @@ TEST_F(RegExpTest, PeepholeLabelFixupsComplex) {
 
   const int pos_fixups[] = {
       0,    // Position before optimization should be unchanged.
-      -16,  // Position after first replacement.
-      -16   // Position after second replacement.
+      -12,  // Position after first replacement should be -12 (optimized size =
+            // 20 - 32 = original size).
+      -8    // Position after second replacement should be -8 (-12 from first
+            // optimization -12 from second optimization + 16 preserved
+            // bytecodes).
   };
   const int target_fixups[] = {
-      0,    // dummy_before
-      -16,  // dummy_between
-      -16,  // dummy_after
-      -12   // dummy_inside
+      0,    // dummy_before should be unchanged
+      -12,  // dummy_between should be -12
+      -8,   // dummy_inside should be -8
+      -8    // dummy_after should be -8
   };
 
   for (int label_idx = 0; label_idx < 4; label_idx++) {
@@ -2450,6 +2448,114 @@ TEST_F(RegExpTest, PeepholeLabelFixupsComplex) {
       CHECK_EQ(expected_jump_address, jump_address);
     }
   }
+}
+
+// Regression test for crbug.com/511290389. The peephole optimizer writes
+// kSkipUntilOneOfMasked.on_match2 (and the corresponding kSkipUntilOneOfMasked3
+// operand) via OverwriteValue, which used to bypass jump_edges_ tracking. When
+// a later peephole pass shrunk bytecode ahead of such an instruction and the
+// instruction itself was forwarded verbatim via EmitRawBytecodeStream, FixJumps
+// had no record of the operand and left it pointing past the end of the final
+// bytecode array. CodeGenerator::PreVisitBytecodes then indexed labels_[] and
+// jump_targets_ with that stale offset.
+//
+// The bytecode below takes three optimizing passes to reach a fixed point:
+//   pass 1: AdvanceCurrentPosition+GoTo  -> AdvanceCpAndGoto
+//   pass 2: header (LCC+CBIT+ACAG)       -> SkipUntilBitInTable   (region A)
+//           CP+L4CU+AC4C+ACAG+AC4C+ACN4C -> SkipUntilOneOfMasked  (region B)
+//   pass 3: SkipUntilBitInTable+...      -> SkipUntilOneOfMasked3 (region A)
+// Two region-A copies before region B make pass 3 shrink 80 bytes total, which
+// is enough to push a stale on_match2 past the end of the buffer.
+namespace {
+
+void EmitMasked3PrecursorRegion(regexp::RegExpMacroAssembler* m,
+                                Handle<ByteArray> bit_table) {
+  // Region A precursor for SkipUntilOneOfMasked3. The SkipUntilBitInTable
+  // header is itself peephole-derived (LCC+CBIT+ACAG) so that the Masked3 fold
+  // is delayed to pass 3.
+  Label start, after_loop, bc4, bc5;
+  m->Bind(&start);
+  m->LoadCurrentCharacter(0, &after_loop, true);
+  m->CheckBitInTable(bit_table, nullptr);
+  m->AdvanceCurrentPosition(1);
+  m->GoTo(&start);
+  m->Bind(&after_loop);
+  m->CheckPosition(4, nullptr);
+  m->LoadCurrentCharacter(0, nullptr, false, 4);
+  m->CheckCharacterAfterAnd(0x61626364, 0xffffffff, &bc5);
+  m->Bind(&bc4);
+  m->AdvanceCurrentPosition(1);
+  m->GoTo(&start);
+  m->Bind(&bc5);
+  m->LoadCurrentCharacter(0, &bc4, true, 4);
+  m->CheckCharacterAfterAnd(0x65666768, 0xffffffff, nullptr);
+  m->CheckCharacterAfterAnd(0x696a6b6c, 0xffffffff, nullptr);
+  m->CheckNotCharacterAfterAnd(0x6d6e6f70, 0xffffffff, &bc4);
+}
+
+void EmitMaskedPrecursorRegion(regexp::RegExpMacroAssembler* m) {
+  // Region B precursor for SkipUntilOneOfMasked. Folds in pass 2 and emits
+  // on_match2 via kOffsetAfterSequence.
+  Label start, second, adv;
+  m->Bind(&start);
+  m->CheckPosition(4, nullptr);
+  m->LoadCurrentCharacter(0, nullptr, false, 4);
+  m->CheckCharacterAfterAnd(0x61616161, 0xffffffff, &second);
+  m->Bind(&adv);
+  m->AdvanceCurrentPosition(1);
+  m->GoTo(&start);
+  m->Bind(&second);
+  m->CheckCharacterAfterAnd(0x62626262, 0xffffffff, nullptr);
+  m->CheckNotCharacterAfterAnd(0x63636363, 0xffffffff, &adv);
+}
+
+}  // namespace
+
+TEST_F(RegExpTest, PeepholeOffsetAfterSequenceTrackedAcrossPasses) {
+  Zone zone(i_isolate()->allocator(), ZONE_NAME);
+  Factory* factory = i_isolate()->factory();
+  HandleScope scope(i_isolate());
+
+  regexp::BytecodeGenerator opt(i_isolate(), &zone,
+                                regexp::RegExpMacroAssembler::LATIN1);
+  Handle<ByteArray> bit_table = factory->NewByteArray(
+      regexp::RegExpMacroAssembler::kTableSize, AllocationType::kOld);
+  for (uint32_t i = 0; i < regexp::RegExpMacroAssembler::kTableSize; i++) {
+    bit_table->set(i, 0);
+  }
+  EmitMasked3PrecursorRegion(&opt, bit_table);
+  EmitMasked3PrecursorRegion(&opt, bit_table);
+  EmitMaskedPrecursorRegion(&opt);
+
+  DirectHandle<String> source = factory->NewStringFromStaticChars("dummy");
+
+  v8_flags.regexp_peephole_optimization = true;
+  DirectHandle<TrustedByteArray> array_optimized =
+      TrustedCast<TrustedByteArray>(
+          opt.GetCode(CreateRegExpData(i_isolate(), source), {}));
+  const uint32_t length_optimized = array_optimized->length().value();
+
+  // Find the SkipUntilOneOfMasked emitted by pass 2 and verify its on_match2
+  // operand was properly remapped through the pass-3 shrink. A stale offset
+  // would point past the end of the buffer and trigger an OOB write in
+  // CodeGenerator::PreVisitBytecodes during tier-up.
+  uint32_t pc = 0;
+  bool found = false;
+  while (pc < length_optimized) {
+    REB bc = GetBytecode(array_optimized, pc);
+    if (bc == REB::kSkipUntilOneOfMasked) {
+      using Ops = regexp::BytecodeOperands<REB::kSkipUntilOneOfMasked>;
+      constexpr int kOnMatch2Off = Ops::Offset(Ops::Operand::on_match2);
+      uint32_t on_match2 = *reinterpret_cast<uint32_t*>(
+          array_optimized->begin() + pc + kOnMatch2Off);
+      CHECK_LT(on_match2, length_optimized);
+      CHECK(regexp::Bytecodes::IsValidJumpTarget(
+          array_optimized->begin()[on_match2]));
+      found = true;
+    }
+    pc += regexp::Bytecodes::Size(bc);
+  }
+  CHECK(found);
 }
 
 TEST_F(RegExpTestWithContext, UnicodePropertyEscapeCodeSize) {
@@ -2520,6 +2626,68 @@ TEST_F(RegExpTestWithContext, RegExpInterruptReentrantExecution) {
   i::DirectHandle<i::Object> result = RegExpExec(&d);
   CHECK(IsNull(*result));
 }
+
+// The bug below is only reliably observable under sandbox hardware support,
+// where the freed RegExpStack page is unmapped and a buggy JIT Push through
+// the dangling BSP segfaults. On other builds the success-path BSP recovery
+// hides the divergence.
+#ifdef V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
+
+namespace {
+
+// Runs from the prologue's stack_limit_hit handler via CheckStackGuardState ->
+// HandleInterrupts -> InvokeApiInterruptCallbacks. Doubles the backtrack
+// stack to force GrowStack to relocate the per-isolate buffer; under sandbox
+// hardware support the freed page is unmapped (vas->FreePages -> munmap), so
+// any subsequent JIT Push through a stale BSP faults.
+void StalePrologueGrowStackInterrupt(v8::Isolate*, void* data) {
+  auto* i_iso = static_cast<i::Isolate*>(data);
+  i_iso->regexp_stack()->EnsureCapacity(i_iso->regexp_stack()->memory_size() *
+                                        2);
+}
+
+}  // namespace
+
+// Regression test for crbug.com/513298483. The native irregexp prologue's
+// stack_limit_hit handler used to save/restore the backtrack_stackpointer with
+// pushq/popq (x64, ia32) or via callee-saved registers (other arches) around
+// CallCheckStackGuardState, instead of round-tripping it through
+// RegExpStack::stack_pointer_. If the call ran an API interrupt that
+// re-entered irregexp and grew the backtrack stack (freeing the original
+// buffer), the restored register held a dangling pointer that subsequent
+// Push() operations wrote through. The fix replaces the push/pop with
+// Store/LoadRegExpStackPointerToMemory on every port, mirroring
+// check_preempt_label_.
+TEST_F(RegExpTestWithContext, RegExpInterruptStalePrologueBacktrackPointer) {
+  if (v8_flags.jitless) return;
+  v8_flags.regexp_tier_up_ticks = 0;  // Compile to native on first exec.
+
+  v8::HandleScope scope(isolate());
+  i::Isolate* i_iso = i_isolate();
+
+  // Pre-grow the per-isolate backtrack stack so EnsureCapacity in the
+  // interrupt actually frees a heap buffer (rather than transitioning off the
+  // static stack).
+  i_iso->regexp_stack()->EnsureCapacity(2 * i::KB);
+
+  isolate()->RequestInterrupt(&StalePrologueGrowStackInterrupt, i_iso);
+
+  // Any regexp that hits the prologue's stack_limit_hit path will do.
+  i::DirectHandle<i::JSRegExp> regexp = v8::Utils::OpenDirectHandle(
+      *v8::RegExp::New(context(), NewString("(a|b)(a|b)(a|b)c"),
+                       v8::RegExp::kNone)
+           .ToLocalChecked());
+  i::DirectHandle<i::String> subject =
+      v8::Utils::OpenDirectHandle(*NewString("aaac"));
+
+  i::DirectHandle<i::Object> result =
+      i::RegExp::Exec_Single(i_iso, regexp, subject, 0,
+                             i_iso->regexp_last_match_info())
+          .ToHandleChecked();
+  USE(result);
+}
+
+#endif  // V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
 
 #undef CHECK_PARSE_ERROR
 #undef CHECK_SIMPLE

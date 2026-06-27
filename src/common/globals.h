@@ -790,7 +790,7 @@ constexpr bool StaticStringsEqual(const char* s1, const char* s2) {
   }
 }
 
-#if COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL
+#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
 constexpr size_t kContiguousReadOnlyReservationSize =
     V8_CONTIGUOUS_COMPRESSED_RO_SPACE_SIZE_MB * MB;
 // Bound the worst case consumption of contiguous RO space across the various
@@ -819,8 +819,7 @@ static_assert(base::bits::IsPowerOfTwo(kContiguousReadOnlyReservationSize));
 // ```
 constexpr Address kContiguousReadOnlySpaceMask =
     (kPtrComprCageBaseAlignment - 1) ^ (kContiguousReadOnlyReservationSize - 1);
-
-#endif  // COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL
+#endif  // CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
 
 // -----------------------------------------------------------------------------
 // Declarations for use in both the preparser and the rest of V8.
@@ -1000,6 +999,7 @@ constexpr const char* ToString(DeoptimizeKind kind) {
     case DeoptimizeKind::kLazyAfterFastCall:
       return "LazyAfterfastCall";
   }
+  UNREACHABLE();
 }
 inline std::ostream& operator<<(std::ostream& os, DeoptimizeKind kind) {
   return os << ToString(kind);
@@ -1516,6 +1516,7 @@ constexpr const char* ToString(AllocationSpace space) {
     case AllocationSpace::TRUSTED_LO_SPACE:
       return "trusted_large_object_space";
   }
+  UNREACHABLE();
 }
 
 inline std::ostream& operator<<(std::ostream& os, AllocationSpace space) {
@@ -1555,7 +1556,10 @@ constexpr const char* ToString(AllocationType kind) {
     case AllocationType::kSharedTrusted:
       return "SharedTrusted";
   }
+  UNREACHABLE();
 }
+
+enum class AllowAllocation : uint8_t { kYes, kNo };
 
 inline std::ostream& operator<<(std::ostream& os, AllocationType type) {
   return os << ToString(type);
@@ -1694,6 +1698,7 @@ constexpr const char* ToString(GarbageCollectionReason reason) {
     case GarbageCollectionReason::NUM_REASONS:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 inline std::ostream& operator<<(std::ostream& os,
@@ -1747,6 +1752,7 @@ inline std::ostream& operator<<(std::ostream& os, TypedArrayAccessMode mode) {
     case TypedArrayAccessMode::kWrite:
       return os << "kWrite";
   }
+  UNREACHABLE();
 }
 
 enum MinimumCapacity {
@@ -1765,6 +1771,7 @@ constexpr const char* ToString(GarbageCollector collector) {
     case GarbageCollector::MINOR_MARK_SWEEPER:
       return "Minor Mark-Sweep";
   }
+  UNREACHABLE();
 }
 
 inline std::ostream& operator<<(std::ostream& os, GarbageCollector collector) {
@@ -2792,10 +2799,6 @@ enum class CachedTieringDecision : int32_t {
   kNormal,
 };
 
-#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64
-#define V8_ENABLE_SPARKPLUG_PLUS
-#endif
-
 #ifdef V8_ENABLE_SPARKPLUG_PLUS
 #define IF_SPARKPLUG_PLUS(V, ...) EXPAND(V(__VA_ARGS__))
 
@@ -2841,6 +2844,7 @@ inline std::ostream& operator<<(std::ostream& os,
     case SpeculationMode::kDisallowSpeculation:
       return os << "SpeculationMode::kDisallowSpeculation";
   }
+  UNREACHABLE();
 }
 
 enum class BlockingBehavior { kBlock, kDontBlock };
@@ -2861,6 +2865,7 @@ constexpr const char* ToString(ConcurrencyMode mode) {
     case ConcurrencyMode::kConcurrent:
       return "ConcurrencyMode::kConcurrent";
   }
+  UNREACHABLE();
 }
 inline std::ostream& operator<<(std::ostream& os, ConcurrencyMode mode) {
   return os << ToString(mode);
@@ -3175,6 +3180,7 @@ inline std::ostream& operator<<(std::ostream& os, SilenceNanMode mode) {
     case SilenceNanMode::kPreserveUndefined:
       return os << "PreserveUndefined";
   }
+  UNREACHABLE();
 }
 
 }  // namespace internal

@@ -127,7 +127,7 @@ void SourceTextModule::CreateIndirectExport(
     Isolate* isolate, DirectHandle<SourceTextModule> module,
     DirectHandle<String> name, DirectHandle<SourceTextModuleInfoEntry> entry) {
   Handle<ObjectHashTable> exports(module->exports(), isolate);
-  DCHECK(IsTheHole(exports->Lookup(name), isolate));
+  DCHECK(IsTheHole(exports->Lookup(name)));
   exports = ObjectHashTable::Put(isolate, exports, name, entry);
   module->set_exports(*exports);
 }
@@ -144,7 +144,7 @@ void SourceTextModule::CreateExport(Isolate* isolate,
   Handle<ObjectHashTable> exports(module->exports(), isolate);
   for (uint32_t i = 0; i < names_len; ++i) {
     DirectHandle<String> name(Cast<String>(names->get(i)), isolate);
-    DCHECK(IsTheHole(exports->Lookup(name), isolate));
+    DCHECK(IsTheHole(exports->Lookup(name)));
     exports = ObjectHashTable::Put(isolate, exports, name, cell);
   }
   module->set_exports(*exports);
@@ -315,7 +315,7 @@ MaybeHandle<Cell> SourceTextModule::ResolveExportUsingStarExports(
       i::DirectHandle<i::SourceTextModuleInfoEntry> entry(
           i::Cast<i::SourceTextModuleInfoEntry>(special_exports->get(i)),
           isolate);
-      if (!IsUndefined(entry->export_name(), isolate)) {
+      if (!IsUndefined(entry->export_name())) {
         continue;  // Indirect export.
       }
 
@@ -342,7 +342,7 @@ MaybeHandle<Cell> SourceTextModule::ResolveExportUsingStarExports(
     if (!unique_cell.is_null()) {
       // Found a unique star export for this name.
       Handle<ObjectHashTable> exports(module->exports(), isolate);
-      DCHECK(IsTheHole(exports->Lookup(export_name), isolate));
+      DCHECK(IsTheHole(exports->Lookup(export_name)));
       exports =
           ObjectHashTable::Put(isolate, exports, export_name, unique_cell);
       module->set_exports(*exports);
@@ -476,7 +476,7 @@ bool SourceTextModule::PrepareInstantiate(
     DirectHandle<SourceTextModuleInfoEntry> entry(
         Cast<SourceTextModuleInfoEntry>(special_exports->get(i)), isolate);
     DirectHandle<Object> export_name(entry->export_name(), isolate);
-    if (IsUndefined(*export_name, isolate)) continue;  // Star export.
+    if (IsUndefined(*export_name)) continue;  // Star export.
     CreateIndirectExport(isolate, module, Cast<String>(export_name), entry);
   }
 
@@ -551,12 +551,15 @@ bool SourceTextModule::MaybeTransitionComponent(
     //     i. Let requiredModule be the last element of stack.
     //    ii. Remove the last element of stack.
     //   iii. Assert: requiredModule is a Cyclic Module Record.
-    //    iv. If requiredModule.[[AsyncEvaluation]] is false, set
+    //    iv. Assert: requiredModule.[[AsyncEvaluationOrder]] is either an
+    //        integer or unset.
+    //     v. If requiredModule.[[AsyncEvaluation]] is false, set
     //        requiredModule.[[Status]] to EVALUATED.
-    //     v. Otherwise, set requiredModule.[[Status]] to EVALUATING-ASYNC.
-    //    vi. If requiredModule and module are the same Module Record, set done
+    //    vi. Else, set requiredModule.[[Status]] to EVALUATING-ASYNC.
+    //   vii. If requiredModule and module are the same Module Record, set done
     //        to true.
-    //   vii. Set requiredModule.[[CycleRoot]] to module.
+    //  viii. Assert: requiredModule.[[CycleRoot]] is empty.
+    //    ix. Set requiredModule.[[CycleRoot]] to module.
     //
     // InnerModuleLinking
     //
@@ -579,7 +582,9 @@ bool SourceTextModule::MaybeTransitionComponent(
         }
         ancestor->SetStatus(kLinked);
       } else {
-        DCHECK(IsTheHole(ancestor->cycle_root(), isolate));
+        DCHECK(ancestor->async_evaluation_ordinal() == kNotAsyncEvaluated ||
+               ancestor->HasAsyncEvaluationOrdinal());
+        DCHECK(IsTheHole(ancestor->cycle_root()));
         ancestor->set_cycle_root(*cycle_root);
         ancestor->SetStatus(ancestor->HasAsyncEvaluationOrdinal()
                                 ? kEvaluatingAsync
@@ -599,7 +604,7 @@ bool SourceTextModule::MaybeTransitionComponent(
 bool SourceTextModule::FinishInstantiate(
     Isolate* isolate, Handle<SourceTextModule> module,
     ZoneForwardList<Handle<SourceTextModule>>* stack, unsigned* dfs_index,
-    Zone* zone) {
+    Zone* zone, unsigned depth, unsigned* max_depth) {
   // Instantiate SharedFunctionInfo and mark module as instantiating for
   // the recursion.
   DirectHandle<SharedFunctionInfo> shared(
@@ -629,7 +634,7 @@ bool SourceTextModule::FinishInstantiate(
     Handle<Module> requested_module(Cast<Module>(requested_modules->get(i)),
                                     isolate);
     if (!Module::FinishInstantiate(isolate, requested_module, stack, dfs_index,
-                                   zone)) {
+                                   zone, depth + 1, max_depth)) {
       return false;
     }
 
@@ -681,7 +686,7 @@ bool SourceTextModule::FinishInstantiate(
     DirectHandle<SourceTextModuleInfoEntry> entry(
         Cast<SourceTextModuleInfoEntry>(special_exports->get(i)), isolate);
     Handle<Object> name(entry->export_name(), isolate);
-    if (IsUndefined(*name, isolate)) continue;  // Star export.
+    if (IsUndefined(*name)) continue;  // Star export.
     MessageLocation loc(script, entry->beg_pos(), entry->end_pos());
     ResolveSet resolve_set(zone);
     if (ResolveExport(isolate, module, {}, Cast<String>(name), loc, true,
@@ -721,22 +726,27 @@ void SourceTextModule::FetchStarExports(Isolate* isolate,
   for (uint32_t i = 0; i < special_exports_len; ++i) {
     DirectHandle<SourceTextModuleInfoEntry> entry(
         Cast<SourceTextModuleInfoEntry>(special_exports->get(i)), isolate);
-    if (!IsUndefined(entry->export_name(), roots)) {
+    if (!IsUndefined(entry->export_name())) {
       continue;  // Indirect export.
     }
 
-    DCHECK_EQ(Cast<ModuleRequest>(module->info()->module_requests()->get(
-                                      entry->module_request()))
-                  ->phase(),
-              ModuleImportPhase::kEvaluation);
+    // Source phase imports store a JSReceiver (not a Module) in
+    // requested_modules. Guard against type confusion if a future change
+    // breaks the invariant that star exports only reference evaluation-phase
+    // imports.
+    CHECK_EQ(Cast<ModuleRequest>(module->info()->module_requests()->get(
+                                     entry->module_request()))
+                 ->phase(),
+             ModuleImportPhase::kEvaluation);
     Handle<Module> requested_module(
         Cast<Module>(module->requested_modules()->get(entry->module_request())),
         isolate);
 
     // Recurse.
-    if (IsSourceTextModule(*requested_module))
+    if (IsSourceTextModule(*requested_module)) {
       FetchStarExports(isolate, Cast<SourceTextModule>(requested_module), zone,
                        visited);
+    }
 
     // Collect all of [requested_module]'s exports that must be added to
     // [module]'s exports (i.e. to [exports]).  We record these in
@@ -750,13 +760,13 @@ void SourceTextModule::FetchStarExports(Isolate* isolate,
       Handle<String> name(Cast<String>(key), isolate);
 
       if (name->Equals(roots.default_string())) continue;
-      if (!IsTheHole(exports->Lookup(name), roots)) continue;
+      if (!IsTheHole(exports->Lookup(name))) continue;
 
       Handle<Cell> cell(Cast<Cell>(requested_exports->ValueAt(index)), isolate);
       auto insert_result = more_exports.insert(std::make_pair(name, cell));
       if (!insert_result.second) {
         auto it = insert_result.first;
-        if (*it->second == *cell || IsUndefined(*it->second, roots)) {
+        if (*it->second == *cell || IsUndefined(*it->second)) {
           // We already recorded this mapping before, or the name is already
           // known to be ambiguous.  In either case, there's nothing to do.
         } else {
@@ -771,7 +781,7 @@ void SourceTextModule::FetchStarExports(Isolate* isolate,
 
   // Copy [more_exports] into [exports].
   for (const auto& elem : more_exports) {
-    if (IsUndefined(*elem.second, isolate)) continue;  // Ambiguous export.
+    if (IsUndefined(*elem.second)) continue;  // Ambiguous export.
     DCHECK(!elem.first->Equals(ReadOnlyRoots(isolate).default_string()));
     DCHECK(IsCell(*elem.second));
     exports = ObjectHashTable::Put(isolate, exports, elem.first, elem.second);
@@ -791,46 +801,35 @@ void SourceTextModule::GatherAvailableAncestors(
     DirectHandle<SourceTextModule> module = worklist.top();
     worklist.pop();
 
-    // 1. For each Module m of module.[[AsyncParentModules]], do
+    // 1. For each Cyclic Module Record m of module.[[AsyncParentModules]], do
     const uint32_t module_count = module->AsyncParentModuleCount();
     DCHECK_LE(module_count, kMaxInt);
     for (int i = static_cast<int>(module_count); i-- > 0;) {
       Handle<SourceTextModule> m = module->GetAsyncParentModule(isolate, i);
-
-      // a. If execList does not contain m and
-      //    m.[[CycleRoot]].[[EvaluationError]] is empty, then
-      // There may be a bug in the spec here. If an async parent module depends
-      // on an async child but also fails synchronously, it is not getting its
-      // cycle_root property set. If the child module later completes, this
-      // function will be called. The first condition (missing from the spec)
-      // prevents a type confusion here. See https://crbug.com/439986081.
-      DCHECK_IMPLIES(IsTheHole(m->cycle_root(), isolate),
-                     m->status() == kErrored);
-      if (!IsTheHole(m->cycle_root(), isolate) &&
-          m->GetCycleRoot(isolate)->status() != kErrored &&
-          exec_list->find(m) == exec_list->end()) {
+      // a. If execList does not contain m and m.[[EvaluationError]] is empty,
+      //    then
+      if (m->status() != kErrored && exec_list->find(m) == exec_list->end()) {
         // i. Assert: m.[[Status]] is EVALUATING-ASYNC.
-        // ii. Assert: m.[[EvaluationError]] is empty.
         DCHECK_EQ(m->status(), kEvaluatingAsync);
-
-        // iii. Assert: m.[[AsyncEvaluation]] is true.
-        DCHECK(m->HasAsyncEvaluationOrdinal());
-
-        // iv. Assert: m.[[PendingAsyncDependencies]] > 0.
-        DCHECK(m->HasPendingAsyncDependencies());
-
-        // v. Set m.[[PendingAsyncDependencies]] to
-        //    m.[[PendingAsyncDependencies]] - 1.
-        m->DecrementPendingAsyncDependencies();
-
-        // vi. If m.[[PendingAsyncDependencies]] = 0, then
-        if (!m->HasPendingAsyncDependencies()) {
-          // 1. Append m to execList.
-          exec_list->insert(m);
-
-          // 2. If m.[[HasTLA]] is false,
-          //    perform ! GatherAvailableAncestors(m, execList).
-          if (!m->has_toplevel_await()) worklist.push(m);
+        // ii. Assert: m.[[CycleRoot]] is not empty.
+        DCHECK(!IsTheHole(m->cycle_root()));
+        // iii. If m.[[CycleRoot]].[[EvaluationError]] is empty, then
+        if (m->GetCycleRoot(isolate)->status() != kErrored) {
+          // 1. Assert: m.[[AsyncEvaluation]] is true.
+          DCHECK(m->HasAsyncEvaluationOrdinal());
+          // 2. Assert: m.[[PendingAsyncDependencies]] > 0.
+          DCHECK(m->HasPendingAsyncDependencies());
+          // 3. Set m.[[PendingAsyncDependencies]] to
+          //    m.[[PendingAsyncDependencies]] - 1.
+          m->DecrementPendingAsyncDependencies();
+          // 4. If m.[[PendingAsyncDependencies]] = 0, then
+          if (!m->HasPendingAsyncDependencies()) {
+            // a. Append m to execList.
+            exec_list->insert(m);
+            // b. If m.[[HasTLA]] is false,
+            //    perform ! GatherAvailableAncestors(m, execList).
+            if (!m->has_toplevel_await()) worklist.push(m);
+          }
         }
       }
     }
@@ -844,7 +843,10 @@ DirectHandle<JSModuleNamespace> SourceTextModule::GetModuleNamespace(
     int module_request_index) {
   Tagged<ModuleRequest> module_request = Cast<ModuleRequest>(
       module->info()->module_requests()->get(module_request_index));
-  DCHECK_NE(module_request->phase(), ModuleImportPhase::kSource);
+  // Source phase imports store a JSReceiver (not a Module) in
+  // requested_modules. Guard against type confusion if a future change
+  // routes a source-phase request through GetModuleNamespace.
+  CHECK_NE(module_request->phase(), ModuleImportPhase::kSource);
 
   Handle<Module> requested_module(
       Cast<Module>(module->requested_modules()->get(module_request_index)),
@@ -857,7 +859,7 @@ MaybeHandle<JSObject> SourceTextModule::GetImportMeta(
     Isolate* isolate, DirectHandle<SourceTextModule> module) {
   Handle<UnionOf<JSObject, TheHole>> import_meta(
       module->import_meta(kAcquireLoad), isolate);
-  if (IsTheHole(*import_meta, isolate)) {
+  if (IsTheHole(*import_meta)) {
     if (!isolate->RunHostInitializeImportMetaObjectCallback(module).ToHandle(
             &import_meta)) {
       return {};
@@ -956,7 +958,7 @@ Maybe<bool> SourceTextModule::AsyncModuleExecutionFulfilled(
   // 1. If module.[[Status]] is EVALUATED, then
   if (module->status() == kErrored) {
     // a. Assert: module.[[EvaluationError]] is not EMPTY.
-    DCHECK(!IsTheHole(module->exception(), isolate));
+    DCHECK(!IsTheHole(module->exception()));
     // b. Return UNUSED.
     return Just(true);
   }
@@ -977,7 +979,7 @@ Maybe<bool> SourceTextModule::AsyncModuleExecutionFulfilled(
   module->SetStatus(kEvaluated);
 
   // 7. If module.[[TopLevelCapability]] is not EMPTY, then
-  if (!IsUndefined(module->top_level_capability(), isolate)) {
+  if (!IsUndefined(module->top_level_capability())) {
     //  a. Assert: module.[[CycleRoot]] is equal to module.
     DCHECK_EQ(*module->GetCycleRoot(isolate), *module);
 
@@ -1018,7 +1020,7 @@ Maybe<bool> SourceTextModule::AsyncModuleExecutionFulfilled(
   for (DirectHandle<SourceTextModule> m : exec_list) {
     if (m->status() == kErrored) {  // a. If m.[[Status]] is EVALUATED, then
       // i. Assert: m.[[EvaluationError]] is not EMPTY.
-      DCHECK(!IsTheHole(m->exception(), isolate));
+      DCHECK(!IsTheHole(m->exception()));
     } else if (m->has_toplevel_await()) {  // b. Else if m.[[HasTLA]] is true,
                                            // then
       // i. Perform ExecuteAsyncModule(m).
@@ -1045,7 +1047,7 @@ Maybe<bool> SourceTextModule::AsyncModuleExecutionFulfilled(
         m->SetStatus(kEvaluated);
 
         // 3. If m.[[TopLevelCapability]] is not EMPTY, then
-        if (!IsUndefined(m->top_level_capability(), isolate)) {
+        if (!IsUndefined(m->top_level_capability())) {
           // a. Assert: m.[[CycleRoot]] and m are the same Module Record.
           DCHECK_EQ(*m->GetCycleRoot(isolate), *m);
 
@@ -1071,7 +1073,7 @@ void SourceTextModule::AsyncModuleExecutionRejected(
   // 1. If module.[[Status]] is EVALUATED, then
   if (module->status() == kErrored) {
     // a. Assert: module.[[EvaluationError]] is not empty.
-    DCHECK(!IsTheHole(module->exception(), isolate));
+    DCHECK(!IsTheHole(module->exception()));
     // b. Return UNUSED.
     return;
   }
@@ -1082,7 +1084,7 @@ void SourceTextModule::AsyncModuleExecutionRejected(
   // 3. Assert: module.[[AsyncEvaluation]] is true.
   DCHECK(module->HasAsyncEvaluationOrdinal());
   // 4. Assert: module.[[EvaluationError]] is EMPTY.
-  DCHECK(IsTheHole(module->exception(), isolate));
+  DCHECK(IsTheHole(module->exception()));
 
   // 5. Set module.[[EvaluationError]] to ThrowCompletion(error).
   module->RecordError(isolate, *exception);
@@ -1092,7 +1094,7 @@ void SourceTextModule::AsyncModuleExecutionRejected(
   module->set_async_evaluation_ordinal(kAsyncEvaluateDidFinish);
 
   // 7. If module.[[TopLevelCapability]] is not EMPTY, then
-  if (!IsUndefined(module->top_level_capability(), isolate)) {
+  if (!IsUndefined(module->top_level_capability())) {
     // a. Assert: module.[[CycleRoot]] and module are the same Module Record.
     DCHECK_EQ(*module->GetCycleRoot(isolate), *module);
 
@@ -1162,13 +1164,12 @@ Maybe<bool> SourceTextModule::ExecuteAsyncModule(
   // 8. Perform PerformPromiseThen(capability.[[Promise]],
   //                               onFulfilled, onRejected).
   DirectHandle<Object> args[] = {on_fulfilled, on_rejected};
-  if (V8_UNLIKELY(Execution::CallBuiltin(isolate, isolate->promise_then(),
+  if (V8_UNLIKELY(Execution::CallBuiltin(isolate,
+                                         isolate->perform_promise_then(),
                                          capability, base::VectorOf(args))
                       .is_null())) {
-    // This may fail with a termination exception or if, for any weird reason,
-    // the promise has been rejected. See bugs: https://crbug.com/349961173 and
-    // https://crbug.com/442161248.
-    CHECK(isolate->has_exception());
+    // This may only fail with a termination exception.
+    CHECK(isolate->is_execution_terminating());
     return Nothing<bool>();
   }
 
@@ -1284,7 +1285,7 @@ MaybeDirectHandle<Object> SourceTextModule::InnerModuleEvaluation(
 
   Zone zone(isolate->allocator(), ZONE_NAME);
   // There's an evaluation set to perform optimized check if a module is already
-  // in eveluation_list. It's encessary to keep evaluation order as it's seen to
+  // in evaluation_list. It's necessary to keep evaluation order as it's seen to
   // be spec compliant.
   UnorderedModuleSet evaluation_set(&zone);
   ZoneVector<Handle<Module>> evaluation_list(&zone);
@@ -1352,15 +1353,18 @@ MaybeDirectHandle<Object> SourceTextModule::InnerModuleEvaluation(
             std::min(module->dfs_ancestor_index(),
                      required_module->dfs_ancestor_index()));
       } else {  // iv. Else,
-        // 1. Set requiredModule to requiredModule.[[CycleRoot]].
+        // 1. Assert: requiredModule.[[CycleRoot]] is not empty.
+        DCHECK(!IsTheHole(required_module->cycle_root()));
+
+        // 2. Set requiredModule to requiredModule.[[CycleRoot]].
         required_module = required_module->GetCycleRoot(isolate);
         required_module_status = required_module->status();
 
-        // 2. Assert: requiredModule.[[Status]] is either EVALUATING-ASYNC or
+        // 3. Assert: requiredModule.[[Status]] is either EVALUATING-ASYNC or
         //    EVALUATED.
         CHECK_GE(required_module_status, kEvaluatingAsync);
 
-        // 3. If requiredModule.[[EvaluationError]] is not EMPTY,
+        // 4. If requiredModule.[[EvaluationError]] is not EMPTY,
         //    return ? module.[[EvaluationError]].
 
         // (If there was an exception on the original required module we would
@@ -1531,7 +1535,7 @@ void SourceTextModule::Reset(Isolate* isolate,
                              DirectHandle<SourceTextModule> module) {
   Factory* factory = isolate->factory();
 
-  DCHECK(IsTheHole(module->import_meta(kAcquireLoad), isolate));
+  DCHECK(IsTheHole(module->import_meta(kAcquireLoad)));
 
   DirectHandle<FixedArray> regular_exports =
       factory->NewFixedArray(module->regular_exports()->length().value());

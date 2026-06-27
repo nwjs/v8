@@ -142,7 +142,7 @@ Tagged<Object> Context::unchecked_previous() const {
 
 Tagged<Context> Context::previous() const {
   Tagged<Object> result = get(PREVIOUS_INDEX, kRelaxedLoad);
-  DCHECK(IsBootstrappingOrValidParentContext(result, *this));
+  DCHECK(IsBootstrappingOrValidParentContext(result, this));
   return UncheckedCast<Context>(result);
 }
 void Context::set_previous(Tagged<Context> context, WriteBarrierMode mode) {
@@ -216,11 +216,6 @@ bool Context::IsScriptContext() const {
 
 inline bool Context::HasContextCells() const {
   return scope_info()->HasContextCells();
-}
-
-bool Context::HasSameSecurityTokenAs(Tagged<Context> that) const {
-  return this->native_context()->security_token() ==
-         that->native_context()->security_token();
 }
 
 #define NATIVE_CONTEXT_FIELD_ACCESSORS(index, type, name)          \
@@ -311,6 +306,10 @@ Tagged<Map> Context::GetInitialJSArrayMap(ElementsKind kind) const {
 EXTERNAL_POINTER_ACCESSORS(NativeContext, microtask_queue, MicrotaskQueue*,
                            kMicrotaskQueueOffset,
                            kNativeContextMicrotaskQueueTag)
+
+bool NativeContext::HasSameSecurityTokenAs(Tagged<NativeContext> that) const {
+  return this == that || this->security_token() == that->security_token();
+}
 
 Tagged<JSGlobalProxy> NativeContext::global_proxy() const {
   return global_proxy_object();

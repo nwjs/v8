@@ -441,7 +441,7 @@ macro NewJSIteratorTakeHelper(
   };
 }
 
-// https://tc39.es/ecma262/#sec-iteratorprototype.take
+// https://tc39.es/ecma262/#sec-iterator.prototype.take
 @incrementUseCounter('v8::Isolate::kIteratorMethods')
 transitioning javascript builtin IteratorPrototypeTake(
     js-implicit context: NativeContext, receiver: JSAny)(
@@ -472,23 +472,29 @@ transitioning javascript builtin IteratorPrototypeTake(
     //   b. Return ? IteratorClose(iterated, error).
     if (NumberIsNaN(numLimit)) goto RangeError(o);
 
-    // 7. Let integerLimit be ! ToIntegerOrInfinity(numLimit).
+    // 7. If numLimit is finite and numLimit > 𝔽(2^53 - 1), then
+    //   a. Let error be ThrowCompletion(a newly created RangeError object).
+    //   b. Return ? IteratorClose(iterated, error).
+    if (!NumberIsSomeInfinity(numLimit) && numLimit > kMaxSafeInteger)
+      goto RangeError(o);
+
+    // 8. Let integerLimit be ! ToIntegerOrInfinity(numLimit).
     const integerLimit = ToInteger_Inline(numLimit);
 
-    // 8. If integerLimit < 0, then
+    // 9. If integerLimit < 0, then
     //  a. Let error be ThrowCompletion(a newly created RangeError object).
     //  b. Return ? IteratorClose(iterated, error).
     if (integerLimit < 0) goto RangeError(o);
 
-    // 9. Set iterated to ? GetIteratorDirect(O).
+    // 10. Set iterated to ? GetIteratorDirect(O).
     const iterated = GetIteratorDirect(o);
 
-    // Step 10 implemented in IteratorTakeHelperNext
+    // Step 11 implemented in IteratorTakeHelperNext
 
-    // 11. Let result be CreateIteratorFromClosure(closure, "Iterator Helper",
-    //    %IteratorHelperPrototype%).
-    // 12. Set result.[[UnderlyingIterator]] to iterated.
-    // 13. Return result.
+    // 12. Let result be CreateIteratorFromClosure(closure, "Iterator Helper",
+    //     %IteratorHelperPrototype%).
+    // 13. Set result.[[UnderlyingIterator]] to iterated.
+    // 14. Return result.
     return NewJSIteratorTakeHelper(iterated, integerLimit);
   } label RangeError(iteratorObject: JSReceiver) deferred {
     IteratorCloseOnException(iteratorObject);
@@ -512,8 +518,8 @@ transitioning builtin IteratorTakeHelperNext(
     // i. If remaining is 0, then
     if (remaining == 0) {
       // 1. Return ? IteratorClose(iterated, NormalCompletion(undefined)).
-      MarkIteratorHelperAsExhausted(helper);
       IteratorClose(helper.underlying_iterator);
+      MarkIteratorHelperAsExhausted(helper);
       return AllocateJSIteratorResult(Undefined, True);
     }
 
@@ -562,7 +568,7 @@ macro NewJSIteratorDropHelper(
   };
 }
 
-// https://tc39.es/ecma262/#sec-iteratorprototype.drop
+// https://tc39.es/ecma262/#sec-iterator.prototype.drop
 @incrementUseCounter('v8::Isolate::kIteratorMethods')
 transitioning javascript builtin IteratorPrototypeDrop(
     js-implicit context: NativeContext, receiver: JSAny)(
@@ -593,23 +599,29 @@ transitioning javascript builtin IteratorPrototypeDrop(
     //   b. Return ? IteratorClose(iterated, error).
     if (NumberIsNaN(numLimit)) goto RangeError(o);
 
-    // 7. Let integerLimit be ! ToIntegerOrInfinity(numLimit).
+    // 7. If numLimit is finite and numLimit > 𝔽(2^53 - 1), then
+    //   a. Let error be ThrowCompletion(a newly created RangeError object).
+    //   b. Return ? IteratorClose(iterated, error).
+    if (!NumberIsSomeInfinity(numLimit) && numLimit > kMaxSafeInteger)
+      goto RangeError(o);
+
+    // 8. Let integerLimit be ! ToIntegerOrInfinity(numLimit).
     const integerLimit = ToInteger_Inline(numLimit);
 
-    // 8. If integerLimit < 0, then
+    // 9. If integerLimit < 0, then
     //   a. Let error be ThrowCompletion(a newly created RangeError object).
     //   b. Return ? IteratorClose(iterated, error).
     if (integerLimit < 0) goto RangeError(o);
 
-    // 9. Let iterated be ? GetIteratorDirect(O).
+    // 10. Let iterated be ? GetIteratorDirect(O).
     const iterated = GetIteratorDirect(o);
 
-    // Step 10 implemented in IteratorDropHelperNext
+    // Step 11 implemented in IteratorDropHelperNext
 
-    // 11. Let result be CreateIteratorFromClosure(closure, "Iterator Helper",
-    //    %IteratorHelperPrototype%).
-    // 12. Set result.[[UnderlyingIterator]] to iterated.
-    // 13. Return result.
+    // 12. Let result be CreateIteratorFromClosure(closure, "Iterator Helper",
+    //     %IteratorHelperPrototype%).
+    // 13. Set result.[[UnderlyingIterator]] to iterated.
+    // 14. Return result.
     return NewJSIteratorDropHelper(iterated, integerLimit);
   } label RangeError(iteratorObject: JSReceiver) deferred {
     IteratorCloseOnException(iteratorObject);
@@ -2065,6 +2077,90 @@ transitioning builtin IteratorZipKeyedHelperNext(
   } label DoneWithException(e: JSAny, message: JSMessageObject|TheHole) {
     ReThrowWithMessage(context, e, message);
   }
+}
+
+// --- includes helper
+
+// https://tc39.es/proposal-iterator-includes/
+@incrementUseCounter('v8::Isolate::kIteratorMethods')
+transitioning javascript builtin IteratorPrototypeIncludes(
+    js-implicit context: NativeContext, receiver: JSAny)(...arguments): JSAny {
+  const methodName: constexpr string = 'Iterator.prototype.includes';
+
+  // 1. Let O be the this value.
+  // 2. If O is not an Object, throw a TypeError exception.
+  const o = Cast<JSReceiver>(receiver)
+      otherwise ThrowTypeError(MessageTemplate::kCalledOnNonObject, methodName);
+
+  const searchElement = arguments[0];
+  const skippedElements = arguments[1];
+
+  // 3. Let iterated be the Iterator Record { [[Iterator]]: O, [[NextMethod]]:
+  // undefined, [[Done]]: false }.
+  let toSkip: Number;
+
+  // 4. If skippedElements is undefined, then
+  if (skippedElements == Undefined) {
+    // a. Let toSkip be +0𝔽.
+    toSkip = 0;
+  } else {
+    // 5. Else,
+    //  a. If skippedElements is not one of +∞𝔽, -∞𝔽, or an integral Number,
+    //     then
+    if (!IsIntegerOrSomeInfinity(skippedElements)) {
+      // i. Let error be ThrowCompletion(a newly created TypeError object).
+      // ii. Return ? IteratorClose(iterated, error).
+      IteratorCloseOnException(o);
+      ThrowTypeError(
+          MessageTemplate::kArgumentIsNotUndefinedOrInteger, 'skippedElements');
+    }
+    // b. Let toSkip be skippedElements.
+    toSkip = Cast<Number>(skippedElements) otherwise unreachable;
+  }
+
+  // 6. If toSkip < -0𝔽, then
+  if (toSkip < 0) {
+    // a. Let error be ThrowCompletion(a newly created RangeError object).
+    // b. Return ? IteratorClose(iterated, error).
+    IteratorCloseOnException(o);
+    ThrowRangeError(MessageTemplate::kMustBePositive, skippedElements);
+  }
+
+  // 7. Let skipped be +0𝔽.
+  let skipped: Number = 0;
+
+  // 8. Set iterated to ? GetIteratorDirect(O).
+  const iterated = GetIteratorDirect(o);
+
+  const fastIteratorResultMap = GetIteratorResultMap();
+
+  // 9. Repeat,
+  while (true) {
+    // a. Let value be ? IteratorStepValue(iterated).
+    let value: JSAny;
+    try {
+      value = IteratorStepValue(iterated, fastIteratorResultMap)
+          otherwise Done, DoneWithException;
+    } label Done {
+      // b. If value is done, return false.
+      return False;
+    } label DoneWithException(e: JSAny, message: JSMessageObject|TheHole) {
+      ReThrowWithMessage(context, e, message);
+    }
+    // c. If skipped < toSkip, then
+    if (skipped < toSkip) {
+      // i. Set skipped to skipped + 1𝔽.
+      skipped = skipped + 1;
+    } else {
+      // d. Else if SameValueZero(value, searchElement) is true, then
+      if (SameValueZero(value, searchElement)) {
+        // i. Return ? IteratorClose(iterated, NormalCompletion(true)).
+        IteratorClose(iterated);
+        return True;
+      }
+    }
+  }
+  unreachable;
 }
 
 }  // namespace iterator

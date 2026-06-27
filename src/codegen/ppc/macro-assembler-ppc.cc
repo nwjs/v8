@@ -620,7 +620,7 @@ void MacroAssembler::MultiPushF64AndV128(DoubleRegList dregs,
     // sure to also save them when Simd is enabled.
     // Check the comments under crrev.com/c/2645694 for more details.
     Label push_empty_simd, simd_pushed;
-    Move(scratch1, ExternalReference::supports_wasm_simd_128_address());
+    Move(scratch1, ExternalReference::supports_simd_128_address());
     LoadU8(scratch1, MemOperand(scratch1), scratch2);
     cmpi(scratch1, Operand::Zero());  // If > 0 then simd is available.
     ble(&push_empty_simd);
@@ -633,7 +633,7 @@ void MacroAssembler::MultiPushF64AndV128(DoubleRegList dregs,
          Operand(-static_cast<int8_t>(simd_regs.Count()) * kSimd128Size));
     bind(&simd_pushed);
   } else {
-    if (CpuFeatures::SupportsWasmSimd128()) {
+    if (CpuFeatures::SupportsSimd128()) {
       MultiPushV128(simd_regs, scratch1);
     } else {
       addi(sp, sp,
@@ -652,7 +652,7 @@ void MacroAssembler::MultiPopF64AndV128(DoubleRegList dregs,
       isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
   if (generating_builtins) {
     Label pop_empty_simd, simd_popped;
-    Move(scratch1, ExternalReference::supports_wasm_simd_128_address());
+    Move(scratch1, ExternalReference::supports_simd_128_address());
     LoadU8(scratch1, MemOperand(scratch1), scratch2);
     cmpi(scratch1, Operand::Zero());  // If > 0 then simd is available.
     ble(&pop_empty_simd);
@@ -663,7 +663,7 @@ void MacroAssembler::MultiPopF64AndV128(DoubleRegList dregs,
          Operand(static_cast<int8_t>(simd_regs.Count()) * kSimd128Size));
     bind(&simd_popped);
   } else {
-    if (CpuFeatures::SupportsWasmSimd128()) {
+    if (CpuFeatures::SupportsSimd128()) {
       MultiPopV128(simd_regs, scratch1);
     } else {
       addi(sp, sp,
@@ -967,7 +967,7 @@ void MacroAssembler::CallVerifySkippedWriteBarrierStub(Register object,
   push(object);
   pop(kCArgRegs[0]);
   pop(kCArgRegs[1]);
-  PrepareCallCFunction(2, r0);
+  PrepareCallCFunction(2);
   CallCFunction(ExternalReference::verify_skipped_write_barrier(), 2);
 }
 
@@ -1208,8 +1208,10 @@ void MacroAssembler::LoadConstantPoolPointerRegister() {
 void MacroAssembler::StubPrologue(StackFrame::Type type) {
   {
     ConstantPoolUnavailableScope constant_pool_unavailable(this);
-    mov(r11, Operand(StackFrame::TypeToMarker(type)));
-    PushCommonFrame(r11);
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
+    mov(scratch, Operand(StackFrame::TypeToMarker(type)));
+    PushCommonFrame(scratch);
   }
   if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
     LoadConstantPoolPointerRegister();
@@ -1581,11 +1583,12 @@ void MacroAssembler::InvokeFunctionWithNewTarget(
   Register temp_reg = r7;
 
   LoadTaggedField(
-      temp_reg, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset), r0);
-  LoadTaggedField(cp, FieldMemOperand(r4, JSFunction::kContextOffset), r0);
+      temp_reg,
+      FieldMemOperand(r4, offsetof(JSFunction, shared_function_info_)), r0);
+  LoadTaggedField(cp, FieldMemOperand(r4, offsetof(JSFunction, context_)), r0);
   LoadU16(expected_reg,
-          FieldMemOperand(temp_reg,
-                          SharedFunctionInfo::kFormalParameterCountOffset));
+          FieldMemOperand(
+              temp_reg, offsetof(SharedFunctionInfo, formal_parameter_count_)));
 
   InvokeFunctionCode(fun, new_target, expected_reg, actual_parameter_count,
                      type);
@@ -1602,7 +1605,7 @@ void MacroAssembler::InvokeFunction(Register function,
   DCHECK_EQ(function, r4);
 
   // Get the function and setup the context.
-  LoadTaggedField(cp, FieldMemOperand(r4, JSFunction::kContextOffset), r0);
+  LoadTaggedField(cp, FieldMemOperand(r4, offsetof(JSFunction, context_)), r0);
 
   InvokeFunctionCode(r4, no_reg, expected_parameter_count,
                      actual_parameter_count, type);
@@ -1670,7 +1673,7 @@ void MacroAssembler::CompareInstanceTypeRange(Register map, Register type_reg,
                                               InstanceType lower_limit,
                                               InstanceType higher_limit) {
   DCHECK_LT(lower_limit, higher_limit);
-  LoadU16(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
+  LoadU16(type_reg, FieldMemOperand(map, offsetof(Map, instance_type_)));
   CompareRange(type_reg, scratch, lower_limit, higher_limit);
 }
 
@@ -1918,7 +1921,7 @@ void MacroAssembler::Abort(AbortReason reason) {
     // We don't care if we constructed a frame. Just pretend we did.
     FrameScope assume_frame(this, StackFrame::NO_FRAME_TYPE);
     mov(r3, Operand(static_cast<int>(reason)));
-    PrepareCallCFunction(1, 0, r4);
+    PrepareCallCFunction(1);
     Register dst = ip;
     if (!ABI_CALL_VIA_IP) {
       dst = r4;
@@ -1951,13 +1954,13 @@ void MacroAssembler::Abort(AbortReason reason) {
 }
 
 void MacroAssembler::LoadMap(Register destination, Register object) {
-  LoadTaggedField(destination, FieldMemOperand(object, HeapObject::kMapOffset),
-                  r0);
+  LoadTaggedField(destination,
+                  FieldMemOperand(object, offsetof(HeapObject, map_)), r0);
 }
 
 void MacroAssembler::LoadFeedbackCell(Register dst, Register closure) {
   LoadTaggedField(
-      dst, FieldMemOperand(closure, JSFunction::kFeedbackCellOffset), r0);
+      dst, FieldMemOperand(closure, offsetof(JSFunction, feedback_cell_)), r0);
 }
 
 void MacroAssembler::LoadFeedbackVectorFromCell(Register dst,
@@ -1969,8 +1972,9 @@ void MacroAssembler::LoadFeedbackVectorFromCell(Register dst,
       dst, FieldMemOperand(feedback_cell, offsetof(FeedbackCell, value_)), r0);
 
   // Check if feedback vector is valid.
-  LoadTaggedField(scratch, FieldMemOperand(dst, HeapObject::kMapOffset), r0);
-  LoadU16(scratch, FieldMemOperand(scratch, Map::kInstanceTypeOffset));
+  LoadTaggedField(scratch, FieldMemOperand(dst, offsetof(HeapObject, map_)),
+                  r0);
+  LoadU16(scratch, FieldMemOperand(scratch, offsetof(Map, instance_type_)));
   CmpS32(scratch, Operand(FEEDBACK_VECTOR_TYPE), r0);
   b(eq, &done);
 
@@ -2007,7 +2011,7 @@ void MacroAssembler::LoadInterpreterDataInterpreterTrampoline(
 void MacroAssembler::LoadCompressedMap(Register dst, Register object,
                                        Register scratch) {
   ASM_CODE_COMMENT(this);
-  LoadU32(dst, FieldMemOperand(object, HeapObject::kMapOffset), scratch);
+  LoadU32(dst, FieldMemOperand(object, offsetof(HeapObject, map_)), scratch);
 }
 
 void MacroAssembler::LoadCompressedMap(Register dst, Register object) {
@@ -2021,7 +2025,8 @@ void MacroAssembler::LoadNativeContextSlot(Register dst, int index) {
   LoadMap(dst, cp);
   LoadTaggedField(
       dst,
-      FieldMemOperand(dst, Map::kConstructorOrBackPointerOrNativeContextOffset),
+      FieldMemOperand(
+          dst, offsetof(Map, constructor_or_back_pointer_or_native_context_)),
       r0);
   LoadTaggedField(dst, MemOperand(dst, Context::SlotOffset(index)), r0);
 }
@@ -2078,7 +2083,7 @@ void MacroAssembler::AssertConstructor(Register object) {
     Check(ne, AbortReason::kOperandIsASmiAndNotAConstructor, cr0);
     push(object);
     LoadMap(object, object);
-    lbz(object, FieldMemOperand(object, Map::kBitFieldOffset));
+    lbz(object, FieldMemOperand(object, offsetof(Map, bit_field_)));
     andi(object, object, Operand(Map::Bits1::IsConstructorBit::kMask));
     pop(object);
     Check(ne, AbortReason::kOperandIsNotAConstructor, cr0);
@@ -2216,14 +2221,15 @@ int MacroAssembler::CalculateStackPassedWords(int num_reg_arguments,
 }
 
 void MacroAssembler::PrepareCallCFunction(int num_reg_arguments,
-                                          int num_double_arguments,
-                                          Register scratch) {
+                                          int num_double_arguments) {
   int frame_alignment = ActivationFrameAlignment();
   int stack_passed_arguments =
       CalculateStackPassedWords(num_reg_arguments, num_double_arguments);
   int stack_space = kNumRequiredStackFrameSlots;
 
   if (frame_alignment > kSystemPointerSize) {
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
     // Make stack end at alignment and make room for stack arguments
     // -- preserving original value of sp.
     mr(scratch, sp);
@@ -2242,11 +2248,6 @@ void MacroAssembler::PrepareCallCFunction(int num_reg_arguments,
   // Allocate frame with required slots to make ABI work.
   li(r0, Operand::Zero());
   StoreU64WithUpdate(r0, MemOperand(sp, -stack_space * kSystemPointerSize));
-}
-
-void MacroAssembler::PrepareCallCFunction(int num_reg_arguments,
-                                          Register scratch) {
-  PrepareCallCFunction(num_reg_arguments, 0, scratch);
 }
 
 void MacroAssembler::MovToFloatParameter(DoubleRegister src) { Move(d1, src); }
@@ -4776,8 +4777,9 @@ void MacroAssembler::CallJSFunction(Register function_object,
                                     uint16_t argument_count) {
   Register code = kJavaScriptCallCodeStartRegister;
   Register dispatch_handle = r0;
-  LoadU32(dispatch_handle,
-          FieldMemOperand(function_object, JSFunction::kDispatchHandleOffset));
+  LoadU32(
+      dispatch_handle,
+      FieldMemOperand(function_object, offsetof(JSFunction, dispatch_handle_)));
   LoadEntrypointFromJSDispatchTable(code, dispatch_handle, ip);
   Call(code);
 }
@@ -4806,8 +4808,9 @@ void MacroAssembler::JumpJSFunction(Register function_object, Register scratch,
                                     JumpMode jump_mode) {
   Register code = kJavaScriptCallCodeStartRegister;
   Register dispatch_handle = r0;
-  LoadU32(dispatch_handle,
-          FieldMemOperand(function_object, JSFunction::kDispatchHandleOffset));
+  LoadU32(
+      dispatch_handle,
+      FieldMemOperand(function_object, offsetof(JSFunction, dispatch_handle_)));
   LoadEntrypointFromJSDispatchTable(code, dispatch_handle, ip);
   Jump(code);
 }
@@ -5229,7 +5232,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     // Save the return value in a callee-save register.
     Register saved_result = prev_limit_reg;
     __ mr(saved_result, return_value);
-    __ PrepareCallCFunction(1, scratch);
+    __ PrepareCallCFunction(1);
     __ Move(kCArgRegs[0], ER::isolate_address());
     __ CallCFunction(ER::delete_handle_scope_extensions(), 1);
     __ mr(return_value, saved_result);

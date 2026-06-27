@@ -11,6 +11,7 @@
 #include "src/api/api-inl.h"
 #include "src/base/bits.h"
 #include "src/base/ieee754.h"
+#include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/codegen/cpu-features.h"
 #include "src/common/globals.h"
@@ -639,10 +640,12 @@ FUNCTION_REFERENCE(wasm_float64_to_uint64_sat,
                    wasm::float64_to_uint64_sat_wrapper)
 FUNCTION_REFERENCE(wasm_float16_to_float32, wasm::float16_to_float32_wrapper)
 FUNCTION_REFERENCE(wasm_float32_to_float16, wasm::float32_to_float16_wrapper)
+#if V8_TARGET_ARCH_32_BIT
 FUNCTION_REFERENCE(wasm_int64_div, wasm::int64_div_wrapper)
 FUNCTION_REFERENCE(wasm_int64_mod, wasm::int64_mod_wrapper)
 FUNCTION_REFERENCE(wasm_uint64_div, wasm::uint64_div_wrapper)
 FUNCTION_REFERENCE(wasm_uint64_mod, wasm::uint64_mod_wrapper)
+#endif
 FUNCTION_REFERENCE(wasm_word32_ctz, base::bits::CountTrailingZeros<uint32_t>)
 FUNCTION_REFERENCE(wasm_word64_ctz, base::bits::CountTrailingZeros<uint64_t>)
 FUNCTION_REFERENCE(wasm_word32_popcnt, base::bits::CountPopulation<uint32_t>)
@@ -652,6 +655,9 @@ FUNCTION_REFERENCE(wasm_word32_ror, wasm::word32_ror_wrapper)
 FUNCTION_REFERENCE(wasm_word64_rol, wasm::word64_rol_wrapper)
 FUNCTION_REFERENCE(wasm_word64_ror, wasm::word64_ror_wrapper)
 FUNCTION_REFERENCE(wasm_int128_add, wasm::wasm_int128_add_wrapper)
+FUNCTION_REFERENCE(wasm_int128_sub, wasm::wasm_int128_sub_wrapper)
+FUNCTION_REFERENCE(wasm_int64_mul_wide_s, wasm::wasm_int64_mul_wide_s_wrapper)
+FUNCTION_REFERENCE(wasm_int64_mul_wide_u, wasm::wasm_int64_mul_wide_u_wrapper)
 FUNCTION_REFERENCE(wasm_f64x2_ceil, wasm::f64x2_ceil_wrapper)
 FUNCTION_REFERENCE(wasm_f64x2_floor, wasm::f64x2_floor_wrapper)
 FUNCTION_REFERENCE(wasm_f64x2_trunc, wasm::f64x2_trunc_wrapper)
@@ -994,9 +1000,9 @@ ExternalReference::address_of_wasm_f64x2_convert_low_i32x4_u_int_mask() {
       reinterpret_cast<Address>(&wasm_f64x2_convert_low_i32x4_u_int_mask));
 }
 
-ExternalReference ExternalReference::supports_wasm_simd_128_address() {
+ExternalReference ExternalReference::supports_simd_128_address() {
   return ExternalReference(
-      reinterpret_cast<Address>(&CpuFeatures::supports_wasm_simd_128_));
+      reinterpret_cast<Address>(&CpuFeatures::supports_simd_128_));
 }
 
 ExternalReference ExternalReference::address_of_wasm_double_2_power_52() {
@@ -1077,6 +1083,7 @@ ExternalReference ExternalReference::invoke_function_callback(
     case CallApiCallbackMode::kOptimizedNoProfiling:
       return ExternalReference();
   }
+  UNREACHABLE();
 }
 
 ExternalReference ExternalReference::invoke_accessor_getter_callback() {
@@ -1307,7 +1314,8 @@ ExternalReference ExternalReference::printf_function() {
   return ExternalReference(Redirect(FUNCTION_ADDR(std::printf)));
 }
 
-FUNCTION_REFERENCE(refill_math_random, MathRandom::RefillCache)
+FUNCTION_REFERENCE(initialize_and_maybe_refill_math_random,
+                   MathRandom::InitializeAndMaybeRefillCache)
 
 template <typename SubjectChar, typename PatternChar>
 ExternalReference ExternalReference::search_string_raw() {
@@ -1452,8 +1460,8 @@ static size_t NameDictionaryLookupForwardedStringWithHandle(Isolate* isolate,
   ReadOnlyRoots roots(isolate);
   uint32_t hash = key->hash();
   InternalIndex entry = mode == kFindExisting
-                            ? dict->FindEntry(isolate, roots, key, hash)
-                            : dict->FindInsertionEntry(isolate, roots, hash);
+                            ? dict->FindEntry(roots, key, hash)
+                            : dict->FindInsertionEntry(roots, hash);
   return entry.raw_value();
 }
 
@@ -1488,8 +1496,8 @@ static size_t NameDictionaryLookupForwardedString(Isolate* isolate,
   ReadOnlyRoots roots(isolate);
   uint32_t hash = key->hash();
   InternalIndex entry = mode == kFindExisting
-                            ? dict->FindEntry(isolate, roots, key, hash)
-                            : dict->FindInsertionEntry(isolate, roots, hash);
+                            ? dict->FindEntry(roots, key, hash)
+                            : dict->FindInsertionEntry(roots, hash);
   return entry.raw_value();
 }
 

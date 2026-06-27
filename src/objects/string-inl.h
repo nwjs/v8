@@ -13,6 +13,7 @@
 
 #include "absl/functional/overload.h"
 #include "include/v8config.h"
+#include "src/base/logging.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/execution/isolate-utils.h"
@@ -320,7 +321,7 @@ V8_NOINLINE V8_PRESERVE_MOST inline bool TryReportUnreachable(
   }
   recursion++;
   Isolate::Current()->PushStackTraceAndDie(
-      reinterpret_cast<void*>(string->ptr()),
+      "invalid string dispatch", reinterpret_cast<void*>(string->ptr()),
       reinterpret_cast<void*>(map->ptr()));
   recursion--;
   UNREACHABLE();
@@ -1091,6 +1092,7 @@ HandleType<String> String::Share(Isolate* isolate, HandleType<T> string) {
     case StringTransitionStrategy::kAlreadyTransitioned:
       return string;
   }
+  UNREACHABLE();
 }
 
 template <typename T, template <typename> typename HandleType>
@@ -1504,6 +1506,8 @@ void ExternalString::SetResourceRefForSerialization(uint32_t ref) {
 }
 
 void ExternalString::DisposeResource(Isolate* isolate) {
+  DisallowGarbageCollection no_gc;
+
   Address value = resource_.load(isolate);
   v8::String::ExternalStringResourceBase* resource =
       reinterpret_cast<v8::String::ExternalStringResourceBase*>(value);
@@ -1513,6 +1517,7 @@ void ExternalString::DisposeResource(Isolate* isolate) {
     if (!IsShared() && !HeapLayout::InWritableSharedSpace(this)) {
       resource->Unaccount(reinterpret_cast<v8::Isolate*>(isolate));
     }
+    DisableGCMole no_gc_mole;
     resource->Dispose();
     resource_.store(isolate, kNullAddress);
   }
@@ -1725,8 +1730,9 @@ void StringCharacterStream::Reset(Tagged<String> string, int offset) {
   iter_.Reset(cons_string, offset);
   if (!cons_string.is_null()) {
     string = iter_.Next(&offset);
-    if (!string.is_null())
+    if (!string.is_null()) {
       String::VisitFlat(this, string, offset, access_guard_);
+    }
   }
 }
 

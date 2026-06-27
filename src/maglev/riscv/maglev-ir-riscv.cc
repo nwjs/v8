@@ -588,7 +588,7 @@ void Int32ModulusWithOverflow::GenerateCode(MaglevAssembler* masm,
   //   deopt if lhs < 0  // Minus zero.
   //   0
   //
-  // Using same algorithm as in EffectControlLinearizer:
+  // Using same algorithm as in MachineLoweringReducer:
   //   if rhs <= 0 then
   //     rhs = -rhs
   //     deopt if rhs == 0
@@ -981,7 +981,7 @@ void LoadTypedArrayLength::GenerateCode(MaglevAssembler* masm,
                         AbortReason::kUnexpectedValue);
   }
   __ LoadBoundedSizeFromObject(result_register, object,
-                               JSTypedArray::kRawByteLengthOffset);
+                               offsetof(JSArrayBufferView, raw_byte_length_));
   int shift_size = ElementsKindToShiftSize(elements_kind_);
   if (shift_size > 0) {
     // TODO(leszeks): Merge this shift with the one in LoadBoundedSize.

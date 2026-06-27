@@ -2080,6 +2080,13 @@ bool InstanceBuilder::ProcessImportedTable(int import_index, int table_index,
     SBXCHECK_EQ(dispatch_table->table_type(),
                 module_->canonical_type(table.type));
     SBXCHECK_GE(dispatch_table->length(), table.initial_size);
+  } else {
+    // Hardening: for non-funcref tables, the dispatch table must be empty.
+    // This is not strictly necessary for sandbox safety as these tables are
+    // not sensitive to CFI, but it prevents an attacker from placing a wrongly
+    // typed trusted_dispatch_table in trusted memory.
+    SBXCHECK_EQ(dispatch_table,
+                *isolate_->factory()->empty_wasm_dispatch_table());
   }
   trusted_instance_data->dispatch_tables()->set(table_index, dispatch_table);
   if (table_index == 0) {
@@ -2559,11 +2566,15 @@ void InstanceBuilder::ProcessExports() {
 
         if (is_asm_js &&
             name->IsEqualTo(base::CStrVector(AsmJs::kSingleFunctionName))) {
-          desc.set_value(value);
+          PropertyDescriptor single_desc;
+          single_desc.set_value(value);
+          single_desc.set_writable(true);
+          single_desc.set_enumerable(false);
+          single_desc.set_configurable(true);
           CHECK(JSReceiver::DefineOwnProperty(
                     isolate_, instance_object,
                     isolate_->factory()->wasm_asm_single_function_symbol(),
-                    &desc, Just(kThrowOnError))
+                    &single_desc, Just(kThrowOnError))
                     .FromMaybe(false));
           continue;
         }
@@ -2658,7 +2669,8 @@ void InstanceBuilder::ProcessExports() {
                                details.attributes());
     } else {
       // Add a property to the dictionary.
-      JSObject::SetNormalizedProperty(exports_object, name, value, details);
+      JSObject::SetNormalizedProperty(exports_object, name, value, details)
+          .Check();
     }
   }
 
@@ -3014,7 +3026,7 @@ void InstanceBuilder::InitializeTags() {
   DirectHandle<FixedArray> tags_table(trusted_data_->tags_table(), isolate_);
   uint32_t tags_table_len = tags_table->ulength().value();
   for (uint32_t index = 0; index < tags_table_len; ++index) {
-    if (!IsUndefined(tags_table->get(index), isolate_)) continue;
+    if (!IsUndefined(tags_table->get(index))) continue;
     DirectHandle<WasmExceptionTag> tag = WasmExceptionTag::New(isolate_, index);
     tags_table->set(index, *tag);
   }

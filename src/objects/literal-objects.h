@@ -51,31 +51,18 @@ V8_OBJECT class PrototypeSharedClosureInfo : public Struct {
   TaggedMember<Context> context_;
 } V8_OBJECT_END;
 
-class ObjectBoilerplateDescriptionShape final : public AllStatic {
- public:
-  using ElementT = Object;
-  using CompressionScheme = V8HeapCompressionScheme;
-  static constexpr RootIndex kMapRootIndex =
-      RootIndex::kObjectBoilerplateDescriptionMap;
-  static constexpr bool kLengthEqualsCapacity = true;
-
-  V8_ARRAY_EXTRA_FIELDS({
-    TaggedMember<Smi> backing_store_size_;
-    TaggedMember<Smi> flags_;
-  });
-};
 
 // ObjectBoilerplateDescription is a list of properties consisting of name
 // value pairs. In addition to the properties, it provides the projected number
 // of properties in the backing store. This number includes properties with
 // computed names that are not in the list.
 class ObjectBoilerplateDescription
-    : public TaggedArrayBase<ObjectBoilerplateDescription,
-                             ObjectBoilerplateDescriptionShape> {
-  using Super = TaggedArrayBase<ObjectBoilerplateDescription,
-                                ObjectBoilerplateDescriptionShape>;
+    : public TaggedArrayBase<ObjectBoilerplateDescription, Object> {
+  using Super = TaggedArrayBase<ObjectBoilerplateDescription, Object>;
+
  public:
-  using Shape = ObjectBoilerplateDescriptionShape;
+  static constexpr RootIndex kMapRootIndex =
+      RootIndex::kObjectBoilerplateDescriptionMap;
   using KeyT = UnionOf<InternalizedString, Number>;
 
   template <class IsolateT>
@@ -104,9 +91,9 @@ class ObjectBoilerplateDescription
 
   class BodyDescriptor;
 
-  static constexpr uint32_t kLengthOffset = HeapObject::kHeaderSize;
+  static constexpr uint32_t kLengthOffset = sizeof(HeapObject);
   static constexpr uint32_t kHeaderSize =
-      kLengthOffset + (TAGGED_SIZE_8_BYTES ? kTaggedSize : kApiInt32Size);
+      kLengthOffset + 3 * (TAGGED_SIZE_8_BYTES ? kTaggedSize : kApiInt32Size);
 
  private:
   using TaggedArrayBase::get;
@@ -115,6 +102,15 @@ class ObjectBoilerplateDescription
   static constexpr int kElementsPerEntry = 2;
   static constexpr int NameIndex(int i) { return i * kElementsPerEntry; }
   static constexpr int ValueIndex(int i) { return i * kElementsPerEntry + 1; }
+
+ public:
+  uint32_t length_;
+#if TAGGED_SIZE_8_BYTES
+  uint32_t optional_padding_;
+#endif
+  TaggedMember<Smi> backing_store_size_;
+  TaggedMember<Smi> flags_;
+  FLEXIBLE_ARRAY_MEMBER(typename Super::ElementMemberT, objects);
 };
 
 V8_OBJECT class ArrayBoilerplateDescription : public Struct {

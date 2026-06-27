@@ -14,7 +14,6 @@
 #include "src/builtins/builtins.h"
 #include "src/handles/global-handles-inl.h"
 #include "src/heap/heap-write-barrier.h"
-#include "src/objects/object-macros.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
 #include "src/wasm/canonical-types.h"
 #include "src/wasm/decoder.h"
@@ -24,6 +23,9 @@
 #include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-opcodes-inl.h"
 #include "src/zone/zone.h"
+
+// Include this after all other object headers.
+#include "src/objects/object-macros.h"
 
 namespace v8 {
 namespace internal {
@@ -843,8 +845,8 @@ static void PrintAndClearProfilingData() {
 #endif  // DRUMBRAKE_ENABLE_PROFILING
 
 int StructFieldOffset(const StructType* struct_type, int field_index) {
-  return WasmStruct::kHeaderSize + struct_type->field_offset(field_index) -
-         kHeapObjectTag;
+  return (WasmStruct::kHeaderSize + struct_type->field_offset(field_index) -
+          kHeapObjectTag);
 }
 
 InstructionHandler s_unwind_code = InstructionHandler::k_s2s_Unwind;
@@ -4743,7 +4745,7 @@ class Handlers : public HandlersBase {
       const uint8_t* code, uint32_t* sp, WasmInterpreterRuntime* wasm_runtime, \
       int64_t r0, double fp0) {                                                \
     uint16_t lane = Read<int16_t>(code);                                       \
-    DCHECK_LT(lane, 4);                                                        \
+    DCHECK_LT(lane, std::tuple_size_v<stype>);                                 \
     Simd128 v = pop<Simd128>(sp, code, wasm_runtime);                          \
     stype s = v.to_##name();                                                   \
     push(sp, code, wasm_runtime, s[LANE(lane, s)]);                            \
@@ -4765,7 +4767,7 @@ class Handlers : public HandlersBase {
       const uint8_t* code, uint32_t* sp, WasmInterpreterRuntime* wasm_runtime, \
       int64_t r0, double fp0) {                                                \
     uint16_t lane = Read<int16_t>(code);                                       \
-    DCHECK_LT(lane, 16);                                                       \
+    DCHECK_LT(lane, std::tuple_size_v<stype>);                                 \
     Simd128 s = pop<Simd128>(sp, code, wasm_runtime);                          \
     stype ss = s.to_##name();                                                  \
     auto res = ss[LANE(lane, ss)];                                             \
@@ -5015,7 +5017,7 @@ class Handlers : public HandlersBase {
       const uint8_t* code, uint32_t* sp, WasmInterpreterRuntime* wasm_runtime, \
       int64_t r0, double fp0) {                                                \
     uint16_t lane = Read<int16_t>(code);                                       \
-    DCHECK_LT(lane, 16);                                                       \
+    DCHECK_LT(lane, std::tuple_size_v<stype>);                                 \
     ctype new_val = pop<ctype>(sp, code, wasm_runtime);                        \
     Simd128 simd_val = pop<Simd128>(sp, code, wasm_runtime);                   \
     stype s = simd_val.to_##name();                                            \
@@ -5136,8 +5138,8 @@ class Handlers : public HandlersBase {
     for (size_t dst = 0; i < end; ++i, ++dst) {
       // Need static_cast for unsigned narrow types.
       res[LANE(dst, res)] =
-          MultiplyLong<wide>(static_cast<narrow>(s1[LANE(start, s1)]),
-                             static_cast<narrow>(s2[LANE(start, s2)]));
+          MultiplyLong<wide>(static_cast<narrow>(s1[LANE(i, s1)]),
+                             static_cast<narrow>(s2[LANE(i, s2)]));
     }
     push<Simd128>(sp, code, wasm_runtime, Simd128(res));
     NextOp();
@@ -5562,6 +5564,7 @@ class Handlers : public HandlersBase {
     memory_type loaded = base::ReadUnalignedValue<memory_type>(
         reinterpret_cast<Address>(address));
     uint16_t lane = Read<uint16_t>(code);
+    DCHECK_LT(lane, std::tuple_size_v<s_type>);
     value[LANE(lane, value)] = loaded;
     push<Simd128>(sp, code, wasm_runtime, Simd128(value));
 
@@ -5601,6 +5604,7 @@ class Handlers : public HandlersBase {
     uint8_t* address = memory_start + effective_index;
 
     uint16_t lane = Read<uint16_t>(code);
+    DCHECK_LT(lane, std::tuple_size_v<s_type>);
     memory_type res = value[LANE(lane, value)];
     base::WriteUnalignedValue<memory_type>(reinterpret_cast<Address>(address),
                                            res);
@@ -5699,7 +5703,7 @@ class Handlers : public HandlersBase {
           case kRef:
           case kRefNull: {
             DirectHandle<Object> ref = pop<WasmRef>(sp, code, wasm_runtime);
-            if (IsWasmNull(*ref, isolate)) {
+            if (IsWasmNull(*ref)) {
               ref = direct_handle(ReadOnlyRoots(isolate).null_value(), isolate);
             }
             encoded_values->set(encoded_index++, *ref);
@@ -6530,7 +6534,10 @@ class Handlers : public HandlersBase {
     const uint32_t data_index = Read<int32_t>(code);
     // TODO(paolosev@microsoft.com): already validated?
     if (V8_UNLIKELY(!Smi::IsValid(data_index))) {
-      TRAP(MessageTemplate::kWasmTrapElementSegmentOutOfBounds)
+      MessageTemplate reason =
+          init_data ? MessageTemplate::kWasmTrapDataSegmentOutOfBounds
+                    : MessageTemplate::kWasmTrapElementSegmentOutOfBounds;
+      INLINED_TRAP(reason);
     }
 
     uint32_t size = pop<int32_t>(sp, code, wasm_runtime);
@@ -8248,6 +8255,9 @@ WasmInstruction WasmBytecodeGenerator::DecodeInstruction(pc_t pc,
     case kExprSelectWithType: {
       SelectTypeImmediate imm(WasmEnabledFeatures::All(), &detected, &decoder,
                               wasm_code_->at(pc + 1), Decoder::kNoValidation);
+      value_type_reader::Populate(&imm.type, module_);
+      optional.gc_heap_type_immediate.heap_type_bit_field =
+          imm.type.raw_bit_field();
       len = 1 + imm.length;
       break;
     }
@@ -8305,7 +8315,10 @@ WasmInstruction WasmBytecodeGenerator::DecodeInstruction(pc_t pc,
   case kExpr##name: {                                                          \
     bool is_rmw = WasmOpcodes::IsAtomicRmwOpcode(opcode);                      \
     MemoryAccessImmediate imm(&decoder, wasm_code_->at(pc + 1), sizeof(ctype), \
-                              false, is_rmw, Decoder::kNoValidation);          \
+                              false,                                           \
+                              is_rmw ? MemoryAccessImmediate::kAtomicRMW       \
+                                     : MemoryAccessImmediate::kNonAtomic,      \
+                              Decoder::kNoValidation);                         \
     len = 1 + imm.length;                                                      \
     optional.memory_access.offset = imm.offset;                                \
     optional.memory_access.memory_index = imm.mem_index;                       \
@@ -8331,7 +8344,10 @@ WasmInstruction WasmBytecodeGenerator::DecodeInstruction(pc_t pc,
   case kExpr##name: {                                                          \
     bool is_rmw = WasmOpcodes::IsAtomicRmwOpcode(opcode);                      \
     MemoryAccessImmediate imm(&decoder, wasm_code_->at(pc + 1), sizeof(ctype), \
-                              false, is_rmw, Decoder::kNoValidation);          \
+                              false,                                           \
+                              is_rmw ? MemoryAccessImmediate::kAtomicRMW       \
+                                     : MemoryAccessImmediate::kNonAtomic,      \
+                              Decoder::kNoValidation);                         \
     len = 1 + imm.length;                                                      \
     optional.memory_access.offset = imm.offset;                                \
     optional.memory_access.memory_index = imm.mem_index;                       \
@@ -8585,7 +8601,6 @@ void WasmBytecodeGenerator::DecodeGCOp(WasmOpcode opcode,
       HeapTypeImmediate imm(WasmEnabledFeatures::All(), &detected, decoder,
                             code->at(pc + *len), Decoder::kNoValidation);
       value_type_reader::Populate(&imm.type, module_);
-      optional->gc_heap_type_immediate.length = imm.length;
       optional->gc_heap_type_immediate.heap_type_bit_field =
           imm.type.raw_bit_field();
       *len += imm.length;
@@ -8734,7 +8749,10 @@ void WasmBytecodeGenerator::DecodeAtomicOp(WasmOpcode opcode,
       bool is_rmw = WasmOpcodes::IsAtomicRmwOpcode(opcode);
       MemoryAccessImmediate imm(decoder, code->at(pc + *len),
                                 ElementSizeLog2Of(memtype.representation()),
-                                false, is_rmw, Decoder::kNoValidation);
+                                false,
+                                is_rmw ? MemoryAccessImmediate::kAtomicRMW
+                                       : MemoryAccessImmediate::kNonAtomic,
+                                Decoder::kNoValidation);
       optional->memory_access.offset = imm.offset;
       optional->memory_access.memory_index = imm.mem_index;
       *len += imm.length;
@@ -8745,7 +8763,10 @@ void WasmBytecodeGenerator::DecodeAtomicOp(WasmOpcode opcode,
       bool is_rmw = WasmOpcodes::IsAtomicRmwOpcode(opcode);
       MemoryAccessImmediate imm(decoder, code->at(pc + *len),
                                 ElementSizeLog2Of(memtype.representation()),
-                                false, is_rmw, Decoder::kNoValidation);
+                                false,
+                                is_rmw ? MemoryAccessImmediate::kAtomicRMW
+                                       : MemoryAccessImmediate::kNonAtomic,
+                                Decoder::kNoValidation);
       optional->memory_access.offset = imm.offset;
       optional->memory_access.memory_index = imm.mem_index;
       *len += imm.length;
@@ -8761,7 +8782,10 @@ void WasmBytecodeGenerator::DecodeAtomicOp(WasmOpcode opcode,
     bool is_rmw = WasmOpcodes::IsAtomicRmwOpcode(opcode);                   \
     MemoryAccessImmediate imm(decoder, code->at(pc + *len),                 \
                               ElementSizeLog2Of(memtype.representation()),  \
-                              false, is_rmw, Decoder::kNoValidation);       \
+                              false,                                        \
+                              is_rmw ? MemoryAccessImmediate::kAtomicRMW    \
+                                     : MemoryAccessImmediate::kNonAtomic,   \
+                              Decoder::kNoValidation);                      \
     optional->memory_access.offset = imm.offset;                            \
     optional->memory_access.memory_index = imm.mem_index;                   \
     *len += imm.length;                                                     \
@@ -8776,7 +8800,10 @@ void WasmBytecodeGenerator::DecodeAtomicOp(WasmOpcode opcode,
     bool is_rmw = WasmOpcodes::IsAtomicRmwOpcode(opcode);                  \
     MemoryAccessImmediate imm(decoder, code->at(pc + *len),                \
                               ElementSizeLog2Of(memtype.representation()), \
-                              false, is_rmw, Decoder::kNoValidation);      \
+                              false,                                       \
+                              is_rmw ? MemoryAccessImmediate::kAtomicRMW   \
+                                     : MemoryAccessImmediate::kNonAtomic,  \
+                              Decoder::kNoValidation);                     \
     optional->memory_access.offset = imm.offset;                           \
     optional->memory_access.memory_index = imm.mem_index;                  \
     *len += imm.length;                                                    \
@@ -9937,17 +9964,28 @@ RegMode WasmBytecodeGenerator::DoEncodeInstruction(const WasmInstruction& instr,
       const ValueType obj_type = slots_[stack_.back()].value_type;
       DCHECK(obj_type.is_ref());
 
-      // This logic ensures that code generation can assume that functions can
-      // only be cast to function types, and data objects to data types.
+      // Drumbrake-specific optimization: the validator independently determines
+      // TypeCheckAlwaysSucceeds but doesn't communicate this to other compilers
+      // via the bytecode. Drumbrake re-analyzes locally during code generation.
+      // This optimization is safe because bytecode is pre-validated. When
+      // always- succeeds, we can skip the dynamic type check and only handle
+      // the nullable case: if null_succeeds=false, branch on non-null;
+      // otherwise branch always. This logic ensures that code generation can
+      // assume that functions can only be cast to function types, and data
+      // objects to data types.
       if (V8_UNLIKELY(
               TypeCheckAlwaysSucceeds(obj_type, target_type.heap_type()))) {
         StoreBlockParamsAndResultsIntoSlots(target_branch_index, kExprBrOnCast);
         // The branch will still not be taken on null if not {null_succeeds}.
         if (obj_type.is_nullable() && !null_succeeds) {
-          EMIT_INSTR_HANDLER(s2s_BranchOnNull);
+          EMIT_INSTR_HANDLER(s2s_BranchOnNonNull);
           RefPop();  // pop condition
           EmitRefValueType(obj_type.raw_bit_field());
-          RefPush(target_type);  // re-push condition value with a new HeapType.
+          // For the fallthrough path, null is possible, so push the original
+          // (nullable) object type instead of target_type. The target_type is
+          // non-null in this case, which would be incorrect for the fallthrough
+          // value.
+          RefPush(obj_type);
           EmitBranchOffset(br_on_cast_data.label_depth());
         } else {
           EMIT_INSTR_HANDLER(s2s_Branch);
@@ -10619,16 +10657,28 @@ RegMode WasmBytecodeGenerator::DoEncodeInstruction(const WasmInstruction& instr,
             case kR2S: {
               EMIT_INSTR_HANDLER(r2s_RefSelect);
               RefPop();                   // val2
-              ValueType type = RefPop();  // val1
-              RefPush(type);              // result
+              ValueType val1_type = RefPop();
+              ValueType result_type =
+                  instr.opcode == kExprSelectWithType
+                      ? ValueType::FromRawBitField(
+                            instr.optional.gc_heap_type_immediate
+                                .heap_type_bit_field)
+                      : val1_type;
+              RefPush(result_type);  // result
               return RegMode::kNoReg;
             }
             case kS2S: {
               EMIT_INSTR_HANDLER(s2s_RefSelect);
               I32Pop();  // condition
               RefPop();
-              ValueType type = RefPop();
-              RefPush(type);
+              ValueType val1_type = RefPop();
+              ValueType result_type =
+                  instr.opcode == kExprSelectWithType
+                      ? ValueType::FromRawBitField(
+                            instr.optional.gc_heap_type_immediate
+                                .heap_type_bit_field)
+                      : val1_type;
+              RefPush(result_type);
               return RegMode::kNoReg;
             }
           }
@@ -12355,7 +12405,7 @@ RegMode WasmBytecodeGenerator::DoEncodeInstruction(const WasmInstruction& instr,
   case kExpr##format##ExtractLane: {                    \
     EMIT_INSTR_HANDLER(s2s_Simd##format##ExtractLane);  \
     /* emit 8 bits ? */                                 \
-    EmitI16Const(instr.optional.simd_lane);             \
+    EmitI16Const(instr.optional.simd_lane.lane());      \
     S128Pop();                                          \
     op_type##Push();                                    \
     return RegMode::kNoReg;                             \
@@ -12370,7 +12420,7 @@ RegMode WasmBytecodeGenerator::DoEncodeInstruction(const WasmInstruction& instr,
   case kExpr##format##ExtractLane##sign: {                                 \
     EMIT_INSTR_HANDLER(s2s_Simd##format##ExtractLane##sign);               \
     /* emit 8 bits ? */                                                    \
-    EmitI16Const(instr.optional.simd_lane);                                \
+    EmitI16Const(instr.optional.simd_lane.lane());                         \
     S128Pop();                                                             \
     I32Push();                                                             \
     return RegMode::kNoReg;                                                \
@@ -12590,7 +12640,7 @@ RegMode WasmBytecodeGenerator::DoEncodeInstruction(const WasmInstruction& instr,
   case kExpr##format##ReplaceLane: {                           \
     EMIT_INSTR_HANDLER(s2s_Simd##format##ReplaceLane);         \
     /* emit 8 bits ? */                                        \
-    EmitI16Const(instr.optional.simd_lane);                    \
+    EmitI16Const(instr.optional.simd_lane.lane());             \
     op_type##Pop();                                            \
     S128Pop();                                                 \
     S128Push();                                                \
@@ -12928,21 +12978,21 @@ RegMode WasmBytecodeGenerator::DoEncodeInstruction(const WasmInstruction& instr,
       LOAD_ZERO_EXTEND_CASE(Load64Zero, I64)
 #undef LOAD_ZERO_EXTEND_CASE
 
-#define LOAD_LANE_CASE(op)                                                 \
-  case kExprS128##op: {                                                    \
-    bool is_memory64 =                                                     \
-        module_->memories[instr.optional.simd_loadstore_lane.memory_index] \
-            .is_memory64();                                                \
-    EMIT_MULTI_MEM64_INSTR_HANDLER_WITH_PC(s2s_SimdS128##op, is_memory64,  \
-                                           instr.pc);                      \
-    S128Pop();                                                             \
-    EmitMemoryOffset(instr.optional.simd_loadstore_lane.offset);           \
-    EmitMemoryIndex(instr.optional.simd_loadstore_lane.memory_index);      \
-    MemIndexPop(is_memory64);                                              \
-    /* emit 8 bits ? */                                                    \
-    EmitI16Const(instr.optional.simd_loadstore_lane.lane);                 \
-    S128Push();                                                            \
-    return RegMode::kNoReg;                                                \
+#define LOAD_LANE_CASE(op)                                                   \
+  case kExprS128##op: {                                                      \
+    bool is_memory64 =                                                       \
+        module_->memories[instr.optional.simd_loadstore_lane.memory_index()] \
+            .is_memory64();                                                  \
+    EMIT_MULTI_MEM64_INSTR_HANDLER_WITH_PC(s2s_SimdS128##op, is_memory64,    \
+                                           instr.pc);                        \
+    S128Pop();                                                               \
+    EmitMemoryOffset(instr.optional.simd_loadstore_lane.offset());           \
+    EmitMemoryIndex(instr.optional.simd_loadstore_lane.memory_index());      \
+    MemIndexPop(is_memory64);                                                \
+    /* emit 8 bits ? */                                                      \
+    EmitI16Const(instr.optional.simd_loadstore_lane.lane());                 \
+    S128Push();                                                              \
+    return RegMode::kNoReg;                                                  \
   }
       LOAD_LANE_CASE(Load8Lane)
       LOAD_LANE_CASE(Load16Lane)
@@ -12950,20 +13000,20 @@ RegMode WasmBytecodeGenerator::DoEncodeInstruction(const WasmInstruction& instr,
       LOAD_LANE_CASE(Load64Lane)
 #undef LOAD_LANE_CASE
 
-#define STORE_LANE_CASE(op)                                                \
-  case kExprS128##op: {                                                    \
-    bool is_memory64 =                                                     \
-        module_->memories[instr.optional.simd_loadstore_lane.memory_index] \
-            .is_memory64();                                                \
-    EMIT_MULTI_MEM64_INSTR_HANDLER_WITH_PC(s2s_SimdS128##op, is_memory64,  \
-                                           instr.pc);                      \
-    S128Pop();                                                             \
-    EmitMemoryOffset(instr.optional.simd_loadstore_lane.offset);           \
-    EmitMemoryIndex(instr.optional.simd_loadstore_lane.memory_index);      \
-    MemIndexPop(is_memory64);                                              \
-    /* emit 8 bits ? */                                                    \
-    EmitI16Const(instr.optional.simd_loadstore_lane.lane);                 \
-    return RegMode::kNoReg;                                                \
+#define STORE_LANE_CASE(op)                                                  \
+  case kExprS128##op: {                                                      \
+    bool is_memory64 =                                                       \
+        module_->memories[instr.optional.simd_loadstore_lane.memory_index()] \
+            .is_memory64();                                                  \
+    EMIT_MULTI_MEM64_INSTR_HANDLER_WITH_PC(s2s_SimdS128##op, is_memory64,    \
+                                           instr.pc);                        \
+    S128Pop();                                                               \
+    EmitMemoryOffset(instr.optional.simd_loadstore_lane.offset());           \
+    EmitMemoryIndex(instr.optional.simd_loadstore_lane.memory_index());      \
+    MemIndexPop(is_memory64);                                                \
+    /* emit 8 bits ? */                                                      \
+    EmitI16Const(instr.optional.simd_loadstore_lane.lane());                 \
+    return RegMode::kNoReg;                                                  \
   }
       STORE_LANE_CASE(Store8Lane)
       STORE_LANE_CASE(Store16Lane)

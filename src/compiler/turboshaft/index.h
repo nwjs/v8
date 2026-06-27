@@ -275,7 +275,8 @@ using Simd256 = WordWithBits<256>;
 
 struct Compressed : public Any {};
 struct InternalTag : public Any {};
-struct FrameState : public InternalTag {};
+struct EagerFrameState : public InternalTag {};
+struct LazyFrameState : public InternalTag {};
 
 // A Union type for untagged values. For Tagged types use `Union` for now.
 // TODO(nicohartmann@): We should think about a more uniform solution some day.
@@ -283,6 +284,8 @@ template <typename... Ts>
 struct UntaggedUnion : public Any {
   using to_list_t = base::tmp::list<Ts...>;
 };
+
+using AnyFrameState = UntaggedUnion<EagerFrameState, LazyFrameState>;
 
 template <typename... Ts>
 struct Tuple : public Any {
@@ -590,6 +593,7 @@ using BooleanOrNullOrUndefined = UnionOf<Boolean, Null, Undefined>;
 using NumberOrString = UnionOf<Number, String>;
 using PlainPrimitive = UnionOf<NumberOrString, BooleanOrNullOrUndefined>;
 using StringOrNull = UnionOf<String, Null>;
+using StringOrUndefined = UnionOf<String, Undefined>;
 using NumberOrUndefined = UnionOf<Number, Undefined>;
 using AnyFixedArray = UnionOf<FixedArray, FixedDoubleArray>;
 using NonBigIntPrimitive = UnionOf<Symbol, PlainPrimitive>;
@@ -651,6 +655,7 @@ constexpr bool IsValidTypeFor(RegisterRepresentation repr) {
     case RegisterRepresentation::Enum::kSimd256:
       return std::is_same_v<T, Simd256>;
   }
+  UNREACHABLE();
 }
 
 // V<> represents an SSA-value that is parameterized with the type of the value.
@@ -684,9 +689,29 @@ class V : public OpIndex {
 
   template <typename U>
   static V<T> Cast(V<U> index) {
+    static_assert(!implicitly_constructible_from<U>,
+                  "Redundant explicit V<> cast.");
+    // Eager frame states cannot be used for LazyDeopt and vice-versa.
+    static_assert(
+        !(std::is_same_v<T, EagerFrameState> &&
+          std::is_same_v<U, LazyFrameState>) &&
+            !(std::is_same_v<T, LazyFrameState> &&
+              std::is_same_v<U, EagerFrameState>),
+        "Cannot cast EagerFrameState to LazyFrameState or vice-versa!");
     return V<T>(OpIndex{index});
   }
   static V<T> Cast(OpIndex index) { return V<T>(index); }
+
+  // The difference between Cast and CastIfNeeded is that Cast disallows
+  // upcasting to avoid redundant Casts, whereas CastIfNeeded doesn't. In the
+  // vast majority of cases, Cast should be preferred. However, in a few cases,
+  // typically within templated functions, upcasting can be necessary, in which
+  // case CastIfNeeded can be used.
+  template <typename U>
+  static V<T> CastIfNeeded(V<U> index) {
+    return V<T>(OpIndex{index});
+  }
+  static V<T> CastIfNeeded(OpIndex index) { return V<T>(index); }
 
   static constexpr bool allows_representation(
       RegisterRepresentation maybe_allowed_rep) {
@@ -738,9 +763,24 @@ class OptionalV : public OptionalOpIndex {
 
   template <typename U>
   static OptionalV<T> Cast(OptionalV<U> index) {
+    static_assert(!implicitly_constructible_from<U>,
+                  "Redundant explicit OptionalV<> cast.");
     return OptionalV<T>(OptionalOpIndex{index});
   }
   static OptionalV<T> Cast(OptionalOpIndex index) {
+    return OptionalV<T>(index);
+  }
+
+  // The difference between Cast and CastIfNeeded is that Cast disallows
+  // upcasting to avoid redundant Casts, whereas CastIfNeeded doesn't. In the
+  // vast majority of cases, Cast should be preferred. However, in a few cases,
+  // typically within templated functions, upcasting can be necessary, in which
+  // case CastIfNeeded can be used.
+  template <typename U>
+  static OptionalV<T> CastIfNeeded(OptionalV<U> index) {
+    return OptionalV<T>(OptionalOpIndex{index});
+  }
+  static OptionalV<T> CastIfNeeded(OptionalOpIndex index) {
     return OptionalV<T>(index);
   }
 

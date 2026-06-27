@@ -43,8 +43,9 @@ class RegisterReuseMap {
   std::optional<LiftoffRegister> Lookup(LiftoffRegister src) {
     for (auto it = map_.begin(), end = map_.end(); it != end; it += 2) {
       if (it->is_gp_pair() == src.is_gp_pair() &&
-          it->is_fp_pair() == src.is_fp_pair() && *it == src)
+          it->is_fp_pair() == src.is_fp_pair() && *it == src) {
         return *(it + 1);
+      }
     }
     return {};
   }
@@ -1174,6 +1175,15 @@ LiftoffRegister LiftoffAssembler::SpillAdjacentFpRegisters(
 
 void LiftoffAssembler::SpillRegister(LiftoffRegister reg) {
   DCHECK(!cache_state_.frozen);
+  if (reg.is_gp() && cache_state_.cached_instance_data == reg.gp()) {
+    cache_state_.ClearCachedInstanceRegister();
+    return;
+  }
+  if (reg.is_gp() && cache_state_.cached_mem_start == reg.gp()) {
+    V8_ASSUME(cache_state_.cached_mem_index >= 0);
+    cache_state_.ClearCachedMemStartRegister();
+    return;
+  }
   int remaining_uses = cache_state_.get_use_count(reg);
   DCHECK_LT(0, remaining_uses);
   for (uint32_t idx = cache_state_.stack_height() - 1;; --idx) {

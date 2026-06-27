@@ -8,6 +8,7 @@
 #include "src/common/globals.h"
 #include "src/objects/object-list-macros.h"
 #include "src/objects/objects-definitions.h"
+#include "src/objects/oddball-predicates.h"
 #include "src/objects/tagged.h"
 
 namespace v8::internal {
@@ -52,9 +53,7 @@ V8_INLINE bool IsHeapObject(Tagged<Smi> obj) { return false; }
 
 V8_INLINE bool IsTaggedIndex(Tagged<Object> obj);
 
-#define IS_TYPE_FUNCTION_DECL(Type)            \
-  V8_INLINE bool Is##Type(Tagged<Object> obj); \
-  V8_INLINE bool Is##Type(Tagged<Object> obj, PtrComprCageBase cage_base);
+#define IS_TYPE_FUNCTION_DECL(Type) V8_INLINE bool Is##Type(Tagged<Object> obj);
 OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
 HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
 IS_TYPE_FUNCTION_DECL(HashTableBase)
@@ -67,20 +66,6 @@ IS_TYPE_FUNCTION_DECL(AnyHole)
 #undef IS_TYPE_FUNCTION_DECL
 
 V8_INLINE bool IsNumber(Tagged<Object> obj, ReadOnlyRoots roots);
-
-// Oddball checks are faster when they are raw pointer comparisons, so the
-// isolate/read-only roots overloads should be preferred where possible.
-#define IS_TYPE_FUNCTION_DECL(Type, ...)                                 \
-  V8_INLINE bool Is##Type(Tagged<Object> obj, Isolate* isolate);         \
-  V8_INLINE bool Is##Type(Tagged<Object> obj, LocalIsolate* isolate);    \
-  V8_INLINE bool Is##Type(Tagged<Object> obj, ReadOnlyRoots roots);      \
-  V8_INLINE bool Is##Type(Tagged<Object> obj, EarlyReadOnlyRoots roots); \
-  V8_INLINE bool Is##Type(Tagged<Object> obj);
-ODDBALL_LIST(IS_TYPE_FUNCTION_DECL)
-HOLE_LIST(IS_TYPE_FUNCTION_DECL)
-IS_TYPE_FUNCTION_DECL(UndefinedContextCell)
-IS_TYPE_FUNCTION_DECL(NullOrUndefined)
-#undef IS_TYPE_FUNCTION_DECL
 
 V8_INLINE bool IsZero(Tagged<Object> obj);
 V8_INLINE bool IsNoSharedNameSentinel(Tagged<Object> obj);
@@ -102,8 +87,7 @@ V8_INLINE bool IsJSObjectThatCanBeTrackedAsPrototype(Tagged<Object> obj);
 V8_INLINE bool IsJSObjectThatCanBeTrackedAsPrototype(Tagged<HeapObject> obj);
 
 #define DECL_STRUCT_PREDICATE(NAME, Name, name) \
-  V8_INLINE bool Is##Name(Tagged<Object> obj);  \
-  V8_INLINE bool Is##Name(Tagged<Object> obj, PtrComprCageBase cage_base);
+  V8_INLINE bool Is##Name(Tagged<Object> obj);
 STRUCT_LIST(DECL_STRUCT_PREDICATE)
 #undef DECL_STRUCT_PREDICATE
 

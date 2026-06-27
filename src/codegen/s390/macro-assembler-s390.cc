@@ -666,7 +666,7 @@ void MacroAssembler::MultiPushF64OrV128(DoubleRegList dregs, Register scratch,
       isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
   if (generating_builtins) {
     Label push_doubles, simd_pushed;
-    Move(r1, ExternalReference::supports_wasm_simd_128_address());
+    Move(r1, ExternalReference::supports_simd_128_address());
     LoadU8(r1, MemOperand(r1));
     LoadAndTestP(r1, r1);  // If > 0 then simd is available.
     ble(&push_doubles, Label::kNear);
@@ -681,7 +681,7 @@ void MacroAssembler::MultiPushF64OrV128(DoubleRegList dregs, Register scratch,
     lay(sp, MemOperand(sp, -(dregs.Count() * kDoubleSize)));
     bind(&simd_pushed);
   } else {
-    if (CpuFeatures::SupportsWasmSimd128()) {
+    if (CpuFeatures::SupportsSimd128()) {
       MultiPushV128(dregs, scratch);
     } else {
       MultiPushDoubles(dregs);
@@ -700,7 +700,7 @@ void MacroAssembler::MultiPopF64OrV128(DoubleRegList dregs, Register scratch,
       isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
   if (generating_builtins) {
     Label pop_doubles, simd_popped;
-    Move(r1, ExternalReference::supports_wasm_simd_128_address());
+    Move(r1, ExternalReference::supports_simd_128_address());
     LoadU8(r1, MemOperand(r1));
     LoadAndTestP(r1, r1);  // If > 0 then simd is available.
     ble(&pop_doubles, Label::kNear);
@@ -713,7 +713,7 @@ void MacroAssembler::MultiPopF64OrV128(DoubleRegList dregs, Register scratch,
     MultiPopDoubles(dregs);
     bind(&simd_popped);
   } else {
-    if (CpuFeatures::SupportsWasmSimd128()) {
+    if (CpuFeatures::SupportsSimd128()) {
       MultiPopV128(dregs, scratch);
     } else {
       lay(sp, MemOperand(sp, dregs.Count() * kDoubleSize));
@@ -1705,12 +1705,13 @@ void MacroAssembler::InvokeFunctionWithNewTarget(
 
   Register expected_reg = r4;
   Register temp_reg = r6;
-  LoadTaggedField(cp, FieldMemOperand(fun, JSFunction::kContextOffset));
-  LoadTaggedField(temp_reg,
-                  FieldMemOperand(fun, JSFunction::kSharedFunctionInfoOffset));
+  LoadTaggedField(cp, FieldMemOperand(fun, offsetof(JSFunction, context_)));
+  LoadTaggedField(
+      temp_reg,
+      FieldMemOperand(fun, offsetof(JSFunction, shared_function_info_)));
   LoadU16(expected_reg,
-          FieldMemOperand(temp_reg,
-                          SharedFunctionInfo::kFormalParameterCountOffset));
+          FieldMemOperand(
+              temp_reg, offsetof(SharedFunctionInfo, formal_parameter_count_)));
 
   InvokeFunctionCode(fun, new_target, expected_reg, actual_parameter_count,
                      type);
@@ -1727,7 +1728,8 @@ void MacroAssembler::InvokeFunction(Register function,
   DCHECK_EQ(function, r3);
 
   // Get the function and setup the context.
-  LoadTaggedField(cp, FieldMemOperand(function, JSFunction::kContextOffset));
+  LoadTaggedField(cp,
+                  FieldMemOperand(function, offsetof(JSFunction, context_)));
 
   InvokeFunctionCode(r3, no_reg, expected_parameter_count,
                      actual_parameter_count, type);
@@ -1796,7 +1798,7 @@ void MacroAssembler::CompareInstanceTypeRange(Register map, Register type_reg,
                                               InstanceType lower_limit,
                                               InstanceType higher_limit) {
   DCHECK_LT(lower_limit, higher_limit);
-  LoadU16(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
+  LoadU16(type_reg, FieldMemOperand(map, offsetof(Map, instance_type_)));
   CompareRange(type_reg, scratch, lower_limit, higher_limit);
 }
 
@@ -2051,16 +2053,17 @@ void MacroAssembler::Abort(AbortReason reason) {
 
 void MacroAssembler::LoadCompressedMap(Register destination, Register object) {
   CHECK(COMPRESS_POINTERS_BOOL);
-  LoadU32(destination, FieldMemOperand(object, HeapObject::kMapOffset));
+  LoadU32(destination, FieldMemOperand(object, offsetof(HeapObject, map_)));
 }
 
 void MacroAssembler::LoadMap(Register destination, Register object) {
-  LoadTaggedField(destination, FieldMemOperand(object, HeapObject::kMapOffset));
+  LoadTaggedField(destination,
+                  FieldMemOperand(object, offsetof(HeapObject, map_)));
 }
 
 void MacroAssembler::LoadFeedbackCell(Register dst, Register closure) {
-  LoadTaggedField(dst,
-                  FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
+  LoadTaggedField(
+      dst, FieldMemOperand(closure, offsetof(JSFunction, feedback_cell_)));
 }
 
 void MacroAssembler::LoadFeedbackVectorFromCell(Register dst,
@@ -2106,8 +2109,9 @@ void MacroAssembler::LoadInterpreterDataInterpreterTrampoline(
 void MacroAssembler::LoadNativeContextSlot(Register dst, int index) {
   LoadMap(dst, cp);
   LoadTaggedField(
-      dst, FieldMemOperand(
-               dst, Map::kConstructorOrBackPointerOrNativeContextOffset));
+      dst,
+      FieldMemOperand(
+          dst, offsetof(Map, constructor_or_back_pointer_or_native_context_)));
   LoadTaggedField(dst, MemOperand(dst, Context::SlotOffset(index)));
 }
 
@@ -2162,7 +2166,7 @@ void MacroAssembler::AssertConstructor(Register object, Register scratch) {
     TestIfSmi(object);
     Check(ne, AbortReason::kOperandIsASmiAndNotAConstructor);
     LoadMap(scratch, object);
-    tm(FieldMemOperand(scratch, Map::kBitFieldOffset),
+    tm(FieldMemOperand(scratch, offsetof(Map, bit_field_)),
        Operand(Map::Bits1::IsConstructorBit::kMask));
     Check(ne, AbortReason::kOperandIsNotAConstructor);
   }
@@ -3707,6 +3711,20 @@ void MacroAssembler::LoadU64(Register dst, const MemOperand& mem,
   lg(dst, src);
 }
 
+void MacroAssembler::LoadReversedU64(Register dst, const MemOperand& mem,
+                                     Register scratch) {
+  int offset = mem.offset();
+
+  MemOperand src = mem;
+  if (!is_int20(offset)) {
+    DCHECK(scratch != no_reg && scratch != r0 && mem.rx() == r0);
+    DCHECK(scratch != mem.rb());
+    mov(scratch, Operand(offset));
+    src = MemOperand(mem.rb(), scratch);
+  }
+  lrvg(dst, src);
+}
+
 // Store a "pointer" sized value to the memory location
 void MacroAssembler::StoreU64(Register src, const MemOperand& mem,
                               Register scratch) {
@@ -3717,6 +3735,18 @@ void MacroAssembler::StoreU64(Register src, const MemOperand& mem,
     stg(src, MemOperand(mem.rb(), scratch));
   } else {
     stg(src, mem);
+  }
+}
+
+void MacroAssembler::StoreReversedU64(Register src, const MemOperand& mem,
+                                      Register scratch) {
+  if (!is_int20(mem.offset())) {
+    DCHECK(scratch != no_reg);
+    DCHECK(scratch != r0);
+    mov(scratch, Operand(mem.offset()));
+    strvg(src, MemOperand(mem.rb(), scratch));
+  } else {
+    strvg(src, mem);
   }
 }
 
@@ -3840,7 +3870,7 @@ void MacroAssembler::LoadU8(Register dst, Register src) {
 #ifdef V8_TARGET_BIG_ENDIAN
 void MacroAssembler::LoadU64LE(Register dst, const MemOperand& mem,
                                Register scratch) {
-  lrvg(dst, mem);
+  LoadReversedU64(dst, mem, scratch);
 }
 
 void MacroAssembler::LoadS32LE(Register dst, const MemOperand& opnd,
@@ -3872,9 +3902,9 @@ void MacroAssembler::LoadV128LE(DoubleRegister dst, const MemOperand& opnd,
   if (use_vlbr) {
     vlbr(dst, opnd, Condition(4));
   } else {
-    lrvg(scratch0, opnd);
-    lrvg(scratch1,
-         MemOperand(opnd.rx(), opnd.rb(), opnd.offset() + kSystemPointerSize));
+    LoadReversedU64(scratch0, opnd);
+    LoadReversedU64(scratch1, MemOperand(opnd.rx(), opnd.rb(),
+                                         opnd.offset() + kSystemPointerSize));
     vlvgp(dst, scratch1, scratch0);
   }
 }
@@ -3894,14 +3924,7 @@ void MacroAssembler::LoadF32LE(DoubleRegister dst, const MemOperand& opnd,
 
 void MacroAssembler::StoreU64LE(Register src, const MemOperand& mem,
                                 Register scratch) {
-  if (!is_int20(mem.offset())) {
-    DCHECK(scratch != no_reg);
-    DCHECK(scratch != r0);
-    mov(scratch, Operand(mem.offset()));
-    strvg(src, MemOperand(mem.rb(), scratch));
-  } else {
-    strvg(src, mem);
-  }
+  StoreReversedU64(src, mem, scratch);
 }
 
 void MacroAssembler::StoreU32LE(Register src, const MemOperand& mem,
@@ -3952,9 +3975,9 @@ void MacroAssembler::StoreV128LE(Simd128Register src, const MemOperand& mem,
   } else {
     vlgv(scratch1, src, MemOperand(r0, 1), Condition(3));
     vlgv(scratch2, src, MemOperand(r0, 0), Condition(3));
-    strvg(scratch1, mem);
-    strvg(scratch2,
-          MemOperand(mem.rx(), mem.rb(), mem.offset() + kSystemPointerSize));
+    StoreReversedU64(scratch1, mem);
+    StoreReversedU64(scratch2, MemOperand(mem.rx(), mem.rb(),
+                                          mem.offset() + kSystemPointerSize));
   }
 }
 
@@ -4753,8 +4776,9 @@ void MacroAssembler::CallJSFunction(Register function_object,
   Register code = kJavaScriptCallCodeStartRegister;
   Register dispatch_handle = r0;
   scratch = ip;
-  LoadU32(dispatch_handle,
-          FieldMemOperand(function_object, JSFunction::kDispatchHandleOffset));
+  LoadU32(
+      dispatch_handle,
+      FieldMemOperand(function_object, offsetof(JSFunction, dispatch_handle_)));
   LoadEntrypointFromJSDispatchTable(code, dispatch_handle, scratch);
   Call(code);
 }
@@ -4784,8 +4808,9 @@ void MacroAssembler::JumpJSFunction(Register function_object,
   Register code = kJavaScriptCallCodeStartRegister;
   Register dispatch_handle = r0;
   Register scratch = ip;
-  LoadU32(dispatch_handle,
-          FieldMemOperand(function_object, JSFunction::kDispatchHandleOffset));
+  LoadU32(
+      dispatch_handle,
+      FieldMemOperand(function_object, offsetof(JSFunction, dispatch_handle_)));
   LoadEntrypointFromJSDispatchTable(code, dispatch_handle, scratch);
   Jump(code);
 }

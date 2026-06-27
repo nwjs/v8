@@ -1131,10 +1131,12 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
 #if V8_ENABLE_WEBASSEMBLY
   // Returns WasmTrustedInstanceData|Smi.
-  TNode<Union<Smi, WasmTrustedInstanceData>> LoadInstanceDataFromWasmImportData(
+  TNode<Union<Smi, WasmTrustedInstanceData>>
+  LoadImportingInstanceDataFromWasmImportData(
       TNode<WasmImportData> import_data) {
     return LoadProtectedPointerField<Union<Smi, WasmTrustedInstanceData>>(
-        import_data, WasmImportData::kProtectedInstanceDataOffset);
+        import_data,
+        offsetof(WasmImportData, protected_importing_instance_data_));
   }
 
   // Returns WasmImportData or WasmTrustedInstanceData.
@@ -1142,7 +1144,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   LoadImplicitArgFromWasmInternalFunction(TNode<WasmInternalFunction> object) {
     return LoadProtectedPointerField<
         Union<WasmImportData, WasmTrustedInstanceData>>(
-        object, WasmInternalFunction::kProtectedImplicitArgOffset);
+        object, offsetof(WasmInternalFunction, protected_implicit_arg_));
   }
 
   inline TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFuncRef(
@@ -1151,14 +1153,14 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFunctionData(
       TNode<WasmFunctionData> data) {
     return LoadProtectedPointerField<WasmInternalFunction>(
-        data, WasmFunctionData::kProtectedInternalOffset);
+        data, offsetof(WasmFunctionData, protected_internal_));
   }
 
   TNode<WasmTrustedInstanceData>
   LoadWasmTrustedInstanceDataFromWasmExportedFunctionData(
       TNode<WasmExportedFunctionData> data) {
     return LoadProtectedPointerField<WasmTrustedInstanceData>(
-        data, WasmExportedFunctionData::kProtectedInstanceDataOffset);
+        data, offsetof(WasmExportedFunctionData, protected_instance_data_));
   }
 
   // Dynamically allocates a buffer of size `size` in C++ on the cppgc heap.
@@ -1168,14 +1170,14 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<RawPtrT> LoadJSTypedArrayExternalPointerPtr(
       TNode<JSTypedArray> holder) {
-    return LoadSandboxedPointerFromObject(holder,
-                                          JSTypedArray::kExternalPointerOffset);
+    return LoadSandboxedPointerFromObject(
+        holder, offsetof(JSTypedArray, external_pointer_));
   }
 
   void StoreJSTypedArrayExternalPointerPtr(TNode<JSTypedArray> holder,
                                            TNode<RawPtrT> value) {
-    StoreSandboxedPointerToObject(holder, JSTypedArray::kExternalPointerOffset,
-                                  value);
+    StoreSandboxedPointerToObject(
+        holder, offsetof(JSTypedArray, external_pointer_), value);
   }
 
   void InitializeJSAPIObjectWithEmbedderSlotsCppHeapWrapperPtr(
@@ -1187,7 +1189,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
         IntPtrConstant(0);
 #endif  // !V8_COMPRESS_POINTERS
     StoreObjectFieldNoWriteBarrier(
-        holder, JSAPIObjectWithEmbedderSlots::kCppHeapWrappableOffset,
+        holder, offsetof(JSAPIObjectWithEmbedderSlots, cpp_heap_wrappable_),
         zero_constant);
   }
 
@@ -1236,7 +1238,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       // Load a tagged field.
       if constexpr (is_subtype_v<T, Map>) {
         // If this is potentially loading a map, we need to check the offset.
-        if (offset == HeapObject::kMapOffset) {
+        if (offset == offsetof(HeapObject, map_)) {
           machine_type = MachineType::MapInHeader();
         }
       }
@@ -1275,8 +1277,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   }
 
   TNode<Object> LoadConstructorOrBackPointer(TNode<Map> map) {
-    return LoadObjectField(map,
-                           Map::kConstructorOrBackPointerOrNativeContextOffset);
+    return LoadObjectField(
+        map, offsetof(Map, constructor_or_back_pointer_or_native_context_));
   }
 
   TNode<Simd128T> LoadSimd128(TNode<IntPtrT> ptr) {
@@ -1577,9 +1579,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                  TNode<TIndex> index,
                                  int additional_offset = 0);
   template <typename Array, typename TIndex>
-  TNode<typename Array::Shape::ElementT> LoadArrayElement(
-      TNode<Array> array, TNode<TIndex> index, int additional_offset = 0) {
-    return LoadArrayElement<Array, TIndex, typename Array::Shape::ElementT>(
+  TNode<typename Array::ElementT> LoadArrayElement(TNode<Array> array,
+                                                   TNode<TIndex> index,
+                                                   int additional_offset = 0) {
+    return LoadArrayElement<Array, TIndex, typename Array::ElementT>(
         array, OFFSET_OF_DATA_START(Array), index, additional_offset);
   }
 
@@ -1913,8 +1916,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   }
   template <typename Array>
   void UnsafeStoreArrayElement(
-      TNode<Array> object, int index,
-      TNode<typename Array::Shape::ElementT> value,
+      TNode<Array> object, int index, TNode<typename Array::ElementT> value,
       WriteBarrierMode barrier_mode = UPDATE_WRITE_BARRIER) {
     DCHECK(barrier_mode == SKIP_WRITE_BARRIER ||
            barrier_mode == UNSAFE_SKIP_WRITE_BARRIER ||
@@ -1936,7 +1938,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <typename Array>
   void UnsafeStoreArrayElement(
       TNode<Array> object, TNode<Uint32T> index,
-      TNode<typename Array::Shape::ElementT> value,
+      TNode<typename Array::ElementT> value,
       WriteBarrierMode barrier_mode = UPDATE_WRITE_BARRIER) {
     DCHECK(barrier_mode == SKIP_WRITE_BARRIER ||
            barrier_mode == UPDATE_WRITE_BARRIER);
@@ -2187,6 +2189,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       AllocationFlags allocation_flags = AllocationFlag::kNone,
       int array_header_size = JSArray::kHeaderSize);
 
+  std::pair<TNode<JSArray>, TNode<FixedArrayBase>>
+  AllocateUninitializedJSArrayWithElementsFolded(
+      ElementsKind kind, TNode<Map> array_map, TNode<Smi> length,
+      std::optional<TNode<AllocationSite>> allocation_site,
+      TNode<IntPtrT> capacity, Label* bailout,
+      int array_header_size = JSArray::kHeaderSize);
+
   // Allocate a JSArray and fill elements with the hole.
   TNode<JSArray> AllocateJSArray(
       ElementsKind kind, TNode<Map> array_map, TNode<IntPtrT> capacity,
@@ -2212,6 +2221,19 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       AllocationFlags allocation_flags = AllocationFlag::kNone) {
     return AllocateJSArray(kind, array_map, capacity, length, std::nullopt,
                            allocation_flags);
+  }
+
+  TNode<JSArray> AllocateJSArrayFolded(
+      ElementsKind kind, TNode<Map> array_map, TNode<IntPtrT> capacity,
+      TNode<Smi> length, Label* bailout,
+      std::optional<TNode<AllocationSite>> allocation_site = std::nullopt);
+
+  TNode<JSArray> AllocateJSArrayFolded(
+      ElementsKind kind, TNode<Map> array_map, TNode<Smi> capacity,
+      TNode<Smi> length, Label* bailout,
+      std::optional<TNode<AllocationSite>> allocation_site = std::nullopt) {
+    return AllocateJSArrayFolded(kind, array_map, PositiveSmiUntag(capacity),
+                                 length, bailout, allocation_site);
   }
 
   // Allocate a JSArray and initialize the header fields.
@@ -2322,15 +2344,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<JSObject> AllocateJSIteratorResultForEntry(TNode<Context> context,
                                                    TNode<Object> key,
                                                    TNode<Object> value);
-  TNode<Object> GetResultValueForHole(TNode<Object> value);
-  // Calls the next method of an iterator and returns the pair of
-  // {value, done} properties of the result.
-  std::pair<TNode<Object>, TNode<Object>> CallIteratorNext(
+  TNode<JSAny> GetResultValueForHole(TNode<JSAny> value);
+  // Calls the next method of an iterator and returns the value property
+  // of the result, or TheHole if done.
+  TNode<UnionOf<JSAny, TheHole>> CallIteratorNext(
       TNode<Context> context, TNode<Object> iterator, TNode<Object> next,
       TNode<Union<FeedbackVector, Undefined>> feedback_vector,
       TNode<UintPtrT> call_slot);
-  using ForOfNextResult = TorqueStructForOfNextResult_0;
-  ForOfNextResult ForOfNextHelper(
+
+  TNode<UnionOf<JSAny, TheHole>> ForOfNextHelper(
       TNode<Context> context, TNode<Object> object, TNode<Object> next,
       TNode<Union<FeedbackVector, Undefined>> feedback_vector,
       TNode<UintPtrT> call_slot);
@@ -2491,6 +2513,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void ArrayListSetLength(TNode<ArrayList> array, TNode<Uint32T> length);
   // TODO(jgruber): Rename to ArrayListToFixedArray.
   TNode<FixedArray> ArrayListElements(TNode<ArrayList> array);
+
+  TorqueStructXorShift128State LoadMathRandomState(TNode<ByteArray> state);
+  void StoreMathRandomState(TNode<ByteArray> state,
+                            TorqueStructXorShift128State value);
 
   template <typename T>
   bool ClassHasMapConstant() {
@@ -4799,7 +4825,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // HeapNumber.
   TNode<Object> CloneIfMutablePrimitive(TNode<Object> object);
 
-  TNode<Smi> RefillMathRandom(TNode<NativeContext> native_context);
+  TNode<Smi> InitializeAndMaybeRefillMathRandom(
+      TNode<NativeContext> native_context);
 
   TNode<IntPtrT> FeedbackIteratorEntrySize() {
     return IntPtrConstant(FeedbackIterator::kEntrySize);
@@ -5026,8 +5053,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<Object> value, WriteBarrierMode barrier_mode = UPDATE_WRITE_BARRIER,
       int additional_offset = 0);
 
-  TNode<IntPtrT> ComputeTypedArrayStoreOffset(TNode<IntPtrT> offset,
-                                              ElementsKind kind);
+  TNode<IntPtrT> ComputeTypedArrayAccessOffset(TNode<IntPtrT> offset,
+                                               ElementsKind kind);
 
   template <typename TIndex>
   void StoreElementTypedArrayBigInt(TNode<RawPtrT> elements, ElementsKind kind,

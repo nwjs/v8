@@ -171,9 +171,9 @@ struct FieldAccess {
             maybe_initializing_or_transitioning_store),
         is_immutable(is_immutable) {
     DCHECK_GE(offset, 0);
-    DCHECK_IMPLIES(
-        machine_type.IsMapWord(),
-        offset == HeapObject::kMapOffset && base_is_tagged != kUntaggedBase);
+    DCHECK_IMPLIES(machine_type.IsMapWord(),
+                   offset == offsetof(HeapObject, map_) &&
+                       base_is_tagged != kUntaggedBase);
     DCHECK_IMPLIES(machine_type.IsMapWord(),
                    (write_barrier_kind == kMapWriteBarrier ||
                     write_barrier_kind == kNoWriteBarrier ||
@@ -486,6 +486,32 @@ CheckMapsParameters const& CheckMapsParametersOf(Operator const*)
     V8_WARN_UNUSED_RESULT;
 
 ZoneRefSet<Map> const& MapGuardMapsOf(Operator const*) V8_WARN_UNUSED_RESULT;
+
+class LoadDictionaryFieldParameters final {
+ public:
+  LoadDictionaryFieldParameters(InternalIndex dictionary_index, NameRef name,
+                                const FeedbackSource& feedback)
+      : dictionary_index_(dictionary_index), name_(name), feedback_(feedback) {}
+
+  InternalIndex dictionary_index() const { return dictionary_index_; }
+  NameRef name() const { return name_; }
+  FeedbackSource const& feedback() const { return feedback_; }
+
+ private:
+  InternalIndex const dictionary_index_;
+  NameRef const name_;
+  FeedbackSource const feedback_;
+};
+
+bool operator==(LoadDictionaryFieldParameters const&,
+                LoadDictionaryFieldParameters const&);
+
+size_t hash_value(LoadDictionaryFieldParameters const&);
+
+std::ostream& operator<<(std::ostream&, LoadDictionaryFieldParameters const&);
+
+LoadDictionaryFieldParameters const& LoadDictionaryFieldParametersOf(
+    Operator const*) V8_WARN_UNUSED_RESULT;
 
 class CheckHomomorphicParameters final {
  public:
@@ -1010,12 +1036,16 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* StringWrapperLength();
   const Operator* StringToLowerCaseIntl();
   const Operator* StringToUpperCaseIntl();
+  const Operator* StringLocaleCompareIntl();
   const Operator* StringSubstring();
 
   const Operator* TypedArrayLength(ElementsKind elements_kind);
 
   const Operator* FindOrderedHashMapEntryForInt32Key();
   const Operator* FindOrderedCollectionEntry(CollectionKind collection_kind);
+
+  // WeakMap.prototype.get lowering. Inputs: receiver (JSWeakCollection), key.
+  const Operator* WeakCollectionGet();
 
   const Operator* SpeculativeToNumber(NumberOperationHint hint,
                                       const FeedbackSource& feedback);
@@ -1122,6 +1152,7 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* CheckedInt64ToAdditiveSafeInteger(
       const FeedbackSource& feedback);
   const Operator* CheckedInt64ToTaggedSigned(const FeedbackSource& feedback);
+  const Operator* CheckedInt64ToUint64(const FeedbackSource& feedback);
   const Operator* CheckedTaggedSignedToInt32(const FeedbackSource& feedback);
   const Operator* CheckedTaggedToFloat64(CheckTaggedInputMode,
                                          const FeedbackSource& feedback);
@@ -1211,6 +1242,9 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* StoreMessage();
 
   const Operator* LoadFieldByIndex();
+  const Operator* LoadDictionaryField(InternalIndex dictionary_index,
+                                      NameRef name,
+                                      const FeedbackSource& feedback);
   const Operator* LoadField(FieldAccess const&);
   const Operator* StoreField(FieldAccess const&,
                              bool maybe_initializing_or_transitioning = true);

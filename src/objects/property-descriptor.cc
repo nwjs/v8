@@ -46,12 +46,13 @@ bool ToPropertyDescriptorFastPath(Isolate* isolate,
   {
     DisallowGarbageCollection no_gc;
     Tagged<JSReceiver> raw_obj = *obj;
-    if (!IsJSObject(*raw_obj)) return false;
-    Tagged<Map> raw_map = raw_obj->map(isolate);
+    if (!IsJSObject(raw_obj)) return false;
+    Tagged<Map> raw_map = raw_obj->map();
     if (raw_map->instance_type() != JS_OBJECT_TYPE) return false;
     if (raw_map->is_access_check_needed()) return false;
-    if (raw_map->prototype() != *isolate->initial_object_prototype())
+    if (raw_map->prototype() != *isolate->initial_object_prototype()) {
       return false;
+    }
     // During bootstrapping, the object_function_prototype_map hasn't been
     // set up yet.
     if (isolate->bootstrapper()->IsActive()) return false;
@@ -63,10 +64,9 @@ bool ToPropertyDescriptorFastPath(Isolate* isolate,
     if (raw_map->is_dictionary_map()) return false;
   }
 
-  DirectHandle<Map> map(obj->map(isolate), isolate);
+  DirectHandle<Map> map(obj->map(), isolate);
 
-  DirectHandle<DescriptorArray> descs(map->instance_descriptors(isolate),
-                                      isolate);
+  DirectHandle<DescriptorArray> descs(map->instance_descriptors(), isolate);
   ReadOnlyRoots roots(isolate);
   for (InternalIndex i : map->IterateOwnDescriptors()) {
     PropertyDetails details = descs->GetDetails(i);
@@ -257,8 +257,9 @@ bool PropertyDescriptor::ToPropertyDescriptor(Isolate* isolate,
     return false;
   }
   // 15c. Set the [[Writable]] field of desc to writable.
-  if (!writable.is_null())
+  if (!writable.is_null()) {
     desc->set_writable(Object::BooleanValue(*writable, isolate));
+  }
 
   // getter?
   Handle<JSAny> getter;
@@ -270,7 +271,7 @@ bool PropertyDescriptor::ToPropertyDescriptor(Isolate* isolate,
   if (!getter.is_null()) {
     // 18c. If IsCallable(getter) is false and getter is not undefined,
     // throw a TypeError exception.
-    if (!IsCallable(*getter) && !IsUndefined(*getter, isolate)) {
+    if (!IsCallable(*getter) && !IsUndefined(*getter)) {
       isolate->Throw(*isolate->factory()->NewTypeError(
           MessageTemplate::kObjectGetterCallable, getter));
       return false;
@@ -288,7 +289,7 @@ bool PropertyDescriptor::ToPropertyDescriptor(Isolate* isolate,
   if (!setter.is_null()) {
     // 21c. If IsCallable(setter) is false and setter is not undefined,
     // throw a TypeError exception.
-    if (!IsCallable(*setter) && !IsUndefined(*setter, isolate)) {
+    if (!IsCallable(*setter) && !IsUndefined(*setter)) {
       isolate->Throw(*isolate->factory()->NewTypeError(
           MessageTemplate::kObjectSetterCallable, setter));
       return false;

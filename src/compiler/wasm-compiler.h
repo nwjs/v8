@@ -121,6 +121,7 @@ struct WasmCompilationData {
   std::unique_ptr<wasm::AssumptionsJournal> assumptions{};
   SourcePositionTable* source_positions{nullptr};
   int func_index;
+  wasm::Validation validate_callees{wasm::Validation::kAlreadyValidated};
 };
 
 // Abstracts details of building TurboFan graph nodes for wasm to separate
@@ -250,8 +251,7 @@ class WasmGraphBuilder {
 
 V8_EXPORT_PRIVATE void BuildInlinedJSToWasmWrapper(
     Zone* zone, MachineGraph* mcgraph, const wasm::CanonicalSig* signature,
-    Isolate* isolate, compiler::SourcePositionTable* spt, Node* frame_state,
-    bool set_in_wasm_flag);
+    Isolate* isolate, compiler::SourcePositionTable* spt, Node* frame_state);
 
 AssemblerOptions WasmAssemblerOptions();
 AssemblerOptions WasmStubAssemblerOptions();

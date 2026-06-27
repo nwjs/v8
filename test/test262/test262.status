@@ -1068,14 +1068,7 @@
 # End roll-watcher patch
 ####
 
-####
-# Roll-watcher patch
-[ALWAYS, {
-  'built-ins/TypedArray/prototype/subarray/BigInt/speciesctor-get-species-custom-ctor-invocation': [SKIP],
-  'built-ins/TypedArray/prototype/subarray/speciesctor-get-species-custom-ctor-invocation': [SKIP],
-}],
-# End roll-watcher patch
-####
+
 
 ####
 # Roll-watcher patch
@@ -1097,19 +1090,6 @@
   'language/import/import-bytes/bytes-from-json': [SKIP],
   'language/import/import-bytes/bytes-from-png': [SKIP],
   'language/import/import-bytes/bytes-from-txt': [SKIP],
-}],
-# End roll-watcher patch
-####
-
-####
-# Roll-watcher patch
-[ALWAYS, {
-  'language/expressions/dynamic-import/import-attributes/2nd-param-with-type-text': [SKIP],
-  'language/import/import-attributes/text-empty': [SKIP],
-  'language/import/import-attributes/text-javascript': [SKIP],
-  'language/import/import-attributes/text-self': [SKIP],
-  'language/import/import-attributes/text-string': [SKIP],
-  'language/import/import-attributes/text-via-namespace': [SKIP],
 }],
 # End roll-watcher patch
 ####
@@ -1140,6 +1120,71 @@
   'built-ins/Promise/allSettledKeyed/resolved-all-rejected': [SKIP],
   'built-ins/Promise/allSettledKeyed/resolves-empty-object': [SKIP],
   'built-ins/Promise/allSettledKeyed/symbol-keys': [SKIP],
+}],
+# End roll-watcher patch
+####
+
+####
+# Roll-watcher patch
+[ALWAYS, {
+}],
+# End roll-watcher patch
+####
+
+####
+# Roll-watcher patch
+[ALWAYS, {
+  'built-ins/ArrayBuffer/prototype/sliceToImmutable/argument-coercion': [SKIP],
+}],
+# End roll-watcher patch
+####
+
+####
+# Roll-watcher patch
+[ALWAYS, {
+  'built-ins/Error/prototype/stack/getter-cross-realm': [SKIP],
+  'built-ins/Error/prototype/stack/getter-data-property-shadows': [SKIP],
+  'built-ins/Error/prototype/stack/getter-error-as-prototype': [SKIP],
+  'built-ins/Error/prototype/stack/getter-error-instance': [SKIP],
+  'built-ins/Error/prototype/stack/getter-error-prototype': [SKIP],
+  'built-ins/Error/prototype/stack/getter-foreign-new-target': [SKIP],
+  'built-ins/Error/prototype/stack/getter-no-error-data': [SKIP],
+  'built-ins/Error/prototype/stack/getter-not-a-constructor': [SKIP],
+  'built-ins/Error/prototype/stack/getter-receiver-is-proxy': [SKIP],
+  'built-ins/Error/prototype/stack/getter-subclass': [SKIP],
+  'built-ins/Error/prototype/stack/getter-this-not-object': [SKIP],
+  'built-ins/Error/prototype/stack/instance-no-own-stack': [SKIP],
+  'built-ins/Error/prototype/stack/instance-not-enumerable': [SKIP],
+  'built-ins/Error/prototype/stack/prop-desc': [SKIP],
+  'built-ins/Error/prototype/stack/setter-creates-own-property': [SKIP],
+  'built-ins/Error/prototype/stack/setter-cross-realm': [SKIP],
+  'built-ins/Error/prototype/stack/setter-delete-round-trip': [SKIP],
+  'built-ins/Error/prototype/stack/setter-empty-string': [SKIP],
+  'built-ins/Error/prototype/stack/setter-existing-own-property': [SKIP],
+  'built-ins/Error/prototype/stack/setter-no-argument': [SKIP],
+  'built-ins/Error/prototype/stack/setter-non-error-receiver': [SKIP],
+  'built-ins/Error/prototype/stack/setter-non-extensible-receiver': [SKIP],
+  'built-ins/Error/prototype/stack/setter-non-string-value': [SKIP],
+  'built-ins/Error/prototype/stack/setter-non-writable-stack': [SKIP],
+  'built-ins/Error/prototype/stack/setter-not-a-constructor': [SKIP],
+  'built-ins/Error/prototype/stack/setter-own-accessor': [SKIP],
+  'built-ins/Error/prototype/stack/setter-proxy-trap-rejects': [SKIP],
+  'built-ins/Error/prototype/stack/setter-proxy-trap-throws': [SKIP],
+  'built-ins/Error/prototype/stack/setter-proxy-wrapping-prototype': [SKIP],
+  'built-ins/Error/prototype/stack/setter-receiver-is-null-proto': [SKIP],
+  'built-ins/Error/prototype/stack/setter-receiver-is-other-prototype': [SKIP],
+  'built-ins/Error/prototype/stack/setter-receiver-is-prototype': [SKIP],
+  'built-ins/Error/prototype/stack/setter-receiver-is-proxy': [SKIP],
+  'built-ins/Error/prototype/stack/setter-this-not-object': [SKIP],
+  'built-ins/Error/prototype/stack/setter-via-assignment': [SKIP],
+  'built-ins/TypedArray/prototype/set/immutable-buffer': [SKIP],
+  'intl402/Temporal/ZonedDateTime/prototype/round/same-date-starts-twice': [SKIP],
+  'language/module-code/ambiguous-export-bindings/namespace-unambiguous-if-import-source-and-export': [SKIP],
+  'language/module-code/source-phase-import/reexport-source-binding-named-import': [SKIP],
+  'language/module-code/source-phase-import/reexport-source-binding-namespace-get': [SKIP],
+  'staging/sm/Error/constructor-proto': [SKIP],
+  'staging/sm/Error/prototype': [SKIP],
+  'staging/sm/Error/prototype-properties': [SKIP],
 }],
 # End roll-watcher patch
 ####

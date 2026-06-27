@@ -95,7 +95,7 @@ MaybeDirectHandle<JSAny> Utils::RegExpExec(Isolate* isolate,
                                            DirectHandle<JSReceiver> regexp,
                                            DirectHandle<String> string,
                                            DirectHandle<Object> exec) {
-  if (IsUndefined(*exec, isolate)) {
+  if (IsUndefined(*exec)) {
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, exec,
         Object::GetProperty(isolate, regexp,
@@ -112,7 +112,7 @@ MaybeDirectHandle<JSAny> Utils::RegExpExec(Isolate* isolate,
         Cast<JSAny>(
             Execution::Call(isolate, exec, regexp, base::VectorOf(args))));
 
-    if (!IsJSReceiver(*result) && !IsNull(*result, isolate)) {
+    if (!IsJSReceiver(*result) && !IsNull(*result)) {
       THROW_NEW_ERROR(isolate,
                       NewTypeError(MessageTemplate::kInvalidRegExpExecResult));
     }
@@ -164,10 +164,9 @@ bool Utils::IsUnmodifiedRegExp(Isolate* isolate, DirectHandle<Object> obj) {
   // with the init order in the bootstrapper).
   InternalIndex kExecIndex(JSRegExp::kExecFunctionDescriptorIndex);
   DCHECK_EQ(*(isolate->factory()->exec_string()),
-            proto_map->instance_descriptors(isolate)->GetKey(kExecIndex));
-  if (proto_map->instance_descriptors(isolate)
-          ->GetDetails(kExecIndex)
-          .constness() != PropertyConstness::kConst) {
+            proto_map->instance_descriptors()->GetKey(kExecIndex));
+  if (proto_map->instance_descriptors()->GetDetails(kExecIndex).constness() !=
+      PropertyConstness::kConst) {
     return false;
   }
 

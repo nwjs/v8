@@ -8,6 +8,7 @@
 
 #include "hwy/highway.h"
 #include "include/v8config.h"
+#include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/small-vector.h"
 #include "src/base/strings.h"
@@ -260,7 +261,7 @@ MaybeHandle<Object> JsonParseInternalizer::InternalizeJsonProperty(
           HandleScope inner_scope(isolate_);
           Handle<String> key_name(Cast<String>(contents->get(i)), isolate_);
           auto property_val_node_and_snapshot =
-              val_nodes_and_snapshots->Lookup(isolate_, key_name);
+              val_nodes_and_snapshots->Lookup(key_name);
           Handle<Object> property_val_node(property_val_node_and_snapshot[0],
                                            isolate_);
           Handle<Object> property_snapshot(property_val_node_and_snapshot[1],
@@ -336,7 +337,7 @@ bool JsonParseInternalizer::RecurseAndApply(Handle<JSReceiver> holder,
       InternalizeJsonProperty<reviver_mode>(holder, name, val_node, snapshot),
       false);
   Maybe<bool> change_result = Nothing<bool>();
-  if (IsUndefined(*result, isolate_)) {
+  if (IsUndefined(*result)) {
     change_result = JSReceiver::DeletePropertyOrElement(isolate_, holder, name,
                                                         LanguageMode::kSloppy);
   } else {
@@ -364,13 +365,11 @@ JsonParser<Char>::JsonParser(Isolate* isolate, Handle<String> source,
           v8_flags.json_parse_max_heuristically_internalized_strings) {
   size_t start = 0;
   size_t length = source->length();
-  PtrComprCageBase cage_base(isolate);
-  if (IsSlicedString(*source, cage_base)) {
+  if (IsSlicedString(*source)) {
     Tagged<SlicedString> string = Cast<SlicedString>(*source);
     start = string->offset();
     Tagged<String> parent = string->parent();
-    if (IsThinString(parent, cage_base))
-      parent = Cast<ThinString>(parent)->actual();
+    if (IsThinString(parent)) parent = Cast<ThinString>(parent)->actual();
     source_ = handle(parent, isolate);
   } else {
     source_ = String::Flatten(isolate, source);
@@ -974,6 +973,7 @@ V8_INLINE MaybeHandle<Object> JsonParser<Char>::ParseJsonValueRecursive(
     case JsonToken::WHITESPACE:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 template <typename Char>

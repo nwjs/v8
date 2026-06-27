@@ -229,7 +229,7 @@ void PropertyCallbackArguments::Initialize(Isolate* isolate,
   }
   values_[T::kIsolateIndex] = reinterpret_cast<Address>(isolate);
   values_[T::kHolderIndex] = holder.ptr();
-  DCHECK(!IsJSGlobalObject(*holder));
+  DCHECK(!IsJSGlobalObject(holder));
 
   // Make sure the Isolate slot is safe to visit by GC (Isolate pointer
   // is guaranteed to be page aligned).
@@ -273,7 +273,7 @@ Maybe<InterceptorResult> PropertyCallbackArguments::GetBooleanReturnValue(
 
   if (ignore_return_value) return Just(InterceptorResult::kTrue);
 
-  bool result = IsTrue(*GetReturnValue<Boolean>(), isolate);
+  bool result = IsTrue(*GetReturnValue<Boolean>());
   return Just(result ? InterceptorResult::kTrue : InterceptorResult::kFalse);
 }
 
@@ -644,7 +644,7 @@ bool PropertyCallbackArguments::CallAccessorSetter(
   // the result is guaranteed to be v8::Boolean value indicating success or
   // failure.
   DirectHandle<Boolean> result = GetReturnValue<Boolean>();
-  return IsTrue(*result, isolate);
+  return IsTrue(*result);
 }
 
 #undef PREPARE_CALLBACK_INFO_ACCESSOR

@@ -109,14 +109,14 @@ class RecomputeKnownNodeAspectsProcessor {
   void PostProcessBasicBlock(BasicBlock* block) {}
   void PostPhiProcessing() {}
 
-  template <typename NodeT>
-  void ProcessThrowingNode(NodeT* node) {
-    static_assert(NodeT::kProperties.can_throw());
+  void ProcessThrowingNode(NodeBase* node, bool mark_handler_reachable = true) {
+    DCHECK(node->properties().can_throw());
     ExceptionHandlerInfo* info = node->exception_handler_info();
     if (info->HasExceptionHandler() && !info->ShouldLazyDeopt()) {
-      BasicBlock* exception_handler =
-          node->exception_handler_info()->catch_block();
-      reachable_exception_handlers_.insert(exception_handler);
+      BasicBlock* exception_handler = info->catch_block();
+      if (mark_handler_reachable) {
+        reachable_exception_handlers_.insert(exception_handler);
+      }
       Merge(exception_handler);
     }
   }
@@ -186,6 +186,12 @@ class RecomputeKnownNodeAspectsProcessor {
   KnownNodeAspects& known_node_aspects() {
     DCHECK_NOT_NULL(known_node_aspects_);
     return *known_node_aspects_;
+  }
+
+  // Swap the active KNA pointer. Used by Subgraph<MaglevGraphOptimizer> to
+  // maintain a per-branch KNA snapshot during off-graph subgraph construction.
+  void set_known_node_aspects(KnownNodeAspects* known_node_aspects) {
+    known_node_aspects_ = known_node_aspects;
   }
 
  private:
@@ -292,6 +298,8 @@ class RecomputeKnownNodeAspectsProcessor {
   PROCESS_SAFE_CONV(CheckedSmiTagIntPtr, tagged, Smi)
   PROCESS_UNSAFE_CONV(UnsafeSmiTagIntPtr, tagged, Smi)
   PROCESS_SAFE_CONV(CheckedSmiTagFloat64, tagged, Smi)
+  PROCESS_UNSAFE_CONV(UnsafeSmiTagFloat64, tagged, Smi)
+  PROCESS_UNSAFE_CONV(UnsafeSmiTagHoleyFloat64, tagged, Smi)
   PROCESS_SAFE_CONV(TruncateCheckedNumberOrOddballToInt32,
                     truncated_int32_to_number, NumberOrOddball)
   PROCESS_UNSAFE_CONV(TruncateUnsafeNumberOrOddballToInt32,

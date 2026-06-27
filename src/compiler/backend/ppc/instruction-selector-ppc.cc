@@ -64,7 +64,7 @@ class PPCOperandGenerator final : public OperandGenerator {
       case kNoImmediate:
         return false;
     }
-    return false;
+    UNREACHABLE();
   }
 };
 
@@ -246,6 +246,9 @@ ArchOpcode SelectLoadOpcode(MemoryRepresentation loaded_rep,
       // Vectors do not support MRI mode, only MRR is available.
       *mode = kNoImmediate;
       return kPPC_LoadSimd128;
+    case MemoryRepresentation::TrustedPointer():
+      // Only LoadTrustedPointer uses this representation.
+      UNREACHABLE();
     case MemoryRepresentation::ProtectedPointer():
     case MemoryRepresentation::IndirectPointer():
     case MemoryRepresentation::SandboxedPointer():
@@ -488,6 +491,9 @@ void VisitStoreCommon(InstructionSelector* selector, OpIndex node,
         // Vectors do not support MRI mode, only MRR is available.
         mode = kNoImmediate;
         break;
+      case MemoryRepresentation::TrustedPointer():
+        // Only LoadTrustedPointer uses this representation.
+        UNREACHABLE();
       case MemoryRepresentation::IndirectPointer():
       case MemoryRepresentation::SandboxedPointer():
       case MemoryRepresentation::Simd256():
@@ -1164,10 +1170,28 @@ void InstructionSelector::VisitInt32MulHigh(OpIndex node) {
 }
 
 void InstructionSelector::VisitWord64MulWide(OpIndex node, bool is_signed) {
-  UNIMPLEMENTED();
+  PPCOperandGenerator g(this);
+
+  const turboshaft::Word64MulWideOp& op =
+      this->Get(node).Cast<turboshaft::Word64MulWideOp>();
+
+  InstructionOperand left = g.UseUniqueRegister(op.left());
+  InstructionOperand right = g.UseUniqueRegister(op.right());
+
+  OptionalOpIndex out_low = FindProjection(node, 0);
+  Emit(kPPC_Mul64, g.DefineAsRegister(out_low.valid() ? out_low.value() : node),
+       left, right);
+
+  OptionalOpIndex out_high = FindProjection(node, 1);
+  if (out_high.valid() && IsUsed(out_high.value())) {
+    InstructionCode high_opcode = is_signed ? kPPC_MulHighS64 : kPPC_MulHighU64;
+    Emit(high_opcode, g.DefineAsRegister(out_high.value()), left, right);
+  }
 }
 
 void InstructionSelector::VisitUint64Add128(OpIndex node) { UNIMPLEMENTED(); }
+
+void InstructionSelector::VisitUint64Sub128(OpIndex node) { UNIMPLEMENTED(); }
 
 void InstructionSelector::VisitUint32MulHigh(OpIndex node) {
   PPCOperandGenerator g(this);
@@ -2626,7 +2650,7 @@ F16_OP_LIST(VISIT_F16_OP)
 #undef F16_OP_LIST
 #undef SIMD_TYPES
 
-#if V8_ENABLE_WEBASSEMBLY
+#if V8_ENABLE_SIMD128
 void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
   uint8_t shuffle[kSimd128Size];
   bool is_swizzle;
@@ -2649,12 +2673,17 @@ void InstructionSelector::VisitI8x16Shuffle(OpIndex node) {
   }
   Emit(kPPC_I8x16Shuffle, g.DefineAsRegister(node), g.UseRegister(input0),
        g.UseRegister(input1),
-       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle_remapped)),
-       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle_remapped + 4)),
-       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle_remapped + 8)),
-       g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle_remapped + 12)));
+       g.UseImmediate(SimdShuffle::Pack4Lanes(shuffle_remapped)),
+       g.UseImmediate(SimdShuffle::Pack4Lanes(shuffle_remapped + 4)),
+       g.UseImmediate(SimdShuffle::Pack4Lanes(shuffle_remapped + 8)),
+       g.UseImmediate(SimdShuffle::Pack4Lanes(shuffle_remapped + 12)));
 }
 
+#else
+void InstructionSelector::VisitI8x16Shuffle(OpIndex node) { UNREACHABLE(); }
+#endif  // V8_ENABLE_SIMD128
+
+#if V8_ENABLE_WEBASSEMBLY
 void InstructionSelector::VisitSetStackPointer(OpIndex node) {
   OperandGenerator g(this);
   const SetStackPointerOp& op = Cast<SetStackPointerOp>(node);
@@ -2663,8 +2692,6 @@ void InstructionSelector::VisitSetStackPointer(OpIndex node) {
   Emit(kArchSetStackPointer, 0, nullptr, 1, &input);
 }
 
-#else
-void InstructionSelector::VisitI8x16Shuffle(OpIndex node) { UNREACHABLE(); }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void InstructionSelector::VisitS128Zero(OpIndex node) {

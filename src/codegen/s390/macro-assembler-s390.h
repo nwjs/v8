@@ -434,6 +434,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // Load
   void LoadU64(Register dst, const MemOperand& mem, Register scratch = no_reg);
+  void LoadReversedU64(Register dst, const MemOperand& mem,
+                       Register scratch = no_reg);
   void LoadS32(Register dst, const MemOperand& opnd, Register scratch = no_reg);
   void LoadS32(Register dst, Register src);
   void LoadU32(Register dst, const MemOperand& opnd, Register scratch = no_reg);
@@ -515,6 +517,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void StoreU64(const MemOperand& mem, const Operand& opnd,
                 Register scratch = no_reg);
   void StoreU64(Register src, const MemOperand& mem, Register scratch = no_reg);
+  void StoreReversedU64(Register src, const MemOperand& mem,
+                        Register scratch = no_reg);
   void StoreU32(Register src, const MemOperand& mem, Register scratch = no_reg);
 
   void StoreU16(Register src, const MemOperand& mem, Register scratch = r0);
@@ -1614,13 +1618,13 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // sets the flags and leaves the object type in the type_reg register.
   template <bool use_unsigned_cmp = false>
   void CompareInstanceType(Register map, Register type_reg, InstanceType type) {
-    static_assert(Map::kInstanceTypeOffset < 4096);
+    static_assert(offsetof(Map, instance_type_) < 4096);
     static_assert(LAST_TYPE <= 0xFFFF);
     if (use_unsigned_cmp) {
-      LoadU16(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
+      LoadU16(type_reg, FieldMemOperand(map, offsetof(Map, instance_type_)));
       CmpU64(type_reg, Operand(type));
     } else {
-      LoadS16(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
+      LoadS16(type_reg, FieldMemOperand(map, offsetof(Map, instance_type_)));
       CmpS64(type_reg, Operand(type));
     }
   }

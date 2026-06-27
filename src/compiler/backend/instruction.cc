@@ -8,6 +8,7 @@
 #include <iomanip>
 
 #include "src/base/iterator.h"
+#include "src/base/logging.h"
 #include "src/codegen/aligned-slot-allocator.h"
 #include "src/codegen/interface-descriptors.h"
 #include "src/codegen/machine-type.h"
@@ -196,6 +197,7 @@ std::ostream& operator<<(std::ostream& os, const InstructionOperand& op) {
         case UnallocatedOperand::REGISTER_OR_SLOT_OR_CONSTANT:
           return os << "(*)";
       }
+      UNREACHABLE();
     }
     case InstructionOperand::CONSTANT:
       return os << "[constant:v" << ConstantOperand::cast(op).virtual_register()
@@ -212,6 +214,7 @@ std::ostream& operator<<(std::ostream& os, const InstructionOperand& op) {
         case ImmediateOperand::INDEXED_IMM:
           return os << "[immediate:" << imm.indexed_value() << "]";
       }
+      UNREACHABLE();
     }
     case InstructionOperand::PENDING:
       return os << "[pending: " << PendingOperand::cast(op).next() << "]";
@@ -1082,6 +1085,7 @@ static MachineRepresentation FilterRepresentation(MachineRepresentation rep) {
     case MachineRepresentation::kFloat16RawBits:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 MachineRepresentation InstructionSequence::GetRepresentation(
@@ -1384,6 +1388,7 @@ std::ostream& operator<<(std::ostream& os, StateValueKind kind) {
     case StateValueKind::kStringConcat:
       return os << "StringConcat";
   }
+  UNREACHABLE();
 }
 
 void StateValueDescriptor::Print(std::ostream& os) const {

@@ -468,7 +468,7 @@ DirectHandle<Object> FutexEmulation::WaitSyncImpl(
 
       lock_guard.Lock();
 
-      if (IsExceptionHole(interrupt_object, isolate)) {
+      if (IsExceptionHole(interrupt_object)) {
         result = direct_handle(interrupt_object, isolate);
         break;
       }
@@ -721,6 +721,10 @@ int FutexEmulation::Wake(void* wait_location, uint32_t num_waiters_to_wake) {
     // task will eventually fire and clean it up.
     // ---
     DCHECK(node->IsAsync());
+    // Retrieve the next node to iterate before calling NotifyAsyncWaiter, since
+    // NotifyAsyncWaiter takes the node out of this list and re-links it onto
+    // another one, clobbering node->next_.
+    FutexWaitListNode* next_node = node->next_;
     if (node->async_state_->timeout_time.IsNull()) {
       // Backing store has been deleted and the node is still waiting, and
       // there's no timeout. It's never going to be woken up, so we can clean it
@@ -740,7 +744,7 @@ int FutexEmulation::Wake(void* wait_location, uint32_t num_waiters_to_wake) {
       // will then delete the node.
       NotifyAsyncWaiter(node);
     }
-    node = node->next_;
+    node = next_node;
   }
 
   return num_waiters_woken;
@@ -968,7 +972,7 @@ void FutexEmulation::IsolateDeinit(Isolate* isolate) {
 
 int FutexEmulation::NumWaitersForTesting(Tagged<JSArrayBuffer> array_buffer,
                                          size_t addr) {
-  void* wait_location = FutexWaitList::ToWaitLocation(*array_buffer, addr);
+  void* wait_location = FutexWaitList::ToWaitLocation(array_buffer, addr);
   FutexWaitList* wait_list = GetWaitList();
   NoGarbageCollectionMutexGuard lock_guard(wait_list->mutex());
 

@@ -10,7 +10,6 @@
 #include "src/common/globals.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
-#include "src/objects/descriptor-array.h"
 #include "src/objects/js-objects.h"
 #include "src/objects/map.h"
 #include "src/objects/objects.h"
@@ -234,11 +233,11 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   void ReconfigureDataProperty(DirectHandle<Object> value,
                                PropertyAttributes attributes);
   void Delete();
-  void TransitionToAccessorProperty(DirectHandle<Object> getter,
-                                    DirectHandle<Object> setter,
-                                    PropertyAttributes attributes);
-  void TransitionToAccessorPair(DirectHandle<Object> pair,
-                                PropertyAttributes attributes);
+  V8_WARN_UNUSED_RESULT Maybe<bool> TransitionToAccessorProperty(
+      DirectHandle<Object> getter, DirectHandle<Object> setter,
+      PropertyAttributes attributes);
+  V8_WARN_UNUSED_RESULT Maybe<bool> TransitionToAccessorPair(
+      DirectHandle<Object> pair, PropertyAttributes attributes);
   PropertyDetails property_details() const {
     DCHECK(has_property_);
     return property_details_;
@@ -262,10 +261,9 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   inline DirectHandle<InterceptorInfo> GetInterceptor() const;
   DirectHandle<InterceptorInfo> GetInterceptorForFailedAccessCheck() const;
   Handle<Object> GetStringPropertyValue(
-      AllocationPolicy allocation_policy =
-          AllocationPolicy::kAllocationAllowed) const;
-  Handle<Object> GetDataValue(AllocationPolicy allocation_policy =
-                                  AllocationPolicy::kAllocationAllowed) const;
+      AllowAllocation allow_allocation = AllowAllocation::kYes) const;
+  Handle<Object> GetDataValue(
+      AllowAllocation allow_allocation = AllowAllocation::kYes) const;
   void WriteDataValue(DirectHandle<Object> value, bool initializing_store);
   DirectHandle<Object> GetDataValue(SeqCstAccessTag tag) const;
   void WriteDataValue(DirectHandle<Object> value, SeqCstAccessTag tag);
@@ -354,8 +352,7 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   template <bool is_element>
   void RestartInternal(InterceptorState interceptor_state);
   DirectHandle<Object> FetchValue(
-      AllocationPolicy allocation_policy =
-          AllocationPolicy::kAllocationAllowed) const;
+      AllowAllocation allow_allocation = AllowAllocation::kYes) const;
   bool CanStayConst(Tagged<Object> value) const;
   bool DictCanStayConst(Tagged<Object> value) const;
 

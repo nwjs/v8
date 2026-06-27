@@ -77,11 +77,13 @@ bool Accessors::IsJSObjectFieldAccessor(Isolate* isolate, DirectHandle<Map> map,
 
   switch (map->instance_type()) {
     case JS_ARRAY_TYPE:
-      if (fake_descriptor_index)
+      if (fake_descriptor_index) {
         *fake_descriptor_index =
             InternalIndex(LoadHandler::kArrayLengthFieldDescriptorIndex);
+      }
       return CheckForName(isolate, name, isolate->factory()->length_string(),
-                          JSArray::kLengthOffset, FieldIndex::kTagged, index);
+                          offsetof(JSArray, length_), FieldIndex::kTagged,
+                          index);
     default:
       DCHECK_IMPLIES(
           InstanceTypeChecker::IsString(map->instance_type()),
@@ -462,7 +464,7 @@ Handle<JSObject> GetFrameArguments(Isolate* isolate,
   DCHECK_EQ(array->ulength().value(), length);
   for (uint32_t i = 0; i < length; i++) {
     Tagged<Object> value = frame->GetParameter(i);
-    if (IsTheHole(value, isolate)) {
+    if (IsTheHole(value)) {
       // Generators currently use holes as dummy arguments when resuming.  We
       // must not leak those.
       DCHECK(IsResumableFunction(function->shared()->kind()));
@@ -551,7 +553,8 @@ DirectHandle<AccessorInfo> Accessors::MakeFunctionArgumentsInfo(
 
 static inline bool AllowAccessToFunction(Tagged<Context> current_context,
                                          Tagged<JSFunction> function) {
-  return current_context->HasSameSecurityTokenAs(function->context());
+  return current_context->native_context()->HasSameSecurityTokenAs(
+      function->context()->native_context());
 }
 
 class FrameFunctionIterator {

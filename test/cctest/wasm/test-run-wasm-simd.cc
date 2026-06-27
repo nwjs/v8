@@ -3005,8 +3005,9 @@ void BuildShuffle(const std::vector<Shuffle>& shuffles,
   size_t row_index = (shuffles.size() - 1) / 2;
   for (size_t i = row_index; i < shuffles.size(); ++i) {
     uint8_t operands[] = {WASM_GLOBAL_GET(0), WASM_GLOBAL_GET(1)};
-    for (size_t j = 0; j < arraysize(operands); ++j)
+    for (size_t j = 0; j < arraysize(operands); ++j) {
       buffer->push_back(operands[j]);
+    }
     AppendShuffle(shuffles[i], buffer);
   }
   // Now perform inner shuffles in the correct order on operands on the stack.
@@ -4497,32 +4498,32 @@ TEST(RunWasmTurbofan_F32x8UConvertI32x8) {
 }
 
 TEST(RunWasmTurbofan_I64x4SConvertI32x4) {
-  RunIntSignExtensionRevecTest<int32_t, int64_t>(
+  RunIntExtensionRevecTest<int32_t, int64_t>(
       kExprI64x2SConvertI32x4Low, kExprI64x2SConvertI32x4High, kExprI32x4Splat);
 }
 
 TEST(RunWasmTurbofan_I64x4UConvertI32x4) {
-  RunIntSignExtensionRevecTest<uint32_t, uint64_t>(
+  RunIntExtensionRevecTest<uint32_t, uint64_t>(
       kExprI64x2UConvertI32x4Low, kExprI64x2UConvertI32x4High, kExprI32x4Splat);
 }
 
 TEST(RunWasmTurbofan_I32x8SConvertI16x8) {
-  RunIntSignExtensionRevecTest<int16_t, int32_t>(
+  RunIntExtensionRevecTest<int16_t, int32_t>(
       kExprI32x4SConvertI16x8Low, kExprI32x4SConvertI16x8High, kExprI16x8Splat);
 }
 
 TEST(RunWasmTurbofan_I32x8UConvertI16x8) {
-  RunIntSignExtensionRevecTest<uint16_t, uint32_t>(
+  RunIntExtensionRevecTest<uint16_t, uint32_t>(
       kExprI32x4UConvertI16x8Low, kExprI32x4UConvertI16x8High, kExprI16x8Splat);
 }
 
 TEST(RunWasmTurbofan_I16x16SConvertI8x16) {
-  RunIntSignExtensionRevecTest<int8_t, int16_t>(
+  RunIntExtensionRevecTest<int8_t, int16_t>(
       kExprI16x8SConvertI8x16Low, kExprI16x8SConvertI8x16High, kExprI8x16Splat);
 }
 
 TEST(RunWasmTurbofan_I16x16UConvertI8x16) {
-  RunIntSignExtensionRevecTest<uint8_t, uint16_t>(
+  RunIntExtensionRevecTest<uint8_t, uint16_t>(
       kExprI16x8UConvertI8x16Low, kExprI16x8UConvertI8x16High, kExprI8x16Splat);
 }
 
@@ -7033,8 +7034,9 @@ TEST(RunWasmTurbofan_I64x4Splat) {
 TEST(RunWasmTurbofan_F16x16Splat) {
   EXPERIMENTAL_FLAG_SCOPE(revectorize);
   EXPERIMENTAL_FLAG_SCOPE(fp16);
-  if (!CpuFeatures::IsSupported(AVX2) || !CpuFeatures::IsSupported(F16C))
+  if (!CpuFeatures::IsSupported(AVX2) || !CpuFeatures::IsSupported(F16C)) {
     return;
+  }
   WasmRunner<int32_t, float> r(TestExecutionTier::kTurbofan);
   uint16_t* memory = r.builder().AddMemoryElems<uint16_t>(16);
   float param1 = 0;
@@ -7937,6 +7939,91 @@ TEST(RunWasmTurbofan_ForcePackIntToIntExtensionSplat) {
   RunIntToIntExtensionRevecForcePackSplat<uint32_t, uint64_t>(
       kExprI64x2UConvertI32x4High);
   RunIntToIntExtensionRevecForcePackSplat<int32_t, int64_t>(
+      kExprI64x2SConvertI32x4High);
+}
+
+// Similar to RunIntToIntExtensionRevecForcePackSplat, but uses load-splat
+// as the unary input so this test covers the load-splat packing path.
+template <typename S, typename T>
+void RunIntToIntExtensionRevecLoadSplat(WasmOpcode opcode1) {
+  EXPERIMENTAL_FLAG_SCOPE(revectorize);
+  if (!CpuFeatures::IsSupported(AVX2)) return;
+  static_assert(sizeof(T) == 2 * sizeof(S),
+                "the element size of dst vector must be twice of src vector in "
+                "integer to integer extension");
+
+  WasmRunner<int32_t, int32_t, int32_t> r(TestExecutionTier::kTurbofan);
+  uint32_t count = 3 * kSimd128Size / sizeof(S);
+  S* memory = r.builder().AddMemoryElems<S>(count);
+
+  uint8_t param1 = 0;
+  uint8_t param2 = 1;
+  uint8_t temp1 = r.AllocateLocal(kWasmS128);
+  uint8_t temp2 = r.AllocateLocal(kWasmS128);
+  constexpr uint8_t offset = 16;
+
+  {
+    // Use Load32Splat as the unary-extension input. This should take the
+    // load-splat path and produce a Simd256Unary node.
+    TSSimd256VerifyScope ts_scope(
+        r.zone(),
+        TSSimd256VerifyScope::VerifyHaveOpcode<
+            compiler::turboshaft::Opcode::kSimd256Unary>,
+        ExpectedResult::kPass);
+    r.Build(
+        {WASM_LOCAL_SET(temp1, WASM_SIMD_LOAD_OP(kExprS128Load32Splat,
+                                                 WASM_LOCAL_GET(param1))),
+         WASM_LOCAL_SET(temp2, WASM_SIMD_UNOP(opcode1, WASM_LOCAL_GET(temp1))),
+         WASM_SIMD_STORE_MEM_OFFSET(offset, WASM_LOCAL_GET(param2),
+                                    WASM_LOCAL_GET(temp2)),
+         WASM_SIMD_STORE_MEM(WASM_LOCAL_GET(param2), WASM_LOCAL_GET(temp2)),
+         WASM_ONE});
+  }
+
+  constexpr uint32_t lanes = kSimd128Size / sizeof(S);
+  for (S x : compiler::ValueHelper::GetVector<S>()) {
+    for (uint32_t i = 0; i < lanes / 2; i++) {
+      r.builder().WriteMemory(&memory[i], x);
+    }
+    r.Call(0, 16);
+    T expected = static_cast<T>(x);
+    T* output = reinterpret_cast<T*>(memory + lanes);
+    for (uint32_t i = 0; i < lanes / 2; i++) {
+      CHECK_EQ(expected, output[i]);
+      CHECK_EQ(expected, output[lanes / 2 + i]);
+    }
+  }
+}
+
+TEST(RunWasmTurbofan_IntToIntExtensionLoadSplat) {
+  // Extend 8 bits to 16 bits.
+  RunIntToIntExtensionRevecLoadSplat<uint8_t, uint16_t>(
+      kExprI16x8UConvertI8x16Low);
+  RunIntToIntExtensionRevecLoadSplat<int8_t, int16_t>(
+      kExprI16x8SConvertI8x16Low);
+  RunIntToIntExtensionRevecLoadSplat<uint8_t, uint16_t>(
+      kExprI16x8UConvertI8x16High);
+  RunIntToIntExtensionRevecLoadSplat<int8_t, int16_t>(
+      kExprI16x8SConvertI8x16High);
+
+  // Extend 16 bits to 32 bits.
+  RunIntToIntExtensionRevecLoadSplat<uint16_t, uint32_t>(
+      kExprI32x4UConvertI16x8Low);
+  RunIntToIntExtensionRevecLoadSplat<int16_t, int32_t>(
+      kExprI32x4SConvertI16x8Low);
+  RunIntToIntExtensionRevecLoadSplat<uint16_t, uint32_t>(
+      kExprI32x4UConvertI16x8High);
+  RunIntToIntExtensionRevecLoadSplat<int16_t, int32_t>(
+      kExprI32x4SConvertI16x8High);
+
+  // Extend 32 bits to 64 bits.
+  RunIntToIntExtensionRevecLoadSplat<uint32_t, uint64_t>(
+      kExprI64x2UConvertI32x4Low);
+  RunIntToIntExtensionRevecLoadSplat<int32_t, int64_t>(
+      kExprI64x2SConvertI32x4Low);
+  RunIntToIntExtensionRevecLoadSplat<uint32_t, uint64_t>(
+      kExprI64x2UConvertI32x4High);
+  RunIntToIntExtensionRevecLoadSplat<int32_t, int64_t>(
       kExprI64x2SConvertI32x4High);
 }
 

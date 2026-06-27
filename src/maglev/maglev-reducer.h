@@ -6,9 +6,13 @@
 #define V8_MAGLEV_MAGLEV_REDUCER_H_
 
 #include <algorithm>
+#include <initializer_list>
+#include <optional>
 #include <utility>
 
+#include "src/base/functional/function-ref.h"
 #include "src/base/logging.h"
+#include "src/base/memcopy.h"
 #include "src/codegen/source-position.h"
 #include "src/compiler/feedback-source.h"
 #include "src/deoptimizer/deoptimize-reason.h"
@@ -25,6 +29,13 @@ namespace v8 {
 namespace internal {
 namespace maglev {
 
+struct MaglevCallSiteInfo;
+template <typename BaseT>
+class MaglevReducer;
+template <typename BaseT>
+class Subgraph;
+template <typename DerivedT, typename BaseT>
+class SubgraphBase;
 class ReduceResult;
 class V8_NODISCARD MaybeReduceResult {
  public:
@@ -201,6 +212,11 @@ template <typename BaseT>
 concept ReducerBaseWithKNA = requires(BaseT* b) { b->known_node_aspects(); };
 
 template <typename BaseT>
+concept ReducerBaseWithKNASetter = requires(BaseT* b, KnownNodeAspects* kna) {
+  b->set_known_node_aspects(kna);
+};
+
+template <typename BaseT>
 concept ReducerBaseWithEagerDeopt =
     requires(BaseT* b) { b->GetDeoptFrameForEagerDeopt(); };
 
@@ -234,6 +250,280 @@ template <typename BaseT>
 concept ReducerBaseHasTracing = requires(BaseT* b) { b->is_tracing(); };
 
 enum class UseReprHintRecording { kRecord, kDoNotRecord };
+
+enum class BranchResult {
+  kDefault,
+  kAlwaysTrue,
+  kAlwaysFalse,
+  // Bailed out before evaluating the condition.
+  kAbort,
+};
+
+inline bool CompareInt32(int32_t lhs, int32_t rhs, Operation operation) {
+  switch (operation) {
+    case Operation::kEqual:
+    case Operation::kStrictEqual:
+      return lhs == rhs;
+    case Operation::kLessThan:
+      return lhs < rhs;
+    case Operation::kLessThanOrEqual:
+      return lhs <= rhs;
+    case Operation::kGreaterThan:
+      return lhs > rhs;
+    case Operation::kGreaterThanOrEqual:
+      return lhs >= rhs;
+    default:
+      UNREACHABLE();
+  }
+}
+
+inline bool CompareUint32(uint32_t lhs, uint32_t rhs, Operation operation) {
+  switch (operation) {
+    case Operation::kEqual:
+    case Operation::kStrictEqual:
+      return lhs == rhs;
+    case Operation::kLessThan:
+      return lhs < rhs;
+    case Operation::kLessThanOrEqual:
+      return lhs <= rhs;
+    case Operation::kGreaterThan:
+      return lhs > rhs;
+    case Operation::kGreaterThanOrEqual:
+      return lhs >= rhs;
+    default:
+      UNREACHABLE();
+  }
+}
+
+// CallArguments encapsulates the arguments of a JS-level call so that
+// reducer code can read them uniformly regardless of where they came from.
+//
+// Two storage modes:
+//   * kOwned: a SmallVector of ValueNode* owned by this object. Used at
+//     bytecode-build time when arguments are gathered from a register list,
+//     synthesised, or copied. Mutating helpers (set_receiver, PopReceiver,
+//     PopSpread, PopArrayLikeArgument, ResizeDefaultArguments) operate on
+//     this storage.
+//   * kNodeView: a non-owning view over the input array of an existing
+//     call node. No allocation. Used at graph-optimizer time when reducing
+//     an existing Call / CallKnownBuiltin. Read-only; mutating helpers
+//     DCHECK-fail.
+class CallArguments {
+ public:
+  enum Mode {
+    kDefault,
+    kWithSpread,
+    kWithArrayLike,
+  };
+
+  // === Owned constructors. ===
+  CallArguments(ConvertReceiverMode receiver_mode,
+                interpreter::RegisterList reglist,
+                const InterpreterFrameState& frame, Mode mode = kDefault)
+      : receiver_mode_(receiver_mode),
+        mode_(mode),
+        storage_(Storage::kOwned),
+        args_(reglist.register_count()) {
+    for (int i = 0; i < reglist.register_count(); i++) {
+      args_[i] = frame.get(reglist[i]);
+    }
+    DCHECK_IMPLIES(args_.size() == 0,
+                   receiver_mode == ConvertReceiverMode::kNullOrUndefined);
+    DCHECK_IMPLIES(mode == kWithArrayLike,
+                   receiver_mode == ConvertReceiverMode::kAny);
+    DCHECK_IMPLIES(mode == kWithArrayLike, args_.size() == 2);
+  }
+
+  explicit CallArguments(ConvertReceiverMode receiver_mode)
+      : receiver_mode_(receiver_mode),
+        mode_(kDefault),
+        storage_(Storage::kOwned),
+        args_() {
+    DCHECK_EQ(receiver_mode, ConvertReceiverMode::kNullOrUndefined);
+  }
+
+  CallArguments(ConvertReceiverMode receiver_mode,
+                std::initializer_list<ValueNode*> args, Mode mode = kDefault)
+      : receiver_mode_(receiver_mode),
+        mode_(mode),
+        storage_(Storage::kOwned),
+        args_(args) {
+    DCHECK_IMPLIES(mode != kDefault,
+                   receiver_mode == ConvertReceiverMode::kAny);
+    DCHECK_IMPLIES(mode == kWithArrayLike, args_.size() == 2);
+    CheckArgumentsAreNotConversionNodes();
+  }
+
+  CallArguments(ConvertReceiverMode receiver_mode,
+                base::SmallVector<ValueNode*, 8>&& args, Mode mode = kDefault)
+      : receiver_mode_(receiver_mode),
+        mode_(mode),
+        storage_(Storage::kOwned),
+        args_(std::move(args)) {
+    DCHECK_IMPLIES(mode != kDefault,
+                   receiver_mode == ConvertReceiverMode::kAny);
+    DCHECK_IMPLIES(mode == kWithArrayLike, args_.size() == 2);
+    CheckArgumentsAreNotConversionNodes();
+  }
+
+  explicit CallArguments(Call* call)
+      : receiver_mode_(call->receiver_mode()),
+        mode_(kDefault),
+        storage_(Storage::kNodeView),
+        node_view_call_(call),
+        node_view_args_start_(Call::kFixedInputCount + 1),
+        node_view_args_count_(call->num_args() - 1),
+        node_view_receiver_(receiver_mode_ ==
+                                    ConvertReceiverMode::kNullOrUndefined
+                                ? nullptr
+                                : call->arg(0).node()) {
+    DCHECK_GE(call->num_args(), 1);  // Always at least the receiver slot.
+  }
+
+  explicit CallArguments(CallKnownBuiltin* call)
+      : receiver_mode_(ConvertReceiverMode::kNotNullOrUndefined),
+        mode_(kDefault),
+        storage_(Storage::kNodeView),
+        node_view_call_(call),
+        node_view_args_start_(CallKnownBuiltin::kFixedInputCount),
+        node_view_args_count_(call->num_args()),
+        node_view_receiver_(call->ReceiverInput().node()) {}
+
+  ValueNode* receiver() const {
+    if (storage_ == Storage::kNodeView) return node_view_receiver_;
+    if (receiver_mode_ == ConvertReceiverMode::kNullOrUndefined) {
+      return nullptr;
+    }
+    return args_[0];
+  }
+
+  size_t count() const {
+    if (storage_ == Storage::kNodeView) return node_view_args_count_;
+    DCHECK_LE(index_offset(), args_.size());
+    return args_.size() - index_offset();
+  }
+
+  size_t count_with_receiver() const { return count() + 1; }
+
+  ValueNode* operator[](size_t i) const {
+    if (storage_ == Storage::kNodeView) {
+      if (i >= static_cast<size_t>(node_view_args_count_)) return nullptr;
+      return node_view_call_->input(node_view_args_start_ + static_cast<int>(i))
+          .node();
+    }
+    i += index_offset();
+    if (i >= args_.size()) return nullptr;
+    return args_[i];
+  }
+
+  Mode mode() const { return mode_; }
+  ConvertReceiverMode receiver_mode() const { return receiver_mode_; }
+
+  ValueNode* array_like_argument() {
+    DCHECK_EQ(mode_, kWithArrayLike);
+    DCHECK_GT(count(), 0);
+    return (*this)[count() - 1];
+  }
+
+  ValueNode* spread() {
+    DCHECK_EQ(mode_, kWithSpread);
+    DCHECK_GT(count(), 0);
+    return (*this)[count() - 1];
+  }
+
+  ValueNode** begin() {
+    DCHECK_EQ(storage_, Storage::kOwned);
+    return args_.begin() + index_offset();
+  }
+  const ValueNode* const* begin() const {
+    DCHECK_EQ(storage_, Storage::kOwned);
+    return args_.begin() + index_offset();
+  }
+  ValueNode** end() {
+    DCHECK_EQ(storage_, Storage::kOwned);
+    return args_.end();
+  }
+  const ValueNode* const* end() const {
+    DCHECK_EQ(storage_, Storage::kOwned);
+    return args_.end();
+  }
+
+  void set_receiver(ValueNode* receiver) {
+    DCHECK_EQ(storage_, Storage::kOwned);
+    if (receiver_mode_ == ConvertReceiverMode::kNullOrUndefined) {
+      args_.insert(args_.data(), receiver);
+      receiver_mode_ = ConvertReceiverMode::kAny;
+    } else {
+      DCHECK(!receiver->is_conversion());
+      args_[0] = receiver;
+    }
+  }
+
+  void PopArrayLikeArgument() {
+    DCHECK_EQ(storage_, Storage::kOwned);
+    DCHECK_EQ(mode_, kWithArrayLike);
+    DCHECK_GT(count(), 0);
+    args_.pop_back();
+  }
+
+  void PopSpread() {
+    DCHECK_EQ(storage_, Storage::kOwned);
+    DCHECK_EQ(mode_, kWithSpread);
+    DCHECK_GT(count(), 0);
+    args_.pop_back();
+  }
+
+  void ResizeDefaultArguments(size_t new_count) {
+    DCHECK_EQ(storage_, Storage::kOwned);
+    DCHECK_EQ(mode_, kDefault);
+    DCHECK_GT(count(), new_count);
+    args_.resize(new_count + index_offset());
+    DCHECK_EQ(count(), new_count);
+  }
+
+  void PopReceiver(ConvertReceiverMode new_receiver_mode) {
+    DCHECK_EQ(storage_, Storage::kOwned);
+    DCHECK_NE(receiver_mode_, ConvertReceiverMode::kNullOrUndefined);
+    DCHECK_NE(new_receiver_mode, ConvertReceiverMode::kNullOrUndefined);
+    DCHECK_GT(args_.size(), 0);  // We have at least a receiver to pop!
+    size_t new_args_size_in_bytes = (args_.size() - 1) * sizeof(args_[0]);
+    MemMove(args_.data(), args_.data() + 1, new_args_size_in_bytes);
+    args_.pop_back();
+
+    // If there is no non-receiver argument to become the new receiver,
+    // consider the new receiver to be known undefined.
+    receiver_mode_ = args_.empty() ? ConvertReceiverMode::kNullOrUndefined
+                                   : new_receiver_mode;
+  }
+
+ private:
+  enum class Storage { kOwned, kNodeView };
+
+  ConvertReceiverMode receiver_mode_;
+  Mode mode_;
+  Storage storage_;
+  // Owned-mode storage. Empty in kNodeView mode.
+  base::SmallVector<ValueNode*, 8> args_;
+  // Node-view-mode storage. Unused in kOwned mode.
+  NodeBase* node_view_call_ = nullptr;
+  int node_view_args_start_ = 0;
+  int node_view_args_count_ = 0;
+  ValueNode* node_view_receiver_ = nullptr;
+
+  int index_offset() const {
+    return receiver_mode_ == ConvertReceiverMode::kNullOrUndefined ? 0 : 1;
+  }
+
+  void CheckArgumentsAreNotConversionNodes() {
+#ifdef DEBUG
+    // Arguments can leak to the interpreter frame if the call is inlined,
+    // conversions should be stored in known_node_aspects/NodeInfo.
+    for (ValueNode* arg : args_) {
+      DCHECK(!arg->is_conversion());
+    }
+#endif  // DEBUG
+  }
+};
 
 class BasicBlockPosition {
  public:
@@ -283,11 +573,8 @@ class MaglevReducer {
     DCHECK(new_nodes_at_end_.empty());
   }
 
-  static enum CheckType GetCheckType(NodeType type, ValueNode* target) {
+  static enum CheckType GetCheckType(NodeType type) {
     if (NodeTypeIs(type, NodeType::kAnyHeapObject)) {
-      if (target && target->Is<Phi>()) {
-        target->Cast<Phi>()->SetUseRequiresHeapObject();
-      }
       return CheckType::kOmitHeapObjectCheck;
     } else {
       return CheckType::kCheckHeapObject;
@@ -391,9 +678,7 @@ class MaglevReducer {
       ValueNode* context, ValueNode* object, ValueNode* callable,
       compiler::FeedbackSource feedback_source);
 
-  ReduceResult BuildSmiUntag(
-      ValueNode* node, AllowWideningSmiToInt32 allow_widening_smi_to_int32 =
-                           AllowWideningSmiToInt32::kDontAllow);
+  ReduceResult BuildSmiUntag(ValueNode* node);
 
   ReduceResult BuildNumberOrOddballToFloat64OrHoleyFloat64(
       ValueNode* node, UseRepresentation use_rep, NodeType allowed_input_type);
@@ -441,6 +726,18 @@ class MaglevReducer {
       ValueNode* context, std::initializer_list<ValueNode*> inputs,
       compiler::FeedbackSource const& feedback,
       CallBuiltin::FeedbackSlotType slot_type);
+
+  ReduceResult BuildCallKnownJSFunction(
+      JSDispatchHandle dispatch_handle, compiler::SharedFunctionInfoRef shared,
+      ValueNode* tagged_function, ValueNode* tagged_context,
+      ValueNode* tagged_receiver, ValueNode* tagged_new_target, int arg_count,
+      base::FunctionRef<ReduceResult(int)> get_arg,
+      compiler::FeedbackSource const& feedback_source);
+
+#if V8_ENABLE_WEBASSEMBLY
+  bool ShouldWrapArgsForWasmInlining(compiler::SharedFunctionInfoRef shared,
+                                     JSDispatchHandle dispatch_handle);
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   compiler::OptionalStringRef GetStringFromInt32(int32_t value);
 
@@ -561,6 +858,75 @@ class MaglevReducer {
     current_speculation_feedback_ = feedback_source;
   }
 
+  SpeculationMode current_speculation_mode() const {
+    return current_speculation_mode_;
+  }
+  void set_current_speculation_mode(SpeculationMode mode) {
+    current_speculation_mode_ = mode;
+  }
+  bool CanSpeculateCall() const {
+    return current_speculation_mode_ == SpeculationMode::kAllowSpeculation;
+  }
+  bool CanSpeculateCall(
+      std::initializer_list<SpeculationMode> supported_modes) const {
+    return CanSpeculateCall() ||
+           std::find(supported_modes.begin(), supported_modes.end(),
+                     current_speculation_mode_) != supported_modes.end();
+  }
+
+  MaybeReduceResult TryReduceMathSqrt(compiler::JSFunctionRef target,
+                                      CallArguments& args);
+  MaybeReduceResult TryReduceMathMax(compiler::JSFunctionRef target,
+                                     CallArguments& args);
+  MaybeReduceResult TryReduceMathMin(compiler::JSFunctionRef target,
+                                     CallArguments& args);
+  template <typename Int32Binop, typename Float64Binop>
+  MaybeReduceResult TryReduceMathMinMax(CallArguments& args,
+                                        Int32Binop&& int32_case,
+                                        Float64Binop&& float64_case);
+  MaybeReduceResult TryReduceBuiltin(
+      Builtin builtin_id, compiler::JSFunctionRef target, CallArguments& args,
+      const compiler::FeedbackSource& feedback_source);
+
+  ReduceResult BuildInt32Max(ValueNode* a, ValueNode* b);
+  ReduceResult BuildInt32Min(ValueNode* a, ValueNode* b);
+
+  // TODO(victorgomes): Maybe it makes sense to port BranchBuilder.
+  template <typename Sub>
+  BranchResult BuildBranchIfInt32Compare(Sub& sg,
+                                         typename Sub::Label* false_target,
+                                         Operation op, ValueNode* lhs,
+                                         ValueNode* rhs);
+  template <typename Sub>
+  BranchResult BuildBranchIfUint32Compare(Sub& sg,
+                                          typename Sub::Label* false_target,
+                                          Operation op, ValueNode* lhs,
+                                          ValueNode* rhs);
+
+  // TODO(victorgomes): Support DoneWithoutValue.
+  template <typename CondFn>
+  ReduceResult Select(CondFn cond, base::FunctionRef<ReduceResult()> if_true,
+                      base::FunctionRef<ReduceResult()> if_false);
+
+  struct PendingSplice {
+    BasicBlock* entry;
+    BasicBlock* exit;
+    ZoneVector<BasicBlock*> all_blocks;
+  };
+  void RecordPendingSplice(BasicBlock* entry, BasicBlock* exit,
+                           ZoneVector<BasicBlock*> all_blocks) {
+    DCHECK(!pending_splice_.has_value());
+    pending_splice_ = PendingSplice{entry, exit, all_blocks};
+  }
+  bool HasPendingSplice() const { return pending_splice_.has_value(); }
+  const PendingSplice& pending_splice() const {
+    DCHECK(pending_splice_.has_value());
+    return *pending_splice_;
+  }
+  PendingSplice TakePendingSplice() {
+    DCHECK(pending_splice_.has_value());
+    return *std::exchange(pending_splice_, {});
+  }
   void FlushNodesToBlock();
 
   void SetNewNodePosition(BasicBlockPosition position) {
@@ -597,6 +963,20 @@ class MaglevReducer {
     return std::prev(it_upper)->second;
   }
 #endif  // DEBUG
+
+  // Tracks whether any node that can throw was emitted since the last
+  // ResetPeriodThrowingNode(). Used by the optimizer to decide whether a
+  // reduced node's exception handler is still reachable: a reduction can lower
+  // a throwing node into several nodes where an intermediate throws but the
+  // returned value does not.
+  void ResetPeriodThrowingNode() { period_added_throwing_node_ = false; }
+  bool period_added_throwing_node() const {
+    return period_added_throwing_node_;
+  }
+
+  void PushInlineCandidate(MaglevCallSiteInfo* call_site) {
+    graph()->inlineable_calls().push(call_site);
+  }
 
   SmiConstant* GetSmiConstant(int constant) const {
     return graph()->GetSmiConstant(constant);
@@ -637,6 +1017,14 @@ class MaglevReducer {
   }
 
   ValueNode* GetNumberConstant(double constant);
+
+  bool IsTheHoleConstant(ValueNode* node);
+  ReduceResult GetConvertReceiver(compiler::SharedFunctionInfoRef shared,
+                                  ValueNode* receiver,
+                                  ConvertReceiverMode mode);
+  bool CanInlineCall(const MaglevCompilationUnit* current_unit,
+                     compiler::SharedFunctionInfoRef shared,
+                     float call_frequency);
 
   ReduceResult BuildCheckedSmiSizedInt32(ValueNode* input);
 
@@ -707,9 +1095,7 @@ class MaglevReducer {
   bool EnsureType(ValueNode* node, NodeType type, NodeType* old = nullptr) {
     return known_node_aspects().EnsureType(broker(), node, type, old);
   }
-  NodeType GetType(ValueNode* node,
-                   AllowWideningSmiToInt32 allow_widening_smi_to_int32 =
-                       AllowWideningSmiToInt32::kAllow) {
+  NodeType GetType(ValueNode* node) {
     NodeType type = known_node_aspects().GetTypeUnchecked(broker(), node);
     if (v8_flags.maglev_assert_types && type != NodeType::kUnknown)
         [[unlikely]] {
@@ -721,8 +1107,7 @@ class MaglevReducer {
         // TODO(marja): Consider adding different CheckMaglevType variants
         // based on node->value_representation(). Then we wouldn't need to
         // convert the value to tagged.
-        ReduceResult result = AddNewNode<CheckMaglevType>(
-            {node}, type, allow_widening_smi_to_int32);
+        ReduceResult result = AddNewNode<CheckMaglevType>({node}, type);
         CHECK(result.IsDoneWithPayload());
       }
     }
@@ -750,6 +1135,20 @@ class MaglevReducer {
   Graph* graph() const { return graph_; }
   compiler::JSHeapBroker* broker() const { return broker_; }
   LocalIsolate* local_isolate() const { return broker()->local_isolate(); }
+  bool is_turbolev() const {
+    return graph()->compilation_info()->is_turbolev();
+  }
+
+  KnownNodeAspects& known_node_aspects() {
+    static_assert(ReducerBaseWithKNA<BaseT>);
+    return base_->known_node_aspects();
+  }
+  void set_known_node_aspects(KnownNodeAspects* kna) {
+    static_assert(ReducerBaseWithKNASetter<BaseT>);
+    base_->set_known_node_aspects(kna);
+  }
+
+  friend class Subgraph<BaseT>;
 
  protected:
   class LazyDeoptResultLocationScope;
@@ -800,11 +1199,6 @@ class MaglevReducer {
 
   std::optional<ValueNode*> TryGetConstantAlternative(ValueNode* node);
 
-  KnownNodeAspects& known_node_aspects() {
-    static_assert(ReducerBaseWithKNA<BaseT>);
-    return base_->known_node_aspects();
-  }
-
   template <typename T>
   friend class MapInference;
 
@@ -832,7 +1226,134 @@ class MaglevReducer {
   ZoneVector<std::pair<int, Node*>> new_nodes_at_;
   ZoneVector<Node*> new_nodes_at_end_;
 
+  bool period_added_throwing_node_ = false;
+
   compiler::FeedbackSource current_speculation_feedback_ = {};
+  SpeculationMode current_speculation_mode_ =
+      SpeculationMode::kDisallowSpeculation;
+  std::optional<PendingSplice> pending_splice_;
+
+  // The innermost optimizer-side Subgraph currently being built, or nullptr.
+  // Lets a nested Subgraph splice directly into its enclosing subgraph instead
+  // of recording a separate top-level pending splice.
+  Subgraph<BaseT>* active_subgraph_ = nullptr;
+};
+
+template <typename DerivedT, typename BaseT>
+class SubgraphBase {
+ public:
+  class Variable {
+   public:
+    explicit Variable(int index) : pseudo_register_(index) {}
+
+   private:
+    friend class SubgraphBase;
+    friend DerivedT;
+    interpreter::Register pseudo_register_;
+  };
+
+  class Label;
+
+  class LabelForTrackingInterpreterFrameState {
+   public:
+    LabelForTrackingInterpreterFrameState(SubgraphBase* sg,
+                                          int predecessor_count,
+                                          int future_bind_offset)
+        : sg_(sg),
+          predecessor_count_(predecessor_count),
+          future_bind_offset_(future_bind_offset) {}
+    LabelForTrackingInterpreterFrameState(SubgraphBase* sg,
+                                          int predecessor_count,
+                                          std::initializer_list<Variable*> vars,
+                                          int future_bind_offset)
+        : sg_(sg),
+          predecessor_count_(predecessor_count),
+          vars_(vars),
+          future_bind_offset_(future_bind_offset) {}
+
+   private:
+    friend class Label;
+    SubgraphBase* sg_;
+    int predecessor_count_;
+    std::vector<Variable*> vars_;
+    int future_bind_offset_;
+  };
+
+  class Label {
+   public:
+    Label(SubgraphBase* sg, int predecessor_count);
+    Label(SubgraphBase* sg, int predecessor_count,
+          std::initializer_list<Variable*> vars);
+
+    // NOLINTNEXTLINE(runtime/explicit)
+    Label(const LabelForTrackingInterpreterFrameState& label);
+
+    BasicBlockRef* ref() { return &ref_; }
+    int predecessor_count() const { return predecessor_count_; }
+    bool ShouldTrackInterpreterFrameState() const {
+      return future_bind_offset_.has_value();
+    }
+
+   private:
+    friend class SubgraphBase;
+    friend DerivedT;
+
+    int predecessor_count_ = -1;
+
+    // These are for tracking the values of Variables and merging them into
+    // variable_frame_.
+    MergePointInterpreterFrameState* variable_merge_state_ = nullptr;
+    compiler::BytecodeLivenessState* variable_liveness_ = nullptr;
+    BasicBlockRef ref_;
+
+    // Used only by MaglevSubGraphBuilder when the label is bound at a
+    // future bytecode offset; the optimizer never sets either of these.
+    // These are for tracking the values of registers and merging into the
+    // interpreter frame. Setting the future_bind_offset to the bytecode offset
+    // where the "bind" for this label will be enables tracking.
+    // TODO(marja): Unify merge_state_ and variable_merge_state_ and only
+    // have one.
+    std::optional<int> future_bind_offset_;
+    MergePointInterpreterFrameState* merge_state_ = nullptr;
+  };
+
+  void set(Variable& v, ValueNode* value) {
+    variable_frame_.set(v.pseudo_register_, value);
+  }
+  ValueNode* get(const Variable& v) const {
+    return variable_frame_.get(v.pseudo_register_);
+  }
+
+  void GotoOrTrim(Label* label) {
+    if (reducer_->current_block() == nullptr) {
+      ReducePredecessorCount(label);
+      return;
+    }
+    static_cast<DerivedT*>(this)->Goto(label);
+  }
+
+  void ReducePredecessorCount(Label* label, unsigned num = 1);
+
+  V8_NODISCARD ReduceResult TrimPredecessorsAndBind(Label* label);
+
+ protected:
+  SubgraphBase(MaglevReducer<BaseT>* reducer, MaglevCompilationUnit* dummy_unit)
+      : reducer_(reducer),
+        dummy_unit_(dummy_unit),
+        variable_frame_(*dummy_unit, /*known_node_aspects=*/nullptr) {}
+
+  MaglevReducer<BaseT>* reducer() { return reducer_; }
+  MaglevCompilationUnit* dummy_unit() { return dummy_unit_; }
+  InterpreterFrameState& variable_frame() { return variable_frame_; }
+
+  // Default CRTP hook; the builder side overrides to also MergeDead its
+  // separate interpreter-frame-state tracking. The optimizer never
+  // triggers it (its labels always have future_bind_offset_ = nullopt).
+  void MergeDeadInterpreterFrameState(Label*, unsigned) { UNREACHABLE(); }
+
+  MaglevReducer<BaseT>* reducer_;
+  MaglevCompilationUnit* dummy_unit_;
+  InterpreterFrameState variable_frame_;
 };
 
 }  // namespace maglev

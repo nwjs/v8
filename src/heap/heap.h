@@ -22,6 +22,7 @@
 #include "src/base/atomic-utils.h"
 #include "src/base/bounded-page-allocator.h"
 #include "src/base/enum-set.h"
+#include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/platform/condition-variable.h"
 #include "src/base/platform/mutex.h"
@@ -261,6 +262,7 @@ constexpr const char* ToString(CompleteSweepingReason reason) {
     case CompleteSweepingReason::kReadOnly:
       return "read only";
   }
+  UNREACHABLE();
 }
 
 static constexpr v8::base::TimeDelta kMaxSynchronuousGCOperation =
@@ -278,6 +280,12 @@ class Heap final {
     TEAR_DOWN
   };
 
+#ifdef V8_ENABLE_ALLOCATION_TIMEOUT
+  int increment_dispatch_table_allocations() {
+    return ++dispatch_table_allocations_;
+  }
+#endif
+
   // Emits GC events for DevTools timeline.
   class V8_NODISCARD DevToolsTraceEventScope {
    public:
@@ -286,7 +294,7 @@ class Heap final {
     ~DevToolsTraceEventScope();
 
    private:
-    Heap* heap_;
+    [[maybe_unused]] Heap* heap_;
     const char* event_name_;
   };
 
@@ -1383,7 +1391,7 @@ class Heap final {
     survived_since_last_expansion_ += survived;
   }
 
-  V8_EXPORT_PRIVATE size_t NewSpaceAllocationCounter() const;
+  V8_EXPORT_PRIVATE uint64_t NewSpaceAllocationCounter() const;
 
   void SetNewSpaceAllocationCounterForTesting(size_t new_value) {
     new_space_allocation_counter_ = new_value;
@@ -1394,12 +1402,13 @@ class Heap final {
         OldGenerationAllocationCounter();
   }
 
-  size_t OldGenerationAllocationCounter() {
+  uint64_t OldGenerationAllocationCounter() {
     return old_generation_allocation_counter_at_last_gc_ +
            PromotedSinceLastGC();
   }
 
-  size_t EmbedderAllocationCounter() const;
+  uint64_t EmbedderAllocationCounter() const;
+  uint64_t ExternalAllocationCounter() const;
 
   // This should be used only for testing.
   void set_old_generation_allocation_counter_at_last_gc(size_t new_value) {
@@ -2320,12 +2329,17 @@ class Heap final {
   // This counter is increased before each GC and never reset.
   // To account for the bytes allocated since the last GC, use the
   // NewSpaceAllocationCounter() function.
-  size_t new_space_allocation_counter_ = 0;
+  uint64_t new_space_allocation_counter_ = 0;
 
   // This counter is increased before each GC and never reset. To
   // account for the bytes allocated since the last GC, use the
   // OldGenerationAllocationCounter() function.
-  size_t old_generation_allocation_counter_at_last_gc_ = 0;
+  uint64_t old_generation_allocation_counter_at_last_gc_ = 0;
+
+  // This counter is increased before each GC and never reset. To account for
+  // the bytes allocated since the last GC, use the ExternalAllocationCounter()
+  // function.
+  uint64_t external_allocation_counter_at_last_gc_ = 0;
 
   char trace_ring_buffer_[kTraceRingBufferSize];
 
@@ -2375,6 +2389,10 @@ class Heap final {
   bool force_oom_ = false;
   bool force_gc_on_next_allocation_ = false;
   bool delay_sweeper_tasks_for_testing_ = false;
+
+#ifdef V8_ENABLE_ALLOCATION_TIMEOUT
+  int dispatch_table_allocations_ = 0;
+#endif
 
   std::vector<HeapObjectAllocationTracker*> allocation_trackers_;
 
@@ -2521,6 +2539,7 @@ constexpr const char* ToString(Heap::SweepingForcedFinalizationMode mode) {
     case Heap::SweepingForcedFinalizationMode::kUnifiedHeap:
       return "unified heap";
   }
+  UNREACHABLE();
 }
 
 constexpr const char* ToString(Heap::HeapGrowingMode mode) {
@@ -2534,6 +2553,7 @@ constexpr const char* ToString(Heap::HeapGrowingMode mode) {
     case Heap::HeapGrowingMode::kDefault:
       return "default";
   }
+  UNREACHABLE();
 }
 
 #define DECL_RIGHT_TRIM(T)                                         \

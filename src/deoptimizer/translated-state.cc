@@ -574,55 +574,8 @@ Tagged<Object> TranslatedValue::GetRawValue() const {
 
   // Otherwise, do a best effort to get the value without allocation.
   switch (kind()) {
-    case kTagged: {
-      Tagged<Object> object = raw_literal();
-      if (IsSlicedString(object)) {
-        // If {object} is a sliced string of length smaller than
-        // SlicedString::kMinLength, then trim the underlying SeqString and
-        // return it. This assumes that such sliced strings are only built by
-        // the fast string builder optimization of Turbofan's
-        // StringBuilderOptimizer/EffectControlLinearizer.
-        Tagged<SlicedString> string = Cast<SlicedString>(object);
-        if (string->length() < SlicedString::kMinLength) {
-          Tagged<String> backing_store = string->parent();
-          CHECK(IsSeqString(backing_store));
-
-          // Creating filler at the end of the backing store if needed.
-          int string_size =
-              IsSeqOneByteString(backing_store)
-                  ? SeqOneByteString::SizeFor(backing_store->length())
-                  : SeqTwoByteString::SizeFor(backing_store->length());
-          int needed_size = IsSeqOneByteString(backing_store)
-                                ? SeqOneByteString::SizeFor(string->length())
-                                : SeqTwoByteString::SizeFor(string->length());
-          if (needed_size < string_size) {
-            Address new_end = backing_store.address() + needed_size;
-            isolate()->heap()->CreateFillerObjectAt(
-                new_end, (string_size - needed_size));
-          }
-
-          // Updating backing store's length, effectively trimming it.
-          backing_store->set_length(string->length());
-
-          // Zeroing the padding bytes of {backing_store}.
-          SeqString::DataAndPaddingSizes sz =
-              Cast<SeqString>(backing_store)->GetDataAndPaddingSizes();
-          auto padding =
-              reinterpret_cast<char*>(backing_store.address() + sz.data_size);
-          for (int i = 0; i < sz.padding_size; ++i) {
-            padding[i] = 0;
-          }
-
-          // Overwriting {string} with a filler, so that we don't leave around a
-          // potentially-too-small SlicedString.
-          isolate()->heap()->CreateFillerObjectAt(string.address(),
-                                                  sizeof(SlicedString));
-
-          return backing_store;
-        }
-      }
-      return object;
-    }
+    case kTagged:
+      return raw_literal();
 
     case kInt32: {
       bool is_smi = Smi::IsValid(int32_value());
@@ -2493,7 +2446,7 @@ void TranslatedState::EnsurePropertiesAllocatedAndMarked(
   Tagged<ByteArray> raw_object_storage = *object_storage;
 
   // Set markers for out-of-object properties.
-  Tagged<DescriptorArray> descriptors = map->instance_descriptors(isolate());
+  Tagged<DescriptorArray> descriptors = map->instance_descriptors();
   for (InternalIndex i : map->IterateOwnDescriptors()) {
     FieldIndex index = FieldIndex::ForDescriptor(raw_map, i);
     Representation representation = descriptors->GetDetails(i).representation();
@@ -2533,7 +2486,7 @@ void TranslatedState::EnsureJSObjectAllocated(TranslatedValue* slot,
   DisallowGarbageCollection no_gc;
   Tagged<Map> raw_map = *map;
   Tagged<ByteArray> raw_object_storage = *object_storage;
-  Tagged<DescriptorArray> descriptors = map->instance_descriptors(isolate());
+  Tagged<DescriptorArray> descriptors = map->instance_descriptors();
 
   // Set markers for in-object properties.
   for (InternalIndex i : raw_map->IterateOwnDescriptors()) {
@@ -2631,7 +2584,7 @@ void TranslatedState::InitializeJSObjectAt(
     InstanceType instance_type = map->instance_type();
     USE(instance_type);
     if (InstanceTypeChecker::IsJSFunction(instance_type) &&
-        offset == JSFunction::kDispatchHandleOffset) {
+        offset == offsetof(JSFunction, dispatch_handle_)) {
       // The JSDispatchHandle will be materialized as a number, but we need
       // the raw value here. TODO(saelo): can we implement "proper" support
       // for JSDispatchHandles in the deoptimizer?
@@ -2639,12 +2592,12 @@ void TranslatedState::InitializeJSObjectAt(
       CHECK(IsNumber(*field_value));
       JSDispatchHandle handle(Object::NumberValue(Cast<Number>(*field_value)));
       object_storage->WriteField<JSDispatchHandle::underlying_type>(
-          JSFunction::kDispatchHandleOffset, handle.value());
+          offsetof(JSFunction, dispatch_handle_), handle.value());
       continue;
     }
 #ifdef V8_ENABLE_SANDBOX
     if (InstanceTypeChecker::IsJSRegExp(instance_type) &&
-        offset == JSRegExp::kDataOffset) {
+        offset == offsetof(JSRegExp, data_)) {
       DirectHandle<HeapObject> field_value = slot->storage();
       // If the value comes from the DeoptimizationLiteralArray, it is a
       // RegExpDataWrapper as we can't store TrustedSpace values in a FixedArray

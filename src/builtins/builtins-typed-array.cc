@@ -69,7 +69,7 @@ BUILTIN(TypedArrayPrototypeCopyWithin) {
       from = CapRelativeIndex(num, 0, len);
 
       DirectHandle<Object> end = args.atOrUndefined(isolate, 3);
-      if (!IsUndefined(*end, isolate)) {
+      if (!IsUndefined(*end)) {
         ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, num,
                                            Object::IntegerValue(isolate, end));
         final = CapRelativeIndex(num, 0, len);
@@ -190,7 +190,7 @@ BUILTIN(TypedArrayPrototypeFill) {
     // 10. If end is undefined, let relativeEnd be len; else let relativeEnd be
     //     ? ToIntegerOrInfinity(end).
     num = args.atOrUndefined(isolate, 3);
-    if (!IsUndefined(*num, isolate)) {
+    if (!IsUndefined(*num)) {
       // 11. If relativeEnd = -∞, let endIndex be 0.
       // 12. Else if relativeEnd < 0, let endIndex be max(len + relativeEnd, 0).
       // 13. Else, let endIndex be min(relativeEnd, len).
@@ -636,8 +636,12 @@ BUILTIN(Uint8ArrayPrototypeSetFromBase64) {
   isolate->CountUsage(v8::Isolate::kUint8ArrayToFromBase64AndHex);
 
   // 1. Let into be the this value.
-  // 2. Perform ? ValidateUint8Array(into).
-  CHECK_RECEIVER(JSTypedArray, uint8array, method_name);
+  // 2. Perform ? ValidateUint8Array(into, write).
+  DirectHandle<JSTypedArray> uint8array;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, uint8array,
+      JSTypedArray::Validate(isolate, args.receiver(), method_name,
+                             TypedArrayAccessMode::kWrite));
   ElementsKind elements_kind = uint8array->GetElementsKind();
   if (elements_kind != ElementsKind::UINT8_ELEMENTS &&
       elements_kind != ElementsKind::RAB_GSAB_UINT8_ELEMENTS) {
@@ -966,8 +970,12 @@ BUILTIN(Uint8ArrayPrototypeSetFromHex) {
   isolate->CountUsage(v8::Isolate::kUint8ArrayToFromBase64AndHex);
 
   // 1. Let into be the this value.
-  // 2. Perform ? ValidateUint8Array(into).
-  CHECK_RECEIVER(JSTypedArray, uint8array, method_name);
+  // 2. Perform ? ValidateUint8Array(into, write).
+  DirectHandle<JSTypedArray> uint8array;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, uint8array,
+      JSTypedArray::Validate(isolate, args.receiver(), method_name,
+                             TypedArrayAccessMode::kWrite));
   ElementsKind elements_kind = uint8array->GetElementsKind();
   if (elements_kind != ElementsKind::UINT8_ELEMENTS &&
       elements_kind != ElementsKind::RAB_GSAB_UINT8_ELEMENTS) {

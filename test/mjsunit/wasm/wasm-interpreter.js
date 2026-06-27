@@ -3424,3 +3424,136 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   let result = instance.exports.test();
   assertEquals(11, result);
 })();
+
+// Test the always-succeeds br_on_cast optimization.
+// When casting from (ref null T) to (ref T) where T is any struct, the
+// validator proves the type check always succeeds (for non-null values).
+// Spec semantics: null -> cast fails -> fall through; non-null -> cast
+// succeeds -> branch.
+(function testBrOnCastAlwaysSucceedsNullable() {
+  print(arguments.callee.name);
+  const builder = new WasmModuleBuilder();
+  const struct = builder.addStruct([makeField(kWasmI32, true)]);
+
+  // Base PoC test: catch the null case trap.
+  builder.addFunction('test', makeSig([wasmRefNullType(struct)], [kWasmI32]))
+    .exportFunc()
+    .addBody([
+      kExprBlock, kWasmRef, struct,
+        kExprLocalGet, 0,
+        ...wasmBrOnCast(0, wasmRefNullType(struct), wasmRefType(struct)),
+        kExprDrop,
+        kExprI32Const, 0,
+        kExprReturn,
+      kExprEnd,
+      kGCPrefix, kExprStructGet, struct, 0,
+    ]);
+
+  // Create struct with custom field value to distinguish code paths.
+  builder.addFunction('make_with_value', makeSig([kWasmI32], [wasmRefType(struct)]))
+    .exportFunc()
+    .addBody([
+      kExprLocalGet, 0,
+      kGCPrefix, kExprStructNew, struct,
+    ]);
+
+  const inst = builder.instantiate();
+
+  // Test the null case: catches the inverted condition manifesting as a trap
+  // test(null) -> 0 (falls through).
+  try {
+    assertEquals(0, inst.exports.test(null), "test(null) should fall through and return 0");
+  } catch (e) {
+    fail("test(null) trapped! Inverted br_on_cast condition not fixed. Error: " + e.message);
+  }
+
+  // Test non-null with value 99: distinguishes the inverted condition for
+  // non-null: test(obj_with_99) -> 99 (branches: correct path!).
+  assertEquals(99, inst.exports.test(inst.exports.make_with_value(99)),
+               "test(non_null_obj_with_99) should branch and return 99");
+})();
+
+// Select with ref type must type the result as the immediate type.
+(function testSelectWithTypeRefResultForRefCast() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+  let typeA =
+      builder.addStruct([makeField(kWasmI64, true), makeField(kWasmI64, true)]);
+  let typeB = builder.addStruct([makeField(kWasmI64, true)]);
+
+  builder.addFunction("mkA", makeSig([], [wasmRefType(typeA)]))
+      .addBody([kGCPrefix, kExprStructNewDefault, typeA])
+      .exportFunc();
+  builder.addFunction("mkB", makeSig([], [wasmRefType(typeB)]))
+      .addBody([kGCPrefix, kExprStructNewDefault, typeB])
+      .exportFunc();
+
+  builder.addFunction(
+      "must_trap",
+      makeSig([wasmRefType(typeA), wasmRefType(typeB)], [kWasmI32]))
+      .addBody([
+        kExprLocalGet, 0,
+        kExprLocalGet, 1,
+        kExprI32Const, 0,
+        kExprSelectWithType, 1, kStructRefCode,
+        kGCPrefix, kExprRefCast, typeA,
+        kExprDrop,
+        kExprI32Const, 7,
+      ])
+      .exportFunc();
+
+  let instance = builder.instantiate({});
+  let a = instance.exports.mkA();
+  let b = instance.exports.mkB();
+  assertTraps(kTrapIllegalCast, () => instance.exports.must_trap(a, b));
+})();
+
+(function testCallRefSubtypingForNonFinalType() {
+  print(arguments.callee.name);
+
+  let exporting_instance = (function() {
+    let builder = new WasmModuleBuilder();
+    let super_struct = builder.addStruct([makeField(kWasmI32, true)]);
+    let sub_struct = builder.addStruct({
+      fields: [makeField(kWasmI32, true), makeField(kWasmI64, true)],
+      supertype: super_struct
+    });
+
+    let super_sig = builder.addType(
+        makeSig([wasmRefNullType(sub_struct)], [kWasmI32]), kNoSuperType, false);
+    let sub_sig = builder.addType(
+        makeSig([wasmRefNullType(super_struct)], [kWasmI32]), super_sig);
+
+    builder.addFunction("exported_function", sub_sig)
+      .addBody([kExprLocalGet, 0, kGCPrefix, kExprStructGet, super_struct, 0])
+      .exportFunc();
+
+    return builder.instantiate({});
+  })();
+
+  let builder = new WasmModuleBuilder();
+  let super_struct = builder.addStruct([makeField(kWasmI32, true)]);
+  let sub_struct = builder.addStruct({
+    fields: [makeField(kWasmI32, true), makeField(kWasmI64, true)],
+    supertype: super_struct
+  });
+  let super_sig = builder.addType(
+      makeSig([wasmRefNullType(sub_struct)], [kWasmI32]), kNoSuperType, false);
+  let imported = builder.addImport("m", "f", super_sig);
+  builder.addDeclarativeElementSegment([imported]);
+
+  builder.addFunction("main", kSig_i_v)
+    .addBody([
+      kExprI32Const, 42,
+      ...wasmI64Const(5),
+      kGCPrefix, kExprStructNew, sub_struct,
+      kExprRefFunc, imported,
+      kExprCallRef, super_sig,
+    ])
+    .exportFunc();
+
+  let instance = builder.instantiate({
+    m: {f: exporting_instance.exports.exported_function}
+  });
+  assertEquals(42, instance.exports.main());
+})();

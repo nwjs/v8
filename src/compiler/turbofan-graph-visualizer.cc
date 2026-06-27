@@ -102,8 +102,7 @@ void JsonPrintFunctionSource(std::ostream& os, int source_id,
 
   int start = 0;
   int end = 0;
-  if (!script.is_null() && !IsUndefined(*script, isolate) &&
-      !shared.is_null()) {
+  if (!script.is_null() && !IsUndefined(*script) && !shared.is_null()) {
     Tagged<Object> source_name = script->name();
     os << ", \"sourceName\": \"";
     if (IsString(source_name)) {
@@ -1121,10 +1120,12 @@ std::ostream& operator<<(
       // Record the minimum and maximum positions observed within this
       // TopLevelLiveRange
       for (const UseInterval& interval : child->intervals()) {
-        if (interval.start().value() < instruction_range[0])
+        if (interval.start().value() < instruction_range[0]) {
           instruction_range[0] = interval.start().value();
-        if (interval.end().value() > instruction_range[1])
+        }
+        if (interval.end().value() > instruction_range[1]) {
           instruction_range[1] = interval.end().value();
+        }
       }
     }
   }

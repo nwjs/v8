@@ -295,13 +295,23 @@ int WasmTableObject::Grow(Isolate* isolate, DirectHandle<WasmTableObject> table,
 
 #if V8_ENABLE_DRUMBRAKE
     if (v8_flags.wasm_jitless) {
-      Tagged<ProtectedWeakFixedArray> uses = dispatch_table->protected_uses();
-      int used_length = GetUsedLength(uses);
+      // SANDBOX SAFETY: `UpdateIndirectCallTable` -> `GetOrCreateInterpreter*`
+      // can allocate (via `Managed::From` -> `NewForeign`) and trigger GC.
+      // `ProtectedWeakFixedArray` lives in trusted space, which *is* an
+      // evacuation candidate during mark-compact.
+      // In default V8 builds (`v8_enable_direct_handle = false`) conservative
+      // stack scanning is off and a raw `Tagged<>` on the C++ stack is not a
+      // known GC root, so it would become a stale pointer to freed/moved memory
+      // across the call.
+      // Wrap `uses` in a `DirectHandle` so its slot is tracked through GC.
+      DirectHandle<ProtectedWeakFixedArray> uses(
+          dispatch_table->protected_uses(), isolate);
+      int used_length = GetUsedLength(*uses);
       for (int i = kReservedSlotOffset; i < used_length; i += 2) {
         if (uses->get(i).IsCleared()) continue;
-        Tagged<WasmTrustedInstanceData> instance = GetInstance(uses, i);
+        Tagged<WasmTrustedInstanceData> instance = GetInstance(*uses, i);
         if (instance->has_interpreter_object()) {
-          int table_index = GetTableIndex(uses, i);
+          int table_index = GetTableIndex(*uses, i);
           wasm::WasmInterpreterRuntime::UpdateIndirectCallTable(
               isolate, direct_handle(instance->instance_object(), isolate),
               table_index);
@@ -336,7 +346,7 @@ void WasmTableObject::SetFunctionTableEntry(
     Isolate* isolate, DirectHandle<WasmTableObject> table,
     DirectHandle<WasmDispatchTable> dispatch_table, int entry_index,
     DirectHandle<Object> entry) {
-  if (IsWasmNull(*entry, isolate)) {
+  if (IsWasmNull(*entry)) {
     dispatch_table->Clear(entry_index, WasmDispatchTable::kExistingEntry);
     table->entries()->set(entry_index, ReadOnlyRoots(isolate).wasm_null());
     return;
@@ -437,7 +447,7 @@ DirectHandle<Object> WasmTableObject::Get(Isolate* isolate,
 
   DirectHandle<Object> entry(entries->get(entry_index), isolate);
 
-  if (IsWasmNull(*entry, isolate)) return entry;
+  if (IsWasmNull(*entry)) return entry;
   if (IsWasmFuncRef(*entry)) return entry;
 
   wasm::ValueType unsafe_type = table->unsafe_type();
@@ -544,6 +554,31 @@ bool FunctionSigMatchesTable(wasm::CanonicalTypeIndex sig_id,
       sig_id, table_type);
 }
 
+#if V8_ENABLE_DRUMBRAKE
+void InvalidateInterpreterIndirectCallCaches(
+    Isolate* isolate, DirectHandle<WasmDispatchTable> dispatch_table) {
+  Tagged<ProtectedWeakFixedArray> uses_raw = dispatch_table->protected_uses();
+  // SANDBOX SAFETY: see comment in `WasmTableObject::Grow` (above).
+  // `protected_uses` is a `ProtectedWeakFixedArray` in trusted space, which
+  // is an evacuation candidate during mark-compact; the call to
+  // `UpdateIndirectCallTable` may allocate and trigger GC. Without
+  // conservative stack scanning (the V8 default), a raw `Tagged<>` on
+  // the C++ stack would become stale, so we wrap it in a `DirectHandle`.
+  DirectHandle<ProtectedWeakFixedArray> uses(uses_raw, isolate);
+  int used_length = GetUsedLength(*uses);
+  for (int i = kReservedSlotOffset; i < used_length; i += 2) {
+    if (uses->get(i).IsCleared()) continue;
+    Tagged<WasmTrustedInstanceData> instance = GetInstance(*uses, i);
+    if (instance->has_interpreter_object()) {
+      int table_index = GetTableIndex(*uses, i);
+      wasm::WasmInterpreterRuntime::UpdateIndirectCallTable(
+          isolate, direct_handle(instance->instance_object(), isolate),
+          table_index);
+    }
+  }
+}
+#endif  // V8_ENABLE_DRUMBRAKE
+
 // static
 void WasmTableObject::UpdateDispatchTable(
     Isolate* isolate, DirectHandle<WasmDispatchTable> dispatch_table,
@@ -601,6 +636,7 @@ void WasmTableObject::UpdateDispatchTable(
 #endif
                                   WasmDispatchTable::kExistingEntry);
 #if V8_ENABLE_DRUMBRAKE
+    InvalidateInterpreterIndirectCallCaches(isolate, dispatch_table);
   } else if (v8_flags.wasm_jitless) {
     DCHECK(v8_flags.wasm_jitless);
     if (Tagged<WasmImportData> import_data;
@@ -614,18 +650,7 @@ void WasmTableObject::UpdateDispatchTable(
           sig_id, target_func_index, WasmDispatchTable::kExistingEntry);
     }
 
-    Tagged<ProtectedWeakFixedArray> uses = dispatch_table->protected_uses();
-    int used_length = GetUsedLength(uses);
-    for (int i = kReservedSlotOffset; i < used_length; i += 2) {
-      if (uses->get(i).IsCleared()) continue;
-      Tagged<WasmTrustedInstanceData> instance = GetInstance(uses, i);
-      if (instance->has_interpreter_object()) {
-        int table_index = GetTableIndex(uses, i);
-        wasm::WasmInterpreterRuntime::UpdateIndirectCallTable(
-            isolate, direct_handle(instance->instance_object(), isolate),
-            table_index);
-      }
-    }
+    InvalidateInterpreterIndirectCallCaches(isolate, dispatch_table);
 #endif  // V8_ENABLE_DRUMBRAKE
   } else {
     dispatch_table->SetForNonWrapper(
@@ -664,6 +689,14 @@ void WasmTableObject::UpdateDispatchTable(
                                 WasmDispatchTable::kInvalidFunctionIndex,
 #endif  // V8_ENABLE_DRUMBRAKE
                                 WasmDispatchTable::kExistingEntry);
+#if V8_ENABLE_DRUMBRAKE
+  // The WasmCapiFunction path requires compiled import wrappers (wasm JIT),
+  // which are unavailable when the interpreter is active. If the interpreter
+  // is ever made to work independently of --jitless, cache invalidation for
+  // dependent interpreter instances must happen here.
+  InvalidateInterpreterIndirectCallCaches(isolate, dispatch_table);
+#endif  // V8_ENABLE_DRUMBRAKE
+  DCHECK(!v8_flags.wasm_jitless);
 }
 
 // static
@@ -1058,7 +1091,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
       // grew the shared memory, broadcasting should have reset the ArrayBuffer
       // so we reallocate it on the next access to the `buffer` property of the
       // Wasm memory.
-      CHECK(IsUndefined(memory_object->array_buffer(), isolate));
+      CHECK(IsUndefined(memory_object->array_buffer()));
     }
     // As {old_pages} was read racefully, we return here the synchronized
     // value provided by {GrowWasmMemoryInPlace}, to provide the atomic
@@ -1136,7 +1169,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
 DirectHandle<JSArrayBuffer> WasmMemoryObject::GetArrayBuffer(
     Isolate* isolate, DirectHandle<WasmMemoryObject> memory_object) {
   DirectHandle<JSArrayBuffer> buffer =
-      IsUndefined(memory_object->array_buffer(), isolate)
+      IsUndefined(memory_object->array_buffer())
           ? i::WasmMemoryObject::RefreshBuffer(isolate, memory_object,
                                                memory_object->backing_store())
           : handle(Cast<JSArrayBuffer>(memory_object->array_buffer()), isolate);
@@ -1372,22 +1405,22 @@ void ImportedFunctionEntry::SetWasmToWrapper(
   if (v8_flags.wasm_jitless) {
     // Ignores wrapper_handle.
     DirectHandle<WasmImportData> import_data =
-        isolate->factory()->NewWasmImportData(callable, suspend, instance_data_,
-                                              sig, SharedFlag::kNo);
+        isolate->factory()->NewWasmImportData(
+            callable, suspend, importing_instance_data_, sig, SharedFlag::kNo);
     {
       DisallowGarbageCollection no_gc;
-      instance_data_->dispatch_table_for_imports()->SetForWrapper(
+      importing_instance_data_->dispatch_table_for_imports()->SetForWrapper(
           index_, *import_data, {}, sig->index(), -1,
           WasmDispatchTable::kExistingEntry);
     }
-    instance_data_->imported_function_indices()->set(index_, -1);
+    importing_instance_data_->imported_function_indices()->set(index_, -1);
     return;
   }
 #endif  // V8_ENABLE_DRUMBRAKE
 
   TRACE_IFT("Import callable 0x%" PRIxPTR "[%d] = {callable=0x%" PRIxPTR
             ", target=%p}\n",
-            instance_data_->ptr(), index_, callable->ptr(),
+            importing_instance_data_->ptr(), index_, callable->ptr(),
             wrapper_handle->has_code()
                 ? nullptr
                 : wrapper_handle->code()->instructions().begin());
@@ -1402,17 +1435,17 @@ void ImportedFunctionEntry::SetWasmToWrapper(
 #endif  // DEBUG
 
   DirectHandle<WasmImportData> import_data =
-      isolate->factory()->NewWasmImportData(callable, suspend, instance_data_,
-                                            sig, SharedFlag::kNo);
+      isolate->factory()->NewWasmImportData(
+          callable, suspend, importing_instance_data_, sig, SharedFlag::kNo);
 
   if (!wrapper_handle->has_code()) {
     import_data->SetIndexInTableAsCallOrigin(
-        instance_data_->dispatch_table_for_imports(), index_);
+        importing_instance_data_->dispatch_table_for_imports(), index_);
   }
 
   DisallowGarbageCollection no_gc;
   Tagged<WasmDispatchTableForImports> dispatch_table =
-      instance_data_->dispatch_table_for_imports();
+      importing_instance_data_->dispatch_table_for_imports();
 
   dispatch_table->SetForWrapper(index_, *import_data, std::move(wrapper_handle),
                                 sig->index(),
@@ -1430,14 +1463,14 @@ void ImportedFunctionEntry::SetWasmToWasm(
     int exported_function_index
 #endif  // V8_ENABLE_DRUMBRAKE
 ) {
-  TRACE_IFT("Import Wasm 0x%" PRIxPTR "[%d] = {instance_data=0x%" PRIxPTR
+  TRACE_IFT("Import Wasm 0x%" PRIxPTR "[%d] = {target_instance_data=0x%" PRIxPTR
             ", target=0x%" PRIxPTR "}\n",
-            instance_data_->ptr(), index_, target_instance_data.ptr(),
+            importing_instance_data_->ptr(), index_, target_instance_data.ptr(),
             wasm::GetProcessWideWasmCodePointerTable()
                 ->GetEntrypointWithoutSignatureCheck(call_target));
   DisallowGarbageCollection no_gc;
   Tagged<WasmDispatchTableForImports> dispatch_table =
-      instance_data_->dispatch_table_for_imports();
+      importing_instance_data_->dispatch_table_for_imports();
   dispatch_table->SetForNonWrapper(index_, target_instance_data, call_target,
                                    sig_id,
 #if V8_ENABLE_DRUMBRAKE
@@ -1446,8 +1479,8 @@ void ImportedFunctionEntry::SetWasmToWasm(
                                    WasmDispatchTable::kExistingEntry);
 
 #if V8_ENABLE_DRUMBRAKE
-  instance_data_->imported_function_indices()->set(index_,
-                                                   exported_function_index);
+  importing_instance_data_->imported_function_indices()->set(
+      index_, exported_function_index);
 #endif  // V8_ENABLE_DRUMBRAKE
 }
 
@@ -1466,16 +1499,17 @@ Tagged<JSReceiver> ImportedFunctionEntry::callable() {
 }
 
 Tagged<Object> ImportedFunctionEntry::implicit_arg() {
-  return instance_data_->dispatch_table_for_imports()->implicit_arg(index_);
+  return importing_instance_data_->dispatch_table_for_imports()->implicit_arg(
+      index_);
 }
 
 WasmCodePointer ImportedFunctionEntry::target() {
-  return instance_data_->dispatch_table_for_imports()->target(index_);
+  return importing_instance_data_->dispatch_table_for_imports()->target(index_);
 }
 
 #if V8_ENABLE_DRUMBRAKE
 int ImportedFunctionEntry::function_index_in_called_module() {
-  return instance_data_->imported_function_indices()->get(index_);
+  return importing_instance_data_->imported_function_indices()->get(index_);
 }
 #endif  // V8_ENABLE_DRUMBRAKE
 
@@ -1665,6 +1699,10 @@ DirectHandle<WasmTrustedInstanceData> WasmTrustedInstanceData::New(
     }
   }
 
+  // Publish WasmTrustedInstanceData now that all body fields are fully
+  // initialized.
+  trusted_data->Publish(isolate);
+
   if (shared == SharedFlag::kNo) {
     // Allocate the WasmInstanceObject (JS wrapper).
     DirectHandle<JSFunction> instance_cons(
@@ -1687,7 +1725,6 @@ DirectHandle<WasmTrustedInstanceData> WasmTrustedInstanceData::New(
       module_object->script()->set_wasm_weak_instance_list(*weak_instance_list);
     }
   }
-
   return trusted_data;
 }
 
@@ -1932,16 +1969,11 @@ DirectHandle<JSFunction> WasmInternalFunction::GetOrCreateExternal(
   // {this} can either be:
   // - a declared function, i.e. {implicit_arg()} is a WasmTrustedInstanceData,
   // - or an imported callable, i.e. {implicit_arg()} is a WasmImportData which
-  //   refers to the imported instance.
-  // It cannot be a JS/C API function as for those, the external function is set
-  // at creation.
-  DirectHandle<TrustedObject> implicit_arg{internal->implicit_arg(), isolate};
-  DirectHandle<WasmTrustedInstanceData> instance_data =
-      IsWasmTrustedInstanceData(*implicit_arg)
-          ? TrustedCast<WasmTrustedInstanceData>(implicit_arg)
-          : direct_handle(
-                TrustedCast<WasmImportData>(*implicit_arg)->instance_data(),
-                isolate);
+  //   refers to the importing instance.
+  // It cannot be a C API function as for those, the external function is set at
+  // creation.
+  DirectHandle<WasmTrustedInstanceData> instance_data{internal->instance_data(),
+                                                      isolate};
   wasm::ModuleOrigin export_origin = instance_data->module()->origin;
   int function_index = internal->function_index();
 
@@ -2140,7 +2172,7 @@ wasm::WasmValue WasmStruct::GetFieldValue(uint32_t index) {
           base::ReadUnalignedValue<uint16_t>(field_address)));
     case wasm::kRef:
     case wasm::kRefNull: {
-      DirectHandle<Object> ref(TaggedField<Object>::load(*this, field_offset),
+      DirectHandle<Object> ref(TaggedField<Object>::load(this, field_offset),
                                Isolate::Current());
       return wasm::WasmValue(ref, field_type);
     }
@@ -2149,6 +2181,7 @@ wasm::WasmValue WasmStruct::GetFieldValue(uint32_t index) {
     case wasm::kBottom:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 wasm::WasmValue WasmArray::GetElement(uint32_t index) {
@@ -2170,7 +2203,7 @@ wasm::WasmValue WasmArray::GetElement(uint32_t index) {
           base::ReadUnalignedValue<uint16_t>(element_address)));
     case wasm::kRef:
     case wasm::kRefNull: {
-      DirectHandle<Object> ref(TaggedField<Object>::load(*this, element_offset),
+      DirectHandle<Object> ref(TaggedField<Object>::load(this, element_offset),
                                Isolate::Current());
       return wasm::WasmValue(ref, element_type);
     }
@@ -2179,6 +2212,7 @@ wasm::WasmValue WasmArray::GetElement(uint32_t index) {
     case wasm::kBottom:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 void WasmArray::SetTaggedElement(uint32_t index, DirectHandle<Object> value,
@@ -2254,20 +2288,13 @@ concept AnyWasmDispatchTable = std::same_as<WasmDispatchTable, T> ||
 
 template <AnyWasmDispatchTable DispatchTable>
 void SetForNonWrapper(Tagged<DispatchTable> dispatch_table, int index,
-                      Tagged<Union<Smi, WasmTrustedInstanceData>> implicit_arg,
+                      Tagged<WasmTrustedInstanceData> implicit_arg,
                       WasmCodePointer call_target,
                       wasm::CanonicalTypeIndex sig_id,
 #if V8_ENABLE_DRUMBRAKE
                       uint32_t function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
                       WasmDispatchTable::NewOrExistingEntry new_or_existing) {
-  if (implicit_arg == Smi::zero()) {
-    DCHECK(v8_flags.wasm_jitless ||
-           (wasm::kInvalidWasmCodePointer == call_target));
-    DispatchTableClear(dispatch_table, index, new_or_existing);
-    return;
-  }
-
   SBXCHECK_BOUNDS(index, dispatch_table->length());
   DCHECK(IsWasmTrustedInstanceData(implicit_arg));
   DCHECK(sig_id.valid());
@@ -2301,14 +2328,14 @@ void SetForNonWrapper(Tagged<DispatchTable> dispatch_table, int index,
 }
 
 void WasmDispatchTable::SetForNonWrapper(
-    int index, Tagged<Union<Smi, WasmTrustedInstanceData>> implicit_arg,
+    int index, Tagged<WasmTrustedInstanceData> implicit_arg,
     WasmCodePointer call_target, wasm::CanonicalTypeIndex sig_id,
 #if V8_ENABLE_DRUMBRAKE
     uint32_t function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
     WasmDispatchTable::NewOrExistingEntry new_or_existing) {
   return ::v8::internal::SetForNonWrapper<WasmDispatchTable>(
-      *this, index, implicit_arg, call_target, sig_id,
+      this, index, implicit_arg, call_target, sig_id,
 #if V8_ENABLE_DRUMBRAKE
       function_index,
 #endif
@@ -2316,14 +2343,14 @@ void WasmDispatchTable::SetForNonWrapper(
 }
 
 void WasmDispatchTableForImports::SetForNonWrapper(
-    int index, Tagged<Union<Smi, WasmTrustedInstanceData>> implicit_arg,
+    int index, Tagged<WasmTrustedInstanceData> implicit_arg,
     WasmCodePointer call_target, wasm::CanonicalTypeIndex sig_id,
 #if V8_ENABLE_DRUMBRAKE
     uint32_t function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
     WasmDispatchTable::NewOrExistingEntry new_or_existing) {
   return ::v8::internal::SetForNonWrapper<WasmDispatchTableForImports>(
-      *this, index, implicit_arg, call_target, sig_id,
+      this, index, implicit_arg, call_target, sig_id,
 #if V8_ENABLE_DRUMBRAKE
       function_index,
 #endif
@@ -2384,7 +2411,7 @@ void WasmDispatchTable::SetForWrapper(
 #endif  // V8_ENABLE_DRUMBRAKE
     WasmDispatchTable::NewOrExistingEntry new_or_existing) {
   return ::v8::internal::SetForWrapper<WasmDispatchTable>(
-      *this, index, implicit_arg, wrapper_handle, sig_id,
+      this, index, implicit_arg, wrapper_handle, sig_id,
 #if V8_ENABLE_DRUMBRAKE
       function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
@@ -2400,7 +2427,7 @@ void WasmDispatchTableForImports::SetForWrapper(
 #endif  // V8_ENABLE_DRUMBRAKE
     WasmDispatchTable::NewOrExistingEntry new_or_existing) {
   return ::v8::internal::SetForWrapper<WasmDispatchTableForImports>(
-      *this, index, implicit_arg, wrapper_handle, sig_id,
+      this, index, implicit_arg, wrapper_handle, sig_id,
 #if V8_ENABLE_DRUMBRAKE
       function_index,
 #endif  // V8_ENABLE_DRUMBRAKE
@@ -2431,20 +2458,26 @@ void DispatchTableClear(Tagged<DispatchTable> dispatch_table, int index,
 
 void WasmDispatchTable::Clear(
     int index, WasmDispatchTable::NewOrExistingEntry new_or_existing) {
-  DispatchTableClear<WasmDispatchTable>(*this, index, new_or_existing);
+  DispatchTableClear<WasmDispatchTable>(this, index, new_or_existing);
 #if V8_ENABLE_DRUMBRAKE
   if (v8_flags.wasm_jitless &&
       new_or_existing == WasmDispatchTable::kExistingEntry) {
-    DisallowGarbageCollection no_gc;
-    Tagged<ProtectedWeakFixedArray> uses = protected_uses();
-    int used_length = GetUsedLength(uses);
+    // SANDBOX SAFETY: `ClearIndirectCallCacheEntry` ->
+    // `GetOrCreateInterpreter*` can allocate and trigger GC.
+    // `protected_uses` is a `ProtectedWeakFixedArray` in trusted space, which
+    // is an evacuation candidate during mark-compact. Without
+    // conservative stack scanning, a raw `Tagged<>` on the C++ stack is not a
+    // known GC root, so it would become a stale pointer if the array is moved.
+    // Wrap `uses` in a `DirectHandle` so its slot is tracked through GC.
     Isolate* isolate = Isolate::Current();
+    DirectHandle<ProtectedWeakFixedArray> uses(protected_uses(), isolate);
+    int used_length = GetUsedLength(*uses);
     for (int i = kReservedSlotOffset; i < used_length; i += 2) {
       if (uses->get(i).IsCleared()) continue;
       Tagged<WasmTrustedInstanceData> non_shared_instance_data =
-          GetInstance(uses, i);
+          GetInstance(*uses, i);
       if (non_shared_instance_data->has_interpreter_object()) {
-        int table_index = GetTableIndex(uses, i);
+        int table_index = GetTableIndex(*uses, i);
         DirectHandle<WasmInstanceObject> instance_handle(
             non_shared_instance_data->instance_object(), isolate);
         wasm::WasmInterpreterRuntime::ClearIndirectCallCacheEntry(
@@ -2456,8 +2489,7 @@ void WasmDispatchTable::Clear(
 }
 void WasmDispatchTableForImports::Clear(
     int index, WasmDispatchTable::NewOrExistingEntry new_or_existing) {
-  DispatchTableClear<WasmDispatchTableForImports>(*this, index,
-                                                  new_or_existing);
+  DispatchTableClear<WasmDispatchTableForImports>(this, index, new_or_existing);
 }
 
 std::optional<std::shared_ptr<wasm::WasmWrapperHandle>>
@@ -2565,7 +2597,7 @@ DirectHandle<WasmDispatchTable> WasmDispatchTable::Grow(
   DCHECK_LE(old_capacity, wasm::max_table_size());
 
   if (new_length < old_capacity) {
-    RELEASE_WRITE_INT32_FIELD(*old_table, kLengthOffset, new_length);
+    RELEASE_WRITE_INT32_FIELD(old_table, kLengthOffset, new_length);
     // All fields within the old capacity are already cleared (see below).
     return old_table;
   }
@@ -3077,8 +3109,7 @@ DirectHandle<Map> CreateArrayMap(Isolate* isolate,
                 instance_type, map_instance_size, elements_kind,
                 inobject_properties);
   map->set_wasm_type_info(*type_info);
-  map->SetInstanceDescriptors(isolate,
-                              *isolate->factory()->empty_descriptor_array(), 0,
+  map->SetInstanceDescriptors(*isolate->factory()->empty_descriptor_array(), 0,
                               SKIP_WRITE_BARRIER);
   map->set_is_extensible(false);
   WasmArray::EncodeElementSizeInMap(element_type.value_kind_size(), *map);
@@ -3145,19 +3176,15 @@ DirectHandle<WasmExceptionTag> WasmExceptionTag::New(Isolate* isolate,
 
 Handle<AsmWasmData> AsmWasmData::New(
     Isolate* isolate, std::shared_ptr<wasm::NativeModule> native_module,
-    DirectHandle<HeapNumber> uses_bitset) {
+    uint64_t uses_bitset) {
   const WasmModule* module = native_module->module();
   size_t memory_estimate =
       wasm::WasmCodeManager::EstimateNativeModuleCodeSize(module) +
       wasm::WasmCodeManager::EstimateNativeModuleMetaDataSize(module);
-  DirectHandle<Managed<wasm::NativeModule>> managed_native_module =
-      Managed<wasm::NativeModule>::From(isolate, memory_estimate,
-                                        std::move(native_module));
-  auto result = Cast<AsmWasmData>(
-      isolate->factory()->NewStruct(ASM_WASM_DATA_TYPE, AllocationType::kOld));
-  result->set_managed_native_module(*managed_native_module);
-  result->set_uses_bitset(*uses_bitset);
-  return result;
+  DirectHandle<TrustedManaged<wasm::NativeModule>> managed_native_module =
+      TrustedManaged<wasm::NativeModule>::From(
+          isolate, memory_estimate, std::move(native_module), SharedFlag::kNo);
+  return isolate->factory()->NewAsmWasmData(managed_native_module, uses_bitset);
 }
 
 namespace {
@@ -3247,7 +3274,7 @@ MaybeDirectHandle<Object> JSToWasmObject(Isolate* isolate,
                                          CanonicalValueType expected,
                                          const char** error_message) {
   DCHECK(expected.is_ref());
-  if (expected.is_nullable() && IsNull(*value, isolate)) {
+  if (expected.is_nullable() && IsNull(*value)) {
     if (expected.is_abstract_ref()) {
       switch (expected.generic_kind()) {
         case GenericKind::kStringViewWtf8:
@@ -3326,23 +3353,21 @@ MaybeDirectHandle<Object> JSToWasmObject(Isolate* isolate,
 
   switch (expected.generic_kind()) {
     case GenericKind::kFunc: {
-      if (!(WasmExternalFunction::IsWasmExternalFunction(*value) ||
-            WasmCapiFunction::IsWasmCapiFunction(*value))) {
+      if (!WasmExternalFunction::IsWasmExternalFunction(*value)) {
         *error_message =
             "function-typed object must be null (if nullable) or a Wasm "
             "function object";
         return {};
       }
-      return direct_handle(
-          Cast<JSFunction>(*value)->shared()->wasm_function_data()->func_ref(),
-          isolate);
+      return direct_handle(Cast<WasmExternalFunction>(*value)->func_ref(),
+                           isolate);
     }
     case GenericKind::kExtern: {
       if (!ConvertToSharedIfExpected(isolate, &value, expected,
                                      error_message)) {
         return {};
       }
-      if (!IsNull(*value, isolate)) return value;
+      if (!IsNull(*value)) return value;
       *error_message = "null is not allowed for (ref extern)";
       return {};
     }
@@ -3357,7 +3382,7 @@ MaybeDirectHandle<Object> JSToWasmObject(Isolate* isolate,
                                      error_message)) {
         return {};
       }
-      if (!IsNull(*value, isolate)) return value;
+      if (!IsNull(*value)) return value;
       *error_message = "null is not allowed for (ref any)";
       return {};
     }

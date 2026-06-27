@@ -14,13 +14,13 @@
 #include "src/codegen/machine-type.h"
 #include "src/codegen/x64/assembler-x64.h"
 #include "src/codegen/x64/register-x64.h"
+#include "src/compiler/backend/simd-shuffle.h"
 #include "src/compiler/linkage.h"
 #include "src/flags/flags.h"
 #include "src/heap/mutable-page.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
 #include "src/wasm/baseline/parallel-move.h"
-#include "src/wasm/simd-shuffle.h"
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
 
@@ -1110,6 +1110,29 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
     if (result.gp() != rax) {
       movl(result.gp(), rax);
     }
+  } else {
+    cmpxchgq(dst_op, value_reg);
+    if (result.gp() != rax) {
+      movq(result.gp(), rax);
+    }
+  }
+
+  if (!v8_flags.disable_write_barriers) {
+    Label done;
+#ifdef V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
+    // TODO(429142815): WriteBarrier builtins currently require a sandbox mode
+    // switch, so more code is emitted and we need far jumps here. Once the
+    // builtins run in sandboxed mode, we can again always use near jumps.
+    Label::Distance distance = Label::kFar;
+#else
+    Label::Distance distance = Label::kNear;
+#endif  // V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
+    j(not_equal, &done, distance);
+    EmitWriteBarrier(dst_addr, dst_op, new_value_for_write_barrier, pinned);
+    bind(&done);
+  }
+
+  if constexpr (COMPRESS_POINTERS_BOOL) {
     // Pointer decompression needs to use an or instead of an add as
     // value_reg is a full pointer. If the expected value stored in rax matches
     // the expected value, rax is left unmodified which already contains a
@@ -1119,26 +1142,7 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
     // value if it isn't already decompressed but keeping it unmodified
     // otherwise.
     orq(result.gp(), kPtrComprCageBaseRegister);
-  } else {
-    cmpxchgq(dst_op, value_reg);
-    if (result.gp() != rax) {
-      movq(result.gp(), rax);
-    }
   }
-
-  if (v8_flags.disable_write_barriers) return;
-  Label done;
-#ifdef V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
-  // TODO(429142815): WriteBarrier builtins currently require a sandbox mode
-  // switch, so more code is emitted and we need far jumps here. Once the
-  // builtins run in sandboxed mode, we can again always use near jumps.
-  Label::Distance distance = Label::kFar;
-#else
-  Label::Distance distance = Label::kNear;
-#endif  // V8_ENABLE_SANDBOX_HARDWARE_SUPPORT
-  j(not_equal, &done, distance);
-  EmitWriteBarrier(dst_addr, dst_op, new_value_for_write_barrier, pinned);
-  bind(&done);
 }
 
 void LiftoffAssembler::AtomicFence() { mfence(); }
@@ -1656,8 +1660,7 @@ void EmitI64MulWide(LiftoffAssembler* assm) {
   assm->PopToFixedRegister(lrdx);
   assm->PopToFixedRegister(lrax);
   // PopToFixedRegister can return without spilling the register.
-  if (assm->cache_state()->is_used(lrax)) assm->SpillRegister(lrax);
-  if (assm->cache_state()->is_used(lrdx)) assm->SpillRegister(lrdx);
+  assm->SpillRegisters(rax, rdx);
   // lhs = rax is implicit. Result is in [rdx:rax].
   (assm->*op)(rdx);
   assm->PushRegister(kI64, lrax);
@@ -1681,19 +1684,39 @@ void LiftoffAssembler::emit_i64_add128(Register dst_low, Register dst_high,
   DCHECK_NE(dst_low, dst_high);
   if (dst_low == al) {
     addq(dst_low, bl);
-  } else if (dst_low == bl) {
-    addq(dst_low, al);
   } else {
+    DCHECK_NE(dst_low, bl);
     movq(dst_low, al);
     addq(dst_low, bl);
   }
   if (dst_high == ah) {
     adcq(dst_high, bh);
-  } else if (dst_high == bh) {
-    adcq(dst_high, ah);
   } else {
+    DCHECK_NE(dst_high, bh);
     movq(dst_high, ah);
     adcq(dst_high, bh);
+  }
+}
+
+void LiftoffAssembler::emit_i64_sub128(Register dst_low, Register dst_high,
+                                       Register al, Register ah, Register bl,
+                                       Register bh) {
+  DCHECK_NE(dst_low, ah);
+  DCHECK_NE(dst_low, bh);
+  DCHECK_NE(dst_low, dst_high);
+  if (dst_low == al) {
+    subq(dst_low, bl);
+  } else {
+    DCHECK_NE(dst_low, bl);
+    movq(dst_low, al);
+    subq(dst_low, bl);
+  }
+  if (dst_high == ah) {
+    sbbq(dst_high, bh);
+  } else {
+    DCHECK_NE(dst_high, bh);
+    movq(dst_high, ah);
+    sbbq(dst_high, bh);
   }
 }
 
@@ -1849,6 +1872,45 @@ bool LiftoffAssembler::emit_i64_popcnt(LiftoffRegister dst,
 
 void LiftoffAssembler::IncrementSmi(LiftoffRegister dst, int offset) {
   SmiAddConstant(Operand(dst.gp(), offset), Smi::FromInt(1));
+}
+
+void LiftoffAssembler::DecrementMaxSteps(int32_t* max_steps_ptr,
+                                         MaxStepsVariant steps,
+                                         Label* trap_label,
+                                         LiftoffRegList pinned) {
+  Register addr = kScratchRegister;
+  movq(addr, Immediate64(reinterpret_cast<intptr_t>(max_steps_ptr)));
+
+  if (auto* steps_const = std::get_if<int32_t>(&steps)) {
+    subl(Operand(addr, 0), Immediate(*steps_const));
+    j(negative, trap_label);
+    return;
+  }
+
+  auto [reg, kind] = std::get<std::pair<Register, ValueKind>>(steps);
+
+  Register max_steps = liftoff::kScratchRegister2;
+  Register scratch = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
+
+  // Decrement the counter. If it underflows, clamp to -1 to prevent
+  // wraparound into positive range. {sbbq} sets {scratch} to -1 if there was
+  // a borrow (CF=1), and 0 otherwise. {orq}/{orl} then sets {max_steps} to -1
+  // if there was a borrow.
+  if (kind == kI64) {
+    movsxlq(max_steps, Operand(addr, 0));
+    subq(max_steps, reg);
+    sbbq(scratch, scratch);
+    orq(max_steps, scratch);
+  } else {
+    movl(max_steps, Operand(addr, 0));
+    subl(max_steps, reg);
+    sbbl(scratch, scratch);
+    orl(max_steps, scratch);
+  }
+  movl(Operand(addr, 0), max_steps);
+
+  // Now trap if the (possibly capped) result is negative.
+  j(negative, trap_label);
 }
 
 void LiftoffAssembler::emit_u32_to_uintptr(Register dst, Register src) {
@@ -2910,7 +2972,7 @@ void LiftoffAssembler::emit_i8x16_shuffle(LiftoffRegister dst,
   if (is_swizzle) {
     uint32_t imms[4];
     // Shuffles that use just 1 operand are called swizzles, rhs can be ignored.
-    wasm::SimdShuffle::Pack16Lanes(imms, shuffle);
+    compiler::SimdShuffle::Pack16Lanes(imms, shuffle);
     MacroAssembler::Move(kScratchDoubleReg, make_uint64(imms[3], imms[2]),
                          make_uint64(imms[1], imms[0]));
     Pshufb(dst.fp(), lhs.fp(), kScratchDoubleReg);
@@ -4698,7 +4760,8 @@ bool F16x8CmpOpViaF32(LiftoffAssembler* assm, LiftoffRegister dst,
   assm->vcvtph2ps(ydst, lhs.fp());
   assm->vcvtph2ps(kScratchSimd256Reg, rhs.fp());
   (assm->*avx_op)(ydst, ydst, kScratchSimd256Reg);
-  assm->vpackssdw(ydst, ydst, ydst);
+  assm->vextractf128(kScratchDoubleReg, ydst, 1);
+  assm->vpackssdw(dst.fp(), dst.fp(), kScratchDoubleReg);
   return true;
 }
 

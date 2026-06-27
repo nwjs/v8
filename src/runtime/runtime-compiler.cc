@@ -37,7 +37,7 @@ void LogExecution(Isolate* isolate, DirectHandle<JSFunction> function) {
   DisallowGarbageCollection no_gc;
   Tagged<SharedFunctionInfo> raw_sfi = *sfi;
   std::string event_name = "first-execution";
-  CodeKind kind = function->abstract_code(isolate)->kind(isolate);
+  CodeKind kind = function->abstract_code(isolate)->kind();
   // Not adding "-interpreter" for tooling backwards compatibility.
   if (kind != CodeKind::INTERPRETED_FUNCTION) {
     event_name += "-";
@@ -835,7 +835,7 @@ static Tagged<Object> CompileGlobalEval(
   static const ParseRestriction restriction = NO_PARSE_RESTRICTION;
   DirectHandle<JSFunction> compiled;
   DirectHandle<Context> context(isolate->context(), isolate);
-  if (!Is<NativeContext>(*context) && v8_flags.reuse_scope_infos) {
+  if (!Is<NativeContext>(*context)) {
     Tagged<WeakFixedArray> array = Cast<Script>(outer_info->script())->infos();
     Tagged<ScopeInfo> stored_info;
     CHECK(array->get(eval_scope_info_index)
