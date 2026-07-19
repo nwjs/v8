@@ -9,9 +9,7 @@
 // Flags: --allow-natives-syntax --turbofan
 // Flags: --turbolev --wasm-in-js-inlining-wrapper --wasm-in-js-inlining-body
 // Disable V8 stress modes and baseline compilers to guarantee deterministic compilation.
-// Flags: --no-always-sparkplug --no-stress-maglev --no-stress-concurrent-inlining --no-always-turbofan
-// Disable concurrent inlining to prevent background compiler threads from emitting out-of-order traces.
-// Flags: --no-concurrent-inlining
+// Flags: --no-always-sparkplug --no-stress-maglev --no-stress-concurrent-inlining
 // Flags: --trace-turbo-inlining
 
 // =============================================================================
@@ -109,7 +107,7 @@
 // CHECK: Considering JS-to-Wasm wrapper for Wasm function [1] get of module {{0x[0-9a-f]+}} for inlining
 // CHECK-NEXT: - inlining wrapper
 // CHECK: Considering JS-to-Wasm wrapper for Wasm function [1] get of module {{0x[0-9a-f]+}} for inlining
-// CHECK-NEXT: - not inlining: already inlining from another Wasm module
+// CHECK-NEXT: - not inlining: already inlining from another Wasm instance
 // CHECK: Considering Wasm function [1] get of module {{0x[0-9a-f]+}} for inlining
 // CHECK-NEXT: - inlining Wasm function
 

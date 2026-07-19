@@ -22,6 +22,7 @@
 #include "src/debug/debug.h"
 #include "src/execution/futex-emulation.h"
 #include "src/logging/counters.h"
+#include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/managed-inl.h"
 #include "src/objects/objects-inl.h"
@@ -1214,134 +1215,6 @@ DirectHandle<JSArrayBuffer> WasmMemoryObject::ChangeArrayBufferResizability(
   return RefreshBuffer(isolate, memory_object, std::move(backing_store));
 }
 
-MaybeDirectHandle<WasmMemoryMapDescriptor>
-WasmMemoryMapDescriptor::NewFromAnonymous(Isolate* isolate, size_t length) {
-#if V8_TARGET_OS_LINUX && V8_OS_LINUX
-  CHECK(v8_flags.experimental_wasm_memory_control);
-  DirectHandle<JSFunction> descriptor_ctor(
-      isolate->native_context()->wasm_memory_map_descriptor_constructor(),
-      isolate);
-
-  int file_descriptor = memfd_create("wasm_memory_map_descriptor", MFD_CLOEXEC);
-  if (file_descriptor == -1) {
-    return {};
-  }
-  int ret_val = ftruncate(file_descriptor, length);
-  if (ret_val == -1) {
-    return {};
-  }
-
-  return NewFromFileDescriptor(isolate, file_descriptor);
-#else   // V8_TARGET_OS_LINUX && V8_OS_LINUX
-  return {};
-#endif  // V8_TARGET_OS_LINUX && V8_OS_LINUX
-}
-
-DirectHandle<WasmMemoryMapDescriptor>
-WasmMemoryMapDescriptor::NewFromFileDescriptor(Isolate* isolate,
-                                               int file_descriptor) {
-  CHECK(v8_flags.experimental_wasm_memory_control);
-  DirectHandle<JSFunction> descriptor_ctor(
-      isolate->native_context()->wasm_memory_map_descriptor_constructor(),
-      isolate);
-
-  auto descriptor_object = Cast<WasmMemoryMapDescriptor>(
-      isolate->factory()->NewJSObject(descriptor_ctor, AllocationType::kOld));
-
-  descriptor_object->set_file_descriptor(file_descriptor);
-  descriptor_object->set_memory(ClearedValue());
-  descriptor_object->set_offset(0);
-  descriptor_object->set_size(0);
-
-  return descriptor_object;
-}
-
-size_t WasmMemoryMapDescriptor::MapDescriptor(
-    DirectHandle<WasmMemoryObject> memory, size_t offset) {
-#if V8_TARGET_OS_LINUX
-  CHECK(v8_flags.experimental_wasm_memory_control);
-  Managed<BackingStore>::Ptr backing_store = memory->backing_store();
-  if (backing_store->is_shared()) {
-    // TODO(ahaas): Handle concurrent calls to `MapDescriptor`. To prevent
-    // concurrency issues, we disable `MapDescriptor` for shared wasm memories
-    // so far.
-    return 0;
-  }
-  if (memory->is_memory64()) {
-    // TODO(ahaas): Handle memory64. So far the offset in the
-    // MemoryMapDescriptor is only an uint32. Either the offset has to be
-    // interpreted as a wasm memory page, or be extended to an uint64.
-    return 0;
-  }
-
-  uint8_t* target =
-      reinterpret_cast<uint8_t*>(backing_store->buffer_start()) + offset;
-
-  struct stat stat_for_size;
-  if (fstat(this->file_descriptor(), &stat_for_size) == -1) {
-    // Could not determine file size.
-    return 0;
-  }
-  size_t size = RoundUp(stat_for_size.st_size,
-                        GetArrayBufferPageAllocator()->AllocatePageSize());
-
-  if (size + offset < size) {
-    // Overflow
-    return 0;
-  }
-  if (size + offset > backing_store->byte_length()) {
-    return 0;
-  }
-
-  void* ret_val = mmap(target, size, PROT_READ | PROT_WRITE,
-                       MAP_FIXED | MAP_SHARED, this->file_descriptor(), 0);
-  CHECK_NE(ret_val, MAP_FAILED);
-  CHECK_EQ(ret_val, target);
-  return size;
-#else
-  return 0;
-#endif
-}
-
-bool WasmMemoryMapDescriptor::UnmapDescriptor() {
-#if V8_TARGET_OS_LINUX
-  CHECK(v8_flags.experimental_wasm_memory_control);
-  DisallowGarbageCollection no_gc;
-
-  if (this->memory().IsCleared()) {
-    return false;
-  }
-
-  i::Tagged<i::WasmMemoryObject> memory =
-      Cast<i::WasmMemoryObject>(MakeStrong(this->memory()));
-  if (memory.is_null()) {
-    return true;
-  }
-  uint32_t offset = this->offset();
-  uint32_t size = this->size();
-  Managed<BackingStore>::Ptr backing_store = memory->backing_store();
-
-  // The following checks already passed during `MapDescriptor`, and they should
-  // still pass.
-  CHECK(!memory->is_memory64());
-  CHECK(!backing_store->is_shared());
-  CHECK_EQ(size % GetArrayBufferPageAllocator()->AllocatePageSize(), 0);
-  CHECK_GE(size + offset, size);
-  CHECK_LE(size + offset, backing_store->byte_length());
-
-  uint8_t* target =
-      reinterpret_cast<uint8_t*>(backing_store->buffer_start()) + offset;
-
-  void* ret_val = mmap(target, size, PROT_READ | PROT_WRITE,
-                       MAP_FIXED | MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-
-  CHECK_NE(ret_val, MAP_FAILED);
-  CHECK_EQ(ret_val, target);
-  return true;
-#else
-  return false;
-#endif
-}
 
 // static
 MaybeDirectHandle<WasmGlobalObject> WasmGlobalObject::New(
@@ -1893,6 +1766,8 @@ DirectHandle<WasmFuncRef> WasmTrustedInstanceData::GetOrCreateFuncRef(
     Isolate* isolate,
     DirectHandle<WasmTrustedInstanceData> trusted_instance_data,
     int function_index, wasm::PrecreateExternal precreate_external) {
+  SBXCHECK_BOUNDS(function_index,
+                  trusted_instance_data->module()->functions.size());
   SharedFlag shared =
       SharedFlag(HeapLayout::InAnySharedSpace(*trusted_instance_data));
   Tagged<WasmFuncRef> existing_func_ref;
@@ -2134,7 +2009,7 @@ DirectHandle<WasmStruct> WasmStruct::AllocateDescriptorUninitialized(
                                           num_supertypes, context);
   rtt->set_immediate_supertype_map(*rtt_parent);
 
-  if (v8_flags.experimental_wasm_js_interop && !IsSmi(*first_field) &&
+  if (v8_flags.wasm_js_interop && !IsSmi(*first_field) &&
       IsJSReceiver(Cast<HeapObject>(*first_field))) {
     DirectHandle<JSPrototype> prototype =
         direct_handle(Cast<JSReceiver>(*first_field), isolate);
@@ -3235,7 +3110,7 @@ inline bool CheckExpectedSharedness(Isolate* isolate,
                                     DirectHandle<Object> value,
                                     CanonicalValueType expected,
                                     const char** error_message) {
-  if (v8_flags.experimental_wasm_shared && (*value).IsHeapObject()) {
+  if (v8_flags.wasm_shared && (*value).IsHeapObject()) {
     Tagged<HeapObject> heap_obj = (*value).cast<HeapObject>();
     if (expected.is_shared() == SharedFlag::kYes &&
         !HeapLayout::InAnySharedSpace(heap_obj)) {
@@ -3254,8 +3129,8 @@ inline bool ConvertToSharedIfExpected(Isolate* isolate,
                                       DirectHandle<Object>* value,
                                       CanonicalValueType expected,
                                       const char** error_message) {
-  if (v8_flags.experimental_wasm_shared &&
-      expected.is_shared() == SharedFlag::kYes && (**value).IsHeapObject()) {
+  if (v8_flags.wasm_shared && expected.is_shared() == SharedFlag::kYes &&
+      (**value).IsHeapObject()) {
     Tagged<HeapObject> heap_obj = (**value).cast<HeapObject>();
     if (!HeapLayout::InAnySharedSpace(heap_obj)) {
       if (!Object::Share(isolate, *value, ShouldThrow::kDontThrow)

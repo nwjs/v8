@@ -2607,7 +2607,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Sc(i.TempRegister(2), MemOperand(i.TempRegister(0), 0));
         __ BranchShort(&compareExchange, ne, i.TempRegister(2),
                        Operand(zero_reg));
-        __ bind(&exit);
       } else {
         Label compare_exchange;
         __ bind(&compare_exchange);
@@ -3424,7 +3423,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                kScratchReg, kSimd128ScratchReg);
       break;
     }
-    case kRiscvFEq: {
+    case kRiscvVFEq: {
       auto sew = DecodeElementWidth(opcode);
       __ VU.SetSimd128(sew);
       // The later vmerge.vi instruction implicitly uses the reserved
@@ -3434,7 +3433,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vmerge_vi(i.OutputSimd128Register(), -1, kSimd128ScratchReg);
       break;
     }
-    case kRiscvFNe: {
+    case kRiscvVFNe: {
       auto sew = DecodeElementWidth(opcode);
       __ VU.SetSimd128(sew);
       // The later vmerge.vi instruction implicitly uses the reserved
@@ -3444,7 +3443,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vmerge_vi(i.OutputSimd128Register(), -1, kSimd128ScratchReg);
       break;
     }
-    case kRiscvFLt: {
+    case kRiscvVFLt: {
       auto sew = DecodeElementWidth(opcode);
       __ VU.SetSimd128(sew);
       // The later vmerge.vi instruction implicitly uses the reserved
@@ -3454,7 +3453,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vmerge_vi(i.OutputSimd128Register(), -1, kSimd128ScratchReg);
       break;
     }
-    case kRiscvFLe: {
+    case kRiscvVFLe: {
       auto sew = DecodeElementWidth(opcode);
       __ VU.SetSimd128(sew);
       // The later vmerge.vi instruction implicitly uses the reserved
@@ -3516,7 +3515,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 
       // Fill the result vector with just NaNs.
       Simd128Register result = kSimd128ScratchReg;
-      if (sew == E32) {
+      if (sew == E16) {
+        __ li(kScratchReg, 0x7E00);
+        __ vmv_vx(result, kScratchReg);
+      } else if (sew == E32) {
         // Working on 32-bit floats.
         __ li(kScratchReg, kFP32DefaultNaN);
         __ vmv_vx(result, kScratchReg);
@@ -3555,7 +3557,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 
       // Fill the result vector with just NaNs.
       Simd128Register result = kSimd128ScratchReg;
-      if (sew == E32) {
+      if (sew == E16) {
+        __ li(kScratchReg, 0x7E00);
+        __ vmv_vx(result, kScratchReg);
+      } else if (sew == E32) {
         // Working on 32-bit floats.
         __ li(kScratchReg, kFP32DefaultNaN);
         __ vmv_vx(result, kScratchReg);
@@ -3685,6 +3690,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vfabs_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
       break;
     }
+    case kRiscvF16x8Abs: {
+      __ VU.SetSimd128(E16);
+      __ vfabs_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      break;
+    }
     case kRiscvF32x4Ceil: {
       __ VU.SetSimd128(E32);
       __ Ceil(i.OutputSimd128Register(), i.InputSimd128Register(0), kScratchReg,
@@ -3716,6 +3726,37 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                    i.InputSimd128Register(0));
       break;
     }
+    case kRiscvF16x8Splat: {
+      __ VU.SetSimd128(E16);
+      __ fcvt_h_s(kScratchDoubleReg, i.InputDoubleRegister(0));
+      __ fmv_x_h(kScratchReg, kScratchDoubleReg);
+      __ vmv_vx(i.OutputSimd128Register(), kScratchReg);
+      break;
+    }
+    case kRiscvF16x8ExtractLane: {
+      __ VU.SetSimd128(E16);
+      if (is_uint5(i.InputInt8(1))) {
+        __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0),
+                         i.InputInt8(1));
+      } else {
+        __ li(kScratchReg, i.InputInt8(1));
+        __ vslidedown_vx(kSimd128ScratchReg, i.InputSimd128Register(0),
+                         kScratchReg);
+      }
+      __ vfmv_fs(kScratchDoubleReg, kSimd128ScratchReg);
+      __ fcvt_s_h(i.OutputSingleRegister(), kScratchDoubleReg);
+      break;
+    }
+    case kRiscvF16x8ReplaceLane: {
+      __ VU.SetSimd128(E16);
+      __ li(kScratchReg, 0x1 << i.InputInt8(1));
+      __ vmv_sx(v0, kScratchReg);
+      __ fcvt_h_s(kScratchDoubleReg, i.InputSingleRegister(2));
+      __ fmv_x_h(kScratchReg, kScratchDoubleReg);
+      __ vmerge_vx(i.OutputSimd128Register(), kScratchReg,
+                   i.InputSimd128Register(0));
+      break;
+    }
     case kRiscvF32x4Pmax: {
       __ VU.SetSimd128(E32);
       __ vmflt_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));
@@ -3730,8 +3771,27 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                    i.InputSimd128Register(0));
       break;
     }
+    case kRiscvF16x8Pmax: {
+      __ VU.SetSimd128(E16);
+      __ vmflt_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));
+      __ vmerge_vv(i.OutputSimd128Register(), i.InputSimd128Register(1),
+                   i.InputSimd128Register(0));
+      break;
+    }
+    case kRiscvF16x8Pmin: {
+      __ VU.SetSimd128(E16);
+      __ vmflt_vv(v0, i.InputSimd128Register(1), i.InputSimd128Register(0));
+      __ vmerge_vv(i.OutputSimd128Register(), i.InputSimd128Register(1),
+                   i.InputSimd128Register(0));
+      break;
+    }
     case kRiscvF32x4Sqrt: {
       __ VU.SetSimd128(E32);
+      __ vfsqrt_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      break;
+    }
+    case kRiscvF16x8Sqrt: {
+      __ VU.SetSimd128(E16);
       __ vfsqrt_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
       break;
     }
@@ -5308,7 +5368,7 @@ void CodeGenerator::AssembleConstructFrame() {
         __ Branch(&done, uge, sp, Operand(stack_limit));
       }
 
-      if (v8_flags.experimental_wasm_growable_stacks) {
+      if (v8_flags.wasm_growable_stacks) {
         RegList regs_to_save;
         regs_to_save.set(WasmHandleStackOverflowDescriptor::GapRegister());
         regs_to_save.set(
@@ -5428,7 +5488,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
 
 #if V8_ENABLE_WEBASSEMBLY
   if (call_descriptor->IsAnyWasmFunctionCall() &&
-      v8_flags.experimental_wasm_growable_stacks) {
+      v8_flags.wasm_growable_stacks) {
     Label done;
     {
       UseScratchRegisterScope temps{masm()};
@@ -5993,10 +6053,7 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
   auto rep = LocationOperand::cast(source)->representation();
   int new_slots = ElementSizeInPointers(rep);
   RiscvOperandConverter g(this, nullptr);
-  int last_frame_slot_id =
-      frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-  int sp_delta = frame_access_state_->sp_delta();
-  int slot_id = last_frame_slot_id + sp_delta + new_slots;
+  int slot_id = frame_access_state()->GetSPSlotCount() - 1 + new_slots;
   AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
   if (source->IsRegister()) {
     __ Push(g.ToRegister(source));
@@ -6031,10 +6088,7 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
     __ Pop(scratch);
     __ StoreWord(scratch, g.ToMemOperand(dest));
   } else {
-    int last_frame_slot_id =
-        frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-    int sp_delta = frame_access_state_->sp_delta();
-    int slot_id = last_frame_slot_id + sp_delta;
+    int slot_id = frame_access_state()->GetSPSlotCount() - 1;
     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
     AssembleMove(&stack_slot, dest);
     frame_access_state()->IncreaseSPDelta(-dropped_slots);

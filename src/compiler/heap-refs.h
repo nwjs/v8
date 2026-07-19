@@ -15,6 +15,7 @@
 #include "src/objects/instance-type.h"
 #include "src/objects/object-list-macros.h"
 #include "src/objects/property-details.h"
+#include "src/objects/shared-function-info.h"
 #include "src/utils/boxed-float.h"
 #include "src/zone/zone-compact-set.h"
 
@@ -148,6 +149,7 @@ enum class RefSerializationKind {
   NEVER_SERIALIZED(Cell)                                                      \
   NEVER_SERIALIZED(Code)                                                      \
   NEVER_SERIALIZED(Context)                                                   \
+  NEVER_SERIALIZED(DataHandler)                                               \
   NEVER_SERIALIZED(DescriptorArray)                                           \
   NEVER_SERIALIZED(FeedbackCell)                                              \
   NEVER_SERIALIZED(FeedbackVector)                                            \
@@ -245,6 +247,9 @@ struct ref_traits<False> : public ref_traits<HeapObject> {};
 
 template <>
 struct ref_traits<Hole> : public ref_traits<HeapObject> {};
+
+template <>
+struct ref_traits<HashSeedWrapper> : public ref_traits<HeapObject> {};
 
 #define DEFINE_HOLE_TYPE(Name, name, Root) \
   template <>                              \
@@ -764,6 +769,17 @@ class HeapNumberRef : public HeapObjectRef {
   uint64_t value_as_bits() const;
 };
 
+class DataHandlerRef : public HeapObjectRef {
+ public:
+  DEFINE_REF_CONSTRUCTOR(DataHandler, HeapObjectRef)
+
+  IndirectHandle<DataHandler> object() const;
+
+  int data_field_count() const;
+  bool IsFastProxyHandler() const;
+  OptionalObjectRef data(JSHeapBroker* broker, int index) const;
+};
+
 class ContextCellRef : public HeapObjectRef {
  public:
   DEFINE_REF_CONSTRUCTOR(ContextCell, HeapObjectRef)
@@ -981,8 +997,6 @@ class V8_EXPORT_PRIVATE MapRef : public HeapObjectRef {
   bool is_abandoned_prototype_map() const;
   bool IsOneByteStringMap() const;
   bool IsTwoByteStringMap() const;
-  bool IsSeqStringMap() const;
-  bool IsThinStringMap() const;
   bool IsStringWrapperMap() const;
 
   OddballType oddball_type(JSHeapBroker* broker) const;
@@ -1134,9 +1148,9 @@ class BytecodeArrayRef : public HeapObjectRef {
   uint32_t handler_table_size() const;
 };
 
-class ScriptContextTableRef : public FixedArrayBaseRef {
+class ScriptContextTableRef : public HeapObjectRef {
  public:
-  DEFINE_REF_CONSTRUCTOR(ScriptContextTable, FixedArrayBaseRef)
+  DEFINE_REF_CONSTRUCTOR(ScriptContextTable, HeapObjectRef)
 
   IndirectHandle<ScriptContextTable> object() const;
 };

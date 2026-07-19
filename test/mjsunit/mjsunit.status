@@ -91,6 +91,8 @@
   'd8/d8-os': [PASS, NO_VARIANTS],
   'd8/d8-performance-now': [PASS, NO_VARIANTS, ['mode != release or simulator_run', SKIP]],
   'regexp-global': [PASS, NO_VARIANTS],
+  'regexp-jetstream': [PASS, SLOW, NO_VARIANTS],
+  'regexp-not-jetstream': [PASS, SLOW, NO_VARIANTS],
   'regress/regress-4595': [PASS, NO_VARIANTS],
   'regress/regress-crbug-491062': [PASS, NO_VARIANTS],
   'third_party/regexp-pcre/regexp-pcre': [PASS, NO_VARIANTS],
@@ -103,6 +105,9 @@
   # Issue 488: this test sometimes times out.
   # TODO(arm): This seems to flush out a bug on arm with simulator.
   'array-constructor': [PASS, SLOW, ['arch == arm and simulator_run', SKIP]],
+
+  # https://crbug.com/505063230
+  'sandbox/regress-488362583': [SKIP],
 
   ##############################################################################
   # Long-running tests.
@@ -128,6 +133,12 @@
 
   # This test should always fail.
   'turbolev/static-assert-fail': [FAIL],
+
+  # This test should always fail: %AssertPeeled() in an unpeeled (outer) loop.
+  'turbolev/assert-peeled-fail': [FAIL],
+
+  # This test should always fail: %AssertNotPeeled() in a peeled loop.
+  'turbolev/assert-not-peeled-fail': [FAIL],
 
   # This test variant makes only sense on arm.
   'math-floor-of-div-nosudiv': [PASS, SLOW, ['arch not in [arm, arm64]', SKIP]],
@@ -372,6 +383,9 @@
   'compiler/conditional-chain': [SKIP],
   'compiler/regress-815392': [SKIP],
   'es6/unicode-regexp-unanchored-advance': [SKIP],
+  # Hash collisions cause O(n^2) behavior, leading to timeout.
+  'lower_limits_mode/regress/regress-crbug-405910175-map': [SKIP],
+  'lower_limits_mode/regress/regress-crbug-405910175-set': [SKIP],
   'regress/regress-490': [SKIP],
   'regress/regress-655573': [SKIP],
   'regress/regress-862433': [SKIP],
@@ -614,6 +628,7 @@
   'shared-memory/wasm/*': [SKIP],
 
   'lower_limits_mode/regress/regress-513192886': [SKIP],
+  'lower_limits_mode/regress/regress-519856906': [SKIP],
 
   'maglev/regress-355256380': [SKIP],
 
@@ -654,6 +669,13 @@
   'regress/wasm/*': [SKIP],
   'shared-memory/wasm/*': [SKIP],
 }],  # not has_wasm_interpreter and variant == jitless
+
+##############################################################################
+['not has_wasm_interpreter', {
+  # This sandbox regression test forces --wasm-jitless to exercise the DrumBrake
+  # interpreter's JS-to-Wasm wrapper.
+  'sandbox/regress-522294322': [SKIP],
+}],  # not has_wasm_interpreter
 
 ['has_wasm_interpreter and variant == jitless', {
   # Skip tests that require Wasm experimental features not supported by the
@@ -723,6 +745,9 @@
   'wasm/jspi*': [SKIP],
   'wasm/growable-stacks': [SKIP],
 
+  # --experimental-wasm-growable-stacks
+  'regress/wasm/regress-513250424': [SKIP],
+
   # --experimental-wasm-wasmfx
   'regress/wasm/regress-455832038': [SKIP],
   'regress/wasm/regress-473272199': [SKIP],
@@ -755,6 +780,8 @@
   'regress/wasm/regress-390467420': [SKIP],
   'regress/wasm/regress-399497254': [SKIP],
   'regress/wasm/regress-497330272': [SKIP],
+  'regress/wasm/regress-511160771': [SKIP],
+  'regress/wasm/regress-516109051': [SKIP],
   'regress/wasm/regress-crbug-1463232': [SKIP],
   'regress/wasm/regress-crbug-1466312': [SKIP],
   'regress/wasm/regress-v8-14710': [SKIP],
@@ -836,6 +863,10 @@
   'regress/wasm/regress-505117973': [SKIP],
   'regress/wasm/regress-508336493': [SKIP],
   'regress/wasm/regress-508691168': [SKIP],
+  'regress/wasm/regress-513364114': [SKIP],
+  'regress/wasm/regress-518229528': [SKIP],
+  'regress/wasm/regress-518872404': [SKIP],
+  'regress/wasm/regress-521064735': [SKIP],
   'wasm/shared-everything/*': [SKIP],
   'wasm/subtyping-invalid': [SKIP],
 
@@ -858,8 +889,12 @@
   'regress/wasm/regress-crbug-408253898': [SKIP],
 
   # --experimental-wasm-fp16
-  'wasm/simd-fp16': [SKIP],
+  'regress/wasm/regress-499027764': [SKIP],
   'regress/wasm/regress-504612573': [SKIP],
+  'wasm/fp16-load-mul': [SKIP],
+  'wasm/fp16-oob-trap': [SKIP],
+  'wasm/fp16-store': [SKIP],
+  'wasm/simd-fp16': [SKIP],
 
   # --experimental-wasm-rab-integration
   'regress/wasm/regress-451144692': [SKIP],
@@ -894,6 +929,7 @@
   'regress/wasm/regress-448404198': [SKIP],
   'regress/wasm/regress-452541294': [SKIP],
   'regress/wasm/regress-457106696': [SKIP],
+  'regress/wasm/regress-513063392': [SKIP],
   'wasm/custom-descriptors*': [SKIP],
   'wasm/exact-types': [SKIP],
 
@@ -901,6 +937,9 @@
   'wasm/compact-imports': [SKIP],
 
   # --experimental-wasm-wide-arithmetic
+  'regress/wasm/regress-515525741': [SKIP],
+  'regress/wasm/regress-516102112-1': [SKIP],
+  'regress/wasm/regress-simd-520944504': [SKIP],
   'wasm/wide-arithmetic': [SKIP],
 
   # --wasm-deopt
@@ -924,6 +963,7 @@
   'compiler/fast-api-calls-wasm': [SKIP],
   'regress/wasm/regress-403308742': [SKIP],
   'regress/wasm/regress-488943662': [SKIP],
+  'wasm/regression-521715545': [SKIP], # --wasm-code-coverage
   'wasm/async-compile': [SKIP],
   'wasm/log-code-after-post-message': [SKIP],
   'wasm/multiple-code-spaces': [SKIP],
@@ -944,6 +984,7 @@
   'wasm/ffi': [SKIP],
 
   # Tests using %WasmTierUpFunction()
+  'regress/wasm/regress-372269618': [SKIP],
   'regress/wasm/regress-1179065': [SKIP],
   'regress/wasm/regress-13230': [SKIP],
   'regress/wasm/regress-13290': [SKIP],
@@ -968,9 +1009,12 @@
   'regress/wasm/regress-484405356': [SKIP],
   'regress/wasm/regress-490183533': [SKIP],
   'regress/wasm/regress-493099941': [SKIP],
+  'regress/wasm/regress-509268941': [SKIP],
   'regress/wasm/regress-509674461': [SKIP],
   'regress/wasm/regress-511772679': [SKIP],
+  'regress/wasm/regress-518697709': [SKIP],
   'regress/wasm/regress-crbug-1507751': [SKIP],
+  'regress/wasm/regress-simd-518058891': [SKIP],
   'wasm/bit-shift-right': [SKIP],
   'wasm/bounds-check-turbofan': [SKIP],
   'wasm/enter-and-leave-debug-state': [SKIP],
@@ -1013,6 +1057,11 @@
   'regress/wasm/regress-498818401': [SKIP],
   'regress/wasm/regress-500113958': [SKIP],
 
+  # --experimental-wasm-acquire-release
+  'regress/wasm/regress-516102113': [SKIP],
+  'regress/wasm/regress-518131466': [SKIP],
+  'wasm/acq-rel-*': [SKIP],
+
   # The interpreter call stack contains an additional top frame if we throw a
   # type-mismatch exception before executing the Wasm function.
   'regress/wasm/regress-366635354': [SKIP],
@@ -1023,6 +1072,9 @@
 
   # Interpreter needs more stack space
   'wasm/turboshaft/reduction-shuffle': [SKIP],
+
+  # Wasm-to-JS type incompatibility in jitless mode with shadow realms.
+  'harmony/regress/regress-511329274': [SKIP],
 
  }],  # has_wasm_interpreter and variant == jitless
 
@@ -1035,7 +1087,7 @@
  }],  # has_wasm_interpreter and variant == jitless and arch == arm64
 
 ##############################################################################
-# --experimental-wasm-simd-opt, only supported on arm64
+# --future-wasm-simd-opt, only supported on arm64
 ['arch != arm64', {
   'wasm/half-shuffles': [SKIP],
   'wasm/redundant-shuffle-lanes': [SKIP],
@@ -1125,6 +1177,8 @@
   # RegExp unicode tests relies on ICU for property classes and
   # case-insensitive unicode patterns.
   'regexp-unicode-sets': [PASS,FAIL],
+  'regexp-not-jetstream': [SKIP],
+  'regexp-jetstream': [SKIP],
 
   # The noi18n build cannot parse characters in supplementary plane.
   'harmony/regexp-named-captures': [FAIL],
@@ -1203,6 +1257,7 @@
   'regress/wasm/regress-398439335': [SKIP],
   'turbolev/regress-488090094': [SKIP],
   'maglev/regress-498816446-3': [SKIP],
+  'maglev/regress-521604719': [SKIP],
 
   # Float parameters are not supported in the fast api on these platforms
   'wasm/fast-api-calls-with-wellknown-imports-floats': [SKIP],
@@ -1212,6 +1267,7 @@
   # Needs a huge Uint8Array.
   'regress/regress-1432470': [SKIP],
   'wasm/imported-dataview-bytelength': [SKIP],
+  'maglev/regress-525732296': [SKIP],
 
   # Needs 64-bit integer add.
   'additive-safe-int-feedback': [SKIP],
@@ -1618,10 +1674,6 @@
 
   # This often fails in debug mode because it is too slow.
   'd8/d8-performance-now': [PASS, ['mode == debug', SKIP]],
-
-  # Needs FP16 support.
-  'wasm/simd-fp16': [SKIP],
-  'regress/wasm/regress-504612573': [SKIP],
 
   # Flush to zero is not supported yet.
   'd8/flush-denormals-flag': [SKIP],
@@ -2056,6 +2108,7 @@
   # Wasm code coverage is not supported yet.
   'regress/wasm/regress-488943662': [SKIP],
   'wasm/wasm-code-coverage': [SKIP],
+  'wasm/regression-521715545': [SKIP]
 }],  # arch in [ppc64, s390x]'
 
 ##############################################################################
@@ -2694,6 +2747,7 @@
   # TODO(42204563): These tests rely on the shared heap which is incompatible
   # with single generation.
   'regress/regress-461969023': [SKIP],
+  'turboshaft/regress-523436017': [SKIP],
   # We need this here because it needs --fuzzing, and in that case we do not
   # check for contradictory flags.
   'regress/wasm/regress-510448957': [SKIP],
@@ -2927,6 +2981,10 @@
 ['variant in (stress_maglev, stress_maglev_tracing, stress_maglev_non_eager_inlining, stress_maglev_future, stress_maglev_no_turbofan, maglev_no_turbofan)', {
   # Maglev doesn't support %TurbofanStaticAssert.
   'turbolev/static-assert-fail': [SKIP],
+  # Maglev doesn't support %AssertPeeled.
+  'turbolev/assert-peeled-fail': [SKIP],
+  # Maglev doesn't support %AssertNotPeeled.
+  'turbolev/assert-not-peeled-fail': [SKIP],
 }], # variant in (stress_maglev, stress_maglev_tracing, stress_maglev_non_eager_inlining, stress_maglev_future, stress_maglev_no_turbofan, maglev_no_turbofan)
 
 
@@ -3161,6 +3219,8 @@
   # These tests are not compatible with --fuzzing.
   'regress/regress-435630464-verification-failure': [SKIP],
   'turbolev/static-assert-fail': [SKIP],
+  'turbolev/assert-peeled-fail': [SKIP],
+  'turbolev/assert-not-peeled-fail': [SKIP],
 
   # Negative tests are not supported, because we pass --no-fail.
   'bugs/*': [SKIP],
@@ -3222,6 +3282,10 @@
 ['variant == scavenger_chaos_mode', {
   'weakrefs/minor-gc-*': [SKIP],
 }],  # variant == scavenger_chaos_mode
+
+['variant == experimental_regexp', {
+  'regress/regress-503097371': [SKIP],
+}],  # variant == experimental_regexp
 
 ##############################################################################
 ['variant in [dumpling_test]', {

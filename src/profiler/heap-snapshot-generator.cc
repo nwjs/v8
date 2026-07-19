@@ -28,8 +28,11 @@
 #include "src/objects/cell-inl.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/feedback-cell-inl.h"
+#include "src/objects/fixed-array-base-inl.h"
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/hash-table-inl.h"
+#include "src/objects/heap-object-inl.h"
+#include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
@@ -42,6 +45,7 @@
 #include "src/objects/js-weak-refs-inl.h"
 #include "src/objects/literal-objects-inl.h"
 #include "src/objects/map-inl.h"
+#include "src/objects/name-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/prototype.h"
 #include "src/objects/slots-inl.h"
@@ -1607,16 +1611,30 @@ void V8HeapExplorer::ExtractJSObjectReferences(HeapEntry* entry,
   } else if (IsJSFunction(obj)) {
     Tagged<JSFunction> js_fun = Cast<JSFunction>(js_obj);
     if (js_fun->has_prototype_slot()) {
-      Tagged<UnionOf<JSPrototype, Map, TheHole>> proto_or_map =
+      Tagged<HeapObject> proto_or_map =
           js_fun->prototype_or_initial_map(kAcquireLoad);
-      if (!IsTheHole(proto_or_map)) {
-        if (!IsMap(proto_or_map)) {
-          SetPropertyReference(
-              entry, roots.prototype_string(), proto_or_map, nullptr,
+
+      if (IsJSReceiver(proto_or_map)) {
+        // The field contains the "prototype" property value.
+        SetPropertyReference(
+            entry, roots.prototype_string(), js_fun->prototype(), nullptr,
+            offsetof(JSFunctionWithPrototype, prototype_or_initial_map_));
+
+      } else if (!IsTheHole(proto_or_map)) {
+        // The function's "prototype" property value is stored indirectly
+        // (either in initial map or in Tuple2).
+        SetPropertyReference(entry, roots.prototype_string(),
+                             js_fun->prototype());
+
+        if (IsTuple2(proto_or_map)) {
+          Tagged<Tuple2> tuple = Cast<Tuple2>(proto_or_map);
+          TagObject(tuple, "(non-instance prototype tuple)");
+          SetInternalReference(
+              entry, "non_instance_prototype_tuple", tuple,
               offsetof(JSFunctionWithPrototype, prototype_or_initial_map_));
+
         } else {
-          SetPropertyReference(entry, roots.prototype_string(),
-                               js_fun->prototype());
+          DCHECK(IsMap(proto_or_map));
           SetInternalReference(
               entry, "initial_map", proto_or_map,
               offsetof(JSFunctionWithPrototype, prototype_or_initial_map_));
@@ -1633,8 +1651,13 @@ void V8HeapExplorer::ExtractJSObjectReferences(HeapEntry* entry,
     TagObject(js_fun->context(), "(context)");
     SetInternalReference(entry, "context", js_fun->context(),
                          offsetof(JSFunction, context_));
-    SetInternalReference(entry, "code", js_fun->code(isolate),
-                         offsetof(JSFunction, dispatch_handle_));
+    JSDispatchHandle handle = js_fun->dispatch_handle();
+    if (handle != kNullJSDispatchHandle) {
+      SetInternalReference(entry, "code", js_fun->code(isolate),
+                           offsetof(JSFunction, dispatch_handle_));
+    } else {
+      MarkVisitedField(offsetof(JSFunction, dispatch_handle_));
+    }
   } else if (IsJSGlobalObject(obj)) {
     Tagged<JSGlobalObject> global_obj = Cast<JSGlobalObject>(obj);
     SetInternalReference(entry, "global_proxy", global_obj->raw_global_proxy(),
@@ -1710,6 +1733,8 @@ void V8HeapExplorer::ExtractStringReferences(HeapEntry* entry,
   AddIntEdge(entry, HeapGraphEdge::kInternal, "length", string->length());
   if (names_->NeedsTruncation(string->length())) {
     AddBoolEdge(entry, HeapGraphEdge::kInternal, "truncated", true);
+    AddIntEdge(entry, HeapGraphEdge::kInternal, "hash",
+               static_cast<int>(string->EnsureHash()));
   }
   if (!string->IsOneByteRepresentation()) {
     AddBoolEdge(entry, HeapGraphEdge::kInternal, "two_byte_representation",
@@ -1937,7 +1962,7 @@ void V8HeapExplorer::ExtractMapReferences(HeapEntry* entry, Tagged<Map> map) {
   // Wasm object maps overload the dependent_code field to store the
   // immediate supertype map. Emit without field offset to avoid
   // double-marking the slot.
-  if (IsWasmObjectMap(map)) {
+  if (IsWasmObjectMap(map) && map->has_immediate_supertype_map()) {
     TagObject(map->immediate_supertype_map(), "(immediate supertype map)");
     SetInternalReference(entry, "immediate_supertype_map",
                          map->immediate_supertype_map());
@@ -2029,6 +2054,33 @@ void V8HeapExplorer::ExtractScriptReferences(HeapEntry* entry,
              static_cast<int>(script->type()));
   AddStringEdge(entry, HeapGraphEdge::kInternal, "script_type_name",
                 ToString(script->type()));
+  AddIntEdge(entry, HeapGraphEdge::kInternal, "compilation_type",
+             static_cast<int>(script->compilation_type()));
+  AddStringEdge(entry, HeapGraphEdge::kInternal, "compilation_type_name",
+                ToString(script->compilation_type()));
+  AddIntEdge(entry, HeapGraphEdge::kInternal, "compilation_state",
+             static_cast<int>(script->compilation_state()));
+  AddStringEdge(entry, HeapGraphEdge::kInternal, "compilation_state_name",
+                ToString(script->compilation_state()));
+  AddBoolEdge(entry, HeapGraphEdge::kInternal, "is_repl_mode",
+              script->is_repl_mode());
+#if V8_ENABLE_WEBASSEMBLY
+  AddBoolEdge(entry, HeapGraphEdge::kInternal, "break_on_entry",
+              script->break_on_entry());
+#endif
+  AddBoolEdge(entry, HeapGraphEdge::kInternal, "produce_compile_hints",
+              script->produce_compile_hints());
+  AddBoolEdge(entry, HeapGraphEdge::kInternal, "deserialized",
+              script->deserialized());
+  v8::ScriptOriginOptions origin_options = script->origin_options();
+  AddBoolEdge(entry, HeapGraphEdge::kInternal, "origin_is_shared_cross_origin",
+              origin_options.IsSharedCrossOrigin());
+  AddBoolEdge(entry, HeapGraphEdge::kInternal, "origin_is_opaque",
+              origin_options.IsOpaque());
+  AddBoolEdge(entry, HeapGraphEdge::kInternal, "origin_is_wasm",
+              origin_options.IsWasm());
+  AddBoolEdge(entry, HeapGraphEdge::kInternal, "origin_is_module",
+              origin_options.IsModule());
   SetInternalReference(entry, "source", script->source(),
                        offsetof(Script, source_));
   SetInternalReference(entry, "name", script->name(), offsetof(Script, name_));
@@ -2052,8 +2104,39 @@ void V8HeapExplorer::ExtractScriptReferences(HeapEntry* entry,
     SetInternalReference(entry, "wasm_weak_instance_list",
                          script->wasm_weak_instance_list(),
                          offsetof(Script, infos_));
+  } else {
+#endif
+    SetInternalReference(
+        entry, "eval_from_shared_or_wrapped_arguments",
+        script->eval_from_shared_or_wrapped_arguments(),
+        offsetof(Script, eval_from_shared_or_wrapped_arguments_));
+    SetInternalReference(entry, "infos", script->infos(),
+                         offsetof(Script, infos_));
+#if V8_ENABLE_WEBASSEMBLY
   }
 #endif
+  SetInternalReference(entry, "eval_from_scope_info",
+                       script->eval_from_scope_info(),
+                       offsetof(Script, eval_from_scope_info_));
+  SetInternalReference(entry, "compiled_lazy_function_positions",
+                       script->compiled_lazy_function_positions(),
+                       offsetof(Script, compiled_lazy_function_positions_));
+  SetInternalReference(entry, "source_url", script->source_url(),
+                       offsetof(Script, source_url_));
+  SetInternalReference(entry, "source_mapping_url",
+                       script->source_mapping_url(),
+                       offsetof(Script, source_mapping_url_));
+  SetInternalReference(entry, "debug_id", script->debug_id(),
+                       offsetof(Script, debug_id_));
+  SetInternalReference(entry, "host_defined_options",
+                       script->host_defined_options(),
+                       offsetof(Script, host_defined_options_));
+#if V8_SCRIPTORMODULE_LEGACY_LIFETIME
+  SetInternalReference(entry, "script_or_modules", script->script_or_modules(),
+                       offsetof(Script, script_or_modules_));
+#endif
+  SetInternalReference(entry, "source_hash", script->source_hash(),
+                       offsetof(Script, source_hash_));
 }
 
 void V8HeapExplorer::ExtractAccessorInfoReferences(

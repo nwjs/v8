@@ -16,13 +16,13 @@
 #include "src/base/logging.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
-#include "src/execution/isolate-utils.h"
+#include "src/execution/isolate-utils-inl.h"
 #include "src/flags/flags.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/numbers/hash-seed-inl.h"
-#include "src/objects/heap-object.h"
+#include "src/objects/heap-object-inl.h"
 #include "src/objects/instance-type-checker.h"
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/instance-type.h"
@@ -33,7 +33,6 @@
 #include "src/roots/roots.h"
 #include "src/roots/static-roots.h"
 #include "src/sandbox/external-pointer-inl.h"
-#include "src/sandbox/external-pointer.h"
 #include "src/sandbox/isolate.h"
 #include "src/strings/string-hasher-inl.h"
 #include "src/strings/unicode-inl.h"
@@ -679,7 +678,7 @@ using SeqTwoByteSubStringKey = SeqSubStringKey<SeqTwoByteString>;
 
 bool String::Equals(Tagged<String> other) const {
   if (other == this) return true;
-  if (IsInternalizedString(this) && IsInternalizedString(other)) {
+  if (Is<InternalizedString>(this) && Is<InternalizedString>(other)) {
     return false;
   }
   return SlowEquals(other);
@@ -741,7 +740,7 @@ bool String::IsEqualToImpl(
 
   DisallowGarbageCollection no_gc;
 
-  int slice_offset = 0;
+  uint32_t slice_offset = 0;
   Tagged<String> string = this;
   const Char* data = str.data();
   while (true) {
@@ -761,7 +760,7 @@ bool String::IsEqualToImpl(
           return CompareCharsEqual(s->GetChars() + slice_offset, data, len);
         },
         [&](Tagged<SlicedString> s) {
-          slice_offset += s->offset();
+          slice_offset += static_cast<uint32_t>(s->offset());
           string = s->parent();
           return std::nullopt;
         },
@@ -792,7 +791,7 @@ bool String::IsConsStringEqualToImpl(
 
   ConsStringIterator iter(Cast<ConsString>(string));
   base::Vector<const Char> remaining_str = str;
-  int offset;
+  uint32_t offset;
   for (Tagged<String> segment = iter.Next(&offset); !segment.is_null();
        segment = iter.Next(&offset)) {
     // We create the iterator without an offset, so we should never have a
@@ -1177,7 +1176,7 @@ Tagged<String> String::GetUnderlying() const {
 
 template <class Visitor>
 Tagged<ConsString> String::VisitFlat(Visitor* visitor, Tagged<String> string,
-                                     const int offset) {
+                                     const uint32_t offset) {
   DCHECK(!SharedStringAccessGuardIfNeeded::IsNeeded(string));
   return VisitFlat(visitor, string, offset,
                    SharedStringAccessGuardIfNeeded::NotNeeded());
@@ -1185,10 +1184,10 @@ Tagged<ConsString> String::VisitFlat(Visitor* visitor, Tagged<String> string,
 
 template <class Visitor>
 Tagged<ConsString> String::VisitFlat(
-    Visitor* visitor, Tagged<String> string, const int offset,
+    Visitor* visitor, Tagged<String> string, const uint32_t offset,
     const SharedStringAccessGuardIfNeeded& access_guard) {
   DisallowGarbageCollection no_gc;
-  int slice_offset = offset;
+  uint32_t slice_offset = offset;
   const uint32_t length = string->length();
   DCHECK_LE(offset, length);
   while (true) {
@@ -1217,7 +1216,7 @@ Tagged<ConsString> String::VisitFlat(
               return Tagged<ConsString>();
             },
             [&](Tagged<SlicedString> s) {
-              slice_offset += s->offset();
+              slice_offset += static_cast<uint32_t>(s->offset());
               string = s->parent();
               return std::nullopt;
             },
@@ -1486,7 +1485,7 @@ Address ExternalString::resource_as_address() const {
 
 void ExternalString::set_address_as_resource(Isolate* isolate, Address value) {
   resource_.store(isolate, value);
-  if (IsExternalOneByteString(this)) {
+  if (Is<ExternalOneByteString>(this)) {
     Cast<ExternalOneByteString>(this)->update_data_cache(
         isolate, reinterpret_cast<ExternalOneByteString::Resource*>(value));
   } else {
@@ -1675,12 +1674,13 @@ void ConsStringIterator::Pop() {
 
 class StringCharacterStream {
  public:
-  inline explicit StringCharacterStream(Tagged<String> string, int offset = 0);
+  inline explicit StringCharacterStream(Tagged<String> string,
+                                        uint32_t offset = 0);
   StringCharacterStream(const StringCharacterStream&) = delete;
   StringCharacterStream& operator=(const StringCharacterStream&) = delete;
   inline uint16_t GetNext();
   inline bool HasMore();
-  inline void Reset(Tagged<String> string, int offset = 0);
+  inline void Reset(Tagged<String> string, uint32_t offset = 0);
   inline void VisitOneByteString(const uint8_t* chars, int length);
   inline void VisitTwoByteString(const uint16_t* chars, int length);
 
@@ -1716,12 +1716,13 @@ uint16_t StringCharacterStream::GetNext() {
 // TODO(solanes, v8:7790, chromium:1166095): Assess if we need to use
 // Isolate/LocalIsolate and pipe them through, instead of using the slow
 // version of the SharedStringAccessGuardIfNeeded.
-StringCharacterStream::StringCharacterStream(Tagged<String> string, int offset)
+StringCharacterStream::StringCharacterStream(Tagged<String> string,
+                                             uint32_t offset)
     : is_one_byte_(false), access_guard_(string) {
   Reset(string, offset);
 }
 
-void StringCharacterStream::Reset(Tagged<String> string, int offset) {
+void StringCharacterStream::Reset(Tagged<String> string, uint32_t offset) {
   buffer8_ = nullptr;
   end_ = nullptr;
 
@@ -1738,7 +1739,7 @@ void StringCharacterStream::Reset(Tagged<String> string, int offset) {
 
 bool StringCharacterStream::HasMore() {
   if (buffer8_ != end_) return true;
-  int offset;
+  uint32_t offset;
   Tagged<String> string = iter_.Next(&offset);
   DCHECK_EQ(offset, 0);
   if (string.is_null()) return false;
@@ -1807,7 +1808,7 @@ bool String::AsArrayIndex(uint32_t* index) {
   uint32_t field = raw_hash_field();
   if (ContainsCachedArrayIndex(field)) {
     *index = StringHasher::DecodeArrayIndexFromHashField(
-        field, HashSeed(EarlyGetReadOnlyRoots()));
+        field, HashSeed(ReadOnlyHeap::EarlyGetReadOnlyRoots(this)));
     return true;
   }
   if (IsHashFieldComputed(field) && !IsIntegerIndex(field)) {
@@ -1820,13 +1821,29 @@ bool String::AsIntegerIndex(size_t* index) {
   uint32_t field = raw_hash_field();
   if (ContainsCachedArrayIndex(field)) {
     *index = StringHasher::DecodeArrayIndexFromHashField(
-        field, HashSeed(EarlyGetReadOnlyRoots()));
+        field, HashSeed(ReadOnlyHeap::EarlyGetReadOnlyRoots(this)));
     return true;
   }
   if (IsHashFieldComputed(field) && !IsIntegerIndex(field)) {
     return false;
   }
   return SlowAsIntegerIndex(index);
+}
+
+// The following methods are defined on the Name class for convenience,
+// but implemented here because they depend on String methods defined
+// in this file.
+bool Name::IsArrayIndex() {
+  uint32_t index;
+  return AsArrayIndex(&index);
+}
+
+bool Name::AsArrayIndex(uint32_t* index) {
+  return Is<String>(this) && Cast<String>(this)->AsArrayIndex(index);
+}
+
+bool Name::AsIntegerIndex(size_t* index) {
+  return Is<String>(this) && Cast<String>(this)->AsIntegerIndex(index);
 }
 
 SubStringRange::SubStringRange(Tagged<String> string,

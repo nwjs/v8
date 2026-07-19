@@ -8,14 +8,13 @@
 
 #include "src/ast/ast.h"
 #include "src/ast/scopes.h"
-#include "src/codegen/compilation-cache.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/common/globals.h"
 #include "src/debug/debug.h"
 #include "src/diagnostics/code-tracer.h"
-#include "src/execution/isolate-utils.h"
 #include "src/heap/combined-heap.h"
+#include "src/objects/abstract-code-inl.h"
 #include "src/objects/shared-function-info-inl.h"
 #include "src/strings/string-builder-inl.h"
 
@@ -503,7 +502,13 @@ Handle<Object> SharedFunctionInfo::GetSourceCodeHarmony(
   builder.AppendCStringLiteral(") {\n");
   builder.AppendString(source);
   builder.AppendCStringLiteral("\n}");
-  return indirect_handle(builder.Finish().ToHandleChecked(), isolate);
+  DirectHandle<String> result;
+  if (builder.Finish().To(&result)) {
+    return indirect_handle(result, isolate);
+  }
+  // This should be extremely rare (only when {source} is close to
+  // String::kMaxLength), but it is reachable.
+  return isolate->factory()->NewStringFromAsciiChecked("<too long to print>");
 }
 
 int SharedFunctionInfo::SourceSize() { return EndPosition() - StartPosition(); }

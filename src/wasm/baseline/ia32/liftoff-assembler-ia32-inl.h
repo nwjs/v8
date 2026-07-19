@@ -332,7 +332,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
     j(above_equal, &continuation, Label::kNear);
   }
 
-  if (v8_flags.experimental_wasm_growable_stacks) {
+  if (v8_flags.wasm_growable_stacks) {
     LiftoffRegList regs_to_save;
     regs_to_save.set(WasmHandleStackOverflowDescriptor::GapRegister());
     regs_to_save.set(WasmHandleStackOverflowDescriptor::FrameBaseRegister());
@@ -411,7 +411,7 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
 }
 
 Register LiftoffAssembler::LoadOldFramePointer() {
-  if (!v8_flags.experimental_wasm_growable_stacks) {
+  if (!v8_flags.wasm_growable_stacks) {
     return ebp;
   }
   LiftoffRegister old_fp = GetUnusedRegister(RegClass::kGpReg, {});
@@ -1439,7 +1439,13 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
   bind(&done);
 }
 
-void LiftoffAssembler::AtomicFence() { mfence(); }
+void LiftoffAssembler::AtomicFence(AtomicMemoryOrder order) {
+  if (order == AtomicMemoryOrder::kSeqCst) {
+    mfence();
+  } else {
+    DCHECK_EQ(order, AtomicMemoryOrder::kAcqRel);
+  }
+}
 
 void LiftoffAssembler::Pause() { pause(); }
 
@@ -2204,42 +2210,39 @@ void LiftoffAssembler::DecrementMaxSteps(int32_t* max_steps_ptr,
                                          MaxStepsVariant steps,
                                          Label* trap_label,
                                          LiftoffRegList pinned) {
+  Operand counter_op(reinterpret_cast<intptr_t>(max_steps_ptr),
+                     RelocInfo::NO_INFO);
   if (auto* steps_const = std::get_if<int32_t>(&steps)) {
-    sub(Operand(reinterpret_cast<int32_t>(max_steps_ptr), RelocInfo::NO_INFO),
-        Immediate(*steps_const));
+    sub(counter_op, Immediate(*steps_const));
+    // Trap if negative (SF=1). We only ever subtract small constant integers,
+    // so wrap-around to positive is impossible.
     j(negative, trap_label);
     return;
   }
 
-  Register addr = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
-  mov(addr, Immediate(reinterpret_cast<intptr_t>(max_steps_ptr)));
-
-  Register max_steps = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
-
   LiftoffRegister reg = std::get<LiftoffRegister>(steps);
-  Register scratch = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
   if (reg.is_gp_pair()) {
-    // If the high word is non-zero, the step count exceeds a 32-bit counter.
-    // We use 0xFFFFFFFF instead of the actual low word in that case. This
-    // ensures the subtraction below sets the carry flag (CF=1), causing the
-    // sbb and or_ logic below to clamp max_steps to -1 and trap.
     test(reg.high_gp(), reg.high_gp());
-    mov(scratch, Immediate(-1));
-    cmov(zero, scratch, reg.low_gp());
-    reg = LiftoffRegister(scratch);
+    Label high_is_zero;
+    j(zero, &high_is_zero);
+    // If the high word is non-zero, the step count exceeds a 32-bit counter.
+    // Just clamp to -1 and trap.
+    mov(counter_op, Immediate(-1));
+    jmp(trap_label);
+    bind(&high_is_zero);
+    reg = reg.low();
   }
-  mov(max_steps, Operand(addr, 0));
-  sub(max_steps, reg.gp());
-  // If the subtraction resulted in an unsigned underflow (borrow), we want to
-  // clamp the result to -1 to prevent wraparound into positive range.
-  // {sbb} will set {scratch} to -1 if there was a borrow, and 0 otherwise.
-  // {or_} then sets {max_steps} to -1 if there was a borrow.
-  sbb(scratch, scratch);
-  or_(max_steps, scratch);
-  mov(Operand(addr, 0), max_steps);
 
-  // Now trap if the (possibly capped) result is negative.
+  sub(counter_op, reg.gp());
+  // Trap if negative (SF=1).
   j(negative, trap_label);
+  // Also trap if it wrapped around to positive (CF=1). In that case, we must
+  // first force the memory counter to negative.
+  Label done;
+  j(not_carry, &done);
+  mov(counter_op, Immediate(-1));
+  jmp(trap_label);
+  bind(&done);
 }
 
 void LiftoffAssembler::emit_f32_add(DoubleRegister dst, DoubleRegister lhs,
@@ -5340,7 +5343,6 @@ void LiftoffAssembler::DeallocateStackSlot(uint32_t size) {
   add(esp, Immediate(size));
 }
 
-void LiftoffAssembler::MaybeOSR() {}
 
 void LiftoffStackSlots::Construct(int param_slots) {
   DCHECK_LT(0, slots_.size());

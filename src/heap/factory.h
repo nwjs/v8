@@ -144,6 +144,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   DirectHandle<Hole> NewHole();
 
+  Handle<HashSeedWrapper> NewHashSeedWrapper();
+
   JSDispatchHandle NewJSDispatchHandle(uint16_t parameter_count,
                                        DirectHandle<Code> code,
                                        JSDispatchTable::Space* space);
@@ -239,9 +241,12 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       AllocationType allocation = AllocationType::kOld);
 
   // Create a new Tuple2 struct.
-  DirectHandle<Tuple2> NewTuple2Uninitialized(AllocationType allocation);
   DirectHandle<Tuple2> NewTuple2(DirectHandle<Object> value1,
                                  DirectHandle<Object> value2,
+                                 AllocationType allocation);
+  DirectHandle<Tuple2> NewTuple2(DirectHandle<Object> value1,
+                                 DirectHandle<Object> value2,
+                                 RelaxedStoreTag tag,
                                  AllocationType allocation);
 
   // Create a new PropertyDescriptorObject struct.
@@ -692,6 +697,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       DirectHandle<FixedArray> array, uint32_t grow_by,
       AllocationType allocation = AllocationType::kYoung);
 
+  Handle<TrustedFixedArray> CopyTrustedFixedArrayAndGrow(
+      DirectHandle<TrustedFixedArray> array, uint32_t grow_by,
+      AllocationType allocation = AllocationType::kTrusted);
+
   DirectHandle<WeakArrayList> NewWeakArrayList(
       uint32_t capacity, AllocationType allocation = AllocationType::kYoung);
 
@@ -933,7 +942,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       DirectHandle<SharedFunctionInfo> code);
   Handle<SyntheticModule> NewSyntheticModule(
       DirectHandle<String> module_name, DirectHandle<FixedArray> export_names,
-      v8::Module::SyntheticModuleEvaluationSteps evaluation_steps);
+      v8::Module::SyntheticModuleEvaluationSteps evaluation_steps,
+      DirectHandle<Object> host_defined_options);
 
   Handle<JSArrayBuffer> NewJSArrayBuffer(
       std::shared_ptr<BackingStore> backing_store,
@@ -1033,8 +1043,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
                             DirectHandle<Object> options = {});
 
   DirectHandle<Object> NewInvalidStringLengthError();
-
-  inline DirectHandle<Object> NewURIError();
 
   Handle<JSObject> NewError(DirectHandle<JSFunction> constructor,
                             MessageTemplate template_index,

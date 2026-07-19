@@ -18,6 +18,7 @@
 #include "src/heap/factory.h"
 #include "src/heap/read-only-heap.h"
 #include "src/numbers/conversions.h"
+#include "src/objects/dictionary-inl.h"
 #include "src/objects/lookup-inl.h"
 #include "src/objects/managed-inl.h"
 #include "src/objects/object-list-macros.h"
@@ -775,7 +776,7 @@ RUNTIME_FUNCTION(Runtime_WasmManagedObjectWait) {
   Tagged<HeapObject> waitqueue = Cast<HeapObject>(args[3]);
   Tagged<BigInt> timeout_ns = Cast<BigInt>(args[4]);
 
-  if (!v8_flags.experimental_wasm_skip_null_checks &&
+  if (!v8_flags.wasm_skip_null_checks &&
       (object == ReadOnlyRoots(isolate).wasm_null() ||
        waitqueue == ReadOnlyRoots(isolate).wasm_null())) {
     return ThrowWasmError(isolate, MessageTemplate::kWasmTrapNullDereference);
@@ -1329,7 +1330,7 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
   target_stack->jmpbuf()->fp = kNullAddress;
   target_stack->jmpbuf()->state = wasm::JumpBuffer::Suspended;
   target_stack->jmpbuf()->is_on_central_stack = false;
-  if (v8_flags.experimental_wasm_wasmfx) {
+  if (v8_flags.wasm_wasmfx) {
     // For now JSPI does not use the WasmStackObject, and it is only set here
     // because it is expected by WasmFX.
     // TODO(thibaudm): We could consider using this object for JSPI too as an
@@ -1348,7 +1349,7 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
   // Update the suspender state.
   Tagged<WasmSuspenderObject> active_suspender =
       isolate->isolate_data()->active_suspender();
-  if (v8_flags.experimental_wasm_wasmfx) {
+  if (v8_flags.wasm_wasmfx) {
     // The active suspender is about to become inactive. Record the currently
     // active stack (which may have changed due to WasmFX) for when we
     // return to this suspender.
@@ -2590,8 +2591,8 @@ RUNTIME_FUNCTION(Runtime_WasmStringMeasureWtf8) {
 RUNTIME_FUNCTION(Runtime_WasmStringEncodeWtf8) {
   DCHECK_EQ(5, args.length());
   HandleScope scope(isolate);
-  Tagged<WasmTrustedInstanceData> trusted_instance_data =
-      TrustedCast<WasmTrustedInstanceData>(args[0]);
+  DirectHandle<WasmTrustedInstanceData> trusted_instance_data(
+      TrustedCast<WasmTrustedInstanceData>(args[0]), isolate);
   uint32_t memory = args.positive_smi_value_at(1);
   uint32_t utf8_variant_value = args.positive_smi_value_at(2);
   DirectHandle<String> string(Cast<String>(args[3]), isolate);
@@ -2601,12 +2602,11 @@ RUNTIME_FUNCTION(Runtime_WasmStringEncodeWtf8) {
   DCHECK(utf8_variant_value <=
          static_cast<uint32_t>(unibrow::Utf8Variant::kLastUtf8Variant));
 
-  char* memory_start =
-      reinterpret_cast<char*>(trusted_instance_data->memory_base(memory));
   auto utf8_variant = static_cast<unibrow::Utf8Variant>(utf8_variant_value);
   auto get_writable_bytes =
       [&](const DisallowGarbageCollection&) -> base::Vector<char> {
-    return {memory_start, trusted_instance_data->memory_size(memory)};
+    return {reinterpret_cast<char*>(trusted_instance_data->memory_base(memory)),
+            trusted_instance_data->memory_size(memory)};
   };
   return EncodeWtf8(isolate, utf8_variant, string, get_writable_bytes, offset,
                     MessageTemplate::kWasmTrapMemOutOfBounds);
@@ -2877,7 +2877,7 @@ RUNTIME_FUNCTION(Runtime_WasmStringHash) {
   return Smi::FromInt(static_cast<int>(hash));
 }
 
-RUNTIME_FUNCTION(Runtime_WasmStringAdd_CheckNone_Shared) {
+RUNTIME_FUNCTION(Runtime_WasmStringAdd_NoMapCheck_Shared) {
   DCHECK_EQ(2, args.length());
   HandleScope scope(isolate);
 
@@ -2940,28 +2940,6 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateContinuation) {
       isolate->factory()->NewWasmContinuationObject(stack_obj);
   stack_ptr->set_current_continuation(*cont);
   stack_ptr->set_stack_obj(*stack_obj);
-  return *cont;
-}
-
-// For cont.bind: invalidate the given continuation and create a new one for the
-// same stack.
-RUNTIME_FUNCTION(Runtime_WasmAllocateBoundContinuation) {
-  DCHECK_EQ(3, args.length());
-  HandleScope scope(isolate);
-  DirectHandle<WasmContinuationObject> old_cont(
-      Cast<WasmContinuationObject>(args[0]), isolate);
-  int num_bound_args = args.smi_value_at(1);
-  uint32_t sig_id = args.smi_value_at(2);
-  wasm::StackMemory* stack = old_cont->stack_obj()->stack();
-  DirectHandle<WasmStackObject> old_stack_obj(old_cont->stack_obj(), isolate);
-  // Order matters: bound arguments must be adjusted first so that they are
-  // visible to the GC potentially triggered by the allocation below.
-  stack->bind_arguments(num_bound_args);
-  stack->set_signature_id(wasm::CanonicalTypeIndex{sig_id});
-
-  DirectHandle<WasmContinuationObject> cont =
-      isolate->factory()->NewWasmContinuationObject(old_stack_obj);
-  stack->set_current_continuation(*cont);
   return *cont;
 }
 

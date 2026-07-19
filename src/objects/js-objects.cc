@@ -30,11 +30,14 @@
 #include "src/objects/allocation-site-inl.h"
 #include "src/objects/api-callbacks.h"
 #include "src/objects/arguments-inl.h"
-#include "src/objects/dictionary.h"
+#include "src/objects/dictionary-inl.h"
 #include "src/objects/elements.h"
 #include "src/objects/field-type.h"
+#include "src/objects/fixed-array-base.h"
 #include "src/objects/fixed-array.h"
+#include "src/objects/fixed-primitive-array.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
@@ -44,12 +47,13 @@
 #include "src/objects/js-generator-inl.h"
 #include "src/objects/js-iterator-helpers-inl.h"
 #include "src/objects/js-promise.h"
+#include "src/objects/js-proxy-inl.h"
 #include "src/objects/js-raw-json-inl.h"
 #include "src/objects/js-regexp-inl.h"
 #include "src/objects/js-regexp-string-iterator.h"
 #include "src/objects/js-shadow-realm.h"
-#include "src/objects/js-shared-array-inl.h"
-#include "src/objects/js-struct-inl.h"
+#include "src/objects/js-shared-array.h"
+#include "src/objects/js-struct.h"
 #include "src/objects/property-details.h"
 #ifdef V8_TEMPORAL_SUPPORT
 #include "src/objects/js-temporal-objects-inl.h"
@@ -539,31 +543,31 @@ Maybe<bool> JSReceiver::SetOrCopyDataProperties(
 
 Tagged<String> JSReceiver::class_name() {
   ReadOnlyRoots roots = GetReadOnlyRoots();
-  if (IsJSFunctionOrBoundFunctionOrWrappedFunction(this)) {
+  if (Is<JSFunctionOrBoundFunctionOrWrappedFunction>(this)) {
     return roots.Function_string();
   }
-  if (IsJSArgumentsObject(this)) return roots.Arguments_string();
-  if (IsJSArray(this)) return roots.Array_string();
-  if (IsJSArrayBuffer(this)) {
+  if (Is<JSArgumentsObject>(this)) return roots.Arguments_string();
+  if (Is<JSArray>(this)) return roots.Array_string();
+  if (Is<JSArrayBuffer>(this)) {
     if (Cast<JSArrayBuffer>(this)->is_shared()) {
       return roots.SharedArrayBuffer_string();
     }
     return roots.ArrayBuffer_string();
   }
-  if (IsJSArrayIterator(this)) return roots.ArrayIterator_string();
-  if (IsJSDate(this)) return roots.Date_string();
+  if (Is<JSArrayIterator>(this)) return roots.ArrayIterator_string();
+  if (Is<JSDate>(this)) return roots.Date_string();
   if (IsJSError(this)) return roots.Error_string();
-  if (IsJSGeneratorObject(this)) return roots.Generator_string();
-  if (IsJSMap(this)) return roots.Map_string();
-  if (IsJSMapIterator(this)) return roots.MapIterator_string();
-  if (IsJSProxy(this)) {
+  if (Is<JSGeneratorObject>(this)) return roots.Generator_string();
+  if (Is<JSMap>(this)) return roots.Map_string();
+  if (Is<JSMapIterator>(this)) return roots.MapIterator_string();
+  if (Is<JSProxy>(this)) {
     return map()->is_callable() ? roots.Function_string()
                                 : roots.Object_string();
   }
-  if (IsJSRegExp(this)) return roots.RegExp_string();
-  if (IsJSSet(this)) return roots.Set_string();
-  if (IsJSSetIterator(this)) return roots.SetIterator_string();
-  if (IsJSTypedArray(this)) {
+  if (Is<JSRegExp>(this)) return roots.RegExp_string();
+  if (Is<JSSet>(this)) return roots.Set_string();
+  if (Is<JSSetIterator>(this)) return roots.SetIterator_string();
+  if (Is<JSTypedArray>(this)) {
 #define SWITCH_KIND(Type, type, TYPE, ctype)       \
   if (map()->elements_kind() == TYPE##_ELEMENTS) { \
     return roots.Type##Array_string();             \
@@ -571,7 +575,7 @@ Tagged<String> JSReceiver::class_name() {
     TYPED_ARRAYS(SWITCH_KIND)
 #undef SWITCH_KIND
   }
-  if (IsJSPrimitiveWrapper(this)) {
+  if (Is<JSPrimitiveWrapper>(this)) {
     Tagged<Object> value = Cast<JSPrimitiveWrapper>(this)->value();
     if (IsBoolean(value)) return roots.Boolean_string();
     if (IsString(value)) return roots.String_string();
@@ -581,15 +585,15 @@ Tagged<String> JSReceiver::class_name() {
     if (IsScript(value)) return roots.Script_string();
     UNREACHABLE();
   }
-  if (IsJSWeakMap(this)) return roots.WeakMap_string();
-  if (IsJSWeakSet(this)) return roots.WeakSet_string();
+  if (Is<JSWeakMap>(this)) return roots.WeakMap_string();
+  if (Is<JSWeakSet>(this)) return roots.WeakSet_string();
   if (IsShared(this)) {
-    if (IsJSSharedStruct(this)) return roots.SharedStruct_string();
-    if (IsJSSharedArray(this)) return roots.SharedArray_string();
-    if (IsJSAtomicsMutex(this)) return roots.AtomicsMutex_string();
-    if (IsJSAtomicsCondition(this)) return roots.AtomicsCondition_string();
+    if (Is<JSSharedStruct>(this)) return roots.SharedStruct_string();
+    if (Is<JSSharedArray>(this)) return roots.SharedArray_string();
+    if (Is<JSAtomicsMutex>(this)) return roots.AtomicsMutex_string();
+    if (Is<JSAtomicsCondition>(this)) return roots.AtomicsCondition_string();
 #if V8_ENABLE_WEBASSEMBLY
-    if (IsWasmObject(this)) return roots.Object_string();
+    if (Is<WasmObject>(this)) return roots.Object_string();
 #endif
     // Other shared values are primitives.
     UNREACHABLE();
@@ -2731,8 +2735,6 @@ int JSObject::GetHeaderSize(InstanceType type) {
       return WasmInstanceObject::kHeaderSize;
     case WASM_MEMORY_OBJECT_TYPE:
       return WasmMemoryObject::kHeaderSize;
-    case WASM_MEMORY_MAP_DESCRIPTOR_TYPE:
-      return WasmMemoryMapDescriptor::kHeaderSize;
     case WASM_MODULE_OBJECT_TYPE:
       return WasmModuleObject::kHeaderSize;
     case WASM_TABLE_OBJECT_TYPE:
@@ -3033,7 +3035,7 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
       Tagged<Map> map_of_this = map();
       Tagged<Object> constructor = map_of_this->GetConstructor();
       bool printed = false;
-      bool is_global_proxy = IsJSGlobalProxy(this);
+      bool is_global_proxy = Is<JSGlobalProxy>(this);
       if (IsJSFunction(constructor)) {
         Tagged<SharedFunctionInfo> sfi =
             Cast<JSFunction>(constructor)->shared();
@@ -3054,13 +3056,13 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
         accumulator->Add("<JS");
         if (is_global_proxy) {
           accumulator->Add("GlobalProxy");
-        } else if (IsJSGlobalObject(this)) {
+        } else if (Is<JSGlobalObject>(this)) {
           accumulator->Add("GlobalObject");
         } else {
           accumulator->Add("Object");
         }
       }
-      if (IsJSPrimitiveWrapper(this)) {
+      if (Is<JSPrimitiveWrapper>(this)) {
         accumulator->Add(" value = ");
         ShortPrint(Cast<JSPrimitiveWrapper>(this)->value(), accumulator);
       }
@@ -4995,7 +4997,7 @@ Tagged<Object> JSObject::SlowReverseLookup(Tagged<Object> value) {
       }
     }
     return GetReadOnlyRoots().undefined_value();
-  } else if (IsJSGlobalObject(this)) {
+  } else if (Is<JSGlobalObject>(this)) {
     return Cast<JSGlobalObject>(this)
         ->global_dictionary(kAcquireLoad)
         ->SlowReverseLookup(value);
@@ -5111,23 +5113,12 @@ void JSObject::OptimizeAsPrototype(DirectHandle<JSObject> object,
     // from the same context if undetectable from JS. This is to avoid keeping
     // memory alive unnecessarily.
     Tagged<Object> maybe_constructor = new_map->GetConstructorRaw();
-    Tagged<Tuple2> tuple;
-    if (IsTuple2(maybe_constructor)) {
-      // Handle the {constructor, non-instance_prototype} tuple case if the map
-      // has non-instance prototype.
-      tuple = Cast<Tuple2>(maybe_constructor);
-      maybe_constructor = tuple->value1();
-    }
     if (IsJSFunction(maybe_constructor)) {
       Tagged<JSFunction> constructor = Cast<JSFunction>(maybe_constructor);
       if (!constructor->shared()->IsApiFunction()) {
         Tagged<NativeContext> context = constructor->native_context();
         Tagged<JSFunction> object_function = context->object_function();
-        if (!tuple.is_null()) {
-          tuple->set_value1(object_function);
-        } else {
-          new_map->SetConstructor(object_function);
-        }
+        new_map->SetConstructor(object_function);
       }
     }
     JSObject::MigrateToMap(isolate, object, new_map);
@@ -5744,8 +5735,8 @@ uint32_t JSObject::GetFastElementsUsage() {
     case PACKED_SEALED_ELEMENTS:
     case PACKED_NONEXTENSIBLE_ELEMENTS:
     case SHARED_ARRAY_ELEMENTS:
-      return IsJSArray(this) ? Smi::ToUInt(Cast<JSArray>(this)->length())
-                             : store->ulength().value();
+      return Is<JSArray>(this) ? Smi::ToUInt(Cast<JSArray>(this)->length())
+                               : store->ulength().value();
     case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
       store = Cast<SloppyArgumentsElements>(store)->arguments();
       [[fallthrough]];
@@ -5835,6 +5826,24 @@ void JSGlobalObject::InvalidatePropertyCell(DirectHandle<JSGlobalObject> global,
   details = details.set_cell_type(PropertyCellType::kMutable);
   PropertyCell::InvalidateAndReplaceEntry(isolate, dictionary, entry, details,
                                           value);
+}
+
+// static
+Maybe<bool> JSGlobalObject::HasRestrictedGlobalProperty(
+    Isolate* isolate, DirectHandle<JSGlobalObject> global,
+    DirectHandle<Name> name) {
+  LookupIterator::Configuration config = LookupIterator::OWN_SKIP_INTERCEPTOR;
+  if (global->HasNamedInterceptor() &&
+      global->GetNamedInterceptor()->has_dont_delete_property()) {
+    config = LookupIterator::OWN;
+  }
+  LookupIterator it(isolate, global, name, global, config);
+  Maybe<PropertyAttributes> maybe = JSReceiver::GetPropertyAttributes(&it);
+  if (maybe.IsNothing()) return Nothing<bool>();
+  // Global var and function bindings (except those that are introduced by
+  // non-strict direct eval) are non-configurable and are therefore restricted
+  // global properties.
+  return Just((maybe.FromJust() & DONT_DELETE) != 0);
 }
 
 // static

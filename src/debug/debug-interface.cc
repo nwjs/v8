@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 
+#include <span>
 #include <vector>
 
 #include "include/v8-function.h"
@@ -866,8 +867,7 @@ std::vector<WasmScript::DebugSymbols> WasmScript::GetDebugSymbols() const {
         GetDebugSymbolType(symbol.type);
     if (type.IsNothing()) continue;
 
-    internal::wasm::ModuleWireBytes wire_bytes(
-        script->wasm_native_module()->wire_bytes());
+    internal::wasm::ModuleWireBytes wire_bytes(native_module->wire_bytes());
     i::wasm::WasmName external_url =
         wire_bytes.GetNameOrNull(symbol.external_url);
     debug_symbols.push_back({type.FromJust(), external_url});
@@ -963,7 +963,7 @@ uint32_t WasmScript::GetFunctionHash(int function_index) {
                                                internal::HashSeed::Default());
 }
 
-Maybe<v8::MemorySpan<const uint8_t>> WasmScript::GetModuleBuildId() const {
+Maybe<std::span<const uint8_t>> WasmScript::GetModuleBuildId() const {
   i::DisallowGarbageCollection no_gc;
   auto script = Utils::OpenDirectHandle(this);
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
@@ -974,7 +974,7 @@ Maybe<v8::MemorySpan<const uint8_t>> WasmScript::GetModuleBuildId() const {
   if (build_id.is_empty()) {
     return {};
   }
-  return Just(MemorySpan<const uint8_t>{
+  return Just(std::span<const uint8_t>{
       native_module->wire_bytes().begin() + build_id.offset(),
       build_id.length()});
 }

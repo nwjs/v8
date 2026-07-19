@@ -5,6 +5,8 @@
 #ifndef V8_MAGLEV_MAGLEV_GRAPH_PROCESSOR_H_
 #define V8_MAGLEV_MAGLEV_GRAPH_PROCESSOR_H_
 
+#include <algorithm>
+
 #include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/compiler/bytecode-analysis.h"
@@ -96,8 +98,12 @@ class ProcessingState {
   ProcessingState(const ProcessingState&) = delete;
   ProcessingState& operator=(const ProcessingState&) = delete;
 
-  BasicBlock* block() const { return *block_it_; }
+  BasicBlock* block() const {
+    if (block_it_ == block_end_) return nullptr;
+    return *block_it_;
+  }
   BasicBlock* next_block() const {
+    DCHECK_NE(block_it_, block_end_);
     BlockConstIterator next_block_it = block_it_ + 1;
     if (next_block_it == block_end_) return nullptr;
     return *next_block_it;
@@ -123,7 +129,9 @@ class GraphProcessor {
 
   void ProcessGraph(Graph* graph) {
     graph_ = graph;
-
+    // Initializing {block_it_} to `graph->end()` so that the ProcessingState
+    // can return nullptr as the block of the constant nodes.
+    block_it_ = graph->end();
     node_processor_.PreProcessGraph(graph);
 
     auto process_constants = [&](auto& map) {
@@ -342,7 +350,10 @@ class GraphProcessor {
     ZoneVector<Node*> tail_nodes(graph_->zone());
     if (truncate) {
       // Drop the visited node and everything after it.
-      block->nodes().resize(node_it_ - block->nodes().begin());
+      auto& nodes = block->nodes();
+      auto it = std::find(nodes.begin(), nodes.end(), node);
+      DCHECK_NE(it, nodes.end());
+      nodes.resize(it - nodes.begin());
     } else {
       // The visitor must have rewritten the visited node to an Identity
       // (typically to the spliced result Phi), so uses on the join-block
@@ -364,31 +375,39 @@ class GraphProcessor {
     block->set_control_node(jump_to_entry);
     splice.entry->set_predecessor(block);
 
-    // Move tail (if any) + original control to the join block.
-    for (Node* n : tail_nodes) {
-      if (n == nullptr) continue;
-      n->set_owner(splice.exit);
-      splice.exit->nodes().push_back(n);
-    }
-    original_control->set_owner(splice.exit);
-    splice.exit->set_control_node(original_control);
+    if (splice.exit == nullptr) {
+      // The subgraph deopts/throws on every path, so there is no join block to
+      // reconnect: the original control (and the already-truncated tail) is
+      // dead. Unwire its successors from `block`.
+      DCHECK(truncate);
+      block->RemovePredecessorFollowing(original_control);
+    } else {
+      // Move tail (if any) + original control to the join block.
+      for (Node* n : tail_nodes) {
+        if (n == nullptr) continue;
+        n->set_owner(splice.exit);
+        splice.exit->nodes().push_back(n);
+      }
+      original_control->set_owner(splice.exit);
+      splice.exit->set_control_node(original_control);
 
-    // Successors of the original control had `block` as predecessor;
-    // they now have the join block.
-    splice.exit->ForEachSuccessor(
-        [block, exit = splice.exit](BasicBlock* succ) {
-          if (!succ->has_state()) {
-            DCHECK_EQ(succ->predecessor(), block);
-            succ->set_predecessor(exit);
-            return;
-          }
-          for (int i = 0; i < succ->predecessor_count(); i++) {
-            if (succ->predecessor_at(i) == block) {
-              succ->state()->set_predecessor_at(i, exit);
-              break;
+      // Successors of the original control had `block` as predecessor;
+      // they now have the join block.
+      splice.exit->ForEachSuccessor(
+          [block, exit = splice.exit](BasicBlock* succ) {
+            if (!succ->has_state()) {
+              DCHECK_EQ(succ->predecessor(), block);
+              succ->set_predecessor(exit);
+              return;
             }
-          }
-        });
+            for (int i = 0; i < succ->predecessor_count(); i++) {
+              if (succ->predecessor_at(i) == block) {
+                succ->state()->set_predecessor_at(i, exit);
+                break;
+              }
+            }
+          });
+    }
 
     size_t current_idx = block_it_ - graph_->begin();
     graph_->AddBlocksAt(splice.all_blocks, current_idx);

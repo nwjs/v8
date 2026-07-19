@@ -195,6 +195,14 @@ struct MemoryAddress {
   uint8_t element_size_log2;
   MemoryRepresentation representation;
 
+  MemoryAddress(OpIndex base, OptionalOpIndex index, int32_t offset,
+                uint8_t element_size_log2, MemoryRepresentation representation)
+      : base(base),
+        index(index),
+        offset(offset),
+        element_size_log2(element_size_log2),
+        representation(Canonicalize(representation)) {}
+
   bool operator==(const MemoryAddress& other) const {
     return base == other.base && index == other.index &&
            offset == other.offset &&
@@ -206,6 +214,23 @@ struct MemoryAddress {
   friend H AbslHashValue(H h, const MemoryAddress& mem) {
     return H::combine(std::move(h), mem.base, mem.index, mem.offset,
                       mem.element_size_log2, mem.representation.value());
+  }
+
+ private:
+  // We want to be able to eliminate loads with different tagged/compressed
+  // representations. Therefore we canonicalize the representation before
+  // creating a MemoryAddress.
+  static MemoryRepresentation Canonicalize(MemoryRepresentation repr) {
+    switch (repr) {
+      case MemoryRepresentation::TaggedSigned():
+      case MemoryRepresentation::TaggedPointer():
+        return MemoryRepresentation::AnyTagged();
+      case MemoryRepresentation::UncompressedTaggedSigned():
+      case MemoryRepresentation::UncompressedTaggedPointer():
+        return MemoryRepresentation::AnyUncompressedTagged();
+      default:
+        return repr;
+    }
   }
 };
 std::ostream& operator<<(std::ostream& os, const MemoryAddress& mem);
@@ -462,7 +487,7 @@ class MemoryContentTable
     int32_t offset = load.offset;
     uint8_t element_size_log2 = index.valid() ? load.element_size_log2 : 0;
 
-    MemoryAddress mem{base, index, offset, element_size_log2, load.loaded_rep};
+    MemoryAddress mem(base, index, offset, element_size_log2, load.loaded_rep);
     auto key = all_keys_.find(mem);
     if (key == all_keys_.end()) return OpIndex::Invalid();
     return Get(key->second);
@@ -503,8 +528,8 @@ class MemoryContentTable
     int32_t offset = load.offset;
     constexpr uint8_t kElementSizeLog2 = 0;  // Unused;
 
-    MemoryAddress mem{base, OpIndex::Invalid(), offset, kElementSizeLog2,
-                      MemoryRepresentation::TrustedPointer()};
+    MemoryAddress mem(base, OpIndex::Invalid(), offset, kElementSizeLog2,
+                      MemoryRepresentation::TrustedPointer());
     auto key = all_keys_.find(mem);
     if (key == all_keys_.end()) return OpIndex::Invalid();
     return Get(key->second);
@@ -546,13 +571,13 @@ class MemoryContentTable
 #endif
 
   void InvalidatePotentialLoadedStringMaps() {
-    constexpr int kOffset = 0;
-    auto offset_keys = offset_keys_.find(kOffset);
+    constexpr int kMapOffset = offsetof(HeapObject, map_);
+    auto offset_keys = offset_keys_.find(kMapOffset);
     if (offset_keys == offset_keys_.end()) return;
     for (auto it = offset_keys->second.begin();
          it != offset_keys->second.end();) {
       Key key = *it;
-      DCHECK_EQ(kOffset, key.data().mem.offset);
+      DCHECK_EQ(kMapOffset, key.data().mem.offset);
       // TODO(dmercadier): check known maps for key.data().mem.base and don't
       // invalidate if maps cannot be string maps.
       it = offset_keys->second.RemoveAt(it);
@@ -575,7 +600,7 @@ class MemoryContentTable
               OpIndex value) {
     DCHECK_EQ(base, ResolveBase(base));
 
-    MemoryAddress mem{base, index, offset, element_size_log2, representation};
+    MemoryAddress mem(base, index, offset, element_size_log2, representation);
     TRACE("> MemoryContentTable: will insert " << mem
                                                << " with value=" << value);
     auto existing_key = all_keys_.find(mem);
@@ -605,7 +630,7 @@ class MemoryContentTable
                        MemoryRepresentation representation, OpIndex value) {
     DCHECK_EQ(base, ResolveBase(base));
 
-    MemoryAddress mem{base, index, offset, element_size_log2, representation};
+    MemoryAddress mem(base, index, offset, element_size_log2, representation);
     TRACE("> MemoryContentTable: will insert immutable "
           << mem << " with value=" << value);
     auto existing_key = all_keys_.find(mem);
@@ -969,53 +994,6 @@ class V8_EXPORT_PRIVATE LateLoadEliminationReducer : public Next {
                 // NaN.
                 EmitReportLoadEliminationError();
               }
-            } else if (compare_rep == RegisterRepresentation::Tagged() &&
-                       !v8_flags.turbolev) {
-              // We are trying to replace a Tagged value by a different Tagged
-              // value. This is generally wrong, but there is one exception: we
-              // are allowed to replace a string map by a different string map
-              // that has the same 1/2-byte encoding. The reason why this is
-              // fine is because we never rely on the exact shape of a string,
-              // as the only operations that look at string maps are:
-              //
-              //  - CheckString (in Turboshaft, this is ObjectIs(kString)): this
-              //  doesn't care about shapes, only about the fact that something
-              //  is a string or not.
-              //
-              //  - StringAt: loading the map is done in a loop that contains a
-              //  runtime call, which is annotated as AnySideEffects, which will
-              //  prevent LoadElimination from ever eliminating the map load.
-              //
-              //  - NewConsString: this only cares about the encoding of the
-              //  input, in order to determine the encoding of the outputs.
-
-              Label<> error(this);
-              Label<> done(this);
-              GOTO_IF_NOT(LIKELY(__ IsStringMap(actual_idx)), error);
-              GOTO_IF_NOT(LIKELY(__ IsStringMap(replacement_idx)), error);
-
-              // Both actual and replacement are strings.
-
-              // Checking that the encoding (1 or 2-byte) remained the same.
-              V<Word32> actual_instance_type =
-                  __ LoadInstanceTypeField(actual_idx);
-              V<Word32> replacement_instance_type =
-                  __ LoadInstanceTypeField(replacement_idx);
-              V<Word32> actual_encoding = __ Word32BitwiseAnd(
-                  actual_instance_type, kStringEncodingMask);
-              V<Word32> replacement_encoding = __ Word32BitwiseAnd(
-                  replacement_instance_type, kStringEncodingMask);
-              GOTO_IF(
-                  LIKELY(__ Word32Equal(actual_encoding, replacement_encoding)),
-                  done);
-              GOTO(error);
-
-              BIND(error);
-              EmitReportLoadEliminationError();
-              BIND(done);
-
-              // NOT aborting: we replaced a string map with a different string
-              // map, but they have the same encoding.
             } else {
               EmitReportLoadEliminationError();
             }

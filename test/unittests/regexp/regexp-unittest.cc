@@ -1899,58 +1899,7 @@ TEST_F(RegExpTest, PeepholeNoChange) {
   CHECK_EQ(0, memcmp(byte_array, byte_array_optimized, length));
 }
 
-void CreatePeepholeSkipUntilCharBytecode(regexp::RegExpMacroAssembler* m) {
-  Label start;
-  m->Bind(&start);
-  m->LoadCurrentCharacter(0, nullptr, true);
-  m->CheckCharacter('x', nullptr);
-  m->AdvanceCurrentPosition(1);
-  m->GoTo(&start);
-}
 
-TEST_F(RegExpTest, PeepholeSkipUntilChar) {
-  Zone zone(i_isolate()->allocator(), ZONE_NAME);
-  Factory* factory = i_isolate()->factory();
-  HandleScope scope(i_isolate());
-
-  regexp::BytecodeGenerator orig(i_isolate(), &zone,
-                                 regexp::RegExpMacroAssembler::LATIN1);
-  regexp::BytecodeGenerator opt(i_isolate(), &zone,
-                                regexp::RegExpMacroAssembler::LATIN1);
-
-  CreatePeepholeSkipUntilCharBytecode(&orig);
-  CreatePeepholeSkipUntilCharBytecode(&opt);
-
-  DirectHandle<String> source = factory->NewStringFromStaticChars("dummy");
-
-  v8_flags.regexp_peephole_optimization = false;
-  DirectHandle<TrustedByteArray> array = TrustedCast<TrustedByteArray>(
-      orig.GetCode(CreateRegExpData(i_isolate(), source), {}));
-  const uint32_t length = array->length().value();
-
-  v8_flags.regexp_peephole_optimization = true;
-  DirectHandle<TrustedByteArray> array_optimized =
-      TrustedCast<TrustedByteArray>(
-          opt.GetCode(CreateRegExpData(i_isolate(), source), {}));
-  const uint32_t length_optimized = array_optimized->length().value();
-
-  const uint32_t length_expected =
-      regexp::Bytecodes::Size(REB::kLoadCurrentCharacter) +
-      regexp::Bytecodes::Size(REB::kCheckCharacter) +
-      regexp::Bytecodes::Size(REB::kAdvanceCpAndGoto) +
-      regexp::Bytecodes::Size(REB::kBacktrack);
-  const uint32_t length_optimized_expected =
-      regexp::Bytecodes::Size(REB::kSkipUntilChar) +
-      regexp::Bytecodes::Size(REB::kBacktrack);
-
-  CHECK_EQ(length, length_expected);
-  CHECK_EQ(length_optimized, length_optimized_expected);
-
-  CHECK_EQ(REB::kSkipUntilChar, GetBytecode(array_optimized, 0));
-  CHECK_EQ(REB::kBacktrack,
-           GetBytecode(array_optimized,
-                       regexp::Bytecodes::Size(REB::kSkipUntilChar)));
-}
 
 void CreatePeepholeSkipUntilBitInTableBytecode(regexp::RegExpMacroAssembler* m,
                                                Factory* factory) {
@@ -2012,8 +1961,7 @@ TEST_F(RegExpTest, PeepholeSkipUntilBitInTable) {
                        regexp::Bytecodes::Size(REB::kSkipUntilBitInTable)));
 }
 
-void CreatePeepholeSkipUntilCharPosCheckedBytecode(
-    regexp::RegExpMacroAssembler* m) {
+void CreatePeepholeSkipUntilCharBytecode(regexp::RegExpMacroAssembler* m) {
   Label start;
   m->Bind(&start);
   m->LoadCurrentCharacter(0, nullptr, true, 1, 2);
@@ -2022,7 +1970,7 @@ void CreatePeepholeSkipUntilCharPosCheckedBytecode(
   m->GoTo(&start);
 }
 
-TEST_F(RegExpTest, PeepholeSkipUntilCharPosChecked) {
+TEST_F(RegExpTest, PeepholeSkipUntilChar) {
   Zone zone(i_isolate()->allocator(), ZONE_NAME);
   Factory* factory = i_isolate()->factory();
   HandleScope scope(i_isolate());
@@ -2032,8 +1980,8 @@ TEST_F(RegExpTest, PeepholeSkipUntilCharPosChecked) {
   regexp::BytecodeGenerator opt(i_isolate(), &zone,
                                 regexp::RegExpMacroAssembler::LATIN1);
 
-  CreatePeepholeSkipUntilCharPosCheckedBytecode(&orig);
-  CreatePeepholeSkipUntilCharPosCheckedBytecode(&opt);
+  CreatePeepholeSkipUntilCharBytecode(&orig);
+  CreatePeepholeSkipUntilCharBytecode(&opt);
 
   DirectHandle<String> source = factory->NewStringFromStaticChars("dummy");
 
@@ -2049,22 +1997,21 @@ TEST_F(RegExpTest, PeepholeSkipUntilCharPosChecked) {
   const uint32_t length_optimized = array_optimized->length().value();
 
   const uint32_t length_expected =
-      regexp::Bytecodes::Size(REB::kCheckPosition) +
-      regexp::Bytecodes::Size(REB::kLoadCurrentCharacterUnchecked) +
+      regexp::Bytecodes::Size(REB::kLoadCurrentCharacter) +
       regexp::Bytecodes::Size(REB::kCheckCharacter) +
       regexp::Bytecodes::Size(REB::kAdvanceCpAndGoto) +
       regexp::Bytecodes::Size(REB::kBacktrack);
   const uint32_t length_optimized_expected =
-      regexp::Bytecodes::Size(REB::kSkipUntilCharPosChecked) +
+      regexp::Bytecodes::Size(REB::kSkipUntilChar) +
       regexp::Bytecodes::Size(REB::kBacktrack);
 
   CHECK_EQ(length, length_expected);
   CHECK_EQ(length_optimized, length_optimized_expected);
 
-  CHECK_EQ(REB::kSkipUntilCharPosChecked, GetBytecode(array_optimized, 0));
+  CHECK_EQ(REB::kSkipUntilChar, GetBytecode(array_optimized, 0));
   CHECK_EQ(REB::kBacktrack,
            GetBytecode(array_optimized,
-                       regexp::Bytecodes::Size(REB::kSkipUntilCharPosChecked)));
+                       regexp::Bytecodes::Size(REB::kSkipUntilChar)));
 }
 
 void CreatePeepholeSkipUntilCharAndBytecode(regexp::RegExpMacroAssembler* m) {
@@ -2103,8 +2050,7 @@ TEST_F(RegExpTest, PeepholeSkipUntilCharAnd) {
   const uint32_t length_optimized = array_optimized->length().value();
 
   const uint32_t length_expected =
-      regexp::Bytecodes::Size(REB::kCheckPosition) +
-      regexp::Bytecodes::Size(REB::kLoadCurrentCharacterUnchecked) +
+      regexp::Bytecodes::Size(REB::kLoadCurrentCharacter) +
       regexp::Bytecodes::Size(REB::kCheckCharacterAfterAnd) +
       regexp::Bytecodes::Size(REB::kAdvanceCpAndGoto) +
       regexp::Bytecodes::Size(REB::kBacktrack);
@@ -2285,14 +2231,14 @@ TEST_F(RegExpTest, PeepholeLabelFixupsInside) {
                                           &dummy_inside);
 
   CHECK_EQ(0x00, dummy_before.pos());
-  CHECK_EQ(0x28, dummy_inside.pos());
-  CHECK_EQ(0x38, dummy_after.pos());
+  CHECK_EQ(0x30, dummy_inside.pos());
+  CHECK_EQ(0x40, dummy_after.pos());
 
   const Label* labels[] = {&dummy_before, &dummy_after, &dummy_inside};
   const int label_positions[4][3] = {
-      {0x04, 0x3C},  // dummy_before
-      {0x0C, 0x44},  // dummy after
-      {0x14, 0x4C}   // dummy inside
+      {0x08, 0x48},  // dummy_before
+      {0x10, 0x50},  // dummy after
+      {0x18, 0x58}   // dummy inside
   };
 
   DirectHandle<String> source = factory->NewStringFromStaticChars("dummy");
@@ -2392,17 +2338,17 @@ TEST_F(RegExpTest, PeepholeLabelFixupsComplex) {
                                            &dummy_after, &dummy_inside);
 
   CHECK_EQ(0x00, dummy_before.pos());
-  CHECK_EQ(0x40, dummy_between.pos());
-  CHECK_EQ(0x70, dummy_inside.pos());
-  CHECK_EQ(0x80, dummy_after.pos());
+  CHECK_EQ(0x48, dummy_between.pos());
+  CHECK_EQ(0x80, dummy_inside.pos());
+  CHECK_EQ(0x90, dummy_after.pos());
 
   const Label* labels[] = {&dummy_before, &dummy_between, &dummy_after,
                            &dummy_inside};
   const int label_positions[4][3] = {
-      {0x04, 0x44, 0x84},  // dummy_before
-      {0x0C, 0x4C, 0x8C},  // dummy between
-      {0x14, 0x54, 0x94},  // dummy after
-      {0x1C, 0x5C, 0x9C}   // dummy inside
+      {0x08, 0x50, 0x98},  // dummy_before
+      {0x10, 0x58, 0xa0},  // dummy between
+      {0x18, 0x60, 0xa8},  // dummy after
+      {0x20, 0x68, 0xb0}   // dummy inside
   };
 
   DirectHandle<String> source = factory->NewStringFromStaticChars("dummy");
@@ -2480,8 +2426,7 @@ void EmitMasked3PrecursorRegion(regexp::RegExpMacroAssembler* m,
   m->AdvanceCurrentPosition(1);
   m->GoTo(&start);
   m->Bind(&after_loop);
-  m->CheckPosition(4, nullptr);
-  m->LoadCurrentCharacter(0, nullptr, false, 4);
+  m->LoadCurrentCharacter(0, nullptr, true, 4, 4);
   m->CheckCharacterAfterAnd(0x61626364, 0xffffffff, &bc5);
   m->Bind(&bc4);
   m->AdvanceCurrentPosition(1);
@@ -2498,8 +2443,7 @@ void EmitMaskedPrecursorRegion(regexp::RegExpMacroAssembler* m) {
   // on_match2 via kOffsetAfterSequence.
   Label start, second, adv;
   m->Bind(&start);
-  m->CheckPosition(4, nullptr);
-  m->LoadCurrentCharacter(0, nullptr, false, 4);
+  m->LoadCurrentCharacter(0, nullptr, true, 4, 4);
   m->CheckCharacterAfterAnd(0x61616161, 0xffffffff, &second);
   m->Bind(&adv);
   m->AdvanceCurrentPosition(1);
@@ -2625,6 +2569,97 @@ TEST_F(RegExpTestWithContext, RegExpInterruptReentrantExecution) {
 
   i::DirectHandle<i::Object> result = RegExpExec(&d);
   CHECK(IsNull(*result));
+}
+
+TEST_F(RegExpTest, QuickCheckDeterminesPerfectly) {
+  Zone zone(i_isolate()->allocator(), ZONE_NAME);
+
+  // Create an EndNode to serve as the successor.
+  regexp::EndNode* accept =
+      zone.New<regexp::EndNode>(regexp::EndNode::ACCEPT, &zone);
+
+  auto check_determines_perfectly =
+      [&](ZoneList<regexp::CharacterRange>* ranges, bool is_one_byte) {
+        regexp::TextNode* node = regexp::TextNode::CreateForCharacterRanges(
+            &zone, ranges, false, accept);
+        regexp::Compiler compiler(i_isolate(), &zone, 0, regexp::Flags(),
+                                  is_one_byte);
+        regexp::QuickCheckDetails details(1);
+        node->GetQuickCheckDetails(&details, &compiler, 0, false,
+                                   regexp::Node::kRecursionBudget);
+        return details.positions(0)->determines_perfectly;
+      };
+
+  // 1. Singleton range 'a' (always perfect)
+  {
+    ZoneList<regexp::CharacterRange>* ranges =
+        zone.New<ZoneList<regexp::CharacterRange>>(1, &zone);
+    ranges->Add(regexp::CharacterRange::Singleton('a'), &zone);
+    EXPECT_TRUE(check_determines_perfectly(ranges, true));
+  }
+
+  // 2. Disjoint ranges containing 'a' and 'A' (perfect, differing in 1 bit:
+  // 0x20)
+  {
+    ZoneList<regexp::CharacterRange>* ranges =
+        zone.New<ZoneList<regexp::CharacterRange>>(2, &zone);
+    ranges->Add(regexp::CharacterRange::Singleton('a'), &zone);
+    ranges->Add(regexp::CharacterRange::Singleton('A'), &zone);
+    EXPECT_TRUE(check_determines_perfectly(ranges, true));
+  }
+
+  // 3. Disjoint ranges 'a', 'A', 'b', 'B' (not perfect, zero bits = 3 (0x20,
+  // 0x02, 0x01), combinations = 8, total = 4)
+  {
+    ZoneList<regexp::CharacterRange>* ranges =
+        zone.New<ZoneList<regexp::CharacterRange>>(4, &zone);
+    ranges->Add(regexp::CharacterRange::Singleton('a'), &zone);
+    ranges->Add(regexp::CharacterRange::Singleton('A'), &zone);
+    ranges->Add(regexp::CharacterRange::Singleton('b'), &zone);
+    ranges->Add(regexp::CharacterRange::Singleton('B'), &zone);
+    EXPECT_FALSE(check_determines_perfectly(ranges, true));
+  }
+
+  // 4. Non-canonical ranges that overlap but can be canonicalized into a
+  // perfect check. E.g., 'a' and 'a' (redundant), or overlapping ranges like
+  // [0, 2] and [1, 3] which canonicalize to [0, 3] (perfect, zero bits = 2)
+  {
+    ZoneList<regexp::CharacterRange>* ranges =
+        zone.New<ZoneList<regexp::CharacterRange>>(2, &zone);
+    ranges->Add(regexp::CharacterRange::Range(0, 2), &zone);
+    ranges->Add(regexp::CharacterRange::Range(1, 3), &zone);
+    // Canonicalized to [0, 3] (4 characters: 0, 1, 2, 3), zero bits = 2,
+    // perfect! Without canonicalization, total_characters would be counted as 3
+    // + 3 = 6, which != 4, and would fail determines_perfectly.
+    EXPECT_TRUE(check_determines_perfectly(ranges, true));
+  }
+
+  // 5. Perfect single range [\x60-\x63] (diff = 3, contiguous block of trailing
+  // 1s, starts at boundary)
+  {
+    ZoneList<regexp::CharacterRange>* ranges =
+        zone.New<ZoneList<regexp::CharacterRange>>(1, &zone);
+    ranges->Add(regexp::CharacterRange::Range(0x60, 0x63), &zone);
+    EXPECT_TRUE(check_determines_perfectly(ranges, true));
+  }
+
+  // 6. Imperfect single range [\x61-\x62] (diff = 3, starts at incorrect
+  // boundary, e.g. not aligned with block of 4)
+  {
+    ZoneList<regexp::CharacterRange>* ranges =
+        zone.New<ZoneList<regexp::CharacterRange>>(1, &zone);
+    ranges->Add(regexp::CharacterRange::Range(0x61, 0x62), &zone);
+    EXPECT_FALSE(check_determines_perfectly(ranges, true));
+  }
+
+  // 7. Imperfect single range [\x60-\x62] (diff = 2, non-contiguous block of
+  // trailing 1s, i.e. bit 0 is fixed)
+  {
+    ZoneList<regexp::CharacterRange>* ranges =
+        zone.New<ZoneList<regexp::CharacterRange>>(1, &zone);
+    ranges->Add(regexp::CharacterRange::Range(0x60, 0x62), &zone);
+    EXPECT_FALSE(check_determines_perfectly(ranges, true));
+  }
 }
 
 // The bug below is only reliably observable under sandbox hardware support,

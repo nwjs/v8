@@ -443,8 +443,6 @@ constexpr bool CanTriggerGC(T... properties) {
   F(PromiseRevokeReject, 1, 1)           \
   F(RejectPromise, 3, 1)                 \
   F(ResolvePromise, 2, 1)                \
-  F(PromiseRejectAfterResolved, 2, 1)    \
-  F(PromiseResolveAfterResolved, 2, 1)   \
   F(ConstructSuppressedError, 3, 1)      \
   F(ConstructAggregateErrorHelper, 4, 1) \
   F(ConstructInternalAggregateErrorHelper, -1 /* <= 5*/, 1)
@@ -552,9 +550,12 @@ constexpr bool CanTriggerGC(T... properties) {
   F(ArrayBufferDetachForceWasm, 1, 1)                                    \
   F(ArrayIteratorProtector, 0, 1)                                        \
   F(ArraySpeciesProtector, 0, 1)                                         \
+  F(AssertNotPeeled, 0, 1)                                               \
+  F(AssertPeeled, 0, 1)                                                  \
   F(BaselineOsr, -1, 1)                                                  \
   F(BenchMaglev, 2, 1)                                                   \
   F(BenchTurbofan, 2, 1)                                                 \
+  F(BlockAt, 2, 1)                                                       \
   F(VerifyGetJSBuiltinState, 1, 1)                                       \
   F(ClearFunctionFeedback, 1, 1)                                         \
   F(ClearMegamorphicStubCache, 0, 1)                                     \
@@ -665,6 +666,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(RegexpHasNativeCode, 2, 1)                                           \
   F(RegexpIsUnmodified, 1, 1)                                            \
   F(RegexpTypeTag, 1, 1)                                                 \
+  F(Resume, 1, 1)                                                        \
   F(RunningInSimulator, 0, 1)                                            \
   F(RuntimeEvaluateREPL, 1, 1)                                           \
   F(ScheduleGCInStackCheck, 0, 1)                                        \
@@ -686,6 +688,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(TurbofanStaticAssert, 1, 1)                                          \
   F(TypedArraySpeciesProtector, 0, 1)                                    \
   F(WaitForBackgroundOptimization, 0, 1)                                 \
+  F(WaitUntilBlocked, 2, 1)                                              \
   I(DeoptimizeNow, 0, 1)                                                 \
   F(LeakHole, 0, 1)                                                      \
   F(GetHoleNaNLower, 0, 1)                                               \
@@ -753,10 +756,9 @@ constexpr bool CanTriggerGC(T... properties) {
   F(WasmArrayInitSegment, 6, 1)                                  \
   F(WasmAllocateSuspender, 0, 1)                                 \
   F(WasmAllocateContinuation, 3, 1)                              \
-  F(WasmAllocateBoundContinuation, 3, 1)                         \
   F(ClearWasmSuspenderResumeField, 1, 1)                         \
   F(WasmCastToSpecialPrimitiveArray, 2, 1)                       \
-  F(WasmStringAdd_CheckNone_Shared, 2, 1)                        \
+  F(WasmStringAdd_NoMapCheck_Shared, 2, 1)                       \
   F(WasmStringNewSegmentWtf8, 5, 1)                              \
   F(WasmStringNewWtf8, 5, 1)                                     \
   F(WasmStringNewWtf8Array, 5, 1)                                \

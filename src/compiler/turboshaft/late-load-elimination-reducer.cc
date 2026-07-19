@@ -294,7 +294,7 @@ void LateLoadEliminationAnalyzer::ProcessBlock(const Block& block,
 
         break;
     }
-    if (op.Effects().can_allocate && v8_flags.turbolev) {
+    if (op.Effects().can_allocate) {
       // String maps can be invalidated by the GC. Unfortunately, there is no
       // way to know if a particular load at offset 0 loads a string map or not.
       // So, to be safe, we invalidate every load at offset 0 whenever we see an
@@ -494,7 +494,7 @@ void LateLoadEliminationAnalyzer::ProcessAtomicRMW(OpIndex op_idx,
   // operations. If the atomic operation is not operating on linear memory, we
   // need to invalidate it. TODO(mliedtke): Only invalidate the potentially
   // aliasing information.
-  if (!v8_flags.experimental_wasm_shared ||
+  if (!v8_flags.wasm_shared ||
       store.base_rep == RegisterRepresentation::WordPtr()) {
     TRACE(">> Skipping operation on linear memory");
     return;

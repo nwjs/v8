@@ -44,7 +44,9 @@
 #include "src/heap/sweeper.h"
 #include "src/init/heap-symbols.h"
 #include "src/objects/allocation-site.h"
+#include "src/objects/fixed-array-base.h"
 #include "src/objects/fixed-array.h"
+#include "src/objects/fixed-primitive-array.h"
 #include "src/objects/hash-table.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/js-array-buffer.h"
@@ -52,7 +54,6 @@
 #include "src/objects/smi.h"
 #include "src/objects/visitors.h"
 #include "src/roots/roots.h"
-#include "src/sandbox/code-pointer-table.h"
 #include "src/sandbox/external-pointer-table.h"
 #include "src/sandbox/js-dispatch-table.h"
 #include "src/sandbox/trusted-pointer-table.h"
@@ -270,7 +271,7 @@ static constexpr v8::base::TimeDelta kMaxSynchronuousGCOperation =
 
 class Heap final {
  public:
-  enum class HeapGrowingMode { kSlow, kConservative, kMinimal, kDefault };
+  using HeapGrowingMode = HeapGrowingMode;
 
   enum HeapState {
     NOT_IN_GC,
@@ -721,7 +722,7 @@ class Heap final {
   // ===========================================================================
 
   void ConfigureHeap(const v8::ResourceConstraints& constraints,
-                     v8::CppHeap* cpp_heap);
+                     v8::CppHeap& cpp_heap);
   void ConfigureHeapDefault();
 
   // Prepares the heap, setting up for deserialization.
@@ -828,7 +829,9 @@ class Heap final {
     return &trusted_pointer_space_;
   }
 
-  CodePointerTable::Space* code_pointer_space() { return &code_pointer_space_; }
+  TrustedPointerTable::Space* read_only_trusted_pointer_space() {
+    return &read_only_trusted_pointer_space_;
+  }
 
 #endif  // V8_ENABLE_SANDBOX
 
@@ -1480,10 +1483,7 @@ class Heap final {
       const uint64_t overshoot_margin) const;
 
   // Return the maximum size objects can be before having to allocate them as
-  // large objects. This takes into account allocating in the code space for
-  // which the size of the allocatable space per V8 page may depend on the OS
-  // page size at runtime. You may use kMaxRegularHeapObjectSize as a constant
-  // instead if you know the allocation isn't in the code spaces.
+  // large objects.
   inline V8_EXPORT_PRIVATE int MaxRegularHeapObjectSize(
       AllocationType allocation);
 
@@ -2187,9 +2187,8 @@ class Heap final {
 #ifdef V8_ENABLE_SANDBOX
   // Likewise, but for the trusted pointer table.
   TrustedPointerTable::Space trusted_pointer_space_;
+  TrustedPointerTable::Space read_only_trusted_pointer_space_;
 
-  // The space in the process-wide code pointer table managed by this heap.
-  CodePointerTable::Space code_pointer_space_;
 #endif  // V8_ENABLE_SANDBOX
 
   // The spaces in the JSDispatchTable containing entries owned by objects
@@ -2379,8 +2378,6 @@ class Heap final {
 
   bool deserialization_complete_ = false;
 
-  int max_regular_code_object_size_ = 0;
-
   bool inline_allocation_enabled_ = true;
 
   int pause_allocation_observers_depth_ = 0;
@@ -2563,8 +2560,7 @@ constexpr const char* ToString(Heap::HeapGrowingMode mode) {
 RIGHT_TRIMMABLE_ARRAY_LIST(DECL_RIGHT_TRIM)
 #undef DECL_RIGHT_TRIM
 
-struct HexAddressTag;
-using HexAddress = base::StrongAlias<HexAddressTag, Address>;
+using HexAddress = base::StrongAlias<struct HexAddressTag, Address>;
 
 using ByteSize = ::heap::base::ByteSize;
 

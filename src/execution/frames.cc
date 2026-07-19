@@ -14,28 +14,25 @@
 #include "src/base/bits.h"
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/linkage-location.h"
-#include "src/codegen/macro-assembler.h"
 #include "src/codegen/maglev-safepoint-table.h"
 #include "src/codegen/register-configuration.h"
 #include "src/codegen/safepoint-table.h"
 #include "src/common/globals.h"
 #include "src/deoptimizer/deoptimizer.h"
-#include "src/execution/arguments.h"
 #include "src/execution/frame-constants.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/vm-state-inl.h"
 #include "src/ic/ic-stats.h"
 #include "src/logging/counters.h"
+#include "src/objects/abstract-code-inl.h"
 #include "src/objects/casting-inl.h"
 #include "src/objects/code.h"
-#include "src/objects/instance-type-checker.h"
 #include "src/objects/slots.h"
 #include "src/objects/smi.h"
 #include "src/objects/visitors.h"
 #include "src/roots/roots.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
 #include "src/strings/string-stream.h"
-#include "src/zone/zone-containers.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug-wasm-objects.h"
@@ -53,6 +50,8 @@
 
 namespace v8 {
 namespace internal {
+
+using base::Memory;
 
 static_assert(CommonFrameConstants::kCPSlotSize ==
               Internals::kFrameCPSlotCount * kSystemPointerSize);
@@ -78,7 +77,7 @@ Address AddressOf(const StackHandler* handler) {
   // We work around that by storing the real stack address in the "padding"
   // field. StackHandlers allocated from generated code have 0 as padding.
   Address padding =
-      base::Memory<Address>(raw + StackHandlerConstants::kPaddingOffset);
+      Memory<Address>(raw + StackHandlerConstants::kPaddingOffset);
   if (padding != 0) return padding;
 #endif
   return raw;
@@ -414,7 +413,7 @@ int DebuggableStackFrameIterator::FrameFunctionCount() const {
 
 FrameSummary DebuggableStackFrameIterator::GetTopValidFrame() const {
   DCHECK(!done());
-  // Like FrameSummary::GetTop, but additionally observes
+  // Like FrameSummary::GetInnermost, but additionally observes
   // DebuggableStackFrameIterator filtering semantics.
   FrameSummaries summaries = frame()->Summarize();
   if (is_javascript()) {
@@ -807,6 +806,7 @@ std::pair<Tagged<Code>, int> StackFrame::LookupCodeAndOffset() const {
 
 void StackFrame::IteratePc(RootVisitor* v, Address* constant_pool_address,
                            Tagged<GcSafeCode> holder) const {
+  DisallowGarbageCollection no_gc;
 #if DEBUG
   const Address old_pc = maybe_unauthenticated_pc();
   DCHECK_GE(old_pc, holder->InstructionStart(isolate(), old_pc));
@@ -817,8 +817,11 @@ void StackFrame::IteratePc(RootVisitor* v, Address* constant_pool_address,
   Tagged<GcSafeCode> visited_holder = holder;
   const Tagged<Object> old_istream = holder->raw_instruction_stream();
   Tagged<Object> visited_istream = old_istream;
-  v->VisitRunningCode(FullObjectSlot{&visited_holder},
-                      FullObjectSlot{&visited_istream});
+  {
+    DisableGCMole no_gcmole;
+    v->VisitRunningCode(FullObjectSlot{&visited_holder},
+                        FullObjectSlot{&visited_istream});
+  }
   // Note this covers two important cases:
   // 1. the associated InstructionStream object did not move, and
   // 2. `holder` is an embedded builtin and has no InstructionStream.
@@ -1603,6 +1606,7 @@ FrameSummaries CommonFrame::Summarize(AllowAllocation allow_allocation) const {
 namespace {
 void VisitSpillSlot(Isolate* isolate, RootVisitor* v,
                     FullObjectSlot spill_slot) {
+  DisallowGarbageCollection no_gc;
 #ifdef V8_COMPRESS_POINTERS
   // Spill slots may contain compressed values in which case the upper
   // 32-bits will contain zeros. In order to simplify handling of such
@@ -1629,7 +1633,10 @@ void VisitSpillSlot(Isolate* isolate, RootVisitor* v,
     Address decompressed =
         V8HeapCompressionScheme::DecompressTagged(compressed_value);
     FullObjectSlot local_slot(&decompressed);
-    v->VisitRootPointer(Root::kStackRoots, nullptr, local_slot);
+    {
+      DisableGCMole no_gcmole;
+      v->VisitRootPointer(Root::kStackRoots, nullptr, local_slot);
+    }
     // Restore compression. Generated code should be able to trust that
     // compressed spill slots remain compressed.
     *spill_slot.location() =
@@ -1637,7 +1644,10 @@ void VisitSpillSlot(Isolate* isolate, RootVisitor* v,
     return;
   }
 #endif
-  v->VisitRootPointer(Root::kStackRoots, nullptr, spill_slot);
+  {
+    DisableGCMole no_gcmole;
+    v->VisitRootPointer(Root::kStackRoots, nullptr, spill_slot);
+  }
 }
 
 void VisitSpillSlots(Isolate* isolate, RootVisitor* v,
@@ -2701,7 +2711,7 @@ uint32_t JavaScriptFrame::GetActualArgumentCount() const {
 
 Tagged<JSFunction> JavaScriptBuiltinContinuationFrame::function() const {
   const int offset = BuiltinContinuationFrameConstants::kFunctionOffset;
-  return Cast<JSFunction>(Tagged<Object>(base::Memory<Address>(fp() + offset)));
+  return Cast<JSFunction>(Tagged<Object>(Memory<Address>(fp() + offset)));
 }
 
 uint32_t JavaScriptBuiltinContinuationFrame::ComputeParametersCount() const {
@@ -2942,7 +2952,7 @@ Handle<Object> FrameSummary::WasmInterpretedFrameSummary::receiver() const {
 }
 
 int FrameSummary::WasmInterpretedFrameSummary::SourcePosition() const {
-  const wasm::WasmModule* module = wasm_instance()->module();
+  const wasm::WasmModule* module = instance_data()->module();
   return GetSourcePosition(module, function_index(), byte_offset(),
                            false /*at_to_number_conversion*/);
 }
@@ -3012,20 +3022,10 @@ FrameSummary::~FrameSummary() {
 #undef FRAME_SUMMARY_DESTR
 }
 
-FrameSummary FrameSummary::GetTop(const CommonFrame* frame) {
+FrameSummary FrameSummary::GetInnermost(const CommonFrame* frame) {
   FrameSummaries summaries = frame->Summarize();
   DCHECK_LT(0, summaries.size());
   return summaries.frames.back();
-}
-
-FrameSummary FrameSummary::GetBottom(const CommonFrame* frame) {
-  return Get(frame, 0);
-}
-
-FrameSummary FrameSummary::GetSingle(const CommonFrame* frame) {
-  FrameSummaries summaries = frame->Summarize();
-  DCHECK_EQ(1, summaries.size());
-  return summaries.frames.front();
 }
 
 FrameSummary FrameSummary::Get(const CommonFrame* frame, int index) {
@@ -3546,19 +3546,17 @@ intptr_t BaselineFrame::GetPCForBytecodeOffset(int bytecode_offset) const {
 }
 
 void BaselineFrame::PatchContext(Tagged<Context> value) {
-  base::Memory<Address>(fp() + BaselineFrameConstants::kContextOffset) =
-      value.ptr();
+  Memory<Address>(fp() + BaselineFrameConstants::kContextOffset) = value.ptr();
 }
 
 Tagged<JSFunction> BuiltinFrame::function() const {
   const int offset = BuiltinFrameConstants::kFunctionOffset;
-  return Cast<JSFunction>(Tagged<Object>(base::Memory<Address>(fp() + offset)));
+  return Cast<JSFunction>(Tagged<Object>(Memory<Address>(fp() + offset)));
 }
 
 uint32_t BuiltinFrame::ComputeParametersCount() const {
   const int offset = BuiltinFrameConstants::kLengthOffset;
-  uint32_t argc =
-      Smi::ToUInt(Tagged<Object>(base::Memory<Address>(fp() + offset)));
+  uint32_t argc = Smi::ToUInt(Tagged<Object>(Memory<Address>(fp() + offset)));
   DCHECK_GE(argc, kJSArgcReceiverSlots);
   return argc - kJSArgcReceiverSlots;
 }
@@ -3587,7 +3585,7 @@ void WasmFrame::Print(StringStream* accumulator, PrintMode mode, int index,
   accumulator->PrintName(script()->name());
 
   FrameSummary::WasmFrameSummary top_summary =
-      FrameSummary::GetTop(this).AsWasm();
+      FrameSummary::GetInnermost(this).AsWasm();
   int func_index = static_cast<int>(top_summary.function_index());
   base::Vector<const uint8_t> raw_func_name =
       module_object()->GetRawFunctionName(func_index);
@@ -3951,7 +3949,7 @@ int WasmInterpreterEntryFrame::function_index(
 }
 
 int WasmInterpreterEntryFrame::position() const {
-  return FrameSummary::GetBottom(this).AsWasmInterpreted().SourcePosition();
+  return FrameSummary::GetInnermost(this).AsWasmInterpreted().SourcePosition();
 }
 
 Tagged<Object> WasmInterpreterEntryFrame::context() const {
@@ -4261,8 +4259,7 @@ uint32_t PcAddressForHashing(Isolate* isolate, Address address) {
 InnerPointerToCodeCache::Entry* InnerPointerToCodeCache::GetCacheEntry(
     Address inner_pointer) {
   DCHECK(base::bits::IsPowerOfTwo(kInnerPointerToCodeCacheSize));
-  uint32_t hash =
-      ComputeUnseededHash(PcAddressForHashing(isolate_, inner_pointer));
+  uint32_t hash = base::hash32(PcAddressForHashing(isolate_, inner_pointer));
   uint32_t index = hash & (kInnerPointerToCodeCacheSize - 1);
   Entry* entry = cache(index);
   if (entry->inner_pointer == inner_pointer) {

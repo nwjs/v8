@@ -20,28 +20,37 @@ def _options_impl(ctx):
 _create_option_flag = rule(
     implementation = _options_impl,
     build_setting = config.bool(flag = True),
+    attrs = {
+        "scope": attr.string(),
+    },
 )
 
 _create_option_string = rule(
     implementation = _options_impl,
     build_setting = config.string(flag = True),
+    attrs = {
+        "scope": attr.string(),
+    },
 )
 
 _create_option_int = rule(
     implementation = _options_impl,
     build_setting = config.int(flag = True),
+    attrs = {
+        "scope": attr.string(),
+    },
 )
 
 def v8_flag(name, default = False):
-    _create_option_flag(name = name, build_setting_default = default)
+    _create_option_flag(name = name, build_setting_default = default, scope = "universal")
     native.config_setting(name = "is_" + name, flag_values = {name: "True"})
     native.config_setting(name = "is_not_" + name, flag_values = {name: "False"})
 
 def v8_string(name, default = ""):
-    _create_option_string(name = name, build_setting_default = default)
+    _create_option_string(name = name, build_setting_default = default, scope = "universal")
 
 def v8_int(name, default = 0):
-    _create_option_int(name = name, build_setting_default = default)
+    _create_option_int(name = name, build_setting_default = default, scope = "universal")
 
 def _custom_config_impl(ctx):
     defs = []
@@ -351,8 +360,6 @@ def _torque_files_impl(ctx):
         if root[:len(v8root)] == v8root:
             root = root[len(v8root):]
         file = ctx.attr.prefix + "/torque-generated/" + root
-        defs.append(ctx.actions.declare_file(file + "-tq-inl.inc"))
-        defs.append(ctx.actions.declare_file(file + "-tq.inc"))
         defs.append(ctx.actions.declare_file(file + "-tq.cc"))
         inits.append(ctx.actions.declare_file(file + "-tq-csa.cc"))
         inits.append(ctx.actions.declare_file(file + "-tq-csa.h"))

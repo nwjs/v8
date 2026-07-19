@@ -777,7 +777,7 @@ void AccessorAssembler::HandleLoadICSmiHandlerCase(
         TNode<UintPtrT> length =
             Unsigned(LoadStringLengthAsWord(string_holder));
         GotoIf(UintPtrGreaterThanOrEqual(index, length), &if_oob_string);
-        TNode<Int32T> code = StringCharCodeAt(string_holder, Unsigned(index));
+        TNode<Uint16T> code = StringCharCodeAt(string_holder, Unsigned(index));
         TNode<String> result = StringFromSingleCharCode(code);
         Return(result);
 
@@ -2481,13 +2481,23 @@ void AccessorAssembler::CheckDescriptorConsidersNumbersMutable(
 void AccessorAssembler::GotoIfNotSameNumberBitPattern(TNode<Float64T> left,
                                                       TNode<Float64T> right,
                                                       Label* miss) {
-  // TODO(verwaest): Use a single compare on 64bit archs.
-  const TNode<Uint32T> lhs_hi = Float64ExtractHighWord32(left);
-  const TNode<Uint32T> rhs_hi = Float64ExtractHighWord32(right);
-  GotoIfNot(Word32Equal(lhs_hi, rhs_hi), miss);
-  const TNode<Uint32T> lhs_lo = Float64ExtractLowWord32(left);
-  const TNode<Uint32T> rhs_lo = Float64ExtractLowWord32(right);
-  GotoIfNot(Word32Equal(lhs_lo, rhs_lo), miss);
+  if (Is64()) {
+    // Single 64-bit compare on 64-bit archs (x64, arm64): bit-cast both
+    // values to a 64-bit integer and compare. Replaces the previous two
+    // 32-bit Word32Equal checks (with two sequential branches) by one
+    // Word64Equal + one branch on the StoreField kConstField fast path
+    // (every redundant constant double store hits this).
+    GotoIfNot(Word64Equal(BitcastFloat64ToInt64(left),
+                          BitcastFloat64ToInt64(right)),
+              miss);
+  } else {
+    const TNode<Uint32T> lhs_hi = Float64ExtractHighWord32(left);
+    const TNode<Uint32T> rhs_hi = Float64ExtractHighWord32(right);
+    GotoIfNot(Word32Equal(lhs_hi, rhs_hi), miss);
+    const TNode<Uint32T> lhs_lo = Float64ExtractLowWord32(left);
+    const TNode<Uint32T> rhs_lo = Float64ExtractLowWord32(right);
+    GotoIfNot(Word32Equal(lhs_lo, rhs_lo), miss);
+  }
 }
 
 void AccessorAssembler::HandleStoreFieldAndReturn(
@@ -3723,13 +3733,10 @@ void AccessorAssembler::LoadIC_NoFeedback(const LoadICParameters* p,
   TNode<Map> lookup_start_object_map = LoadMap(CAST(lookup_start_object));
   GotoIf(IsDeprecatedMap(lookup_start_object_map), &miss);
 
-  TNode<Uint16T> instance_type = LoadMapInstanceType(lookup_start_object_map);
-
   {
     // Special case for Function.prototype load, because it's very common
     // for ICs that are only executed once (MyFunc.prototype.foo = ...).
     Label not_function_prototype(this, Label::kDeferred);
-    GotoIfNot(IsJSFunctionInstanceType(instance_type), &not_function_prototype);
     GotoIfNot(IsPrototypeString(p->name()), &not_function_prototype);
 
     GotoIfPrototypeRequiresRuntimeLookup(CAST(lookup_start_object),
@@ -3739,6 +3746,7 @@ void AccessorAssembler::LoadIC_NoFeedback(const LoadICParameters* p,
     BIND(&not_function_prototype);
   }
 
+  TNode<Uint16T> instance_type = LoadMapInstanceType(lookup_start_object_map);
   GenericPropertyLoad(CAST(lookup_start_object), lookup_start_object_map,
                       instance_type, p, &miss, kDontUseStubCache);
 
@@ -4464,14 +4472,62 @@ void AccessorAssembler::KeyedStoreIC(const StoreICParameters* p) {
     {
       // We might have a name in feedback, and a fixed array in the next slot.
       Comment("KeyedStoreIC_try_polymorphic_name");
-      GotoIfNot(TaggedEqual(strong_feedback, p->name()), &miss);
-      // If the name comparison succeeded, we know we have a feedback vector
-      // with at least one map/handler pair.
-      TNode<MaybeObject> feedback_element =
-          LoadFeedbackVectorSlot(CAST(p->vector()), p->slot(), kTaggedSize);
-      TNode<WeakFixedArray> array = CAST(feedback_element);
-      HandlePolymorphicCase(weak_receiver_map, array, &if_handler, &var_handler,
-                            &miss);
+      TVARIABLE(Name, var_name);
+      Label if_polymorphic_name(this), feedback_matches(this),
+          if_internalized(this), if_notinternalized(this, Label::kDeferred);
+
+      // Fast-case: The recorded {feedback} matches the {name}.
+      GotoIf(TaggedEqual(strong_feedback, p->name()), &feedback_matches);
+
+      {
+        // Try to internalize the {name} if it isn't already.
+        TVARIABLE(IntPtrT, var_index);
+        TryToName(p->name(), &miss, &var_index, &if_internalized, &var_name,
+                  &miss, &if_notinternalized);
+      }
+
+      BIND(&if_internalized);
+      {
+        // The {var_name} now contains a unique name.
+        Branch(TaggedEqual(strong_feedback, var_name.value()),
+               &if_polymorphic_name, &miss);
+      }
+
+      BIND(&if_notinternalized);
+      {
+        TVARIABLE(IntPtrT, var_index);
+        TryInternalizeString(CAST(p->name()), &miss, &var_index,
+                             &if_internalized, &var_name, &miss, &miss);
+      }
+
+      BIND(&feedback_matches);
+      {
+        var_name = CAST(p->name());
+        Goto(&if_polymorphic_name);
+      }
+
+      BIND(&if_polymorphic_name);
+      {
+        // If the name comparison succeeded, we know we have a feedback vector
+        // with at least one map/handler pair.
+        TNode<MaybeObject> feedback_element =
+            LoadFeedbackVectorSlot(CAST(p->vector()), p->slot(), kTaggedSize);
+        TNode<WeakFixedArray> array = CAST(feedback_element);
+
+        TVARIABLE(MaybeObject, var_polymorphic_handler);
+        Label if_polymorphic_handler(this, &var_polymorphic_handler);
+
+        HandlePolymorphicCase(weak_receiver_map, array, &if_polymorphic_handler,
+                              &var_polymorphic_handler, &miss);
+
+        BIND(&if_polymorphic_handler);
+        {
+          StoreICParameters name_p = p->WithName(var_name.value());
+          HandleStoreICHandlerCase(&name_p, var_polymorphic_handler.value(),
+                                   &miss, ICMode::kNonGlobalIC,
+                                   kSupportElements);
+        }
+      }
     }
   }
   BIND(&miss);
@@ -4558,14 +4614,62 @@ void AccessorAssembler::DefineKeyedOwnIC(const StoreICParameters* p) {
     {
       // We might have a name in feedback, and a fixed array in the next slot.
       Comment("DefineKeyedOwnIC_try_polymorphic_name");
-      GotoIfNot(TaggedEqual(strong_feedback, p->name()), &miss);
-      // If the name comparison succeeded, we know we have a feedback vector
-      // with at least one map/handler pair.
-      TNode<MaybeObject> feedback_element =
-          LoadFeedbackVectorSlot(CAST(p->vector()), p->slot(), kTaggedSize);
-      TNode<WeakFixedArray> array = CAST(feedback_element);
-      HandlePolymorphicCase(weak_receiver_map, array, &if_handler, &var_handler,
-                            &miss);
+      TVARIABLE(Name, var_name);
+      Label if_polymorphic_name(this), feedback_matches(this),
+          if_internalized(this), if_notinternalized(this, Label::kDeferred);
+
+      // Fast-case: The recorded {feedback} matches the {name}.
+      GotoIf(TaggedEqual(strong_feedback, p->name()), &feedback_matches);
+
+      {
+        // Try to internalize the {name} if it isn't already.
+        TVARIABLE(IntPtrT, var_index);
+        TryToName(p->name(), &miss, &var_index, &if_internalized, &var_name,
+                  &miss, &if_notinternalized);
+      }
+
+      BIND(&if_internalized);
+      {
+        // The {var_name} now contains a unique name.
+        Branch(TaggedEqual(strong_feedback, var_name.value()),
+               &if_polymorphic_name, &miss);
+      }
+
+      BIND(&if_notinternalized);
+      {
+        TVARIABLE(IntPtrT, var_index);
+        TryInternalizeString(CAST(p->name()), &miss, &var_index,
+                             &if_internalized, &var_name, &miss, &miss);
+      }
+
+      BIND(&feedback_matches);
+      {
+        var_name = CAST(p->name());
+        Goto(&if_polymorphic_name);
+      }
+
+      BIND(&if_polymorphic_name);
+      {
+        // If the name comparison succeeded, we know we have a feedback vector
+        // with at least one map/handler pair.
+        TNode<MaybeObject> feedback_element =
+            LoadFeedbackVectorSlot(CAST(p->vector()), p->slot(), kTaggedSize);
+        TNode<WeakFixedArray> array = CAST(feedback_element);
+
+        TVARIABLE(MaybeObject, var_polymorphic_handler);
+        Label if_polymorphic_handler(this, &var_polymorphic_handler);
+
+        HandlePolymorphicCase(weak_receiver_map, array, &if_polymorphic_handler,
+                              &var_polymorphic_handler, &miss);
+
+        BIND(&if_polymorphic_handler);
+        {
+          StoreICParameters name_p = p->WithName(var_name.value());
+          HandleStoreICHandlerCase(&name_p, var_polymorphic_handler.value(),
+                                   &miss, ICMode::kNonGlobalIC,
+                                   kSupportElements);
+        }
+      }
     }
   }
   BIND(&miss);

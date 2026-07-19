@@ -11,7 +11,7 @@
 #include "src/common/ptr-compr-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/interpreter/bytecode-register.h"
-#include "src/objects/fixed-array-inl.h"
+#include "src/objects/fixed-primitive-array-inl.h"
 #include "src/objects/trusted-pointer-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -115,6 +115,7 @@ uint16_t BytecodeArray::parameter_count_without_receiver() const {
 }
 
 void BytecodeArray::set_parameter_count(uint16_t number_of_parameters) {
+  DCHECK_GE(number_of_parameters, kJSArgcReceiverSlots);
   parameter_size_ = number_of_parameters;
 }
 

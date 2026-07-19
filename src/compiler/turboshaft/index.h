@@ -15,11 +15,22 @@
 #include "src/codegen/tnode.h"
 #include "src/compiler/turboshaft/fast-hash.h"
 #include "src/compiler/turboshaft/representations.h"
+#include "src/objects/bigint.h"
+#include "src/objects/contexts.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/js-array-buffer.h"
+#include "src/objects/js-collection.h"
 #include "src/objects/js-function.h"
+#include "src/objects/js-generator.h"
+#include "src/objects/js-promise.h"
+#include "src/objects/js-proxy.h"
+#include "src/objects/objects.h"
 #include "src/objects/oddball.h"
+#include "src/objects/shared-function-info.h"
+#include "src/objects/source-text-module.h"
 #include "src/objects/string.h"
 #include "src/objects/tagged.h"
+#include "src/objects/templates.h"
 
 #define TURBOSHAFT_ALLOW_IMPLICIT_OPINDEX_INITIALIZATION_FOR_V 1
 
@@ -118,19 +129,19 @@ class OpIndex {
 
   static constexpr OpIndex Invalid() { return OpIndex(); }
 
-  // Encode a sea-of-nodes node id in the `OpIndex` type.
-  // Only used for node origins that actually point to sea-of-nodes graph nodes.
-  static OpIndex EncodeTurbofanNodeId(uint32_t id) {
+  // Encode an external node id (e.g. Turbofan or Maglev) in the `OpIndex` type.
+  // Only used for node origins that point to nodes in a different graph.
+  static OpIndex EncodeExternalId(uint32_t id) {
     OpIndex result = OpIndex(id * sizeof(OperationStorageSlot));
-    result.offset_ += kTurbofanNodeIdFlag;
+    result.offset_ += kExternalIdFlag;
     return result;
   }
-  uint32_t DecodeTurbofanNodeId() const {
-    DCHECK(IsTurbofanNodeId());
+  uint32_t DecodeExternalId() const {
+    DCHECK(IsExternalId());
     return offset_ / sizeof(OperationStorageSlot);
   }
-  bool IsTurbofanNodeId() const {
-    return offset_ % sizeof(OperationStorageSlot) == kTurbofanNodeIdFlag;
+  bool IsExternalId() const {
+    return offset_ % sizeof(OperationStorageSlot) == kExternalIdFlag;
   }
 
   constexpr bool operator==(OpIndex other) const {
@@ -181,7 +192,7 @@ class OpIndex {
   // of the offset.
   uint32_t offset_;
 
-  static constexpr uint32_t kTurbofanNodeIdFlag = 1;
+  static constexpr uint32_t kExternalIdFlag = 1;
 
   template <typename H>
   friend H AbslHashValue(H h, const OpIndex& idx) {
@@ -932,6 +943,11 @@ class ShadowyOpIndex : public OpIndex {
   template <typename T>
   operator V<T>() const {  // NOLINT(runtime/explicit)
     return V<T>::Cast(*this);
+  }
+
+  template <typename T>
+  operator OptionalV<T>() const {  // NOLINT(runtime/explicit)
+    return OptionalV<T>::Cast(*this);
   }
 };
 

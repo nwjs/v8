@@ -10,7 +10,6 @@
 // Only tier-up the test functions to get a cleaner and stable trace.
 // Flags: --trace-turbo-inlining --turbo-filter='js_*'
 // Concurrent inlining leads to additional traces.
-// Flags: --no-concurrent-inlining
 // Flags: --no-stress-concurrent-inlining
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
@@ -890,7 +889,7 @@ const wasmExports2 = builder2.instantiate({}).exports;
 // CHECK: Considering JS-to-Wasm wrapper for Wasm function [{{[0-9]+}}] noop2 of module {{.*}} for inlining
 // CHECK-NEXT: - inlining wrapper
 // CHECK-NEXT: Considering JS-to-Wasm wrapper for Wasm function [{{[0-9]+}}] multiModule of module {{.*}} for inlining
-// CHECK-NEXT: - not inlining: already inlining from another Wasm module
+// CHECK-NEXT: - not inlining: already inlining from another Wasm instance
 // CHECK: Considering Wasm function [{{[0-9]+}}] noop2 of module {{.*}} for inlining
 // CHECK-NEXT: - inlining Wasm function
 // CHECK-NOT: Considering Wasm function [{{[0-9]+}}] multiModule of module {{.*}} for inlining

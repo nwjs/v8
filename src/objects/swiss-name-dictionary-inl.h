@@ -12,9 +12,11 @@
 
 #include "src/base/logging.h"
 #include "src/heap/heap.h"
-#include "src/objects/fixed-array-inl.h"
+#include "src/objects/fixed-primitive-array-inl.h"
+#include "src/objects/hole.h"
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/objects-inl.h"
+#include "src/objects/oddball-predicates-inl.h"
 #include "src/objects/slots-inl.h"
 #include "src/objects/smi.h"
 
@@ -22,8 +24,6 @@
 #include "src/objects/object-macros.h"
 
 namespace v8::internal {
-
-#include "torque-generated/src/objects/swiss-name-dictionary-tq-inl.inc"
 
 swiss_table::ctrl_t* SwissNameDictionary::CtrlTable() {
   return reinterpret_cast<ctrl_t*>(

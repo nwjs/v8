@@ -33,9 +33,8 @@
 #include "src/heap/concurrent-marking.h"
 #include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/evacuation-allocator-inl.h"
-#include "src/heap/evacuation-verifier-inl.h"
+#include "src/heap/evacuation-verifier.h"
 #include "src/heap/gc-tracer-inl.h"
-#include "src/heap/gc-tracer.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-utils-inl.h"
 #include "src/heap/heap-visitor-inl.h"
@@ -55,11 +54,9 @@
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/memory-chunk.h"
 #include "src/heap/memory-measurement-inl.h"
-#include "src/heap/memory-measurement.h"
 #include "src/heap/mutable-page.h"
 #include "src/heap/new-spaces.h"
 #include "src/heap/normal-page-inl.h"
-#include "src/heap/normal-page.h"
 #include "src/heap/object-stats.h"
 #include "src/heap/parallel-work-item.h"
 #include "src/heap/read-only-heap.h"
@@ -78,7 +75,7 @@
 #include "src/objects/foreign.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/heap-object-inl.h"
-#include "src/objects/heap-object.h"
+#include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-objects-inl.h"
@@ -90,6 +87,7 @@
 #include "src/objects/transitions-inl.h"
 #include "src/objects/visitors.h"
 #include "src/sandbox/indirect-pointer-tag.h"
+#include "src/sandbox/trusted-pointer-table.h"
 #include "src/snapshot/shared-heap-serializer.h"
 #include "src/tasks/cancelable-task.h"
 #include "src/tracing/tracing-category-observer.h"
@@ -1689,6 +1687,9 @@ class EvacuateVisitorBase : public HeapObjectVisitor {
                                 Tagged<HeapObject> object,
                                 SafeHeapObjectSize size,
                                 Tagged<HeapObject>* target_object) {
+    // GCMole suppression: TryEvacuateObject runs inside GC compaction and
+    // cannot trigger re-entrant GC.
+    DisableGCMole no_gcmole;
 #if DEBUG
     DCHECK_LE(
         abort_evacuation_at_address_,
@@ -1771,7 +1772,6 @@ class EvacuateNewSpaceVisitor final : public EvacuateVisitorBase {
     if (TryEvacuateWithoutCopy(object)) return true;
     Tagged<HeapObject> target_object;
 
-
     if (!TryEvacuateObject(OLD_SPACE, object, size, &target_object)) {
       heap_->FatalProcessOutOfMemory(
           "MarkCompactCollector: young object promotion failed");
@@ -1806,6 +1806,9 @@ class EvacuateNewSpaceVisitor final : public EvacuateVisitorBase {
   inline AllocationSpace AllocateTargetObject(
       Tagged<HeapObject> old_object, int size,
       Tagged<HeapObject>* target_object) {
+    // GCMole suppression: AllocateTargetObject runs inside GC compaction and
+    // cannot trigger re-entrant GC.
+    DisableGCMole no_gcmole;
     AllocationSpace space_allocated_in = NEW_SPACE;
     AllocationAlignment alignment =
         HeapObject::RequiredAlignment(space_allocated_in, old_object->map());
@@ -2378,7 +2381,7 @@ std::pair<size_t, size_t> MarkCompactCollector::ProcessMarkingWorklist(
                   "kDeadlineCheckInterval must be power of 2");
     // The below check is an optimized version of
     // `(objects_processed % kDeadlineCheckInterval) == 0`
-    if ((objects_processed & (kDeadlineCheckInterval -1)) == 0 &&
+    if ((objects_processed & (kDeadlineCheckInterval - 1)) == 0 &&
         ((v8::base::TimeTicks::Now() - start) > max_duration)) {
       break;
     }
@@ -3267,35 +3270,34 @@ void MarkCompactCollector::ClearNonLiveReferences() {
         JSDispatchTable& jdt = isolate->js_dispatch_table();
         Tagged<Code> compile_lazy =
             heap_->isolate()->builtins()->code(Builtin::kCompileLazy);
-        jdt
-            .Sweep(heap_->js_dispatch_table_space(),
-                   heap_->isolate()->counters(), [&](JSDispatchEntry& entry) {
-                     Tagged<Code> code = entry.GetCode();
-                     if (MarkingHelper::IsUnmarkedAndNotAlwaysLive(
-                             heap_, marking_state_, code)) {
-                       // Baseline flushing: if the Code object is no longer
-                       // alive, it must have been flushed and so we replace it
-                       // with the CompileLazy builtin. Once we use leaptiering
-                       // on all platforms, we can probably simplify the other
-                       // code related to baseline flushing.
+        jdt.Sweep(heap_->js_dispatch_table_space(),
+                  heap_->isolate()->counters(), [&](JSDispatchEntry& entry) {
+                    Tagged<Code> code = entry.GetCode();
+                    if (MarkingHelper::IsUnmarkedAndNotAlwaysLive(
+                            heap_, marking_state_, code)) {
+                      // Baseline flushing: if the Code object is no longer
+                      // alive, it must have been flushed and so we replace it
+                      // with the CompileLazy builtin. Once we use leaptiering
+                      // on all platforms, we can probably simplify the other
+                      // code related to baseline flushing.
 
-                       // Currently, we can also see optimized code here. This
-                       // happens when a FeedbackCell for which no JSFunctions
-                       // remain references optimized code. However, in that
-                       // case we probably do want to delete the optimized code,
-                       // so that is working as intended. It does mean, however,
-                       // that we cannot DCHECK here that we only see baseline
-                       // code.
-                       DCHECK(code->kind() == CodeKind::FOR_TESTING_JS ||
-                              code->kind() == CodeKind::BASELINE ||
-                              code->kind() == CodeKind::MAGLEV ||
-                              code->kind() == CodeKind::TURBOFAN_JS ||
-                              code->is_interpreter_trampoline_builtin());
-                       entry.SetCodeAndEntrypointPointer(
-                           compile_lazy.ptr(),
-                           compile_lazy->instruction_start());
-                     }
-                   });
+                      // Currently, we can also see optimized code here. This
+                      // happens when a FeedbackCell for which no JSFunctions
+                      // remain references optimized code. However, in that
+                      // case we probably do want to delete the optimized code,
+                      // so that is working as intended. It does mean, however,
+                      // that we cannot DCHECK here that we only see baseline
+                      // code.
+                      DCHECK(code->kind() == CodeKind::FOR_TESTING_JS ||
+                             code->kind() == CodeKind::BASELINE ||
+                             code->kind() == CodeKind::MAGLEV ||
+                             code->kind() == CodeKind::TURBOFAN_JS ||
+                             code->is_interpreter_trampoline_builtin());
+                      entry.SetCodeAndEntrypointPointer(
+                          compile_lazy.ptr(),
+                          compile_lazy->instruction_start());
+                    }
+                  });
       })
       // MarkDependentCodeForDeoptimization updates dispatch table entries.
       .DependsOn(mark_dependent_code_for_deopt)
@@ -3456,17 +3458,6 @@ void MarkCompactCollector::ClearNonLiveReferences() {
       .DependsOn(process_old_code_candidates_item)
       .Enqueue(parallel_clearing_job);
 
-  MakeParallelItem(
-      "SweepCodePointerTable",
-      [this](ParallelItem*, JobDelegate* delegate) {
-        TRACE_GC1(heap_->tracer(),
-                  GCTracer::Scope::MC_CLEAR_SWEEP_CODE_POINTER_TABLE, delegate);
-        IsolateGroup::current()->code_pointer_table()->Sweep(
-            heap_->code_pointer_space(), heap_->isolate()->counters());
-      })
-      // Flushing old SFIs modifies code pointer table.
-      .DependsOn(process_old_code_candidates_item)
-      .Enqueue(parallel_clearing_job);
 #endif  // V8_ENABLE_SANDBOX
 
 #ifdef V8_ENABLE_WEBASSEMBLY
@@ -3730,12 +3721,7 @@ void MarkCompactCollector::FlushBytecodeFromSFI(
   // Mark the new entry in the trusted pointer table as alive.
   TrustedPointerTable& table = heap_->isolate()->trusted_pointer_table();
   TrustedPointerTable::Space* space = heap_->trusted_pointer_space();
-  IndirectPointerSlot self_indirect_pointer_slot =
-      Cast<ExposedTrustedObject>(uncompiled_data)
-          ->RawIndirectPointerField(
-              offsetof(ExposedTrustedObject, self_indirect_pointer_),
-              kUncompiledDataIndirectPointerTag);
-  table.Mark(space, self_indirect_pointer_slot.Relaxed_LoadHandle());
+  table.Mark(space, uncompiled_data->self_indirect_pointer_handle());
 #endif
 
   shared_info->set_uncompiled_data(uncompiled_data);
@@ -4155,9 +4141,10 @@ void MarkCompactCollector::TrimDescriptorArray(
     DCHECK_EQ(descriptors, ReadOnlyRoots(heap_).empty_descriptor_array());
     return;
   }
-  const bool can_trim = v8_flags.trim_descriptor_arrays_in_gc &&
-                        (v8_flags.trim_descriptor_arrays_in_gc_with_stack ||
-                         !heap_->IsGCWithStack());
+  const bool can_trim =
+      v8_flags.trim_descriptor_arrays_in_gc &&
+      (v8_flags.trim_descriptor_arrays_in_gc_with_stack ||
+       (!heap_->IsGCWithStack() && heap_->ShouldReduceMemory()));
   int to_trim =
       descriptors->number_of_all_descriptors() - number_of_own_descriptors;
   DCHECK_IMPLIES(to_trim == 0, descriptors->number_of_all_descriptors() ==
@@ -4841,9 +4828,8 @@ void Evacuator::Finalize() {
   heap_->tracer()->AddCompactionEvent(duration_, bytes_compacted_);
   heap_->IncrementPromotedObjectsSize(new_space_visitor_.promoted_size() +
                                       new_to_old_page_visitor_.moved_bytes());
-  heap_->IncrementYoungSurvivorsCounter(
-      new_space_visitor_.promoted_size() +
-      new_to_old_page_visitor_.moved_bytes());
+  heap_->IncrementYoungSurvivorsCounter(new_space_visitor_.promoted_size() +
+                                        new_to_old_page_visitor_.moved_bytes());
 }
 
 class LiveObjectVisitor final : AllStatic {
@@ -5979,7 +5965,8 @@ void MarkCompactCollector::UpdatePointersInClientHeap(Isolate* client) {
 void MarkCompactCollector::UpdatePointersInPointerTables() {
   // Process an entry of a pointer table, returning either the relocated object
   // or a null pointer if the object wasn't relocated.
-  auto process_entry = [&](Address content) -> Tagged<ExposedTrustedObject> {
+  const auto process_entry =
+      [](Address content) -> Tagged<ExposedTrustedObject> {
     Tagged<HeapObject> heap_obj = Cast<HeapObject>(Tagged<Object>(content));
     MapWord map_word = heap_obj->map_word(kRelaxedLoad);
     if (!map_word.IsForwardingAddress()) return {};
@@ -5989,48 +5976,21 @@ void MarkCompactCollector::UpdatePointersInPointerTables() {
   };
 
 #ifdef V8_ENABLE_SANDBOX
-  TrustedPointerTable* const tpt = &heap_->isolate()->trusted_pointer_table();
-  tpt->IterateActiveEntriesIn(
-      heap_->trusted_pointer_space(),
-      [&](TrustedPointerHandle handle, Address content) {
-        Tagged<ExposedTrustedObject> relocated_object = process_entry(content);
-        if (!relocated_object.is_null()) {
-          DCHECK_EQ(handle, relocated_object->self_indirect_pointer_handle());
-          auto instance_type = relocated_object->map()->instance_type();
-          SharedFlag shared =
-              SharedFlag(HeapLayout::InAnySharedSpace(relocated_object));
-          auto tag = IndirectPointerTagFromInstanceType(instance_type, shared);
-          tpt->Set(handle, relocated_object.ptr(), tag);
-        }
-      });
-
-  TrustedPointerTable* const stpt =
-      &heap_->isolate()->shared_trusted_pointer_table();
-  stpt->IterateActiveEntriesIn(
-      heap_->isolate()->shared_trusted_pointer_space(),
-      [&](TrustedPointerHandle handle, Address content) {
-        Tagged<ExposedTrustedObject> relocated_object = process_entry(content);
-        if (!relocated_object.is_null()) {
-          DCHECK_EQ(handle, relocated_object->self_indirect_pointer_handle());
-          auto instance_type = relocated_object->map()->instance_type();
-          SharedFlag shared =
-              SharedFlag(HeapLayout::InAnySharedSpace(relocated_object));
-          auto tag = IndirectPointerTagFromInstanceType(instance_type, shared);
-          DCHECK(IsSharedTrustedPointerType(tag));
-          stpt->Set(handle, relocated_object.ptr(), tag);
-        }
-      });
-
-  CodePointerTable* const cpt = IsolateGroup::current()->code_pointer_table();
-  cpt->IterateActiveEntriesIn(
-      heap_->code_pointer_space(),
-      [&](CodePointerHandle handle, Address content) {
-        Tagged<ExposedTrustedObject> relocated_object = process_entry(content);
-        if (!relocated_object.is_null()) {
-          DCHECK_EQ(handle, relocated_object->self_indirect_pointer_handle());
-          cpt->SetCodeObject(handle, relocated_object.address());
-        }
-      });
+  const auto process_table = [process_entry](
+                                 TrustedPointerTable& table,
+                                 TrustedPointerTable::Space* space) {
+    table.IterateActiveEntriesIn(space, [&](TrustedPointerHandle handle,
+                                            Address content) {
+      Tagged<ExposedTrustedObject> relocated_object = process_entry(content);
+      if (relocated_object.is_null()) return;
+      DCHECK_EQ(handle, relocated_object->self_indirect_pointer_handle());
+      table.Update(handle, relocated_object.ptr());
+    });
+  };
+  process_table(heap_->isolate()->trusted_pointer_table(),
+                heap_->trusted_pointer_space());
+  process_table(heap_->isolate()->shared_trusted_pointer_table(),
+                heap_->isolate()->shared_trusted_pointer_space());
 #endif  // V8_ENABLE_SANDBOX
 
   JSDispatchTable& jdt = heap_->isolate()->js_dispatch_table();

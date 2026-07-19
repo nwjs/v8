@@ -19,9 +19,9 @@
 #include "include/v8-profiler.h"
 #include "src/api/api-inl.h"
 #include "src/base/macros.h"
+#include "src/heap/cppgc-internal/heap-object-header.h"
+#include "src/heap/cppgc-internal/object-allocator.h"
 #include "src/heap/cppgc-js/cpp-heap.h"
-#include "src/heap/cppgc/heap-object-header.h"
-#include "src/heap/cppgc/object-allocator.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/objects-inl.h"
 #include "src/profiler/heap-snapshot-generator.h"
@@ -1256,7 +1256,7 @@ TEST_F(UnifiedHeapSnapshotTest, CppHeapExternal) {
   v8::Global<v8::CppHeapExternal> cpp_heap_external(
       v8_isolate(),
       v8::CppHeapExternal::New<ExternalData>(
-          v8_isolate(), cpp_object, v8::CppHeapPointerTag::kDefaultTag));
+          v8_isolate(), cpp_object, v8::CppHeapPointerTag::kTagForTesting));
   USE(cpp_heap_external);
   const v8::HeapSnapshot* snapshot =
       TakeHeapSnapshot(cppgc::EmbedderStackState::kNoHeapPointers);
@@ -1394,7 +1394,7 @@ TEST_F(UnifiedHeapSnapshotTest, CppHeapExternalTracedReference) {
       v8::CppHeapExternal::New<ExternalData>(
           v8_isolate(),
           cppgc::MakeGarbageCollected<ExternalData>(allocation_handle()),
-          v8::CppHeapPointerTag::kDefaultTag));
+          v8::CppHeapPointerTag::kTagForTesting));
   const v8::HeapSnapshot* snapshot =
       TakeHeapSnapshot(cppgc::EmbedderStackState::kNoHeapPointers);
   EXPECT_TRUE(IsValidSnapshot(snapshot));

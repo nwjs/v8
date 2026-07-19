@@ -9,6 +9,8 @@
 // Include the non-inl header before the rest of the headers.
 
 #include "src/heap/heap-write-barrier-inl.h"
+#include "src/objects/bigint.h"       // For JSAny type checks.
+#include "src/objects/heap-number.h"  // For JSAny type checks.
 #include "src/objects/smi-inl.h"
 #include "src/objects/tagged-field-inl.h"
 

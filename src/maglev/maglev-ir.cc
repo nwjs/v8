@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 
+#include "src/api/api.h"
 #include "src/base/bounds.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
@@ -27,6 +28,7 @@
 #include "src/heap/local-heap.h"
 #include "src/heap/parked-scope.h"
 #include "src/interpreter/bytecode-flags-and-tokens.h"
+#include "src/maglev/maglev-node-type.h"
 #include "src/objects/descriptor-array.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/fixed-array.h"
@@ -223,6 +225,37 @@ std::ostream& operator<<(std::ostream& os, const StringEqualInputMode mode) {
 }
 
 bool Phi::is_loop_phi() const { return merge_state()->is_loop(); }
+
+namespace {
+template <typename UnwrapFunction>
+ValueNode* UnwrapSinglePhis(ValueNode* node, UnwrapFunction&& unwrap) {
+  ValueNode* prev = nullptr;
+  while (prev != node) {
+    prev = node;
+    node = unwrap(node);
+    if (Phi* phi = node->TryCast<Phi>()) {
+      // We skip resumable loop phis since their single input could actually be
+      // defined within the loop itself.
+      if (phi->input_count() == 1 && !phi->is_exception_phi() &&
+          !(phi->is_loop_phi() && phi->merge_state()->is_resumable_loop())) {
+        // This is a Phi with a single input ==> replacing with the input
+        // itself.
+        node = phi->input_node(0);
+      }
+    }
+  }
+  return node;
+}
+}  // namespace
+
+ValueNode* ValueNode::UnwrapIdentitiesAndPhis() {
+  return UnwrapSinglePhis(
+      this, [](ValueNode* node) { return node->UnwrapIdentities(); });
+}
+
+ValueNode* ValueNode::UnwrapForDeopt() {
+  return UnwrapSinglePhis(this, [](ValueNode* node) { return node->Unwrap(); });
+}
 
 bool Phi::is_unmerged_loop_phi() const {
   DCHECK(is_loop_phi());
@@ -555,6 +588,37 @@ void NodeBase::Print() const {
   std::cout << " : ";
   Print(std::cout);
   std::cout << std::endl;
+}
+
+namespace {
+template <typename NodeT>
+bool SameOptionsAndInputs(const NodeBase* a, const NodeBase* b) {
+  if constexpr (Node::participate_in_cse(NodeBase::opcode_of<NodeT>)) {
+    if (a->Cast<NodeT>()->options() != b->Cast<NodeT>()->options()) {
+      return false;
+    }
+    for (int i = 0; i < a->input_count(); ++i) {
+      if (a->input_node(i) != b->input_node(i)) return false;
+    }
+    return true;
+  } else {
+    return false;
+  }
+}
+}  // namespace
+
+bool NodeBase::IsStructurallyEqualTo(const NodeBase* other) const {
+  if (this == other) return true;
+  if (opcode() != other->opcode()) return false;
+  if (input_count() != other->input_count()) return false;
+  switch (opcode()) {
+#define V(Name)         \
+  case Opcode::k##Name: \
+    return SameOptionsAndInputs<Name>(this, other);
+    NODE_BASE_LIST(V)
+#undef V
+  }
+  UNREACHABLE();
 }
 
 void ValueNode::SetHint(compiler::InstructionOperand hint) {
@@ -1461,31 +1525,9 @@ void UnaryWithFeedbackNode<Derived, kOperation>::GenerateCode(
 }
 
 template <class Derived, Operation kOperation>
-void BinaryWithFeedbackNode<Derived,
-                            kOperation>::SetValueLocationConstraints() {
-  using D = BinaryOp_WithFeedbackDescriptor;
-  UseFixed(LeftInput(), D::GetRegisterParameter(D::kLeft));
-  UseFixed(RightInput(), D::GetRegisterParameter(D::kRight));
-  DefineAsFixed(this, kReturnRegister0);
-}
-
-template <class Derived, Operation kOperation>
-void BinaryWithFeedbackNode<Derived, kOperation>::GenerateCode(
-    MaglevAssembler* masm, const ProcessingState& state) {
-  __ CallBuiltin<BuiltinFor(kOperation)>(
-      masm->native_context().object(),  // context
-      LeftInput(),                      // left
-      RightInput(),                     // right
-      feedback().index(),               // feedback slot
-      feedback().vector                 // feedback vector
-  );
-  masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
-}
-
-template <class Derived, Operation kOperation>
 void BinaryWithEmbeddedFeedbackNode<Derived,
                                     kOperation>::SetValueLocationConstraints() {
-  using D = BinaryOp_WithFeedbackDescriptor;
+  using D = BinaryOp_WithEmbeddedFeedbackDescriptor;
   UseFixed(LeftInput(), D::GetRegisterParameter(D::kLeft));
   UseFixed(RightInput(), D::GetRegisterParameter(D::kRight));
   DefineAsFixed(this, kReturnRegister0);
@@ -1502,6 +1544,140 @@ void BinaryWithEmbeddedFeedbackNode<Derived, kOperation>::GenerateCode(
       feedback().bytecode_array_        // bytecode array
   );
   masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
+}
+
+namespace {
+// The BigInt*NoThrow builtins for these operations perform interrupt-checked
+// large-number arithmetic and can thus return the TerminationRequested
+// sentinel; the others can only signal BigIntTooBig (or never fail).
+constexpr bool BigIntBinaryOperationCanTerminate(Operation operation) {
+  switch (operation) {
+    case Operation::kMultiply:
+    case Operation::kDivide:
+    case Operation::kModulus:
+      return true;
+    default:
+      return false;
+  }
+}
+}  // namespace
+
+int BigIntBinaryOperation::MaxCallStackArgs() const {
+  // All BigInt*NoThrow builtins dispatched in GenerateCode have the same
+  // (BigInt, BigInt) signature and thus the same descriptor; Add is a
+  // representative.
+  using D = CallInterfaceDescriptorFor<Builtin::kBigIntAddNoThrow>::type;
+  return D::GetStackParameterCount();
+}
+void BigIntBinaryOperation::SetValueLocationConstraints() {
+  using D = CallInterfaceDescriptorFor<Builtin::kBigIntAddNoThrow>::type;
+  UseFixed(LeftInput(), D::GetRegisterParameter(0));
+  UseFixed(RightInput(), D::GetRegisterParameter(1));
+  DefineAsFixed(this, kReturnRegister0);
+}
+void BigIntBinaryOperation::GenerateCode(MaglevAssembler* masm,
+                                         const ProcessingState& state) {
+  // All these builtins share the same call interface descriptor, so we can
+  // select the target at runtime while pinning the inputs once.
+  switch (operation()) {
+#define CASE(Op, BuiltinName)                                                \
+  case Operation::k##Op:                                                     \
+    __ CallBuiltin<Builtin::k##BuiltinName>(masm->native_context().object(), \
+                                            LeftInput(), RightInput());      \
+    break;
+    CASE(Add, BigIntAddNoThrow)
+    CASE(Subtract, BigIntSubtractNoThrow)
+    CASE(Multiply, BigIntMultiplyNoThrow)
+    CASE(Divide, BigIntDivideNoThrow)
+    CASE(Modulus, BigIntModulusNoThrow)
+    CASE(BitwiseAnd, BigIntBitwiseAndNoThrow)
+    CASE(BitwiseOr, BigIntBitwiseOrNoThrow)
+    CASE(BitwiseXor, BigIntBitwiseXorNoThrow)
+    CASE(ShiftLeft, BigIntShiftLeftNoThrow)
+    CASE(ShiftRight, BigIntShiftRightNoThrow)
+#undef CASE
+    default:
+      UNREACHABLE();
+  }
+  // The NoThrow builtins return a Smi sentinel (rather than a BigInt) to signal
+  // an exceptional result: Smi 0 for BigIntTooBig or DivisionByZero, and Smi 1
+  // for TerminationRequested. In the Smi 0 case we deopt and let the
+  // interpreter recompute and raise the right exception.
+  Label* deopt = __ GetDeoptLabel(this, DeoptimizeReason::kBigIntTooBig);
+  if (BigIntBinaryOperationCanTerminate(operation())) {
+    Label done;
+    // Not a Smi: this is the BigInt result, nothing to do.
+    __ JumpIfNotSmi(kReturnRegister0, &done, Label::kNear);
+    // Smi 0 (BigIntTooBig / DivisionByZero): deopt and recompute.
+    __ CompareSmiAndJumpIf(kReturnRegister0, Smi::FromInt(1), kNotEqual, deopt);
+    // Smi 1 (TerminationRequested): the builtin already observed (and cleared)
+    // the terminate interrupt, so deopting would let the interpreter recompute
+    // to completion and swallow it. Re-raise the termination in this frame.
+    __ Move(kContextRegister, 0);
+    __ CallRuntime(Runtime::kTerminateExecution, 0);
+    __ DefineLazyDeoptPoint(lazy_deopt_info());
+    __ Abort(AbortReason::kUnexpectedReturnFromThrow);
+    __ bind(&done);
+  } else {
+    if (v8_flags.debug_code) {
+      Label not_smi;
+      __ JumpIfNotSmi(kReturnRegister0, &not_smi, Label::kNear);
+      // If this fails, update BigIntBinaryOperationCanTerminate.
+      __ CompareSmiAndAssert(kReturnRegister0, Smi::FromInt(1), kNotEqual,
+                             AbortReason::kUnexpectedBigIntTerminationSentinel);
+      __ bind(&not_smi);
+    }
+    __ JumpIfSmi(kReturnRegister0, deopt);
+  }
+}
+
+int BigIntCompare::MaxCallStackArgs() const {
+  // The BigInt comparison builtins share the same (BigInt, BigInt) descriptor;
+  // Equal is a representative.
+  using D = CallInterfaceDescriptorFor<Builtin::kBigIntEqual>::type;
+  return D::GetStackParameterCount();
+}
+void BigIntCompare::SetValueLocationConstraints() {
+  using D = CallInterfaceDescriptorFor<Builtin::kBigIntEqual>::type;
+  UseFixed(LeftInput(), D::GetRegisterParameter(0));
+  UseFixed(RightInput(), D::GetRegisterParameter(1));
+  DefineAsFixed(this, kReturnRegister0);
+}
+void BigIntCompare::GenerateCode(MaglevAssembler* masm,
+                                 const ProcessingState& state) {
+  // GreaterThan / GreaterThanOrEqual are lowered by the graph builder to
+  // LessThan / LessThanOrEqual with swapped operands.
+  switch (operation()) {
+    case Operation::kEqual:
+      __ CallBuiltin<Builtin::kBigIntEqual>(masm->native_context().object(),
+                                            LeftInput(), RightInput());
+      break;
+    case Operation::kLessThan:
+      __ CallBuiltin<Builtin::kBigIntLessThan>(masm->native_context().object(),
+                                               LeftInput(), RightInput());
+      break;
+    case Operation::kLessThanOrEqual:
+      __ CallBuiltin<Builtin::kBigIntLessThanOrEqual>(
+          masm->native_context().object(), LeftInput(), RightInput());
+      break;
+    default:
+      UNREACHABLE();
+  }
+}
+
+int BigIntNegate::MaxCallStackArgs() const {
+  using D = CallInterfaceDescriptorFor<Builtin::kBigIntUnaryMinus>::type;
+  return D::GetStackParameterCount();
+}
+void BigIntNegate::SetValueLocationConstraints() {
+  using D = CallInterfaceDescriptorFor<Builtin::kBigIntUnaryMinus>::type;
+  UseFixed(ValueInput(), D::GetRegisterParameter(0));
+  DefineAsFixed(this, kReturnRegister0);
+}
+void BigIntNegate::GenerateCode(MaglevAssembler* masm,
+                                const ProcessingState& state) {
+  __ CallBuiltin<Builtin::kBigIntUnaryMinus>(masm->native_context().object(),
+                                             ValueInput());
 }
 
 #define DEF_OPERATION(Name)                               \
@@ -5663,6 +5839,8 @@ void StringAt::GenerateCode(MaglevAssembler* masm,
       BuiltinStringPrototypeCharCodeOrCodePointAt::kCharCodeAt, save_registers,
       char_code, string, index, scratch, Register::no_reg(),
       &cached_one_byte_string);
+  // StringCharCodeOrCodePointAt guarantees writing a valid unsigned 16-bit
+  // code unit (uint16) into char_code, so extra masking is redundant.
   __ StringFromCharCode(save_registers, &cached_one_byte_string, result_string,
                         char_code, scratch,
                         MaglevAssembler::CharCodeMaskMode::kValueIsInRange);
@@ -5860,14 +6038,14 @@ void StringSubstring::GenerateCode(MaglevAssembler* masm,
 }
 
 void StringConcat::SetValueLocationConstraints() {
-  using D = StringAdd_CheckNoneDescriptor;
+  using D = StringAdd_NoMapCheckDescriptor;
   UseFixed(LeftInput(), D::GetRegisterParameter(D::kLeft));
   UseFixed(RightInput(), D::GetRegisterParameter(D::kRight));
   DefineAsFixed(this, kReturnRegister0);
 }
 void StringConcat::GenerateCode(MaglevAssembler* masm,
                                 const ProcessingState& state) {
-  __ CallBuiltin<Builtin::kStringAdd_CheckNone>(
+  __ CallBuiltin<Builtin::kStringAdd_NoMapCheck>(
       masm->native_context().object(),  // context
       LeftInput(),                      // left
       RightInput()                      // right
@@ -8324,6 +8502,36 @@ void BranchIfReferenceEqual::GenerateCode(MaglevAssembler* masm,
   __ Branch(kEqual, if_true(), if_false(), state.next_block());
 }
 
+void BranchIfTypedArrayBounds::SetValueLocationConstraints() {
+  UseRegister(IndexInput());
+  UseRegister(LengthInput());
+#ifdef V8_TARGET_ARCH_64_BIT
+  set_temporaries_needed(1);
+#endif
+}
+
+void BranchIfTypedArrayBounds::GenerateCode(MaglevAssembler* masm,
+                                            const ProcessingState& state) {
+  Register index = ToRegister(IndexInput());
+  Register length = ToRegister(LengthInput());
+
+#ifdef V8_TARGET_ARCH_64_BIT
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register index_ext = temps.Acquire();
+  __ SignExtend32To64Bits(index_ext, index);
+  __ CompareIntPtrAndJumpIf(index_ext, length, kUnsignedLessThan,
+                            if_true()->label());
+#else
+  __ CompareIntPtrAndJumpIf(index, length, kUnsignedLessThan,
+                            if_true()->label());
+#endif
+
+  auto* next_block = state.next_block();
+  if (if_false() != next_block) {
+    __ Jump(if_false()->label());
+  }
+}
+
 void BranchIfInt32Compare::SetValueLocationConstraints() {
   UseRegister(LeftInput());
   UseRegister(RightInput());
@@ -8787,8 +8995,8 @@ void LoadTaggedField::PrintParams(std::ostream& os) const {
   if (is_const()) {
     os << ", is_const";
   }
-  if (load_type() != LoadType::kUnknown) {
-    os << ", " << load_type();
+  if (type() != NodeType::kUnknown) {
+    os << ", " << type();
   }
   os << ")";
 }
@@ -9079,12 +9287,11 @@ std::optional<int32_t> NodeBase::TryGetInt32ConstantInput(int index) {
   return {};
 }
 
-VirtualObject::VirtualObject(uint64_t bitfield, uint32_t id,
-                             MaglevGraphBuilder* builder,
+VirtualObject::VirtualObject(uint64_t bitfield, uint32_t id, Zone* zone,
                              const vobj::ObjectLayout* object_layout,
                              compiler::OptionalMapRef map, uint32_t slot_count)
     : VirtualObject(bitfield, map, id, object_layout, slot_count,
-                    builder->zone()->AllocateArray<ValueNode*>(slot_count)) {
+                    zone->AllocateArray<ValueNode*>(slot_count)) {
   DCHECK_NOT_NULL(object_layout);
   int header_slot_count = object_layout->header_fields.length();
   int body_slot_count = slot_count - header_slot_count;

@@ -90,6 +90,12 @@ class RecomputePhiUseHintsProcessor {
     return ProcessResult::kContinue;
   }
 
+  template <typename Derived>
+  ProcessResult Process(AssumeTypeT<Derived>* node,
+                        const ProcessingState& state) {
+    return ProcessResult::kContinue;
+  }
+
   ProcessResult Process(NodeBase* node, const ProcessingState& state) {
     DCHECK(!node->Is<Phi>());
     if (ValueNode* value_node = node->TryCast<ValueNode>()) {
@@ -498,33 +504,101 @@ class DeadNodeSweepingProcessor {
 
   template <typename NodeT>
   ProcessResult Process(NodeT* node, const ProcessingState& state) {
-    if constexpr (IsValueNode(Node::opcode_of<NodeT>) &&
-                  (!NodeT::kProperties.is_required_when_unused() ||
-                   std::is_same_v<ArgumentsElements, NodeT>)) {
-      if (!node->is_used()) {
-        return ProcessResult::kRemove;
+    if constexpr (CanBeStoreToNonEscapedObject<NodeT>()) {
+      if (V8_UNLIKELY(v8_flags.trace_maglev_escape_analysis) &&
+          IsSweepableDeadNode(node)) {
+        InlinedAllocation* object =
+            node->input(0).node()->template Cast<InlinedAllocation>();
+        std::cout << "* Removing store node " << PrintNodeLabel(node)
+                  << " to allocation " << PrintNodeLabel(object) << std::endl;
       }
-      return ProcessResult::kContinue;
     }
+
+    if (IsSweepableDeadNode(node)) return ProcessResult::kRemove;
+
+    return ProcessResult::kContinue;
+  }
+
+  template <typename NodeT>
+  static bool IsSweepableDeadNode(NodeT* node) {
+    if (IsDead(node)) return true;
 
     if constexpr (CanBeStoreToNonEscapedObject<NodeT>()) {
       if (InlinedAllocation* object =
               node->input(0).node()->template TryCast<InlinedAllocation>()) {
-        if (!object->HasEscaped()) {
-          if (v8_flags.trace_maglev_escape_analysis) {
-            std::cout << "* Removing store node " << PrintNodeLabel(node)
-                      << " to allocation " << PrintNodeLabel(object)
-                      << std::endl;
-          }
-          return ProcessResult::kRemove;
-        }
+        if (!object->HasBeenAnalysed()) return false;
+        if (!object->HasEscaped()) return true;
+      }
+    }
+
+    return false;
+  }
+
+ private:
+  MaglevGraphLabeller* labeller_ = nullptr;
+};
+
+// Tracks which exception handlers are reachable by collecting catch blocks
+// from throwing nodes. Unreachable exception handlers (and their successors)
+// are aborted and marked dead.
+class ReachableExceptionHandlerTracker {
+ public:
+  explicit ReachableExceptionHandlerTracker(Graph* graph)
+      : graph_(graph), reachable_exception_handlers_(graph->zone()) {}
+
+  void PreProcessGraph(Graph* graph) {}
+  void PostProcessGraph(Graph* graph) {}
+  void PostProcessBasicBlock(BasicBlock* block) {}
+  void PostPhiProcessing() {}
+
+  void MarkReachable(BasicBlock* block) {
+    reachable_exception_handlers_.insert(block);
+  }
+
+  BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
+    // TODO(victorgomes): Support removing the unreachable blocks instead of
+    // just skipping it.
+    if (V8_UNLIKELY(block->IsUnreachable())) {
+      return AbortBlock(block);
+    }
+
+    if (block->is_exception_handler_block()) {
+      if (!IsReachable(block)) {
+        return AbortBlock(block);
+      }
+    }
+    return BlockProcessResult::kContinue;
+  }
+
+  template <typename NodeT>
+  ProcessResult Process(NodeT* node, const ProcessingState& state) {
+    if constexpr (NodeT::kProperties.can_throw()) {
+      if (node->exception_handler_info()->HasExceptionHandler() &&
+          !node->exception_handler_info()->ShouldLazyDeopt()) {
+        MarkReachable(node->exception_handler_info()->catch_block());
       }
     }
     return ProcessResult::kContinue;
   }
 
  private:
-  MaglevGraphLabeller* labeller_ = nullptr;
+  BlockProcessResult AbortBlock(BasicBlock* block) {
+    ControlNode* control = block->reset_control_node();
+    block->RemovePredecessorFollowing(control);
+    control->OverwriteWith<Abort>()->set_reason(AbortReason::kUnreachable);
+    block->set_deferred(true);
+    block->set_control_node(control);
+    block->mark_dead();
+    graph_->set_may_have_unreachable_blocks();
+    return BlockProcessResult::kSkip;
+  }
+
+  bool IsReachable(BasicBlock* block) const {
+    return reachable_exception_handlers_.contains(block);
+  }
+
+  Graph* graph_;
+  ZoneAbslFlatHashSet<BasicBlock*> reachable_exception_handlers_;
 };
 
 }  // namespace v8::internal::maglev

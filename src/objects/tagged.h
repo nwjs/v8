@@ -182,21 +182,6 @@ inline Tagged<StrongOf<T>> MakeStrong(Tagged<T> value);
 using StrongTaggedBase = TaggedImpl<HeapObjectReferenceType::STRONG, Address>;
 using WeakTaggedBase = TaggedImpl<HeapObjectReferenceType::WEAK, Address>;
 
-// Forward declarations for is_subtype.
-class Struct;
-class FixedArrayBase;
-class FixedArray;
-class FixedDoubleArray;
-class ByteArray;
-class NameDictionary;
-class NumberDictionary;
-class OrderedHashMap;
-class OrderedHashSet;
-class OrderedNameDictionary;
-class ScriptContextTable;
-class ArrayList;
-class SloppyArgumentsElements;
-
 namespace detail {
 template <typename Derived, typename Base>
 consteval bool is_subtype_helper();
@@ -234,10 +219,30 @@ struct normalize_type<FieldType> {
   using type = Union<Smi, Map>;
 };
 
+template <typename DerivedUnion, typename Base>
+struct are_all_subtype_of;
+
+template <typename... Ts, typename Base>
+struct are_all_subtype_of<Union<Ts...>, Base> {
+  static constexpr bool value = (is_subtype_helper<Ts, Base>() && ...);
+};
+
+template <typename Derived, typename BaseUnion>
+struct is_subtype_of_any;
+
+template <typename Derived, typename... Ts>
+struct is_subtype_of_any<Derived, Union<Ts...>> {
+  static constexpr bool value = v8::base::has_type_v<Derived, Ts...> ||
+                                (is_subtype_helper<Derived, Ts>() || ...);
+};
+
 template <typename D, typename B>
 consteval bool is_subtype_helper() {
   using std::is_base_of_v;
   using std::is_same_v;
+
+  // Bailout for identical types before normalization.
+  if constexpr (is_same_v<D, B>) return true;
 
   // Normalize Union-like types and layout types to a canonical representation.
   using Derived = typename normalize_type<D>::type;
@@ -258,15 +263,10 @@ consteval bool is_subtype_helper() {
     return true;
   } else if constexpr (is_union_v<Derived>) {
     // If Derived is a union, ALL of its members must be a subtype of Base.
-    // Unpack it by passing it to a templated lambda.
-    return []<typename... Ts>(std::type_identity<Union<Ts...>>) consteval {
-      return (... && is_subtype_helper<Ts, Base>());
-    }(std::type_identity<Derived>{});
+    return are_all_subtype_of<Derived, Base>::value;
   } else if constexpr (is_union_v<Base>) {
     // If Base is a union, Derived must be a subtype of AT LEAST ONE member.
-    return []<typename... Ts>(std::type_identity<Union<Ts...>>) consteval {
-      return (... || is_subtype_helper<Derived, Ts>());
-    }(std::type_identity<Base>{});
+    return is_subtype_of_any<Derived, Base>::value;
   } else if constexpr (is_same_v<Derived, Smi> || is_same_v<Base, Smi> ||
                        is_same_v<Derived, TaggedIndex> ||
                        is_same_v<Base, TaggedIndex>) {
@@ -290,15 +290,6 @@ consteval bool is_subtype_helper() {
     // Weak<T> cannot be a subtype of a non-weak Base (unless
     // matched exactly earlier by a union)
     return false;
-  } else if constexpr (is_same_v<Base, FixedArrayBase>) {
-    // FixedArrayBase Hierarchy Collapse
-    return is_same_v<D, FixedArray> || is_same_v<D, FixedDoubleArray> ||
-           is_same_v<D, ByteArray> || is_same_v<D, NameDictionary> ||
-           is_same_v<D, NumberDictionary> || is_same_v<D, GlobalDictionary> ||
-           is_same_v<D, OrderedHashMap> || is_same_v<D, OrderedHashSet> ||
-           is_same_v<D, OrderedNameDictionary> ||
-           is_same_v<D, ScriptContextTable> || is_same_v<D, ArrayList> ||
-           is_same_v<D, SloppyArgumentsElements>;
   } else {
     // Fallback to base_of.
     return is_base_of_v<Base, Derived>;
@@ -381,7 +372,7 @@ struct BaseForTagged<FieldType> {
 // Specialization for Object, where it's unknown whether this is a Smi or a
 // HeapObject.
 template <>
-class Tagged<Object> : public StrongTaggedBase {
+class V8_GSL_POINTER Tagged<Object> : public StrongTaggedBase {
  public:
   // Allow Tagged<Object> to be created from any address.
   V8_INLINE constexpr explicit Tagged(Address o) : StrongTaggedBase(o) {}
@@ -411,7 +402,7 @@ class Tagged<Object> : public StrongTaggedBase {
 // Specialization for Smi disallowing any implicit creation or access via ->,
 // but offering instead a cast from Object and an int32_t value() method.
 template <>
-class Tagged<Smi> : public StrongTaggedBase {
+class V8_GSL_POINTER Tagged<Smi> : public StrongTaggedBase {
  public:
   V8_INLINE constexpr Tagged() = default;
   V8_INLINE constexpr explicit Tagged(Address ptr) : StrongTaggedBase(ptr) {}
@@ -430,7 +421,7 @@ class Tagged<Smi> : public StrongTaggedBase {
 // via ->, but offering instead a cast from Object and an intptr_t value()
 // method.
 template <>
-class Tagged<TaggedIndex> : public StrongTaggedBase {
+class V8_GSL_POINTER Tagged<TaggedIndex> : public StrongTaggedBase {
  public:
   V8_INLINE constexpr Tagged() = default;
   V8_INLINE constexpr explicit Tagged(Address ptr) : StrongTaggedBase(ptr) {}
@@ -464,7 +455,7 @@ class Tagged<TaggedIndex> : public StrongTaggedBase {
 // Specialization for HeapObject, to group together functions shared between all
 // HeapObjects
 template <>
-class Tagged<HeapObject> : public StrongTaggedBase {
+class V8_GSL_POINTER Tagged<HeapObject> : public StrongTaggedBase {
   using Base = StrongTaggedBase;
 
  public:
@@ -544,7 +535,7 @@ static_assert(Tagged<HeapObject>().is_null());
 // Specialization for Weak<HeapObject>, to group together functions shared
 // between all HeapObjects
 template <>
-class Tagged<Weak<HeapObject>> : public WeakTaggedBase {
+class V8_GSL_POINTER Tagged<Weak<HeapObject>> : public WeakTaggedBase {
   using Base = WeakTaggedBase;
 
  public:
@@ -604,7 +595,8 @@ class Tagged<Weak<HeapObject>> : public WeakTaggedBase {
 // Generic Tagged<T> for Unions. This doesn't allow direct access to the object,
 // aside from casting.
 template <typename... Ts>
-class Tagged<Union<Ts...>> : public detail::BaseForTagged<Union<Ts...>>::type {
+class V8_GSL_POINTER Tagged<Union<Ts...>>
+    : public detail::BaseForTagged<Union<Ts...>>::type {
   using This = Union<Ts...>;
   using Base = typename detail::BaseForTagged<This>::type;
 
@@ -693,7 +685,7 @@ concept is_tagged_convertible =
 // separate Tagged<T> specialaizations for T==Smi and T==Object, so we know that
 // all other Tagged<T> are definitely pointers and not Smis.
 template <typename T>
-class Tagged : public detail::BaseForTagged<T>::type {
+class V8_GSL_POINTER Tagged : public detail::BaseForTagged<T>::type {
   using Base = typename detail::BaseForTagged<T>::type;
 
  public:
@@ -756,7 +748,7 @@ class Tagged : public detail::BaseForTagged<T>::type {
 // Tagged<MaybeWeak<T>>, where subtyping rules mean that this works for
 // aribitrary T.
 template <>
-class Tagged<ClearedWeakValue> : public WeakTaggedBase {
+class V8_GSL_POINTER Tagged<ClearedWeakValue> : public WeakTaggedBase {
  public:
   V8_INLINE constexpr explicit Tagged(Address ptr) : WeakTaggedBase(ptr) {}
 };
@@ -764,7 +756,8 @@ class Tagged<ClearedWeakValue> : public WeakTaggedBase {
 // Specialized Tagged<T> for weak references to T, which are known to be
 // subclasses of HeapObject (Smis can't be weak).
 template <typename T>
-class Tagged<Weak<T>> : public detail::BaseForTagged<Weak<T>>::type {
+class V8_GSL_POINTER Tagged<Weak<T>>
+    : public detail::BaseForTagged<Weak<T>>::type {
   using Base = typename detail::BaseForTagged<Weak<T>>::type;
 
  public:

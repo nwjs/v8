@@ -852,7 +852,9 @@ TNode<UintPtrT> RegExpBuiltinsAssembler::RegExpExecInternal(
         TrustedCast<IrRegExpData>(data, "type checked above");
 
 #ifdef V8_ENABLE_SANDBOX
-    TNode<Code> code = ResolveCodePointerHandle(var_code.value());
+    TNode<Code> code = TrustedCast<Code>(
+        ResolveIndirectPointerHandle(var_code.value(), kCodeIndirectPointerTag),
+        "from trusted table");
 #else
     TNode<Code> code = TrustedCast<Code>(var_code.value(), "no sandbox");
 #endif
@@ -917,7 +919,7 @@ TNode<UintPtrT> RegExpBuiltinsAssembler::RegExpExecInternal(
     static_assert(
         Internals::IsValidSmi(Isolate::kJSRegexpStaticOffsetsVectorSize));
     TNode<Smi> result_as_smi = CAST(CallRuntime(
-        Runtime::kRegExpExperimentalOneshotExec, context, regexp, string,
+        Runtime::kRegExpExperimentalOneshotExec, context, data, string,
         last_index, SmiFromInt32(result_offsets_vector_length)));
     var_result = UncheckedCast<UintPtrT>(SmiUntag(result_as_smi));
 #ifdef DEBUG
@@ -937,7 +939,7 @@ TNode<UintPtrT> RegExpBuiltinsAssembler::RegExpExecInternal(
     static_assert(
         Internals::IsValidSmi(Isolate::kJSRegexpStaticOffsetsVectorSize));
     TNode<Smi> result_as_smi = CAST(
-        CallRuntime(Runtime::kRegExpExec, context, regexp, string, last_index,
+        CallRuntime(Runtime::kRegExpExec, context, data, string, last_index,
                     SmiFromInt32(result_offsets_vector_length)));
     var_result = UncheckedCast<UintPtrT>(SmiUntag(result_as_smi));
 #ifdef DEBUG
@@ -2178,7 +2180,7 @@ TNode<String> RegExpBuiltinsAssembler::AppendStringSlice(
   TNode<String> slice = CAST(CallBuiltin(Builtin::kSubString, context,
                                          from_string, slice_start, slice_end));
   return CAST(
-      CallBuiltin(Builtin::kStringAdd_CheckNone, context, to_string, slice));
+      CallBuiltin(Builtin::kStringAdd_NoMapCheck, context, to_string, slice));
 }
 
 TNode<String> RegExpBuiltinsAssembler::RegExpReplaceGlobalSimpleString(
@@ -2216,7 +2218,7 @@ TNode<String> RegExpBuiltinsAssembler::RegExpReplaceGlobalSimpleString(
           Label next(this);
           GotoIf(SmiEqual(replace_string_length, SmiConstant(0)), &next);
 
-          var_result = CAST(CallBuiltin(Builtin::kStringAdd_CheckNone, context,
+          var_result = CAST(CallBuiltin(Builtin::kStringAdd_NoMapCheck, context,
                                         var_result.value(), replace_string));
           Goto(&next);
 

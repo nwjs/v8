@@ -6,6 +6,7 @@
 
 #include <stdlib.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cinttypes>
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -26,13 +28,11 @@
 #include "src/ast/ast-value-factory.h"
 #include "src/ast/scopes.h"
 #include "src/base/fpu.h"
-#include "src/base/hashmap.h"
 #include "src/base/iterator.h"
 #include "src/base/logging.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/wrappers.h"
-#include "src/base/sys-info.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/baseline/baseline-batch-compiler.h"
 #include "src/bigint/bigint.h"
@@ -41,7 +41,6 @@
 #include "src/builtins/constants-table-builder.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/compilation-cache.h"
-#include "src/codegen/flush-instruction-cache.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/common/ptr-compr-inl.h"
@@ -56,7 +55,6 @@
 #include "src/diagnostics/basic-block-profiler.h"
 #include "src/diagnostics/compilation-statistics.h"
 #include "src/execution/frames-inl.h"
-#include "src/execution/frames.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/local-isolate.h"
 #include "src/execution/messages.h"
@@ -72,8 +70,6 @@
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-verifier.h"
 #include "src/heap/local-heap-inl.h"
-#include "src/heap/local-heap.h"
-#include "src/heap/parked-scope.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/safepoint.h"
 #include "src/ic/stub-cache.h"
@@ -89,26 +85,24 @@
 #include "src/logging/metrics.h"
 #include "src/logging/runtime-call-stats-scope.h"
 #include "src/numbers/hash-seed-inl.h"
+#include "src/objects/abstract-code-inl.h"
 #include "src/objects/backing-store.h"
 #include "src/objects/call-site-info-inl.h"
-#include "src/objects/call-site-info.h"
-#include "src/objects/elements.h"
 #include "src/objects/feedback-vector.h"
-#include "src/objects/field-type.h"
 #include "src/objects/hash-table-inl.h"
+#include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-function.h"
 #include "src/objects/js-generator-inl.h"
-#include "src/objects/js-struct-inl.h"
+#include "src/objects/js-struct.h"
 #include "src/objects/js-weak-refs-inl.h"
 #include "src/objects/managed-inl.h"
 #include "src/objects/module-inl.h"
 #include "src/objects/objects.h"
 #include "src/objects/promise-inl.h"
 #include "src/objects/property-descriptor.h"
-#include "src/objects/prototype.h"
 #include "src/objects/slots.h"
 #include "src/objects/smi.h"
 #include "src/objects/source-text-module-inl.h"
@@ -682,6 +676,8 @@ void Isolate::Iterate(RootVisitor* v, ThreadLocalTop* thread) {
                       FullObjectSlot(&thread->pending_message_));
   v->VisitRootPointer(Root::kStackRoots, nullptr,
                       FullObjectSlot(&thread->context_));
+  v->VisitRootPointer(Root::kStackRoots, nullptr,
+                      FullObjectSlot(&thread->last_entered_context_));
 
   for (v8::TryCatch* block = thread->try_catch_handler_; block != nullptr;
        block = block->next_) {
@@ -1080,7 +1076,7 @@ class CallSiteBuilder {
     if (summary.code()->kind() != wasm::WasmCode::kWasmFunction) return;
     DirectHandle<WasmInstanceObject> instance = summary.wasm_instance();
     int flags = CallSiteInfo::kIsWasm;
-    if (wasm::is_asmjs_module(instance->module())) {
+    if (wasm::is_asmjs_module(summary.wasm_trusted_instance_data()->module())) {
       flags |= CallSiteInfo::kIsAsmJsWasm;
       if (summary.at_to_number_conversion()) {
         flags |= CallSiteInfo::kIsAsmJsAtNumberConversion;
@@ -1098,7 +1094,7 @@ class CallSiteBuilder {
       FrameSummary::WasmInterpretedFrameSummary const& summary) {
     Handle<WasmInstanceObject> instance = summary.wasm_instance();
     int flags = CallSiteInfo::kIsWasm | CallSiteInfo::kIsWasmInterpretedFrame;
-    DCHECK(!wasm::is_asmjs_module(instance->module()));
+    DCHECK(!wasm::is_asmjs_module(summary.instance_data()->module()));
     // We don't have any code object in the interpreter, so we pass 'undefined'.
     auto code = isolate_->factory()->undefined_value();
     AppendFrame(instance,
@@ -1383,9 +1379,12 @@ void CaptureAsyncStackTrace(Isolate* isolate, DirectHandle<JSPromise> promise,
       DirectHandle<JSFunction> function(
           Cast<JSFunction>(reaction->fulfill_handler()), isolate);
       DirectHandle<Context> context(function->context(), isolate);
-      promise = direct_handle(
-          Cast<JSPromise>(context->GetNoCell(PromiseBuiltins::kPromiseSlot)),
-          isolate);
+      Tagged<Object> promise_or_undefined =
+          context->GetNoCell(PromiseBuiltins::kPromiseIfNotResolvedSlot);
+      if (!TryCast(direct_handle(promise_or_undefined, isolate), &promise)) {
+        DCHECK(IsUndefined(promise_or_undefined));
+        return;
+      }
     } else {
       // We have some generic promise chain here, so try to
       // continue with the chained promise on the reaction
@@ -1990,8 +1989,7 @@ class CurrentScriptIdStackVisitor {
 class CurrentScriptIdsAndContextsStackVisitor {
  public:
   CurrentScriptIdsAndContextsStackVisitor(
-      Isolate* isolate,
-      v8::MemorySpan<StackTrace::ScriptIdAndContext> frame_data)
+      Isolate* isolate, std::span<StackTrace::ScriptIdAndContext> frame_data)
       : isolate_(isolate), frame_data_(frame_data) {
     DCHECK_LT(0, frame_data.size());
   }
@@ -2033,14 +2031,14 @@ class CurrentScriptIdsAndContextsStackVisitor {
   }
 
   Isolate* const isolate_;
-  v8::MemorySpan<StackTrace::ScriptIdAndContext> frame_data_;
+  std::span<StackTrace::ScriptIdAndContext> frame_data_;
   size_t cur_frame_ = 0;
 };
 
 class CurrentScriptDataStackVisitor {
  public:
-  CurrentScriptDataStackVisitor(
-      Isolate* isolate, v8::MemorySpan<StackTrace::ScriptData> frame_data)
+  CurrentScriptDataStackVisitor(Isolate* isolate,
+                                std::span<StackTrace::ScriptData> frame_data)
       : isolate_(isolate), frame_data_(frame_data) {
     DCHECK_LT(0, frame_data.size());
   }
@@ -2083,7 +2081,7 @@ class CurrentScriptDataStackVisitor {
   }
 
   Isolate* const isolate_;
-  v8::MemorySpan<StackTrace::ScriptData> frame_data_;
+  std::span<StackTrace::ScriptData> frame_data_;
   size_t cur_frame_ = 0;
 };
 
@@ -2124,7 +2122,7 @@ int Isolate::CurrentScriptId() {
 }
 
 size_t Isolate::CurrentScriptIdsAndContexts(
-    v8::MemorySpan<StackTrace::ScriptIdAndContext> frame_data) {
+    std::span<StackTrace::ScriptIdAndContext> frame_data) {
   if (frame_data.size() == 0) {
     return 0;
   }
@@ -2136,7 +2134,7 @@ size_t Isolate::CurrentScriptIdsAndContexts(
 }
 
 size_t Isolate::CurrentScriptData(
-    v8::MemorySpan<StackTrace::ScriptData> frame_data) {
+    std::span<StackTrace::ScriptData> frame_data) {
   if (frame_data.size() == 0) return 0;
   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
               perfetto::StaticString(__func__));
@@ -3344,10 +3342,16 @@ class StackFrameSummaryIterator {
 
  private:
   void InitSummaries() {
-    if (!done() && frame()->is_javascript()) {
+    while (!done() && frame()->is_javascript()) {
       summaries_ = JavaScriptFrame::cast(frame())->Summarize();
+      if (summaries_.size() == 0) {
+        // We may have encountered a Builtin::kWasmMethodWrapper. Skip it.
+        stack_iterator_.Advance();
+        continue;
+      }
       DCHECK_GT(summaries_.size(), 0);
       index_ = summaries_.size() - 1;
+      break;
     }
   }
   StackFrameIterator stack_iterator_;
@@ -4312,7 +4316,7 @@ bool Isolate::IsWasmCustomDescriptorsEnabled(
     v8::Local<v8::Context> api_context = v8::Utils::ToLocal(context);
     if (callback(api_context)) return true;
   }
-  return v8_flags.experimental_wasm_custom_descriptors;
+  return v8_flags.wasm_custom_descriptors;
 #else
   return false;
 #endif
@@ -4471,6 +4475,9 @@ void Isolate::AddSharedWasmMemory(
     DirectHandle<WasmMemoryObject> memory_object) {
   DirectHandle<WeakArrayList> shared_wasm_memories =
       factory()->shared_wasm_memories();
+  // Avoid adding the same memory object multiple times.
+  if (shared_wasm_memories->Contains(MakeWeak(*memory_object))) return;
+
   shared_wasm_memories = WeakArrayList::Append(
       this, shared_wasm_memories, MaybeObjectDirectHandle::Weak(memory_object));
   heap()->set_shared_wasm_memories(*shared_wasm_memories);
@@ -4793,8 +4800,6 @@ Isolate::Isolate(IsolateGroup* isolate_group)
     i::trap_handler::SetLandingPad(landing_pad);
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
-
-  MicrotaskQueue::SetUpDefaultMicrotaskQueue(this);
 }
 
 void Isolate::CheckIsolateLayout() {
@@ -4857,6 +4862,9 @@ void Isolate::CheckIsolateLayout() {
   static_assert(
       static_cast<int>(OFFSET_OF(Isolate, isolate_data_.handle_scope_data_)) ==
       Internals::kIsolateHandleScopeDataOffset);
+  static_assert(static_cast<int>(OFFSET_OF(
+                    Isolate, isolate_data_.handle_scope_implementer_)) ==
+                Internals::kIsolateHandleScopeImplementerOffset);
   static_assert(
       static_cast<int>(OFFSET_OF(Isolate, isolate_data_.embedder_data_)) ==
       Internals::kIsolateEmbedderDataOffset);
@@ -4881,10 +4889,6 @@ void Isolate::CheckIsolateLayout() {
   static_assert(static_cast<int>(OFFSET_OF(
                     Isolate, isolate_data_.shared_trusted_pointer_table_)) ==
                 Internals::kIsolateSharedTrustedPointerTableAddressOffset);
-
-  static_assert(static_cast<int>(OFFSET_OF(
-                    Isolate, isolate_data_.code_pointer_table_base_address_)) ==
-                Internals::kIsolateCodePointerTableBaseAddressOffset);
 #endif
 
   static_assert(
@@ -4983,6 +4987,19 @@ void Isolate::PrintAndClearRegExpSubjectStrings() {
   trace_regexp_exec_subject_hash_to_index_.clear();
 }
 #endif  // V8_ENABLE_REGEXP_DIAGNOSTICS
+
+#ifdef V8_CPPGC_MICROTASK_QUEUE
+void Isolate::CompactMicrotaskQueues() {
+  microtask_queues_.erase(
+      std::remove_if(microtask_queues_.begin(), microtask_queues_.end(),
+                     [](const auto& weak_ptr) { return !weak_ptr; }),
+      microtask_queues_.end());
+}
+void Isolate::RegisterMicrotaskQueue(MicrotaskQueue* queue) {
+  CompactMicrotaskQueues();
+  microtask_queues_.push_back(queue);
+}
+#endif  // V8_CPPGC_MICROTASK_QUEUE
 
 void Isolate::Deinit() {
   TRACE_ISOLATE(deinit);
@@ -5226,6 +5243,10 @@ void Isolate::Deinit() {
 
 #ifdef V8_ENABLE_SANDBOX
   trusted_pointer_table().TearDownSpace(heap()->trusted_pointer_space());
+  trusted_pointer_table().DetachSpaceFromReadOnlySegments(
+      heap()->read_only_trusted_pointer_space());
+  trusted_pointer_table().TearDownSpace(
+      heap()->read_only_trusted_pointer_space());
   trusted_pointer_table().TearDown();
   if (owns_shareable_data()) {
     shared_trusted_pointer_table().TearDownSpace(
@@ -5236,9 +5257,6 @@ void Isolate::Deinit() {
     delete shared_trusted_pointer_space_;
     shared_trusted_pointer_space_ = nullptr;
   }
-
-  IsolateGroup::current()->code_pointer_table()->TearDownSpace(
-      heap()->code_pointer_space());
 #endif  // V8_ENABLE_SANDBOX
   js_dispatch_table().TearDownSpace(heap()->js_dispatch_table_space());
 #if V8_STATIC_DISPATCH_HANDLES_BOOL
@@ -5320,9 +5338,6 @@ Isolate::~Isolate() {
   delete v8_file_logger_;
   v8_file_logger_ = nullptr;
 
-  delete handle_scope_implementer_;
-  handle_scope_implementer_ = nullptr;
-
   delete code_tracer();
   set_code_tracer(nullptr);
 
@@ -5365,11 +5380,20 @@ Isolate::~Isolate() {
 
   DCHECK_NULL(builtins_effects_analyzer_);
 
+#ifdef V8_CPPGC_MICROTASK_QUEUE
+  // Assert that |default_microtask_queue_| is the last MicrotaskQueue instance.
+  CompactMicrotaskQueues();
+  if (DEBUG_BOOL && default_microtask_queue_) {
+    DCHECK_EQ(microtask_queues_.size(), 1);
+  }
+  default_microtask_queue_ = nullptr;
+#else
   // Assert that |default_microtask_queue_| is the last MicrotaskQueue instance.
   DCHECK_IMPLIES(default_microtask_queue_,
                  default_microtask_queue_ == default_microtask_queue_->next());
   delete default_microtask_queue_;
   default_microtask_queue_ = nullptr;
+#endif  // V8_CPPGC_MICROTASK_QUEUE
 
   // isolate_group_ released in caller, to ensure that all member destructors
   // run before potentially unmapping the isolate's VirtualMemoryArea.
@@ -6121,7 +6145,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   global_handles_ = new GlobalHandles(this);
   eternal_handles_ = new EternalHandles();
   bootstrapper_ = new Bootstrapper(this);
-  handle_scope_implementer_ = new HandleScopeImplementer(this);
   load_stub_cache_ = new StubCache(this);
   store_stub_cache_ = new StubCache(this);
   define_own_stub_cache_ = new StubCache(this);
@@ -6209,6 +6232,7 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   // Set up the object heap.
   DCHECK(!heap_.HasBeenSetUp());
   heap_.SetUp(main_thread_local_heap());
+  MicrotaskQueue::SetUpDefaultMicrotaskQueue(this);
   InitializeIsShortBuiltinCallsEnabled();
   if (!create_heap_objects) {
     // Must be done before deserializing RO space, since RO space may contain
@@ -6237,6 +6261,10 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
 
 #ifdef V8_ENABLE_SANDBOX
     trusted_pointer_table().Initialize();
+    trusted_pointer_table().InitializeSpace(
+        heap()->read_only_trusted_pointer_space());
+    trusted_pointer_table().AttachSpaceToReadOnlySegments(
+        heap()->read_only_trusted_pointer_space());
     trusted_pointer_table().InitializeSpace(heap()->trusted_pointer_space());
 #endif  // V8_ENABLE_SANDBOX
   }
@@ -6323,8 +6351,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
 #endif  // V8_COMPRESS_POINTERS
 
 #ifdef V8_ENABLE_SANDBOX
-  IsolateGroup::current()->code_pointer_table()->InitializeSpace(
-      heap()->code_pointer_space());
   if (owns_shareable_data()) {
     isolate_data_.shared_trusted_pointer_table_ = new TrustedPointerTable();
     shared_trusted_pointer_space_ = new TrustedPointerTable::Space();
@@ -6378,6 +6404,8 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
     ETWJITInterface::AddIsolate(this);
   }
 #endif  // defined(V8_ENABLE_ETW_STACK_WALKING)
+
+  isolate_data_.cpu_features_ = CpuFeatures::SupportedFeatures();
 
   if (setup_delegate_ == nullptr) {
     setup_delegate_ = new SetupIsolateDelegate;

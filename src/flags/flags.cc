@@ -334,8 +334,10 @@ consteval std::array<int, kNumFlags> GetSortedFlagIndices() {
   constexpr const char* kFlagNames[] = {
 #define FLAG_MODE_APPLY_NAME(nam) #nam,
 #define FLAG_ALIAS(ftype, ctype, alias, nam) #alias,
+#define FLAG_ALIAS_WITH_COMMENT(ftype, ctype, alias, nam, cmt) #alias,
 #include "src/flags/flag-definitions.h"  // NOLINT(build/include)
 #undef FLAG_ALIAS
+#undef FLAG_ALIAS_WITH_COMMENT
 #undef FLAG_MODE_APPLY_NAME
   };
 
@@ -603,6 +605,7 @@ uint32_t ComputeFlagListHash() {
 static void SplitArgument(const char* arg, char* buffer, int buffer_size,
                           const char** name, const char** value,
                           bool* negated) {
+  const char* orig_arg = arg;
   *name = nullptr;
   *value = nullptr;
   *negated = false;
@@ -632,7 +635,7 @@ static void SplitArgument(const char* arg, char* buffer, int buffer_size,
     // Make a copy so we can NUL-terminate the flag name.
     size_t n = arg - *name;
     if (n >= static_cast<size_t>(buffer_size)) {
-      FlagError{} << "Flag name is too long: " << FlagName(*name);
+      FlagError{} << "Flag name is too long: " << orig_arg;
     }
     MemCopy(buffer, *name, n);
     buffer[n] = '\0';
@@ -904,9 +907,7 @@ void FlagList::ReleaseDynamicAllocations() {
 
 // static
 void FlagList::PrintHelp() {
-  CpuFeatures::Probe(false);
-  CpuFeatures::PrintTarget();
-  CpuFeatures::PrintFeatures();
+  CpuFeatures::PrintInformation();
 
   StdoutStream os;
   os << "The following syntax for options is accepted (both '-' and '--' are "
@@ -1023,11 +1024,11 @@ void FlagList::PrintFeatureFlagsJSON() {
     std::vector<const char*> shipping_flags;
 
 #define ADD_WASM_INPROGRESS_FLAG(name, desc, val) \
-  inprogress_flags.push_back("experimental_wasm_" #name);
+  inprogress_flags.push_back("wasm_" #name);
 #define ADD_WASM_STAGED_FLAG(name, desc, val) \
-  staged_flags.push_back("experimental_wasm_" #name);
+  staged_flags.push_back("wasm_" #name);
 #define ADD_WASM_SHIPPED_FLAG(name, desc, val) \
-  shipping_flags.push_back("experimental_wasm_" #name);
+  shipping_flags.push_back("wasm_" #name);
 
     FOREACH_WASM_EXPERIMENTAL_FEATURE_FLAG(ADD_WASM_INPROGRESS_FLAG)
     FOREACH_WASM_STAGING_FEATURE_FLAG(ADD_WASM_STAGED_FLAG)
@@ -1273,7 +1274,7 @@ void FlagList::ResolveContradictionsWhenFuzzing() {
       CONTRADICTION(predictable_gc_schedule, stress_compaction),
       CONTRADICTION(single_threaded, stress_concurrent_inlining_attach_code),
 #if V8_ENABLE_WEBASSEMBLY
-      CONTRADICTION(single_threaded, experimental_wasm_pgo_to_file),
+      CONTRADICTION(single_threaded, wasm_pgo_to_file),
       CONTRADICTION(single_threaded, wasm_generate_compilation_hints),
       CONTRADICTION(single_threaded, trace_wasm_generate_compilation_hints),
 #endif  // V8_ENABLE_WEBASSEMBLY

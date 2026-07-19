@@ -14,12 +14,13 @@
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
 #include "src/objects/arguments-inl.h"
+#include "src/objects/dictionary-inl.h"
 #include "src/objects/elements.h"
 #include "src/objects/field-type.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/heap-number-inl.h"
-#include "src/objects/js-shared-array-inl.h"
-#include "src/objects/js-struct-inl.h"
+#include "src/objects/js-shared-array.h"
+#include "src/objects/js-struct.h"
 #include "src/objects/map-updater.h"
 #include "src/objects/ordered-hash-table.h"
 #include "src/objects/property-details.h"
@@ -130,9 +131,11 @@ void LookupIterator::NextInternal(Tagged<Map> orig_map,
       // know which question to ask, we assume the lookup succeeds.
       switch (state_) {
         // https://webidl.spec.whatwg.org/#dfn-named-property-visibility says a
-        // second interceptor on the prototype chain is invisible.
+        // second named interceptor on the prototype chain is invisible. This
+        // only applies to named interceptors, not indexed ones.
         case INTERCEPTOR:
-          continue;
+          if (!is_element) continue;
+          break;
         case ACCESS_CHECK: {
           // If an access check fails, we assume the lookup succeeds.
           if (HasAccess()) {
@@ -769,8 +772,8 @@ Maybe<bool> LookupIterator::ApplyTransitionToDataProperty(
   }
 
   if (!IsJSProxy(*receiver)) {
-    static_assert(std::is_same_v<JSTransitionableReceiver::Without<JSProxy>,
-                                 Union<JSObject>>);
+    static_assert(
+        std::is_same_v<JSTransitionableReceiver::Without<JSProxy>, JSObject>);
     JSObject::MigrateToMap(isolate_, Cast<JSObject>(receiver), transition);
   }
 
@@ -1020,8 +1023,7 @@ DirectHandle<Object> LookupIterator::FetchValue(
     DirectHandle<JSObject> holder = GetHolder<JSObject>();
     FieldIndex field_index =
         FieldIndex::ForDetails(holder->map(), property_details_);
-    if (allow_allocation == AllowAllocation::kNo && field_index.is_inobject() &&
-        field_index.is_double()) {
+    if (allow_allocation == AllowAllocation::kNo && field_index.is_double()) {
       return isolate_->factory()->undefined_value();
     }
     return JSObject::FastPropertyAt(

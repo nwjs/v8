@@ -10,14 +10,15 @@
 
 #include "include/v8config.h"
 #include "src/base/bit-field.h"
+#include "src/base/iterator.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/small-vector.h"
+#include "src/builtins/builtins.h"
 #include "src/common/globals.h"
-#include "src/objects/elements-kind.h"
+#include "src/objects/code-kind.h"
 #include "src/objects/feedback-cell.h"
 #include "src/objects/map.h"
-#include "src/objects/maybe-object.h"
 #include "src/objects/name.h"
 #include "src/objects/type-hints.h"
 #include "src/zone/zone-containers.h"
@@ -269,13 +270,11 @@ using MaybeObjectHandles = std::vector<MaybeObjectHandle>;
 
 class FeedbackMetadata;
 
-#include "torque-generated/src/objects/feedback-vector-tq.inc"
-
 // ClosureFeedbackCellArray contains feedback cells used when creating closures
 // from a function. This is created once the function is compiled and is either
 // held by the feedback vector (if allocated) or by the FeedbackCell of the
 // closure.
-class ClosureFeedbackCellArray
+V8_OBJECT class ClosureFeedbackCellArray
     : public TaggedArrayBase<ClosureFeedbackCellArray, FeedbackCell> {
   using Super = TaggedArrayBase<ClosureFeedbackCellArray, FeedbackCell>;
 
@@ -293,12 +292,9 @@ class ClosureFeedbackCellArray
   class BodyDescriptor;
 
  public:
-  uint32_t length_;
-#if TAGGED_SIZE_8_BYTES
-  uint32_t optional_padding_;
-#endif
+  // length_ / optional_padding_ live in FixedArrayBase.
   FLEXIBLE_ARRAY_MEMBER(typename Super::ElementMemberT, objects);
-};
+} V8_OBJECT_END;
 
 class NexusConfig;
 
@@ -306,8 +302,19 @@ class NexusConfig;
 // of length determined by the feedback metadata.
 V8_OBJECT class FeedbackVector : public HeapObject {
  public:
-  DEFINE_TORQUE_GENERATED_OSR_STATE()
-  DEFINE_TORQUE_GENERATED_FEEDBACK_VECTOR_FLAGS()
+  // Bit positions in |osr_state|.
+  using OsrUrgencyBits = base::BitField<uint32_t, 0, 3, uint8_t>;
+  using MaybeHasMaglevOsrCodeBit = OsrUrgencyBits::Next<bool, 1>;
+  using MaybeHasTurbofanOsrCodeBit = MaybeHasMaglevOsrCodeBit::Next<bool, 1>;
+  using DontUseTheseBitsUnlessBeneficialBits =
+      MaybeHasTurbofanOsrCodeBit::Next<uint32_t, 3>;
+  // Bit positions in |flags|.
+  using TieringInProgressBit = base::BitField<bool, 0, 1, uint16_t>;
+  using OsrTieringInProgressBit = TieringInProgressBit::Next<bool, 1>;
+  using InterruptBudgetResetByIcChangeBit =
+      OsrTieringInProgressBit::Next<bool, 1>;
+  using AllYourBitsAreBelongToJgruberBits =
+      InterruptBudgetResetByIcChangeBit::Next<uint32_t, 13>;
 
   inline bool is_empty() const;
 
@@ -1071,8 +1078,9 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
   float ComputeCallFrequency();
 
   using SpeculationModeField = base::BitField<SpeculationMode, 0, 2>;
-  using CallFeedbackContentField = base::BitField<CallFeedbackContent, 2, 1>;
-  using CallCountField = base::BitField<uint32_t, 3, 29>;
+  using CallFeedbackContentField =
+      SpeculationModeField::Next<CallFeedbackContent, 1>;
+  using CallCountField = CallFeedbackContentField::Next<uint32_t, 29>;
 
   // For InstanceOf ICs.
   MaybeDirectHandle<JSObject> GetConstructorFeedback() const;

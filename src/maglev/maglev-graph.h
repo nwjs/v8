@@ -11,6 +11,7 @@
 #include "src/maglev/maglev-compilation-info.h"
 #include "src/maglev/maglev-graph-labeller.h"
 #include "src/maglev/maglev-ir.h"
+#include "src/maglev/maglev-phase.h"
 #include "src/maglev/maglev-tracer.h"
 #include "src/zone/zone-containers.h"
 
@@ -30,6 +31,16 @@ class MaglevCallSiteInfoCompare {
 };
 using MaglevCallSiteCandidates =
     ZonePriorityQueue<MaglevCallSiteInfo*, MaglevCallSiteInfoCompare>;
+
+class MaglevCompilationUnit;
+
+struct MaglevLoopPeelInfo {
+  const MaglevCompilationUnit* unit;
+  int loop_header_offset;
+  int bytecode_size;
+  BasicBlock* header = nullptr;
+};
+using MaglevPeelableLoops = ZoneVector<MaglevLoopPeelInfo>;
 
 struct MaglevCallerDetails;
 struct InliningTreeDebugInfo : public ZoneObject {
@@ -67,6 +78,7 @@ class Graph final : public ZoneObject {
         eager_deopt_top_frames_(zone()),
         lazy_deopt_top_frames_(zone()),
         inlineable_calls_(zone()),
+        peelable_loops_(zone()),
         allocations_escape_map_(zone()),
         allocations_elide_map_(zone()),
         register_inputs_(),
@@ -104,7 +116,6 @@ class Graph final : public ZoneObject {
     blocks_.insert(blocks_.begin() + index + 1, new_blocks.begin(),
                    new_blocks.end());
   }
-
   void set_blocks(ZoneVector<BasicBlock*> blocks) { blocks_ = blocks; }
 
   void RemoveUnreachableBlocks();
@@ -185,6 +196,8 @@ class Graph final : public ZoneObject {
 
   MaglevCallSiteCandidates& inlineable_calls() { return inlineable_calls_; }
 
+  MaglevPeelableLoops& peelable_loops() { return peelable_loops_; }
+
   const ZoneAbslFlatHashSet<DeoptFrame*>& eager_deopt_top_frames() const {
     return eager_deopt_top_frames_;
   }
@@ -204,6 +217,8 @@ class Graph final : public ZoneObject {
           frame, std::make_pair(result_location, result_size));
     }
   }
+
+  void UnwrapDeoptFrames();
 
   // Running JS2, 99.99% of the cases, we have less than 2 dependencies.
   using SmallAllocationVector = SmallZoneVector<InlinedAllocation*, 2>;
@@ -374,6 +389,7 @@ class Graph final : public ZoneObject {
   ZoneAbslFlatHashMap<DeoptFrame*, std::pair<interpreter::Register, int>>
       lazy_deopt_top_frames_;
   MaglevCallSiteCandidates inlineable_calls_;
+  MaglevPeelableLoops peelable_loops_;
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_escape_map_;
   ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_elide_map_;
   RegList register_inputs_;

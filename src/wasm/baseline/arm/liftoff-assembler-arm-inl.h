@@ -586,7 +586,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
     b(cs /* higher or same */, &continuation);
   }
 
-  if (v8_flags.experimental_wasm_growable_stacks) {
+  if (v8_flags.wasm_growable_stacks) {
     LiftoffRegList regs_to_save;
     regs_to_save.set(WasmHandleStackOverflowDescriptor::GapRegister());
     regs_to_save.set(WasmHandleStackOverflowDescriptor::FrameBaseRegister());
@@ -679,7 +679,7 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
 }
 
 Register LiftoffAssembler::LoadOldFramePointer() {
-  if (!v8_flags.experimental_wasm_growable_stacks) {
+  if (!v8_flags.wasm_growable_stacks) {
     return fp;
   }
   LiftoffRegister old_fp = GetUnusedRegister(RegClass::kGpReg, {});
@@ -1707,7 +1707,7 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
   bind(&exit);
 }
 
-void LiftoffAssembler::AtomicFence() { dmb(ISH); }
+void LiftoffAssembler::AtomicFence(AtomicMemoryOrder /*order*/) { dmb(ISH); }
 
 void LiftoffAssembler::Pause() { isb(SY); }
 
@@ -5134,7 +5134,6 @@ void LiftoffAssembler::DeallocateStackSlot(uint32_t size) {
   add(sp, sp, Operand(size));
 }
 
-void LiftoffAssembler::MaybeOSR() {}
 
 void LiftoffStackSlots::Construct(int param_slots) {
   DCHECK_LT(0, slots_.size());

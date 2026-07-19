@@ -8,6 +8,7 @@
 #include <optional>
 #include <type_traits>
 
+#include "include/v8config.h"
 #include "src/base/bit-field.h"
 #include "src/base/bits.h"
 #include "src/base/bounds.h"
@@ -45,6 +46,11 @@
 #include "src/maglev/maglev-regalloc-node-info.h"
 #include "src/objects/arguments.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/js-array-buffer.h"
+#include "src/objects/js-collection.h"
+#include "src/objects/js-generator.h"
+#include "src/objects/js-promise.h"
+#include "src/objects/js-proxy.h"
 #include "src/objects/property-details.h"
 #include "src/objects/smi.h"
 #include "src/objects/tagged-index.h"
@@ -82,7 +88,6 @@ class ProcessingState;
 class MaglevAssembler;
 class MaglevCodeGenState;
 class MaglevCompilationUnit;
-class MaglevGraphBuilder;
 class MaglevVregAllocationState;
 class CompactInterpreterFrameState;
 class MergePointInterpreterFrameState;
@@ -118,6 +123,14 @@ class ExceptionHandlerInfo;
   V(GenericLessThanOrEqual)             \
   V(GenericGreaterThan)                 \
   V(GenericGreaterThanOrEqual)
+
+// TODO(jgruber): These are currently implemented using *NoThrow builtin
+// variants, both in Maglev and downstream in Turboshaft. Consider using
+// throwing builtins instead once we've switched over to the Turbolev pipeline.
+#define BIGINT_OPERATIONS_NODE_LIST(V) \
+  V(BigIntBinaryOperation)             \
+  V(BigIntCompare)                     \
+  V(BigIntNegate)
 
 #define INT32_BITWISE_BINARY_OPERATIONS_NODE_LIST(V) \
   V(Int32BitwiseAnd)                                 \
@@ -207,7 +220,12 @@ class ExceptionHandlerInfo;
 #define TURBOLEV_NON_VALUE_NODE_LIST(V) \
   V(TransitionAndStoreArrayElement)     \
   V(TurbofanStaticAssert)               \
-  V(AssumeMap)
+  V(AssertPeeled)                       \
+  V(AssumeMap)                          \
+  V(AssumeTaggedType)                   \
+  V(AssumeInt32Type)                    \
+  V(AssumeUint32Type)                   \
+  V(AssumeFloat64Type)
 
 #define CONVERSION_NODE_LIST(V)         \
   V(ChangeInt32ToFloat64)               \
@@ -403,6 +421,7 @@ class ExceptionHandlerInfo;
   FLOAT64_OPERATIONS_NODE_LIST(V)                                     \
   SMI_OPERATIONS_NODE_LIST(V)                                         \
   GENERIC_OPERATIONS_NODE_LIST(V)                                     \
+  BIGINT_OPERATIONS_NODE_LIST(V)                                      \
   INLINE_BUILTIN_NODE_LIST(V)                                         \
   TURBOLEV_VALUE_NODE_LIST(V)
 
@@ -510,7 +529,8 @@ class ExceptionHandlerInfo;
   V(BranchIfFloat64Compare)                  \
   V(BranchIfUndefinedOrNull)                 \
   V(BranchIfUndetectable)                    \
-  V(BranchIfJSReceiver)
+  V(BranchIfJSReceiver)                      \
+  V(BranchIfTypedArrayBounds)
 
 #define CONDITIONAL_CONTROL_NODE_LIST(V) \
   V(Switch)                              \
@@ -1784,6 +1804,10 @@ class DeoptInfo {
  public:
   DeoptFrame& top_frame() { return *top_frame_; }
   const DeoptFrame& top_frame() const { return *top_frame_; }
+  void set_top_frame(DeoptFrame* frame) {
+    DCHECK_NULL(input_locations_);
+    top_frame_ = frame;
+  }
   const compiler::FeedbackSource& feedback_to_update() const {
     return feedback_to_update_;
   }
@@ -2101,6 +2125,52 @@ class NodeBase : public ZoneObject {
     return node;
   }
 
+  template <class Derived>
+  static Derived* CloneRaw(Derived* src, Zone* zone) {
+    static_assert(NodeBase::opcode_of<Derived> != Opcode::kPhi);
+    // TODO(victorgomes): this prefix-size computation is duplicated with
+    // Allocate(); hoist it into a shared helper so the two can't drift apart.
+    constexpr size_t size_before_inputs =
+        ExceptionHandlerInfoSize(Derived::kProperties) +
+        RegisterSnapshotSize(Derived::kProperties) +
+        EagerDeoptInfoSize(Derived::kProperties) +
+        LazyDeoptInfoSize(Derived::kProperties);
+    size_t input_bytes = src->input_count() * sizeof(ValueNode*);
+    size_t size_before_node;
+    if constexpr (Is64()) {
+      size_before_node = size_before_inputs + input_bytes;
+    } else {
+      size_before_node =
+          RoundUp<alignof(Derived)>(size_before_inputs + input_bytes);
+    }
+    const size_t total = size_before_node + sizeof(Derived);
+    intptr_t raw =
+        reinterpret_cast<intptr_t>(zone->Allocate<NodeWithInlineInputs>(total));
+    intptr_t src_lo = reinterpret_cast<intptr_t>(src) - size_before_node;
+    memcpy(reinterpret_cast<void*>(raw), reinterpret_cast<const void*>(src_lo),
+           total);
+    Derived* clone = reinterpret_cast<Derived*>(raw + size_before_node);
+    // The cloned node is not yet attached to a block and has no regalloc
+    // info. Reset the union to a clean state.
+#ifdef DEBUG
+    clone->state_ = kNull;
+#endif
+    clone->owner_ = nullptr;
+    // Inputs have been byte-copied from `src`, so they currently point at
+    // the source's input nodes WITHOUT having added a use to those nodes
+    // for the clone. Zero them so the caller can use set_input(), which
+    // will manage use counts correctly.
+    for (int i = 0; i < clone->input_count(); ++i) {
+      *(clone->input_base() - i) = nullptr;
+    }
+    // For ValueNode clones, the byte copy also duplicates `use_count_`
+    // from the source. Reset it: the clone has no users yet.
+    if constexpr (std::is_base_of_v<ValueNode, Derived>) {
+      clone->reset_use();
+    }
+    return clone;
+  }
+
   // Overwritten by subclasses.
   static constexpr OpProperties kProperties =
       OpProperties::Pure() | OpProperties::TaggedValue();
@@ -2227,9 +2297,15 @@ class NodeBase : public ZoneObject {
   // For GDB: Print any Node with `print node->Print()`.
   void Print() const;
 
+  bool IsStructurallyEqualTo(const NodeBase* other) const;
+
   EagerDeoptInfo* eager_deopt_info() {
     DCHECK(properties().has_eager_deopt_info());
     return reinterpret_cast<EagerDeoptInfo*>(deopt_info_address());
+  }
+  const EagerDeoptInfo* eager_deopt_info() const {
+    DCHECK(properties().has_eager_deopt_info());
+    return reinterpret_cast<const EagerDeoptInfo*>(deopt_info_address());
   }
 
   LazyDeoptInfo* lazy_deopt_info() {
@@ -2238,6 +2314,14 @@ class NodeBase : public ZoneObject {
                         ? EagerDeoptInfoSize(properties())
                         : 0;
     return reinterpret_cast<LazyDeoptInfo*>(deopt_info_address() + offset);
+  }
+  const LazyDeoptInfo* lazy_deopt_info() const {
+    DCHECK(properties().can_lazy_deopt());
+    size_t offset = properties().has_eager_deopt_info()
+                        ? EagerDeoptInfoSize(properties())
+                        : 0;
+    return reinterpret_cast<const LazyDeoptInfo*>(deopt_info_address() +
+                                                  offset);
   }
 
   const RegisterSnapshot& register_snapshot() const {
@@ -2248,6 +2332,11 @@ class NodeBase : public ZoneObject {
   ExceptionHandlerInfo* exception_handler_info() {
     DCHECK(properties().can_throw());
     return reinterpret_cast<ExceptionHandlerInfo*>(exception_handler_address());
+  }
+  const ExceptionHandlerInfo* exception_handler_info() const {
+    DCHECK(properties().can_throw());
+    return reinterpret_cast<const ExceptionHandlerInfo*>(
+        exception_handler_address());
   }
 
   void set_register_snapshot(RegisterSnapshot snapshot) {
@@ -2295,7 +2384,6 @@ class NodeBase : public ZoneObject {
   template <typename NodeT, typename... Args>
   NodeT* OverwriteWith(Args&&... args);
 
-  inline void UnwrapDeoptFrames();
   inline void OverwriteWithIdentityTo(ValueNode* node);
   inline void OverwriteWithReturnValue(ValueNode* node);
 
@@ -2592,6 +2680,7 @@ class ValueNode : public Node {
     use_count_++;
   }
   inline void remove_use();
+  void reset_use() { use_count_ = 0; }
   // Avoid revisiting nodes when processing an unused node's inputs, by marking
   // it as visited.
   void mark_unused_inputs_visited() {
@@ -2720,8 +2809,18 @@ class ValueNode : public Node {
   ValueNode* UnwrapIdentities();
   const ValueNode* UnwrapIdentities() const;
 
+  // Like UnwrapIdentities, but also unwraps phis with a single input (which are
+  // not exception phis or resumable loop phis), since the optimizer replaces
+  // those with their input.
+  // TODO(dmercadier): Remove this if https://crrev.com/c/7117478 ever lands.
+  ValueNode* UnwrapIdentitiesAndPhis();
+
   // Unwrap identities and conversions.
   ValueNode* Unwrap();
+
+  // Like Unwrap, but also unwraps single-input phis (cf.
+  // UnwrapIdentitiesAndPhis).
+  ValueNode* UnwrapForDeopt();
 
   ValueNode* UnwrapIdentitiesAndUpdateUseCountForDeopt(
       const VirtualObjectList& virtual_objects);
@@ -2829,7 +2928,7 @@ inline ValueNode* ValueNode::UnwrapIdentitiesAndUpdateUseCountForDeopt(
 // use-count and increments the use-count of the unwrapped node.
 inline ValueNode* ValueNode::UnwrapAndUpdateUseCountForDeopt(
     const VirtualObjectList& virtual_objects) {
-  ValueNode* unwrapped = Unwrap();
+  ValueNode* unwrapped = UnwrapForDeopt();
   if (unwrapped != this) {
     // TODO(dmercadier): instead of a simple `remove_use` here, we could instead
     // recursively remove uses in VirtualObjects (basically doing the oppositve
@@ -3156,28 +3255,6 @@ class UnaryWithFeedbackNode : public FixedInputValueNodeT<1, Derived> {
 };
 
 template <class Derived, Operation kOperation>
-class BinaryWithFeedbackNode : public FixedInputValueNodeT<2, Derived> {
-  using Base = FixedInputValueNodeT<2, Derived>;
-
- public:
-  // The implementation currently calls runtime.
-  static constexpr OpProperties kProperties = OpProperties::JSCall();
-  DECLARE_BINOP(Tagged, Tagged)
-
-  compiler::FeedbackSource feedback() const { return feedback_; }
-
- protected:
-  BinaryWithFeedbackNode(uint64_t bitfield,
-                         const compiler::FeedbackSource& feedback)
-      : Base(bitfield), feedback_(feedback) {}
-
-  void SetValueLocationConstraints();
-  void GenerateCode(MaglevAssembler*, const ProcessingState&);
-
-  const compiler::FeedbackSource feedback_;
-};
-
-template <class Derived, Operation kOperation>
 class BinaryWithEmbeddedFeedbackNode : public FixedInputValueNodeT<2, Derived> {
   using Base = FixedInputValueNodeT<2, Derived>;
 
@@ -3225,21 +3302,119 @@ class BinaryWithEmbeddedFeedbackNode : public FixedInputValueNodeT<2, Derived> {
 
 #define DEF_UNARY_WITH_FEEDBACK_NODE(Name) \
   DEF_OPERATION_WITH_FEEDBACK_NODE(Generic##Name, UnaryWithFeedbackNode, Name)
-#define DEF_BINARY_WITH_FEEDBACK_NODE(Name) \
-  DEF_OPERATION_WITH_FEEDBACK_NODE(Generic##Name, BinaryWithFeedbackNode, Name)
 #define DEF_BINARY_WITH_EMBEDDED_FEEDBACK_NODE(Name) \
   DEF_OPERATION_WITH_EMBEDDED_FEEDBACK_NODE(         \
       Generic##Name, BinaryWithEmbeddedFeedbackNode, Name)
 
 UNARY_OPERATION_LIST(DEF_UNARY_WITH_FEEDBACK_NODE)
-ARITHMETIC_OPERATION_LIST(DEF_BINARY_WITH_FEEDBACK_NODE)
+ARITHMETIC_OPERATION_LIST(DEF_BINARY_WITH_EMBEDDED_FEEDBACK_NODE)
 COMPARISON_OPERATION_LIST(DEF_BINARY_WITH_EMBEDDED_FEEDBACK_NODE)
 
 #undef DEF_UNARY_WITH_FEEDBACK_NODE
-#undef DEF_BINARY_WITH_FEEDBACK_NODE
 #undef DEF_BINARY_WITH_EMBEDDED_FEEDBACK_NODE
 #undef DEF_OPERATION_WITH_FEEDBACK_NODE
 #undef DEF_OPERATION_WITH_EMBEDDED_FEEDBACK_NODE
+
+// Number of bits needed to encode an Operation in a node's bitfield.
+#define COUNT_OPERATION(Name) +1
+inline constexpr int kNumberOfOperations = 0 OPERATION_LIST(COUNT_OPERATION);
+#undef COUNT_OPERATION
+inline constexpr int kOperationBits = 5;
+static_assert(kNumberOfOperations <= (1 << kOperationBits),
+              "Operation must fit in kOperationBits");
+
+// Arbitrary-precision BigInt arithmetic. Calls the BigInt*NoThrow builtins and
+// eager-deopts on the Smi sentinel they return (signalling BigIntTooBig,
+// DivisionByZero, or TerminationRequested), falling back to the interpreter to
+// produce the correct result or exception. Inputs are known BigInt.
+class BigIntBinaryOperation
+    : public FixedInputValueNodeT<2, BigIntBinaryOperation> {
+  using Base = FixedInputValueNodeT<2, BigIntBinaryOperation>;
+
+ public:
+  explicit BigIntBinaryOperation(uint64_t bitfield, Operation operation)
+      : Base(OperationBitField::update(bitfield, operation)) {}
+
+  // Calls the builtin (Call) which allocates the result (CanAllocate). On the
+  // Smi sentinel it either eager-deopts (BigIntTooBig / DivisionByZero,
+  // EagerDeopt) or, for the Mul/Div/Mod TerminationRequested sentinel, raises
+  // TerminateExecution in this frame; the LazyDeopt frame state lets the
+  // termination stack walk summarize this frame. The result is a pure function
+  // of the inputs, so the node stays idempotent and may be CSE'd.
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::CanAllocate() |
+      OpProperties::EagerDeopt() | OpProperties::LazyDeopt();
+
+  DECLARE_BINOP(Tagged, Tagged)
+
+  constexpr Operation operation() const {
+    return OperationBitField::decode(bitfield());
+  }
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+
+  auto options() const { return std::tuple{operation()}; }
+  NodeType type() const { return NodeType::kBigInt; }
+
+ private:
+  using OperationBitField = NextBitField<Operation, kOperationBits>;
+};
+
+// Arbitrary-precision BigInt comparison. Calls the BigInt{Equal,LessThan,
+// LessThanOrEqual} builtins, which return a Boolean and cannot throw or deopt.
+// Inputs are known BigInt.
+class BigIntCompare : public FixedInputValueNodeT<2, BigIntCompare> {
+  using Base = FixedInputValueNodeT<2, BigIntCompare>;
+
+ public:
+  explicit BigIntCompare(uint64_t bitfield, Operation operation)
+      : Base(OperationBitField::update(bitfield, operation)) {}
+
+  // Unlike BigIntBinaryOperation, the comparison builtins return a boolean root
+  // (no allocation) and cannot fail (no deopt).
+  static constexpr OpProperties kProperties = OpProperties::Call();
+
+  DECLARE_BINOP(Tagged, Tagged)
+
+  constexpr Operation operation() const {
+    return OperationBitField::decode(bitfield());
+  }
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+
+  auto options() const { return std::tuple{operation()}; }
+  NodeType type() const { return NodeType::kBoolean; }
+
+ private:
+  using OperationBitField = NextBitField<Operation, kOperationBits>;
+};
+
+// BigInt unary minus. Calls BigIntUnaryMinus, which allocates the negated
+// result but cannot overflow (negation does not change the digit length).
+// Input is known BigInt.
+class BigIntNegate : public FixedInputValueNodeT<1, BigIntNegate> {
+  using Base = FixedInputValueNodeT<1, BigIntNegate>;
+
+ public:
+  explicit BigIntNegate(uint64_t bitfield) : Base(bitfield) {}
+
+  // Allocates the negated result (CanAllocate) but cannot overflow, so unlike
+  // BigIntBinaryOperation it needs no deopt.
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::CanAllocate();
+
+  DECLARE_UNOP(Tagged)
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+
+  NodeType type() const { return NodeType::kBigInt; }
+};
 
 template <class Derived, Operation kOperation>
 class Int32BinaryWithOverflowNode : public FixedInputValueNodeT<2, Derived> {
@@ -3392,7 +3567,7 @@ class Int32Compare : public FixedInputValueNodeT<2, Int32Compare> {
   NodeType type() const { return NodeType::kBoolean; }
 
  private:
-  using OperationBitField = NextBitField<Operation, 5>;
+  using OperationBitField = NextBitField<Operation, kOperationBits>;
 };
 
 class Int32ToBoolean : public FixedInputValueNodeT<1, Int32ToBoolean> {
@@ -3566,7 +3741,7 @@ class Float64Compare : public FixedInputValueNodeT<2, Float64Compare> {
   NodeType type() const { return NodeType::kBoolean; }
 
  private:
-  using OperationBitField = NextBitField<Operation, 5>;
+  using OperationBitField = NextBitField<Operation, kOperationBits>;
 };
 
 class Float64ToBoolean : public FixedInputValueNodeT<1, Float64ToBoolean> {
@@ -5638,8 +5813,7 @@ struct VirtualHeapObjectShape {
 // to the Maglev graph.
 class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
  public:
-  explicit VirtualObject(uint64_t bitfield, uint32_t id,
-                         MaglevGraphBuilder* builder,
+  explicit VirtualObject(uint64_t bitfield, uint32_t id, Zone* zone,
                          const vobj::ObjectLayout* object_layout,
                          compiler::OptionalMapRef map, uint32_t slot_count);
 
@@ -5670,10 +5844,14 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
     return header_size() + body_fields * body_field_size();
   }
 
+  ValueNode* get_by_index(uint32_t i) const {
+    SBXCHECK_LT(i, slot_count());
+    return slots_[i] ? slots_[i]->UnwrapIdentities() : nullptr;
+  }
+
   ValueNode* get(uint32_t offset) const {
     uint32_t slot_index = object_layout_->SlotAtOffset(offset);
-    SBXCHECK_LT(slot_index, slot_count());
-    return slots_[slot_index];
+    return get_by_index(slot_index);
   }
 
   void set(uint32_t offset, ValueNode* value) {
@@ -5786,7 +5964,7 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
     VirtualObject* result = Clone(new_object_id, zone, /* empty_clone */ true);
     DCHECK(compatible_for_merge(other));
     for (int i = 0; i < slot_count(); i++) {
-      if (auto success = MergeValue(slots_[i], other->slots_[i])) {
+      if (auto success = MergeValue(get_by_index(i), other->get_by_index(i))) {
         result->set_by_index(i, *success);
       } else {
         return {};
@@ -5806,7 +5984,7 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
 
     // Copy content
     for (int i = 0; i < slot_count(); i++) {
-      result->set_by_index(i, slots_[i]);
+      result->set_by_index(i, get_by_index(i));
     }
 
     result->set_allocation(allocation());
@@ -6151,7 +6329,7 @@ class VirtualObjectList {
 
   explicit VirtualObjectList(VirtualObject* head) : head_(head) {}
 
-  class Iterator final {
+  class V8_GSL_POINTER Iterator final {
    public:
     explicit Iterator(VirtualObject* entry) : entry_(entry) {}
 
@@ -6246,6 +6424,16 @@ class VirtualObjectList {
  private:
   VirtualObject* head_;
 };
+
+inline VirtualObjectList DeoptFrame::GetVirtualObjects() const {
+  if (type() == DeoptFrame::FrameType::kInterpretedFrame) {
+    // Recover virtual object list using the last object before the
+    // deopt frame creation.
+    return VirtualObjectList(as_interpreted().last_virtual_object());
+  }
+  DCHECK_NOT_NULL(parent());
+  return parent()->GetVirtualObjects();
+}
 
 enum class EscapeAnalysisResult {
   kUnknown,
@@ -6503,6 +6691,8 @@ class ArgumentsLength : public FixedInputValueNodeT<0, ArgumentsLength> {
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
+
+  NodeType type() const { return NodeType::kSmi; }
 };
 
 class RestLength : public FixedInputValueNodeT<0, RestLength> {
@@ -7528,6 +7718,63 @@ class AssumeMap : public FixedInputNodeT<1, AssumeMap> {
   const compiler::ZoneRefSet<Map> maps_;
 };
 
+template <class Derived>
+class AssumeTypeT : public FixedInputNodeT<1, Derived> {
+ public:
+  using Base = FixedInputNodeT<1, Derived>;
+
+  explicit AssumeTypeT(uint64_t bitfield, NodeType type)
+      : Base(bitfield), asserted_type_(type) {}
+
+  static constexpr OpProperties kProperties = OpProperties::Pure();
+
+  NodeType asserted_type() const { return asserted_type_; }
+  auto options() const { return std::tuple{asserted_type_}; }
+
+ private:
+  const NodeType asserted_type_;
+};
+
+class AssumeTaggedType : public AssumeTypeT<AssumeTaggedType> {
+ public:
+  using AssumeTypeT<AssumeTaggedType>::AssumeTypeT;
+
+  DECLARE_UNOP(Tagged)
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+};
+
+class AssumeInt32Type : public AssumeTypeT<AssumeInt32Type> {
+ public:
+  using AssumeTypeT<AssumeInt32Type>::AssumeTypeT;
+
+  DECLARE_UNOP(Int32)
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+};
+
+class AssumeUint32Type : public AssumeTypeT<AssumeUint32Type> {
+ public:
+  using AssumeTypeT<AssumeUint32Type>::AssumeTypeT;
+
+  DECLARE_UNOP(Uint32)
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+};
+
+class AssumeFloat64Type : public AssumeTypeT<AssumeFloat64Type> {
+ public:
+  using AssumeTypeT<AssumeFloat64Type>::AssumeTypeT;
+
+  DECLARE_UNOP(Float64)
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+};
+
 class TurbofanStaticAssert : public FixedInputNodeT<1, TurbofanStaticAssert> {
  public:
   explicit TurbofanStaticAssert(uint64_t bitfield) : Base(bitfield) {}
@@ -7537,6 +7784,24 @@ class TurbofanStaticAssert : public FixedInputNodeT<1, TurbofanStaticAssert> {
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
+};
+
+class AssertPeeled : public FixedInputNodeT<0, AssertPeeled> {
+ public:
+  explicit AssertPeeled(uint64_t bitfield, bool expect_peeled)
+      : Base(ExpectPeeledField::update(bitfield, expect_peeled)) {}
+
+  constexpr bool expect_peeled() const {
+    return ExpectPeeledField::decode(bitfield());
+  }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+
+  auto options() const { return std::tuple{expect_peeled()}; }
+
+ private:
+  using ExpectPeeledField = NextBitField<bool, 1>;
 };
 
 class MajorGCForCompilerTesting
@@ -8324,35 +8589,35 @@ inline std::ostream& operator<<(std::ostream& os, PropertyKey key) {
 
 class LoadTaggedField : public FixedInputValueNodeT<1, LoadTaggedField> {
  public:
-  explicit LoadTaggedField(uint64_t bitfield, const int offset, LoadType type,
+  explicit LoadTaggedField(uint64_t bitfield, const int offset, NodeType type,
                            bool is_const, PropertyKey property_key)
-      : Base(bitfield | LoadTypeField::encode(type) |
-             IsConstantLoadField::encode(is_const)),
+      : Base(bitfield | IsConstantLoadField::encode(is_const)),
         offset_(offset),
+        type_(type),
         property_key_(property_key) {}
+
   static constexpr OpProperties kProperties = OpProperties::CanRead();
   DECLARE_UNOP(Tagged)
 
   int offset() const { return offset_; }
-  LoadType load_type() const { return LoadTypeField::decode(bitfield()); }
+  NodeType type() const { return type_; }
   bool is_const() const { return IsConstantLoadField::decode(bitfield()); }
   PropertyKey property_key() const { return property_key_; }
 
-  NodeType type() const { return NodeTypeFromLoadType(load_type()); }
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&) const;
 
   auto options() const {
-    return std::tuple{offset(), load_type(), is_const(), property_key()};
+    return std::tuple{offset(), type(), is_const(), property_key()};
   }
 
  private:
   const int offset_;
+  const NodeType type_;
   PropertyKey property_key_;
-  using LoadTypeField = NextBitField<LoadType, kLoadTypeBitSize>;
-  using IsConstantLoadField = LoadTypeField::Next<bool, 1>;
+  using IsConstantLoadField = NextBitField<bool, 1>;
 };
 
 class LoadContextSlotNoCells
@@ -9850,6 +10115,7 @@ class Phi : public ValueNodeT<Phi> {
   const MergePointInterpreterFrameState* merge_state() const {
     return merge_state_;
   }
+  MergePointInterpreterFrameState* merge_state() { return merge_state_; }
 
   using Node::initialize_input_null;
   using Node::reduce_input_count;
@@ -9931,7 +10197,7 @@ class Phi : public ValueNodeT<Phi> {
   UseRepresentationSet same_loop_use_repr_hints_ = {};
 
   Phi* next_ = nullptr;
-  MergePointInterpreterFrameState* const merge_state_;
+  MergePointInterpreterFrameState* merge_state_;
 
   // The type of this Phi based on its predecessors' types.
   NodeType type_;
@@ -9945,6 +10211,7 @@ class Phi : public ValueNodeT<Phi> {
   NodeType post_loop_type_;
 
   friend base::ThreadedListTraits<Phi>;
+  friend MergePointInterpreterFrameState;
 };
 
 class Call : public VarargsValueNodeT<2, Call> {
@@ -11704,6 +11971,21 @@ class BranchIfReferenceEqual
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 };
 
+class BranchIfTypedArrayBounds
+    : public BranchControlNodeT<2, BranchIfTypedArrayBounds> {
+ public:
+  explicit BranchIfTypedArrayBounds(uint64_t bitfield,
+                                    BasicBlockRef* if_true_refs,
+                                    BasicBlockRef* if_false_refs)
+      : Base(bitfield, if_true_refs, if_false_refs) {}
+
+  DECLARE_INPUTS(Index, Length)
+  DECLARE_INPUT_TYPES(Int32, IntPtr)
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+};
+
 template <typename NodeT>
 constexpr inline int StaticInputCount() {
   if constexpr (IsFixedInputNode<NodeT>()) {
@@ -11744,6 +12026,16 @@ constexpr inline int SizeOfNodeForOpcode(Opcode op) {
 #undef CASE
   }
   UNREACHABLE();
+}
+
+template <typename NodeT>
+inline bool IsDead(NodeT* node) {
+  if constexpr (IsValueNode(Node::opcode_of<NodeT>) &&
+                (!NodeT::kProperties.is_required_when_unused() ||
+                 std::is_same_v<ArgumentsElements, NodeT>)) {
+    return !node->is_used();
+  }
+  return false;
 }
 
 template <typename Function>

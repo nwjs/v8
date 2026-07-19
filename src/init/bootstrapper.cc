@@ -22,6 +22,8 @@
 #include "src/extensions/statistics-extension.h"
 #include "src/extensions/trigger-failure-extension.h"
 #include "src/logging/runtime-call-stats-scope.h"
+#include "src/objects/dictionary-inl.h"
+#include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array.h"
 #include "src/objects/js-function.h"
@@ -76,7 +78,7 @@
 #endif  // V8_TEMPORAL_SUPPORT
 #include "src/objects/js-weak-refs.h"
 #include "src/objects/ordered-hash-table.h"
-#include "src/objects/property-cell.h"
+#include "src/objects/property-cell-inl.h"
 #include "src/objects/property-descriptor.h"
 #include "src/objects/slots-inl.h"
 #include "src/objects/swiss-name-dictionary-inl.h"
@@ -5549,6 +5551,7 @@ EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_regexp_buffer_boundaries)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_regexp_modifiers)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_regexp_duplicate_named_groups)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_decorators)
+EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_import_bytes)
 
 #ifdef V8_INTL_SUPPORT
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_intl_best_fit_matcher)
@@ -7067,7 +7070,6 @@ DirectHandle<Map> Genesis::CreateInitialMapForArraySubclass(
   initial_map->SetConstructor(*array_constructor);
 
   // Set prototype on map.
-  initial_map->set_has_non_instance_prototype(false);
   Map::SetPrototype(isolate(), initial_map, array_prototype);
 
   // Update map with length accessor from Array.

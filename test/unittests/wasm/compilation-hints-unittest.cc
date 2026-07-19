@@ -114,7 +114,7 @@ class WasmCompilationHintsBuilder {
   }
 
   const CanonicalSig* LookupCanonicalSigFor(uint32_t function_index) const {
-    auto* module = instance_object_->module();
+    auto* module = instance_object_->trusted_data(isolate_)->module();
     CanonicalTypeIndex sig_id =
         module->canonical_sig_id(module->functions[function_index].sig_index);
     return GetTypeCanonicalizer()->LookupFunctionSignature(sig_id);
@@ -132,7 +132,7 @@ class WasmCompilationHintsUnittest : public TestWithIsolateAndZone {};
 
 TEST_F(WasmCompilationHintsUnittest, RecoverCompilationHints) {
   const FlagScope<bool> compilation_hints_scope(
-      &v8_flags.experimental_wasm_compilation_hints, true);
+      &v8_flags.wasm_compilation_hints, true);
   const FlagScope<bool> wasm_generate_compilation_hints_scope(
       &v8_flags.wasm_generate_compilation_hints, true);
   const FlagScope<int> wasm_tiering_budget_scope(&v8_flags.wasm_tiering_budget,
@@ -199,7 +199,8 @@ TEST_F(WasmCompilationHintsUnittest, RecoverCompilationHints) {
                                                base::VectorOf(buffer));
   EXPECT_FALSE(thrower.error());
 
-  const WasmModule* module = maybe_instance.ToHandleChecked()->module();
+  const WasmModule* module =
+      maybe_instance.ToHandleChecked()->trusted_data(isolate())->module();
 
   // Check compilation priorities.
   EXPECT_EQ(size_t{3}, module->compilation_priorities.size());

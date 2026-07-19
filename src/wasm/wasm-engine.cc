@@ -701,7 +701,7 @@ MaybeDirectHandle<WasmModuleObject> WasmEngine::SyncCompile(
 
   // If experimental PGO via files is enabled, load profile information now.
   std::unique_ptr<ProfileInformation> pgo_info;
-  if (V8_UNLIKELY(v8_flags.experimental_wasm_pgo_from_file)) {
+  if (V8_UNLIKELY(v8_flags.wasm_pgo_from_file)) {
     pgo_info = LoadProfileFromFile(module.get(), bytes.as_vector());
   }
 
@@ -812,6 +812,11 @@ void WasmEngine::AsyncCompile(
     return;
   }
 
+  // If the --wasm-test-streaming flag is set, we use the streaming compilation
+  // path even for non-streaming compilation (e.g. {WebAssembly.compile}).
+  // This allows testing the streaming pipeline (which normally depends on the
+  // browser's {Response} object for the {WebAssembly.compileStreaming} API)
+  // in environments like the d8 shell by manually chunking the provided bytes.
   if (v8_flags.wasm_test_streaming) {
     std::shared_ptr<StreamingDecoder> streaming_decoder =
         StartStreamingCompilation(enabled, std::move(compile_imports),
@@ -1207,6 +1212,9 @@ void WasmEngine::DeleteCompileJobsOnContext(DirectHandle<Context> context) {
       }
     }
   }
+  for (auto& job : jobs_to_delete) {
+    job->PrepareForRemoval();
+  }
 }
 
 void WasmEngine::DeleteCompileJobsOnIsolate(Isolate* isolate) {
@@ -1234,6 +1242,10 @@ void WasmEngine::DeleteCompileJobsOnIsolate(Isolate* isolate) {
       DCHECK(native_modules_.contains(native_module));
       modules_in_isolate.emplace_back(native_modules_[native_module]->weak_ptr);
     }
+  }
+
+  for (auto& job : jobs_to_delete) {
+    job->PrepareForRemoval();
   }
 
   // All modules that have not finished initial compilation yet cannot be
@@ -1582,7 +1594,7 @@ std::shared_ptr<NativeModule> WasmEngine::NewUnownedNativeModule(
           enabled_features, detected_features, std::move(compile_imports),
           code_size_estimate, std::move(module));
   base::MutexGuard lock(&mutex_);
-  if (V8_UNLIKELY(v8_flags.experimental_wasm_pgo_to_file)) {
+  if (V8_UNLIKELY(v8_flags.wasm_pgo_to_file)) {
     if (!native_modules_kept_alive_for_pgo) {
       native_modules_kept_alive_for_pgo =
           new std::vector<std::shared_ptr<NativeModule>>;

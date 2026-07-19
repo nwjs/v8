@@ -353,6 +353,7 @@
       {'name': 'v8testing', 'variant': 'stress_instruction_scheduling', 'shards': 2},
       {'name': 'v8testing', 'variant': 'stress_concurrent_allocation', 'shards': 2},
       {'name': 'v8testing', 'variant': 'stress_concurrent_inlining','shards': 2},
+      {'name': 'v8testing', 'variant': 'turbofan_random_rescheduling', 'shards': 2},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode', 'shards': 2},
       {'name': 'mjsunit', 'variant': 'stress_maglev_tests_with_turbofan', 'shards': 2},
       # Maglev -- move to extra once more architectures are supported.
@@ -453,17 +454,12 @@
       {'name': 'mjsunit', 'variant': 'stress_sampling'},
       {'name': 'webkit', 'variant': 'stress_sampling'},
       # Stress snapshot.
-      {'name': 'mjsunit', 'variant': 'stress_snapshot'},
       {'name': 'mjsunit', 'variant': 'rehash_snapshot'},
       # Experimental regexp engine.
       {'name': 'mjsunit', 'variant': 'experimental_regexp'},
       # Variants for maglev.
       {'name': 'v8testing', 'variant': 'stress_maglev_no_turbofan'},
       # Variants maglev + regexp assemble from bc
-      # TODO(437003349) change to maglev_no_turbofan once the regexp project
-      # is complete.
-      {'name': 'v8testing', 'variant': 'maglev_no_turbofan_regexp_from_bc'},
-      {'name': 'mjsunit', 'variant': 'stress_maglev_tracing'},
     ],
   },
   'v8_linux64_gc_stress_custom_snapshot_dbg': {
@@ -573,6 +569,7 @@
       {'name': 'v8testing', 'variant': 'extra', 'shards': 2},
       {'name': 'v8testing', 'variant': 'no_lfa'},
       {'name': 'v8testing', 'variant': 'stress_instruction_scheduling'},
+      {'name': 'v8testing', 'variant': 'turbofan_random_rescheduling'},
       {'name': 'mjsunit', 'variant': 'stress_maglev_tests_with_turbofan'},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'v8testing', 'variant': 'maglev'},
@@ -706,6 +703,7 @@
       {'name': 'v8testing', 'variant': 'no_lfa'},
       {'name': 'v8testing', 'variant': 'slow_path'},
       {'name': 'v8testing', 'variant': 'stress_instruction_scheduling'},
+      {'name': 'v8testing', 'variant': 'turbofan_random_rescheduling'},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode'},
       {'name': 'mjsunit', 'variant': 'stress_maglev_tests_with_turbofan'},
       # Maglev -- move to extra once more architectures are supported.
@@ -1049,7 +1047,7 @@
   'v8_mac_arm64_gc_stress_dbg': {
     'swarming_dimensions' : {
       'cpu': 'arm64',
-      'os': 'Mac-15',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'd8testing', 'test_args': ['--gc-stress'], 'shards': 3},
@@ -1082,8 +1080,7 @@
   'v8_mac_arm64_rel': {
     'swarming_dimensions' : {
       'cpu': 'arm64',
-      'os': 'Mac-15',
-      'pool': 'chromium.tests',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'v8testing'},
@@ -1104,8 +1101,7 @@
   'v8_mac_arm64_dbg': {
     'swarming_dimensions' : {
       'cpu': 'arm64',
-      'os': 'Mac-15',
-      'pool': 'chromium.tests',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'v8testing', 'shards': 2},
@@ -1126,8 +1122,7 @@
   'v8_mac_arm64_full_dbg': {
     'swarming_dimensions' : {
       'cpu': 'arm64',
-      'os': 'Mac-15',
-      'pool': 'chromium.tests',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'v8testing'},
@@ -1148,8 +1143,7 @@
   'v8_mac_arm64_no_pointer_compression_dbg': {
     'swarming_dimensions' : {
       'cpu': 'arm64',
-      'os': 'Mac-15',
-      'pool': 'chromium.tests',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'v8testing'},
@@ -1361,6 +1355,7 @@
       {'name': 'v8testing', 'variant': 'conservative_stack_scanning'},
       {'name': 'v8testing', 'variant': 'no_lfa'},
       {'name': 'v8testing', 'variant': 'stress_instruction_scheduling'},
+      {'name': 'v8testing', 'variant': 'turbofan_random_rescheduling'},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode'},
       {'name': 'mjsunit', 'variant': 'stress_maglev_tests_with_turbofan'},
       # Maglev -- move to extra once more architectures are supported.
@@ -1459,6 +1454,7 @@
       {'name': 'v8testing', 'variant': 'stress_instruction_scheduling'},
       {'name': 'v8testing', 'variant': 'stress_concurrent_allocation'},
       {'name': 'v8testing', 'variant': 'stress_concurrent_inlining', 'shards': 2},
+      {'name': 'v8testing', 'variant': 'turbofan_random_rescheduling'},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode'},
       {'name': 'mjsunit', 'variant': 'stress_maglev_tests_with_turbofan'},
       # Maglev -- move to extra once more architectures are supported.
@@ -1523,17 +1519,12 @@
       {'name': 'mjsunit', 'variant': 'stress_sampling'},
       {'name': 'webkit', 'variant': 'stress_sampling'},
       # Stress snapshot.
-      {'name': 'mjsunit', 'variant': 'stress_snapshot'},
       {'name': 'mjsunit', 'variant': 'rehash_snapshot'},
       # Experimental regexp engine.
       {'name': 'mjsunit', 'variant': 'experimental_regexp'},
       # Variants for maglev.
       {'name': 'v8testing', 'variant': 'stress_maglev_no_turbofan'},
       # Variants maglev + regexp assemble from bc
-      # TODO(437003349) change to maglev_no_turbofan once the regexp project
-      # is complete.
-      {'name': 'v8testing', 'variant': 'maglev_no_turbofan_regexp_from_bc'},
-      {'name': 'mjsunit', 'variant': 'stress_maglev_tracing'},
     ],
   },
   'V8 Linux64 - cppgc-non-default - debug': {
@@ -1577,17 +1568,12 @@
       {'name': 'mjsunit', 'variant': 'stress_sampling'},
       {'name': 'webkit', 'variant': 'stress_sampling'},
       # Stress snapshot.
-      {'name': 'mjsunit', 'variant': 'stress_snapshot'},
       {'name': 'mjsunit', 'variant': 'rehash_snapshot'},
       # Experimental regexp engine.
       {'name': 'mjsunit', 'variant': 'experimental_regexp'},
       # Variants for maglev.
       {'name': 'v8testing', 'variant': 'stress_maglev_no_turbofan'},
       # Variants maglev + regexp assemble from bc
-      # TODO(437003349) change to maglev_no_turbofan once the regexp project
-      # is complete.
-      {'name': 'v8testing', 'variant': 'maglev_no_turbofan_regexp_from_bc'},
-      {'name': 'mjsunit', 'variant': 'stress_maglev_tracing'},
     ],
   },
   'V8 Linux64 - PKU': {
@@ -1966,7 +1952,7 @@
   'V8 Mac - arm64 - gc stress': {
     'swarming_dimensions': {
       'cpu': 'arm64',
-      'os': 'Mac-15',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'd8testing', 'test_args': ['--gc-stress'], 'shards': 3},
@@ -1974,9 +1960,8 @@
   },
   'V8 Mac - arm64': {
     'swarming_dimensions' : {
-      'os': 'Mac-15',
       'cpu': 'arm64',
-      'pool': 'chromium.tests',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'v8testing'},
@@ -1997,9 +1982,8 @@
   },
   'V8 Mac - arm64 - release': {
     'swarming_dimensions' : {
-      'os': 'Mac-15',
       'cpu': 'arm64',
-      'pool': 'chromium.tests',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'v8testing'},
@@ -2020,9 +2004,8 @@
   },
   'V8 Mac - arm64 - debug': {
     'swarming_dimensions' : {
-      'os': 'Mac-15',
       'cpu': 'arm64',
-      'pool': 'chromium.tests',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'v8testing', 'shards': 2},
@@ -2044,8 +2027,7 @@
   'V8 Mac - arm64 - no pointer compression debug': {
     'swarming_dimensions' : {
       'cpu': 'arm64',
-      'os': 'Mac-15',
-      'pool': 'chromium.tests',
+      'os': 'Mac-26',
     },
     'tests': [
       {'name': 'v8testing', 'shards': 2},

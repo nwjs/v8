@@ -632,6 +632,9 @@ void ConstantOp::PrintOptions(std::ostream& os) const {
       os << "relocatable wasm indirect call target: "
          << static_cast<uint32_t>(storage.integral);
       break;
+    case Kind::kRelocatableWasmCodePointer:
+      os << "relocatable self wasm code pointer";
+      break;
   }
   os << ']';
 }
@@ -1587,16 +1590,6 @@ std::ostream& operator<<(
   UNREACHABLE();
 }
 
-std::ostream& operator<<(
-    std::ostream& os,
-    TruncateJSPrimitiveToUntaggedOrDeoptOp::UntaggedKind kind) {
-  switch (kind) {
-    case TruncateJSPrimitiveToUntaggedOrDeoptOp::UntaggedKind::kInt32:
-      return os << "Int32";
-  }
-  UNREACHABLE();
-}
-
 std::ostream& operator<<(std::ostream& os, NewArrayOp::Kind kind) {
   switch (kind) {
     case NewArrayOp::Kind::kDouble:
@@ -2225,7 +2218,8 @@ void StructSetOp::PrintOptions(std::ostream& os) const {
   } else {
     os << "non-atomic";
   }
-  os << ", " << write_barrier << ']';
+  os << ", " << write_barrier << ", "
+     << (kind == Kind::kInitialize ? "initialize" : "assign") << ']';
 }
 
 void ArrayGetOp::PrintOptions(std::ostream& os) const {
@@ -2247,7 +2241,8 @@ void ArraySetOp::PrintOptions(std::ostream& os) const {
   } else {
     os << "non-atomic";
   }
-  os << ", " << write_barrier << ']';
+  os << ", " << write_barrier << ", "
+     << (kind == Kind::kInitialize ? "initialize" : "assign") << ']';
 }
 
 #endif  // V8_ENABLE_WEBASSEBMLY
@@ -2270,7 +2265,8 @@ void SupportedOperations::Initialize() {
   MachineOperatorBuilder::Flags supported =
       InstructionSelector::SupportedMachineOperatorFlags();
 #define SET_SUPPORTED(name, machine_name) \
-  instance_.name##_ = supported & MachineOperatorBuilder::Flag::k##machine_name;
+  instance_.name##_ =                     \
+      supported.contains(MachineOperatorBuilder::Flag::k##machine_name);
 
   SUPPORTED_OPERATIONS_LIST(SET_SUPPORTED)
 #undef SET_SUPPORTED

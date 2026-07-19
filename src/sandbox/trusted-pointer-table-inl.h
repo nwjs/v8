@@ -8,7 +8,7 @@
 #include "src/sandbox/trusted-pointer-table.h"
 // Include the non-inl header before the rest of the headers.
 
-#include "src/sandbox/external-entity-table-inl.h"
+#include "src/heap/read-only-heap.h"
 #include "src/sandbox/sandbox.h"
 #include "src/sandbox/trusted-pointer-scope.h"
 
@@ -76,16 +76,24 @@ IndirectPointerTag TrustedPointerTableEntry::GetTag() const {
 void TrustedPointerTableEntry::Unpublish() {
   auto old_payload = payload_.load(std::memory_order_relaxed);
   auto new_payload = old_payload;
-  new_payload.SetTag(kUnpublishedIndirectPointerTag);
-  payload_.store(new_payload, std::memory_order_release);
+  do {
+    new_payload = old_payload;
+    new_payload.SetTag(kUnpublishedIndirectPointerTag);
+  } while (!payload_.compare_exchange_weak(old_payload, new_payload,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed));
 }
 
 void TrustedPointerTableEntry::Publish(IndirectPointerTag tag) {
   auto old_payload = payload_.load(std::memory_order_relaxed);
-  CHECK(old_payload.IsTaggedWith(kUnpublishedIndirectPointerTag));
   auto new_payload = old_payload;
-  new_payload.SetTag(tag);
-  payload_.store(new_payload, std::memory_order_release);
+  do {
+    CHECK(old_payload.IsTaggedWith(kUnpublishedIndirectPointerTag));
+    new_payload = old_payload;
+    new_payload.SetTag(tag);
+  } while (!payload_.compare_exchange_weak(old_payload, new_payload,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed));
 }
 
 bool TrustedPointerTableEntry::IsFreelistEntry() const {
@@ -100,18 +108,15 @@ std::optional<uint32_t> TrustedPointerTableEntry::GetNextFreelistEntryIndex()
 
 void TrustedPointerTableEntry::Mark() {
   auto old_payload = payload_.load(std::memory_order_relaxed);
-  DCHECK(old_payload.ContainsPointer());
-
-  auto new_payload = old_payload;
-  new_payload.SetMarkBit();
-
-  // We don't need to perform the CAS in a loop since it can only fail if a new
-  // value has been written into the entry. This, however, will also have set
-  // the marking bit.
-  bool success = payload_.compare_exchange_strong(old_payload, new_payload,
-                                                  std::memory_order_relaxed);
-  DCHECK(success || old_payload.HasMarkBitSet());
-  USE(success);
+  while (!old_payload.HasMarkBitSet()) {
+    DCHECK(old_payload.ContainsPointer());
+    auto new_payload = old_payload;
+    new_payload.SetMarkBit();
+    if (payload_.compare_exchange_weak(old_payload, new_payload,
+                                       std::memory_order_relaxed)) {
+      break;
+    }
+  }
 }
 
 void TrustedPointerTableEntry::Unmark() {
@@ -143,6 +148,14 @@ void TrustedPointerTable::Set(TrustedPointerHandle handle, Address pointer,
   DCHECK_NE(kNullTrustedPointerHandle, handle);
   Validate(pointer, tag);
   uint32_t index = HandleToIndex(handle);
+  at(index).SetPointer(pointer, tag);
+}
+
+void TrustedPointerTable::Update(TrustedPointerHandle handle, Address pointer) {
+  DCHECK_NE(kNullTrustedPointerHandle, handle);
+  uint32_t index = HandleToIndex(handle);
+  const auto tag = at(index).GetTag();
+  Validate(pointer, tag);
   at(index).SetPointer(pointer, tag);
 }
 
@@ -219,7 +232,14 @@ void TrustedPointerTable::Validate(Address pointer, IndirectPointerTag tag) {
     // This CHECK is mostly just here to force tags to be taken out of the
     // IsTrustedSpaceMigrationInProgressForObjectsWithTag function once the
     // objects are fully migrated into trusted space.
-    DCHECK(Sandbox::current()->Contains(pointer));
+    return;
+  }
+
+  if (ReadOnlyHeap::Contains(pointer)) {
+    // Only Code and UncompiledData are allowed to reside in the Read-Only Heap
+    // and have entries in the Trusted Pointer Table.
+    CHECK(tag == kCodeIndirectPointerTag ||
+          tag == kUncompiledDataIndirectPointerTag);
     return;
   }
 

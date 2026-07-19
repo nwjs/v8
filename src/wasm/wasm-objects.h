@@ -68,8 +68,6 @@ class Managed;
 template <typename CppType>
 class TrustedManaged;
 
-#include "torque-generated/src/wasm/wasm-objects-tq.inc"
-
 #define DECL_OPTIONAL_ACCESSORS(name, type) \
   DECL_GETTER(has_##name, bool)             \
   DECL_ACCESSORS(name, type)
@@ -145,16 +143,17 @@ V8_OBJECT class WasmModuleObject : public JSObject {
  public:
   using Super = JSObject;
 
-  inline Tagged<Managed<wasm::NativeModule>> managed_native_module() const;
+  inline Tagged<Managed<wasm::NativeModule>> managed_native_module() const
+      V8_LIFETIME_BOUND;
   inline void set_managed_native_module(
       Tagged<Managed<wasm::NativeModule>> value,
       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  inline Tagged<Script> script() const;
+  inline Tagged<Script> script() const V8_LIFETIME_BOUND;
   inline void set_script(Tagged<Script> value,
                          WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  inline Managed<wasm::NativeModule>::Ptr native_module();
+  inline Managed<wasm::NativeModule>::Ptr native_module() V8_LIFETIME_BOUND;
 
   // Dispatched behavior.
   DECL_PRINTER(WasmModuleObject)
@@ -361,56 +360,7 @@ inline constexpr int WasmTableObject::kTrustedDataOffsetEnd =
     offsetof(WasmTableObject, trusted_data_) + kTrustedPointerSize - 1;
 inline constexpr int WasmTableObject::kHeaderSize = sizeof(WasmTableObject);
 
-V8_OBJECT class WasmMemoryMapDescriptor : public JSObject {
- public:
-  using Super = JSObject;
 
-  inline Tagged<Weak<HeapObject>> memory() const;
-  inline void set_memory(Tagged<Weak<HeapObject>> value,
-                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
-
-  inline int32_t file_descriptor() const;
-  inline void set_file_descriptor(int32_t value);
-
-  inline uint32_t offset() const;
-  inline void set_offset(uint32_t value);
-
-  inline uint32_t size() const;
-  inline void set_size(uint32_t value);
-
-  V8_EXPORT_PRIVATE static MaybeDirectHandle<WasmMemoryMapDescriptor>
-  NewFromAnonymous(Isolate* isolate, size_t length);
-
-  V8_EXPORT_PRIVATE static DirectHandle<WasmMemoryMapDescriptor>
-  NewFromFileDescriptor(
-      Isolate* isolate,
-      v8::WasmMemoryMapDescriptor::WasmFileDescriptor file_descriptor);
-
-  // Returns the number of bytes that got mapped into the WebAssembly.Memory.
-  V8_EXPORT_PRIVATE size_t MapDescriptor(DirectHandle<WasmMemoryObject> memory,
-                                         size_t offset);
-
-  // Returns `false` if an error occurred, otherwise `true`.
-  V8_EXPORT_PRIVATE bool UnmapDescriptor();
-
-  DECL_PRINTER(WasmMemoryMapDescriptor)
-  DECL_VERIFIER(WasmMemoryMapDescriptor)
-
-  class BodyDescriptor;
-
-  static const int kHeaderSize;
-
-  TaggedMember<Weak<HeapObject>> memory_;
-  int32_t file_descriptor_;
-  uint32_t offset_;
-  uint32_t size_;
-#if TAGGED_SIZE_8_BYTES
-  uint32_t padding_;
-#endif  // TAGGED_SIZE_8_BYTES
-} V8_OBJECT_END;
-
-inline constexpr int WasmMemoryMapDescriptor::kHeaderSize =
-    sizeof(WasmMemoryMapDescriptor);
 
 // Representation of a WebAssembly.Memory JavaScript-level object.
 V8_OBJECT class WasmMemoryObject : public JSObject {
@@ -662,7 +612,7 @@ V8_OBJECT class V8_EXPORT_PRIVATE WasmTrustedInstanceData
   DECL_PROTECTED_POINTER_ACCESSORS(dispatch_table0, WasmDispatchTable)
   DECL_PROTECTED_POINTER_ACCESSORS(dispatch_tables, ProtectedFixedArray)
   inline Tagged<WasmDispatchTable> dispatch_table(uint32_t i) const;
-  DECL_OPTIONAL_ACCESSORS(tags_table, Tagged<FixedArray>)
+  DECL_PROTECTED_POINTER_ACCESSORS(tags_table, TrustedFixedArray)
   DECL_ACCESSORS(func_refs, Tagged<FixedArray>)
   DECL_ACCESSORS(managed_object_maps, Tagged<FixedArray>)
   DECL_ACCESSORS(feedback_vectors, Tagged<FixedArray>)
@@ -689,10 +639,10 @@ V8_OBJECT class V8_EXPORT_PRIVATE WasmTrustedInstanceData
   inline uint8_t* memory_base(uint32_t memory_index) const;
   inline size_t memory_size(uint32_t memory_index) const;
 
-  inline wasm::NativeModule* native_module() const;
+  inline wasm::NativeModule* native_module() const V8_LIFETIME_BOUND;
 
-  inline Tagged<WasmModuleObject> module_object() const;
-  inline const wasm::WasmModule* module() const;
+  inline Tagged<WasmModuleObject> module_object() const V8_LIFETIME_BOUND;
+  inline const wasm::WasmModule* module() const V8_LIFETIME_BOUND;
 
   // Dispatched behavior.
   DECL_PRINTER(WasmTrustedInstanceData)
@@ -729,7 +679,7 @@ V8_OBJECT class V8_EXPORT_PRIVATE WasmTrustedInstanceData
   IF_WASM_DRUMBRAKE(V, kInterpreterObjectOffset, kTaggedSize)             \
   V(kTablesOffset, kTaggedSize)                                           \
   V(kProtectedDispatchTablesOffset, kTaggedSize)                          \
-  V(kTagsTableOffset, kTaggedSize)                                        \
+  V(kProtectedTagsTableOffset, kTaggedSize)                               \
   V(kFuncRefsOffset, kTaggedSize)                                         \
   V(kManagedObjectMapsOffset, kTaggedSize)                                \
   V(kFeedbackVectorsOffset, kTaggedSize)                                  \
@@ -767,7 +717,6 @@ V8_OBJECT class V8_EXPORT_PRIVATE WasmTrustedInstanceData
   V(kImportedMutableGlobalsOffsetsOffset, "imported_mutable_globals_offsets") \
   IF_WASM_DRUMBRAKE(V, kInterpreterObjectOffset, "interpreter_object")        \
   V(kTablesOffset, "tables")                                                  \
-  V(kTagsTableOffset, "tags_table")                                           \
   V(kFuncRefsOffset, "func_refs")                                             \
   V(kManagedObjectMapsOffset, "managed_object_maps")                          \
   V(kFeedbackVectorsOffset, "feedback_vectors")                               \
@@ -782,6 +731,7 @@ V8_OBJECT class V8_EXPORT_PRIVATE WasmTrustedInstanceData
   V(kProtectedDispatchTable0Offset, "dispatch_table0")                     \
   V(kProtectedDispatchTablesOffset, "dispatch_tables")                     \
   V(kProtectedDispatchTableForImportsOffset, "dispatch_table_for_imports") \
+  V(kProtectedTagsTableOffset, "tags_table")                               \
   V(kProtectedManagedNativeModuleOffset, "managed_native_module")
 
 #define WASM_INSTANCE_FIELD_OFFSET(offset, _) offset,
@@ -893,15 +843,13 @@ V8_OBJECT class WasmInstanceObject : public JSObject {
   inline Tagged<WasmTrustedInstanceData> trusted_data_allow_unpublished(
       IsolateForSandbox isolate) const;
 
-  inline Tagged<WasmModuleObject> module_object() const;
+  inline Tagged<WasmModuleObject> module_object() const V8_LIFETIME_BOUND;
   inline void set_module_object(Tagged<WasmModuleObject> value,
                                 WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  inline Tagged<JSObject> exports_object() const;
+  inline Tagged<JSObject> exports_object() const V8_LIFETIME_BOUND;
   inline void set_exports_object(Tagged<JSObject> value,
                                  WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
-
-  inline const wasm::WasmModule* module() const;
 
   class BodyDescriptor;
 
@@ -1223,7 +1171,7 @@ V8_OBJECT class WasmDispatchTableForImports : public TrustedObject {
 } V8_OBJECT_END;
 
 // A Wasm exception that has been thrown out of Wasm code.
-class V8_EXPORT_PRIVATE WasmExceptionPackage : public JSObject {
+V8_OBJECT class V8_EXPORT_PRIVATE WasmExceptionPackage : public JSObject {
  public:
   static DirectHandle<WasmExceptionPackage> New(
       Isolate* isolate, DirectHandle<WasmExceptionTag> exception_tag,
@@ -1255,7 +1203,7 @@ class V8_EXPORT_PRIVATE WasmExceptionPackage : public JSObject {
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(WasmExceptionPackage);
-};
+} V8_OBJECT_END;
 
 void V8_EXPORT_PRIVATE
 EncodeI32ExceptionValue(DirectHandle<FixedArray> encoded_values,

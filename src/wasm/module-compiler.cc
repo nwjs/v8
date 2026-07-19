@@ -1784,7 +1784,7 @@ WasmError ValidateAndSetBuiltinImports(const WasmModule* module,
       status = WellKnownImport::kEnumName;                                     \
       detected->add_##feature();                                               \
       break;                                                                   \
-    } else if (V8_LIKELY(v8_flags.experimental_wasm_shared &&                  \
+    } else if (V8_LIKELY(v8_flags.wasm_shared &&                               \
                          sig ==                                                \
                              TypeCanonicalizer::                               \
                                  kPredefinedSigIndex_##shared_expected_sig)) { \
@@ -2290,9 +2290,24 @@ void AsyncCompileJob::InitializeIsolateSpecificInfo(Isolate* isolate) {
 void AsyncCompileJob::StartAsyncDecoding() { DoAsync<DecodeModule>(); }
 
 void AsyncCompileJob::Abort() {
-  // Removing this job will trigger the destructor, which will cancel all
-  // compilation.
+  // This will cancel all compilation.
+  PrepareForRemoval();
   GetWasmEngine()->RemoveCompileJob(this);
+}
+
+void AsyncCompileJob::PrepareForRemoval() {
+  if (prepared_for_removal_) return;
+  prepared_for_removal_ = true;
+  background_task_manager_.CancelAndWait();
+  // If initial compilation did not finish yet we can abort it.
+  if (new_native_module_) {
+    Impl(new_native_module_->compilation_state())
+        ->CancelCompilation(CompilationStateImpl::kCancelInitialCompilation);
+  }
+  // Tell the streaming decoder that the AsyncCompileJob is not available
+  // anymore.
+  if (stream_) stream_->NotifyCompilationStopped();
+  CancelPendingForegroundTask();
 }
 
 // {ValidateFunctionsStreamingJobData} holds information that is shared between
@@ -2428,6 +2443,9 @@ class ValidateFunctionsStreamingJob final : public JobTask {
   ValidateFunctionsStreamingJobData* data_;
 };
 
+// This class bridges the {StreamingDecoder} and the {AsyncCompileJob}.
+// It receives byte chunks from the decoder and drives the compilation steps
+// of the job.
 class AsyncStreamingProcessor final : public StreamingProcessor {
  public:
   explicit AsyncStreamingProcessor(AsyncCompileJob* job);
@@ -2490,16 +2508,7 @@ std::shared_ptr<StreamingDecoder> AsyncCompileJob::CreateStreamingDecoder() {
 
 AsyncCompileJob::~AsyncCompileJob() {
   // Note: This destructor always runs on the foreground thread of the isolate.
-  background_task_manager_.CancelAndWait();
-  // If initial compilation did not finish yet we can abort it.
-  if (new_native_module_) {
-    Impl(new_native_module_->compilation_state())
-        ->CancelCompilation(CompilationStateImpl::kCancelInitialCompilation);
-  }
-  // Tell the streaming decoder that the AsyncCompileJob is not available
-  // anymore.
-  if (stream_) stream_->NotifyCompilationDiscarded();
-  CancelPendingForegroundTask();
+  CHECK(prepared_for_removal_);
   if (isolate_specific_info_.isolate_) {
     DCHECK_EQ(isolate_specific_info_.isolate_->thread_id(),
               ThreadId::Current());
@@ -2539,6 +2548,10 @@ void AsyncCompileJob::FinishCompile(
     std::shared_ptr<NativeModule> native_module,
     DirectHandle<WasmModuleObject> deserialized_module_object,
     bool cache_hit) && {
+  PrepareForRemoval();
+  std::unique_ptr<AsyncCompileJob> job =
+      GetWasmEngine()->RemoveCompileJob(this);
+
   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
               "wasm.FinishAsyncCompile");
   Isolate* isolate = isolate_specific_info_.isolate_;
@@ -2557,7 +2570,7 @@ void AsyncCompileJob::FinishCompile(
 
   // If experimental PGO via files is enabled, load profile information now that
   // we have all wire bytes and know that the module is valid.
-  if (V8_UNLIKELY(v8_flags.experimental_wasm_pgo_from_file)) {
+  if (V8_UNLIKELY(v8_flags.wasm_pgo_from_file)) {
     std::unique_ptr<ProfileInformation> pgo_info =
         LoadProfileFromFile(module, native_module->wire_bytes());
     if (pgo_info) {
@@ -2676,10 +2689,10 @@ void AsyncCompileJob::FinishCompile(
     v8::Context::BackupIncumbentScope incumbent(backup_incumbent_context);
     resolver_->OnCompilationSucceeded(module_object);
   }
-  GetWasmEngine()->RemoveCompileJob(this);
 }
 
 void AsyncCompileJob::Failed() && {
+  PrepareForRemoval();
   // {job} keeps the {this} pointer alive.
   std::unique_ptr<AsyncCompileJob> job =
       GetWasmEngine()->RemoveCompileJob(this);
@@ -3003,9 +3016,12 @@ AsyncStreamingProcessor::AsyncStreamingProcessor(AsyncCompileJob* job)
       compilation_unit_builder_(nullptr) {}
 
 AsyncStreamingProcessor::~AsyncStreamingProcessor() {
-  // We expect {OnAbort()} or {OnFinishedStream()} to be called before the
-  // destructor runs. Both invalidate the {validate_functions_job_handle_}.
-  CHECK_NULL(validate_functions_job_handle_);
+  // When we receive a ContextDisposedNotification before the stream ends,
+  // we might still have a running validation job. Terminate that before
+  // freeing {validate_functions_job_data_}.
+  if (validate_functions_job_handle_) {
+    validate_functions_job_handle_->Cancel();
+  }
 
   if (owns_cache_entry_) {
     GetWasmEngine()->StreamingCompilationFailed(
@@ -4063,7 +4079,7 @@ void CompilationStateImpl::OnCompilationStopped(
   // Compilation hints enables eager compilation if there are
   // compilation-priority hints in the module, so it should be included here.
   DCHECK(!v8_flags.wasm_lazy_compilation ||
-         (v8_flags.experimental_wasm_compilation_hints &&
+         (v8_flags.wasm_compilation_hints &&
           !native_module_->module()->compilation_priorities.empty()));
 }
 

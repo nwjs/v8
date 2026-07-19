@@ -33,6 +33,7 @@
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/foreign-inl.h"
 #include "src/objects/free-space-inl.h"
+#include "src/objects/hash-seed-wrapper-inl.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object-inl.h"
@@ -53,8 +54,6 @@
 #include "src/objects/js-regexp-inl.h"
 #include "src/objects/js-regexp-string-iterator-inl.h"
 #include "src/objects/js-shadow-realm-inl.h"
-#include "src/objects/js-shared-array-inl.h"
-#include "src/objects/js-struct-inl.h"
 #ifdef V8_TEMPORAL_SUPPORT
 #include "src/objects/js-temporal-objects-inl.h"
 #endif  // V8_TEMPORAL_SUPPORT
@@ -71,7 +70,6 @@
 #include "src/objects/objects-inl.h"
 #include "src/objects/oddball-inl.h"
 #include "src/objects/ordered-hash-table-inl.h"
-#include "src/objects/primitive-heap-object-inl.h"
 #include "src/objects/promise-inl.h"
 #include "src/objects/property-array-inl.h"
 #include "src/objects/property-cell-inl.h"
@@ -95,7 +93,6 @@
 #include "src/objects/tagged-value-inl.h"
 #include "src/objects/template-objects-inl.h"
 #include "src/objects/templates-inl.h"
-#include "src/objects/torque-defined-classes-inl.h"
 #include "src/objects/transitions-inl.h"
 #include "src/objects/trusted-object-inl.h"
 #include "src/objects/turbofan-types-inl.h"

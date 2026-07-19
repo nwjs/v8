@@ -3533,10 +3533,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     case kX64Movsh:
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       if (instr->HasOutput()) {
         CpuFeatureScope f16c_scope(masm(), F16C);
         CpuFeatureScope avx2_scope(masm(), AVX2);
+        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
         __ vpbroadcastw(i.OutputDoubleRegister(), i.MemoryOperand());
         __ vcvtph2ps(i.OutputDoubleRegister(), i.OutputDoubleRegister());
       } else {
@@ -3544,6 +3544,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         size_t index = 0;
         Operand operand = i.MemoryOperand(&index);
         __ vcvtps2ph(kScratchDoubleReg, i.InputDoubleRegister(index), 0);
+        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
         __ Pextrw(operand, kScratchDoubleReg, static_cast<uint8_t>(0));
       }
       break;
@@ -3720,7 +3721,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           __ AllocateStackSpace(stack_decrement - kSystemPointerSize);
           __ pushq(i.InputOperand(1));
         } else {
-          DCHECK(input->IsSimd128StackSlot());
+          // Simd256 stack slots can be used as Simd128 since the lower
+          // 128 bits are at the base address, analogous to register aliasing.
+          DCHECK(input->CanBeSimd128StackSlot());
           DCHECK_GE(stack_decrement, kSimd128Size);
           // TODO(bbudge) Use Movaps when slots are aligned.
           __ Movups(kScratchDoubleReg, i.InputOperand(1));
@@ -8237,7 +8240,7 @@ void CodeGenerator::AssembleConstructFrame() {
         __ j(above_equal, &done, Label::kNear);
       }
 
-      if (v8_flags.experimental_wasm_growable_stacks) {
+      if (v8_flags.wasm_growable_stacks) {
         RegList regs_to_save;
         regs_to_save.set(WasmHandleStackOverflowDescriptor::GapRegister());
         regs_to_save.set(
@@ -8365,7 +8368,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
 
 #if V8_ENABLE_WEBASSEMBLY
   if (call_descriptor->IsAnyWasmFunctionCall() &&
-      v8_flags.experimental_wasm_growable_stacks) {
+      v8_flags.wasm_growable_stacks) {
     __ cmpq(
         MemOperand(rbp, TypedFrameConstants::kFrameTypeOffset),
         Immediate(StackFrame::TypeToMarker(StackFrame::WASM_SEGMENT_START)));
@@ -8494,10 +8497,7 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
   auto rep = LocationOperand::cast(source)->representation();
   int new_slots = ElementSizeInPointers(rep);
   X64OperandConverter g(this, nullptr);
-  int last_frame_slot_id =
-      frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-  int sp_delta = frame_access_state_->sp_delta();
-  int slot_id = last_frame_slot_id + sp_delta + new_slots;
+  int slot_id = frame_access_state()->GetSPSlotCount() - 1 + new_slots;
   AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
   if (source->IsRegister()) {
     __ pushq(g.ToRegister(source));
@@ -8528,10 +8528,7 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
     frame_access_state()->IncreaseSPDelta(-dropped_slots);
     __ popq(g.ToOperand(dest));
   } else {
-    int last_frame_slot_id =
-        frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-    int sp_delta = frame_access_state_->sp_delta();
-    int slot_id = last_frame_slot_id + sp_delta;
+    int slot_id = frame_access_state()->GetSPSlotCount() - 1;
     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
     AssembleMove(&stack_slot, dest);
     frame_access_state()->IncreaseSPDelta(-dropped_slots);

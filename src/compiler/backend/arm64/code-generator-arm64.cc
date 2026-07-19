@@ -589,6 +589,42 @@ void EmitFpOrNeonUnop(MacroAssembler* masm, Fn fn, Instruction* instr,
   (masm->*fn)(output, input);
 }
 
+// Based on LSE support, invoke |lse_atomic| and/or |ldst_excl_loop|
+// (load/store exclusive loop). When generating code for embedded builtins,
+// generate both after runtime check. This is similar to the -moutline-atomics
+// compilation flag.
+template <typename Fn1, typename Fn2>
+void EmitAtomicAlternatives(MacroAssembler* masm, Fn1 lse_atomic,
+                            Fn2 ldst_excl_loop) {
+  if (CpuFeatures::IsSupported(LSE)) {
+    CpuFeatureScope scope(masm, LSE);
+    lse_atomic();
+    return;
+  }
+
+  if (!masm->options().generating_embedded_builtin) {
+    ldst_excl_loop();
+    return;
+  }
+
+  Label lse, done;
+  {
+    UseScratchRegisterScope temps(masm);
+    Register scratch = temps.AcquireW();
+    masm->Ldr(scratch,
+              masm->ExternalReferenceAsOperand(IsolateFieldId::kCpuFeatures));
+    masm->Tbnz(scratch, LSE, &lse);
+  }
+  ldst_excl_loop();
+  masm->B(&done);
+  masm->Bind(&lse);
+  {
+    CpuFeatureScope scope(masm, LSE, CpuFeatureScope::kDontCheckSupported);
+    lse_atomic();
+  }
+  masm->Bind(&done);
+}
+
 }  // namespace
 
 #define ASSEMBLE_SHIFT(asm_instr, width)                                    \
@@ -618,113 +654,134 @@ void EmitFpOrNeonUnop(MacroAssembler* masm, Fn fn, Instruction* instr,
     __ asm_instr(i.Input##reg(2), i.TempRegister(0));                    \
   } while (0)
 
-#define ASSEMBLE_ATOMIC_EXCHANGE_INTEGER(suffix, reg)                      \
-  do {                                                                     \
-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));     \
-    if (CpuFeatures::IsSupported(LSE)) {                                   \
-      CpuFeatureScope scope(masm(), LSE);                                  \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
-      __ Swpal##suffix(i.Input##reg(2), i.Output##reg(),                   \
-                       MemOperand(i.TempRegister(0)));                     \
-    } else {                                                               \
-      Label exchange;                                                      \
-      __ Bind(&exchange);                                                  \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
-      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
-      __ stlxr##suffix(i.TempRegister32(1), i.Input##reg(2),               \
-                       i.TempRegister(0));                                 \
-      __ Cbnz(i.TempRegister32(1), &exchange);                             \
-    }                                                                      \
+#define ASSEMBLE_ATOMIC_EXCHANGE_INTEGER(suffix, reg)                          \
+  do {                                                                         \
+    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));         \
+    EmitAtomicAlternatives(                                                    \
+        masm(),                                                                \
+        [&]() {                                                                \
+          /* LSE */                                                            \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ Swpal##suffix(i.Input##reg(2), i.Output##reg(),                   \
+                           MemOperand(i.TempRegister(0)));                     \
+        },                                                                     \
+        [&]() {                                                                \
+          /* Load/Store exclusive loop */                                      \
+          Label exchange;                                                      \
+          __ Bind(&exchange);                                                  \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
+          __ stlxr##suffix(i.TempRegister32(1), i.Input##reg(2),               \
+                           i.TempRegister(0));                                 \
+          __ Cbnz(i.TempRegister32(1), &exchange);                             \
+        });                                                                    \
   } while (0)
 
-#define ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER(suffix, ext, reg)         \
-  do {                                                                     \
-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));     \
-    if (CpuFeatures::IsSupported(LSE)) {                                   \
-      DCHECK_EQ(i.OutputRegister(), i.InputRegister(2));                   \
-      CpuFeatureScope scope(masm(), LSE);                                  \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
-      __ Casal##suffix(i.Output##reg(), i.Input##reg(3),                   \
-                       MemOperand(i.TempRegister(0)));                     \
-    } else {                                                               \
-      Label compare_exchange;                                              \
-      Label exit;                                                          \
-      __ Bind(&compare_exchange);                                          \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
-      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
-      __ Cmp(i.Output##reg(), Operand(i.Input##reg(2), ext));              \
-      __ B(ne, &exit);                                                     \
-      __ stlxr##suffix(i.TempRegister32(1), i.Input##reg(3),               \
-                       i.TempRegister(0));                                 \
-      __ Cbnz(i.TempRegister32(1), &compare_exchange);                     \
-      __ Bind(&exit);                                                      \
-    }                                                                      \
+#define ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER(suffix, ext, reg)             \
+  do {                                                                         \
+    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));         \
+    EmitAtomicAlternatives(                                                    \
+        masm(),                                                                \
+        [&]() {                                                                \
+          /* LSE */                                                            \
+          __ Mov(i.OutputRegister(), i.InputRegister(2));                      \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ Casal##suffix(i.Output##reg(), i.Input##reg(3),                   \
+                           MemOperand(i.TempRegister(0)));                     \
+        },                                                                     \
+        [&]() {                                                                \
+          /* Load/Store exclusive loop */                                      \
+          Label compare_exchange;                                              \
+          Label exit;                                                          \
+          __ Bind(&compare_exchange);                                          \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
+          __ Cmp(i.Output##reg(), Operand(i.Input##reg(2), ext));              \
+          __ B(ne, &exit);                                                     \
+          __ stlxr##suffix(i.TempRegister32(1), i.Input##reg(3),               \
+                           i.TempRegister(0));                                 \
+          __ Cbnz(i.TempRegister32(1), &compare_exchange);                     \
+          __ Bind(&exit);                                                      \
+        });                                                                    \
   } while (0)
 
-#define ASSEMBLE_ATOMIC_SUB(suffix, reg)                                   \
-  do {                                                                     \
-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));     \
-    if (CpuFeatures::IsSupported(LSE)) {                                   \
-      CpuFeatureScope scope(masm(), LSE);                                  \
-      UseScratchRegisterScope temps(masm());                               \
-      Register scratch = temps.AcquireSameSizeAs(i.Input##reg(2));         \
-      __ Neg(scratch, i.Input##reg(2));                                    \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
-      __ Ldaddal##suffix(scratch, i.Output##reg(),                         \
-                         MemOperand(i.TempRegister(0)));                   \
-    } else {                                                               \
-      Label binop;                                                         \
-      __ Bind(&binop);                                                     \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
-      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
-      __ Sub(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2)));   \
-      __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),                \
-                       i.TempRegister(0));                                 \
-      __ Cbnz(i.TempRegister32(2), &binop);                                \
-    }                                                                      \
+#define ASSEMBLE_ATOMIC_SUB(suffix, reg)                                       \
+  do {                                                                         \
+    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));         \
+    EmitAtomicAlternatives(                                                    \
+        masm(),                                                                \
+        [&]() {                                                                \
+          /* LSE */                                                            \
+          UseScratchRegisterScope temps(masm());                               \
+          Register scratch = temps.AcquireSameSizeAs(i.Input##reg(2));         \
+          __ Neg(scratch, i.Input##reg(2));                                    \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ Ldaddal##suffix(scratch, i.Output##reg(),                         \
+                             MemOperand(i.TempRegister(0)));                   \
+        },                                                                     \
+        [&]() {                                                                \
+          /* Load/Store exclusive loop */                                      \
+          Label binop;                                                         \
+          __ Bind(&binop);                                                     \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
+          __ Sub(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2)));   \
+          __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),                \
+                           i.TempRegister(0));                                 \
+          __ Cbnz(i.TempRegister32(2), &binop);                                \
+        });                                                                    \
   } while (0)
 
-#define ASSEMBLE_ATOMIC_AND(suffix, reg)                                   \
-  do {                                                                     \
-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));     \
-    if (CpuFeatures::IsSupported(LSE)) {                                   \
-      CpuFeatureScope scope(masm(), LSE);                                  \
-      UseScratchRegisterScope temps(masm());                               \
-      Register scratch = temps.AcquireSameSizeAs(i.Input##reg(2));         \
-      __ Mvn(scratch, i.Input##reg(2));                                    \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
-      __ Ldclral##suffix(scratch, i.Output##reg(),                         \
-                         MemOperand(i.TempRegister(0)));                   \
-    } else {                                                               \
-      Label binop;                                                         \
-      __ Bind(&binop);                                                     \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
-      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
-      __ And(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2)));   \
-      __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),                \
-                       i.TempRegister(0));                                 \
-      __ Cbnz(i.TempRegister32(2), &binop);                                \
-    }                                                                      \
+#define ASSEMBLE_ATOMIC_AND(suffix, reg)                                       \
+  do {                                                                         \
+    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));         \
+    EmitAtomicAlternatives(                                                    \
+        masm(),                                                                \
+        [&]() {                                                                \
+          /* LSE */                                                            \
+          UseScratchRegisterScope temps(masm());                               \
+          Register scratch = temps.AcquireSameSizeAs(i.Input##reg(2));         \
+          __ Mvn(scratch, i.Input##reg(2));                                    \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ Ldclral##suffix(scratch, i.Output##reg(),                         \
+                             MemOperand(i.TempRegister(0)));                   \
+        },                                                                     \
+        [&]() {                                                                \
+          /* Load/Store exclusive loop */                                      \
+          Label binop;                                                         \
+          __ Bind(&binop);                                                     \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
+          __ And(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2)));   \
+          __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),                \
+                           i.TempRegister(0));                                 \
+          __ Cbnz(i.TempRegister32(2), &binop);                                \
+        });                                                                    \
   } while (0)
 
 #define ASSEMBLE_ATOMIC_BINOP(suffix, bin_instr, lse_instr, reg)               \
   do {                                                                         \
     __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));         \
-    if (CpuFeatures::IsSupported(LSE)) {                                       \
-      CpuFeatureScope scope(masm(), LSE);                                      \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());     \
-      __ lse_instr##suffix(i.Input##reg(2), i.Output##reg(),                   \
-                           MemOperand(i.TempRegister(0)));                     \
-    } else {                                                                   \
-      Label binop;                                                             \
-      __ Bind(&binop);                                                         \
-      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());     \
-      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                    \
-      __ bin_instr(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2))); \
-      __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),                    \
-                       i.TempRegister(0));                                     \
-      __ Cbnz(i.TempRegister32(2), &binop);                                    \
-    }                                                                          \
+    EmitAtomicAlternatives(                                                    \
+        masm(),                                                                \
+        [&]() {                                                                \
+          /* LSE */                                                            \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ lse_instr##suffix(i.Input##reg(2), i.Output##reg(),               \
+                               MemOperand(i.TempRegister(0)));                 \
+        },                                                                     \
+        [&]() {                                                                \
+          /* Load/Store exclusive loop */                                      \
+          Label binop;                                                         \
+          __ Bind(&binop);                                                     \
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+          __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
+          __ bin_instr(i.Temp##reg(1), i.Output##reg(),                        \
+                       Operand(i.Input##reg(2)));                              \
+          __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),                \
+                           i.TempRegister(0));                                 \
+          __ Cbnz(i.TempRegister32(2), &binop);                                \
+        });                                                                    \
   } while (0)
 
 #define ASSEMBLE_IEEE754_BINOP(name)                                        \
@@ -2659,12 +2716,20 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Fcvt(i.OutputDoubleRegister().S(), i.OutputDoubleRegister().H());
       break;
     }
-    case kArm64StrH:
+    case kArm64StrH: {
+      if (instr->InputAt(0)->IsImmediate()) {
+        DCHECK_EQ(0, base::bit_cast<int32_t>(i.InputFloat32(0)));
+        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+        __ Strh(wzr, i.MemoryOperand(1));
+        break;
+      }
+      UseScratchRegisterScope temps(masm());
+      VRegister tmp_h = temps.AcquireH();
+      __ Fcvt(tmp_h, i.InputFloatRegister(0).S());
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
-      __ Fcvt(i.InputFloat32OrZeroRegister(0).H(),
-              i.InputFloat32OrZeroRegister(0).S());
-      __ Str(i.InputFloat32OrZeroRegister(0).H(), i.MemoryOperand(1));
+      __ Str(tmp_h, i.MemoryOperand(1));
       break;
+    }
     case kArm64LdrS:
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Ldr(i.OutputDoubleRegister().S(), i.MemoryOperand());
@@ -2807,26 +2872,30 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Extend extend = COMPRESS_POINTERS_BOOL ? UXTW : UXTX;
 
       Label exit;
-      if (CpuFeatures::IsSupported(LSE)) {
-        DCHECK_NE(i.OutputRegister(), i.InputRegister(2));
-        __ Mov(output_register, expected);
-        CpuFeatureScope scope(masm(), LSE);
-        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
-        __ Casal(output_register, new_value, MemOperand(i.TempRegister(0)));
-        // If the loaded value isn't the expected value, nothing was written,
-        // so the write barrier can be skipped.
-        __ Cmp(output_register, Operand(expected, extend));
-        __ B(ne, &exit);
-      } else {
-        Label compare_exchange;
-        __ Bind(&compare_exchange);
-        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
-        __ ldaxr(output_register, i.TempRegister(0));
-        __ Cmp(output_register, Operand(expected, extend));
-        __ B(ne, &exit);
-        __ stlxr(i.TempRegister32(1), new_value, i.TempRegister(0));
-        __ Cbnz(i.TempRegister32(1), &compare_exchange);
-      }
+      EmitAtomicAlternatives(
+          masm(),
+          [&]() {
+            // LSE
+            DCHECK_NE(i.OutputRegister(), i.InputRegister(2));
+            __ Mov(output_register, expected);
+            RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+            __ Casal(output_register, new_value, MemOperand(i.TempRegister(0)));
+            // If the loaded value isn't the expected value, nothing was
+            // written, so the write barrier can be skipped.
+            __ Cmp(output_register, Operand(expected, extend));
+            __ B(ne, &exit);
+          },
+          [&]() {
+            // Load/Store exclusive loop
+            Label compare_exchange;
+            __ Bind(&compare_exchange);
+            RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+            __ ldaxr(output_register, i.TempRegister(0));
+            __ Cmp(output_register, Operand(expected, extend));
+            __ B(ne, &exit);
+            __ stlxr(i.TempRegister32(1), new_value, i.TempRegister(0));
+            __ Cbnz(i.TempRegister32(1), &compare_exchange);
+          });
       if (!v8_flags.disable_write_barriers) {
         Register object = i.InputRegister(0);
         Register offset = i.InputRegister(1);
@@ -4398,7 +4467,7 @@ void CodeGenerator::AssembleConstructFrame() {
         __ B(hs, &done);
       }
 
-      if (v8_flags.experimental_wasm_growable_stacks) {
+      if (v8_flags.wasm_growable_stacks) {
         CPURegList regs_to_save(kXRegSizeInBits, RegList{});
         regs_to_save.Combine(WasmHandleStackOverflowDescriptor::GapRegister());
         regs_to_save.Combine(
@@ -4508,7 +4577,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
 
 #if V8_ENABLE_WEBASSEMBLY
   if (call_descriptor->IsAnyWasmFunctionCall() &&
-      v8_flags.experimental_wasm_growable_stacks) {
+      v8_flags.wasm_growable_stacks) {
     {
       UseScratchRegisterScope temps{masm()};
       Register scratch = temps.AcquireX();
@@ -4635,10 +4704,7 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
   auto rep = LocationOperand::cast(source)->representation();
   int new_slots = RoundUp<2>(ElementSizeInPointers(rep));
   Arm64OperandConverter g(this, nullptr);
-  int last_frame_slot_id =
-      frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-  int sp_delta = frame_access_state_->sp_delta();
-  int slot_id = last_frame_slot_id + sp_delta + new_slots;
+  int slot_id = frame_access_state()->GetSPSlotCount() - 1 + new_slots;
   AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
   if (source->IsRegister()) {
     __ Push(padreg, g.ToRegister(source));
@@ -4673,10 +4739,7 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
     __ Pop(scratch, padreg);
     __ Str(scratch, g.ToMemOperand(dest, masm()));
   } else {
-    int last_frame_slot_id =
-        frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-    int sp_delta = frame_access_state_->sp_delta();
-    int slot_id = last_frame_slot_id + sp_delta;
+    int slot_id = frame_access_state()->GetSPSlotCount() - 1;
     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
     AssembleMove(&stack_slot, dest);
     frame_access_state()->IncreaseSPDelta(-dropped_slots);

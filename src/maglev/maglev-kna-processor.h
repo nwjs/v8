@@ -10,6 +10,7 @@
 #include "src/base/base-export.h"
 #include "src/base/logging.h"
 #include "src/codegen/bailout-reason.h"
+#include "src/compiler/heap-refs.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/maglev/maglev-basic-block.h"
 #include "src/maglev/maglev-graph-processor.h"
@@ -17,10 +18,18 @@
 #include "src/maglev/maglev-ir.h"
 #include "src/maglev/maglev-known-node-aspects.h"
 #include "src/maglev/maglev-node-type.h"
+#include "src/maglev/maglev-post-hoc-optimizations-processors.h"
+#include "src/maglev/maglev-tracer.h"
+#include "src/objects/map.h"
 
 namespace v8 {
 namespace internal {
 namespace maglev {
+
+#define TRACE_KNA(...)                   \
+  if (V8_UNLIKELY(is_tracing())) {       \
+    TraceLogger(tracer_) << __VA_ARGS__; \
+  }
 
 template <typename T>
 concept IsNodeT = std::is_base_of_v<Node, T>;
@@ -37,10 +46,12 @@ concept IsNodeT = std::is_base_of_v<Node, T>;
 // successor basic blocks.
 class RecomputeKnownNodeAspectsProcessor {
  public:
-  explicit RecomputeKnownNodeAspectsProcessor(Graph* graph)
+  RecomputeKnownNodeAspectsProcessor(Graph* graph,
+                                     ReachableExceptionHandlerTracker& tracker)
       : graph_(graph),
         known_node_aspects_(nullptr),
-        reachable_exception_handlers_(zone()) {}
+        tracker_(tracker),
+        tracer_(graph->compilation_info()) {}
 
   void PreProcessGraph(Graph* graph) {
     known_node_aspects_ = zone()->New<KnownNodeAspects>(zone());
@@ -52,29 +63,25 @@ class RecomputeKnownNodeAspectsProcessor {
   }
   void PostProcessGraph(Graph* graph) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
-    // TODO(victorgomes): Support removing the unreachable blocks instead of
-    // just skipping it.
-    if (V8_UNLIKELY(block->IsUnreachable())) {
-      // Ensure successors can also be unreachable.
-      return AbortBlock(block);
-    }
-
-    if (block->is_exception_handler_block()) {
-      if (!reachable_exception_handlers_.contains(block)) {
-        // This is an unreachable exception handler block.
-        // Ensure successors can also be unreachable.
-        return AbortBlock(block);
-      }
-    }
-
+    bool is_fallthrough = false;
     if (block->is_loop() && block->state()->is_resumable_loop()) {
       // TODO(victorgomes): Ideally, we should use the loop backedge KNA cache
       // for all loops.
       known_node_aspects_ = zone()->New<KnownNodeAspects>(zone());
     } else if (block->is_loop()) {
-      known_node_aspects_ =
-          block->state()->TakeKnownNodeAspects()->CloneForLoopHeader(
-              false, nullptr, zone());
+      DCHECK_GT(block->predecessor_count(), 1);
+      known_node_aspects_ = block->state()->TakeKnownNodeAspects();
+      KnownNodeAspects* backedge_known_node_aspects =
+          block->state()->backedge_known_node_aspects();
+      // Merge saved backedge KNA to the forward one.
+      TRACE_KNA("Merging KNA at loop header B"
+                << block->id() << ":" << TraceNewline{}
+                << "## Forward KNA:" << TraceNewline{} << *known_node_aspects_
+                << TraceNewline{} << "## Backward KNA:" << TraceNewline{}
+                << *backedge_known_node_aspects);
+      backedge_known_node_aspects->UnwrapIdentitiesAndPhisInKeys(zone());
+      known_node_aspects_->MergeForLoop(*backedge_known_node_aspects, zone(),
+                                        block->state()->loop_effects());
     } else if (block->has_state()) {
       known_node_aspects_ = block->state()->TakeKnownNodeAspects();
     } else if (block->is_edge_split_block()) {
@@ -84,6 +91,8 @@ class RecomputeKnownNodeAspectsProcessor {
         next_block = next_block->control_node()->Cast<Jump>()->target();
       }
       known_node_aspects_ = next_block->state()->CloneKnownNodeAspects(zone());
+    } else {
+      is_fallthrough = true;
     }
     DCHECK_NOT_NULL(known_node_aspects_);
 
@@ -104,6 +113,12 @@ class RecomputeKnownNodeAspectsProcessor {
       }
     }
 
+    if (!is_fallthrough) {
+      TRACE_KNA("KNA at entry of block B" << block->id() << ":"
+                                          << TraceNewline{}
+                                          << *known_node_aspects_);
+    }
+
     return BlockProcessResult::kContinue;
   }
   void PostProcessBasicBlock(BasicBlock* block) {}
@@ -115,7 +130,7 @@ class RecomputeKnownNodeAspectsProcessor {
     if (info->HasExceptionHandler() && !info->ShouldLazyDeopt()) {
       BasicBlock* exception_handler = info->catch_block();
       if (mark_handler_reachable) {
-        reachable_exception_handlers_.insert(exception_handler);
+        tracker_.MarkReachable(exception_handler);
       }
       Merge(exception_handler);
     }
@@ -195,9 +210,15 @@ class RecomputeKnownNodeAspectsProcessor {
   }
 
  private:
+  bool is_tracing() const {
+    return v8_flags.trace_maglev_kna_processor &&
+           graph_->compilation_info()->is_tracing_enabled();
+  }
+
   Graph* graph_;
   KnownNodeAspects* known_node_aspects_;
-  ZoneAbslFlatHashSet<BasicBlock*> reachable_exception_handlers_;
+  ReachableExceptionHandlerTracker& tracker_;
+  Tracer tracer_;
 
   Zone* zone() { return graph_->zone(); }
   compiler::JSHeapBroker* broker() { return graph_->broker(); }
@@ -205,19 +226,9 @@ class RecomputeKnownNodeAspectsProcessor {
   NodeInfo* GetOrCreateInfoFor(ValueNode* node) {
     return known_node_aspects().GetOrCreateInfoFor(broker(), node);
   }
-  bool EnsureType(ValueNode* node, NodeType type) {
-    return known_node_aspects().EnsureType(broker(), node, type);
-  }
 
-  BlockProcessResult AbortBlock(BasicBlock* block) {
-    ControlNode* control = block->reset_control_node();
-    block->RemovePredecessorFollowing(control);
-    control->OverwriteWith<Abort>()->set_reason(AbortReason::kUnreachable);
-    block->set_deferred(true);
-    block->set_control_node(control);
-    block->mark_dead();
-    graph_->set_may_have_unreachable_blocks();
-    return BlockProcessResult::kSkip;
+  void RecordType(ValueNode* node, NodeType type) {
+    known_node_aspects().EnsureType(broker(), node, type);
   }
 
   void Merge(BasicBlock* block) {
@@ -237,7 +248,7 @@ class RecomputeKnownNodeAspectsProcessor {
 
 #define PROCESS_CHECK(Type)                             \
   ProcessResult ProcessNode(Check##Type* node) {        \
-    EnsureType(node->input_node(0), NodeType::k##Type); \
+    RecordType(node->input_node(0), NodeType::k##Type); \
     return ProcessResult::kContinue;                    \
   }
   PROCESS_CHECK(Smi)
@@ -251,13 +262,11 @@ class RecomputeKnownNodeAspectsProcessor {
   ProcessResult ProcessNode(CheckNumber* node) {
     switch (node->mode()) {
       case Object::Conversion::kToNumber:
-        EnsureType(node->input_node(0), NodeType::kNumber);
+        RecordType(node->input_node(0), NodeType::kNumber);
         break;
       case Object::Conversion::kToNumeric:
-        // Smi, HeapNumber or BigInt. There's no separate type for BigInt, but
-        // it's a kOtherHeapObject.
-        EnsureType(node->input_node(0),
-                   UnionType(NodeType::kNumber, NodeType::kOtherHeapObject));
+        // Smi, HeapNumber or BigInt.
+        RecordType(node->input_node(0), NodeType::kNumeric);
         break;
     }
     return ProcessResult::kContinue;
@@ -430,8 +439,26 @@ class RecomputeKnownNodeAspectsProcessor {
     return ProcessResult::kContinue;
   }
 
+  ProcessResult ProcessNode(AssumeMap* node) {
+    auto merger = KnownMapsMerger<compiler::ZoneRefSet<Map>>(broker(), zone(),
+                                                             node->maps());
+    merger.IntersectWithKnownNodeAspects(node->ObjectInput().node(),
+                                         known_node_aspects());
+    merger.UpdateKnownNodeAspects(node->ObjectInput().node(),
+                                  known_node_aspects());
+    return ProcessResult::kContinue;
+  }
+
+  template <typename Derived>
+  ProcessResult ProcessNode(AssumeTypeT<Derived>* node) {
+    RecordType(node->input_node(0), node->asserted_type());
+    return ProcessResult::kContinue;
+  }
+
   ProcessResult ProcessNode(Node* node) { return ProcessResult::kContinue; }
 };
+
+#undef TRACE_KNA
 
 }  // namespace maglev
 }  // namespace internal

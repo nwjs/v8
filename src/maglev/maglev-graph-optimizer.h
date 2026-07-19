@@ -73,17 +73,14 @@ class MaglevGraphOptimizer {
 
   void AttachExceptionHandlerInfo(NodeBase* node);
 
-  ReduceResult EmitUnconditionalDeopt(DeoptimizeReason);
-  ReduceResult EmitThrow(Throw::Function function, ValueNode* input);
-
   ProcessResult DeoptAndTruncate(DeoptimizeReason reason) {
-    ReduceResult result = EmitUnconditionalDeopt(reason);
+    ReduceResult result = reducer_.EmitUnconditionalDeopt(reason);
     CHECK(result.IsDoneWithAbort());
     return ProcessResult::kTruncateBlock;
   }
   ProcessResult ThrowAndTruncate(Throw::Function function,
                                  ValueNode* input = nullptr) {
-    ReduceResult result = EmitThrow(function, input);
+    ReduceResult result = reducer_.EmitThrow(function, input);
     CHECK(result.IsDoneWithAbort());
     return ProcessResult::kTruncateBlock;
   }
@@ -111,9 +108,6 @@ class MaglevGraphOptimizer {
   std::optional<Range> GetRange(ValueNode* node);
   bool IsRangeLessEqual(ValueNode* lhs, ValueNode* rhs);
 
-  // Iterates the deopt frames unwrapping its inputs, ie, removing Identity or
-  // ReturnedValue nodes.
-  void UnwrapDeoptFrames();
   void UnwrapInputs();
 
   template <typename NodeT>
@@ -149,6 +143,8 @@ class MaglevGraphOptimizer {
   template <typename NodeT, typename... Args>
   ProcessResult ReplaceWith(std::initializer_list<ValueNode*> inputs,
                             Args&&...);
+
+  ProcessResult RemoveCurrentNode();
 
   template <Operation kOperation>
   std::optional<ProcessResult> TryFoldInt32Operation(ValueNode* node);

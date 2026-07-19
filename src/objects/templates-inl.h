@@ -11,7 +11,7 @@
 #include "src/codegen/external-reference.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/api-callbacks.h"
-#include "src/objects/dictionary.h"
+#include "src/objects/contexts-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/oddball.h"
 #include "src/objects/shared-function-info.h"
@@ -21,8 +21,6 @@
 
 namespace v8 {
 namespace internal {
-
-#include "torque-generated/src/objects/templates-tq-inl.inc"
 
 Tagged<UnionOf<Undefined, ObjectTemplateInfo>>
 FunctionTemplateRareData::prototype_template() const {
@@ -405,12 +403,7 @@ uint32_t TemplateInfo::EnsureHasSerialNumber(Isolate* isolate) {
   return serial_number;
 }
 
-uint32_t TemplateInfo::GetHash() const {
-  uint32_t hash = ComputeUnseededHash(serial_number());
-  // Make sure that the hash can be encoded in a Smi in order to make it
-  // compatible with Object::GetSimpleHash() and avoid surprises.
-  return hash & Smi::kMaxValue;
-}
+uint32_t TemplateInfo::GetHash() const { return SmiHash32(serial_number()); }
 
 // static
 MaybeHandle<Object> TemplateInfo::ProbeInstantiationsCache(

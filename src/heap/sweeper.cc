@@ -20,12 +20,10 @@
 #include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/free-list-inl.h"
 #include "src/heap/gc-tracer-inl.h"
-#include "src/heap/gc-tracer.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap.h"
 #include "src/heap/live-object-range-inl.h"
 #include "src/heap/mark-compact-inl.h"
-#include "src/heap/mark-compact.h"
 #include "src/heap/marking-inl.h"
 #include "src/heap/marking-state.h"
 #include "src/heap/memory-allocator.h"
@@ -35,11 +33,12 @@
 #include "src/heap/normal-page-inl.h"
 #include "src/heap/paged-spaces.h"
 #include "src/heap/pretenuring-handler-inl.h"
-#include "src/heap/pretenuring-handler.h"
 #include "src/heap/remembered-set.h"
 #include "src/heap/slot-set.h"
 #include "src/heap/zapping.h"
+#include "src/init/isolate-group.h"
 #include "src/objects/hash-table.h"
+#include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/map.h"
@@ -179,6 +178,8 @@ class Sweeper::MajorSweeperJob final : public JobTask {
     // Set the current isolate such that trusted pointer tables etc are
     // available and the cage base is set correctly for multi-cage mode.
     SetCurrentIsolateScope isolate_scope(sweeper_->heap_->isolate());
+    SYNCHRONIZATION_POINT_FOR_TESTING(is_main_thread ? "MajorSweeperMainThread"
+                                                     : "MajorSweeperBgThread");
 
     DCHECK(sweeper_->major_sweeping_in_progress());
     const int offset = delegate->GetTaskId();
@@ -258,6 +259,8 @@ class Sweeper::MinorSweeperJob final : public JobTask {
     // Set the current isolate such that trusted pointer tables etc are
     // available and the cage base is set correctly for multi-cage mode.
     SetCurrentIsolateScope isolate_scope(sweeper_->heap_->isolate());
+    SYNCHRONIZATION_POINT_FOR_TESTING(is_main_thread ? "MinorSweeperMainThread"
+                                                     : "MinorSweeperBgThread");
 
     if (!concurrent_sweeper.ConcurrentSweepSpace(delegate)) return;
     concurrent_sweeper.ConcurrentSweepPromotedPages(delegate);

@@ -15,6 +15,7 @@
 #include "src/base/float16.h"
 #include "src/base/ieee754.h"
 #include "src/base/numerics/safe_conversions.h"
+#include "src/base/sanitizer/tsan.h"
 #include "src/common/assert-scope.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/frames.h"
@@ -1192,9 +1193,15 @@ wasm::StackMemory* find_wasmfx_handler_stack(Isolate* isolate,
     CHECK(type == StackFrame::WASM || type == StackFrame::WASM_SEGMENT_START);
 
     // Get the handler table and search for a matching tag.
-    WasmCode* wasm_code =
-        wasm::GetWasmCodeManager()->LookupCode(isolate, target_pc);
-
+    WasmCode* wasm_code = to->wasm_code();
+    DCHECK_NOT_NULL(wasm_code);
+    // Establish a release-acquire relationship with
+    // NativeModule::PublishCodeLocked. Although hardware synchronization is
+    // guaranteed transitively via the instruction cache flushing barriers (or
+    // x64 TSO) when publishing JIT code, C++ compilers and TSan do not
+    // understand this JIT-to-C++ data flow and report a false positive data
+    // race.
+    TSAN_ACQUIRE(wasm_code);
     base::Vector<const uint8_t> effect_handlers = wasm_code->effect_handlers();
     Tagged<Object> trusted_instance_data_obj(base::Memory<Address>(
         target_fp + WasmFrameConstants::kWasmInstanceDataOffset));
@@ -1242,7 +1249,7 @@ Address suspend_wasmfx_stack(Isolate* isolate, Address sp, Address fp,
                              const uint32_t tag_sig_index) {
   Address target_sp, target_fp, target_pc;
   Tagged<Object> cont_obj(cont_raw);
-  auto cont = TrustedCast<WasmContinuationObject>(cont_obj);
+  auto cont = Cast<WasmContinuationObject>(cont_obj);
   wasm::StackMemory* from = isolate->isolate_data()->active_stack();
   cont->set_stack_obj(from->stack_obj());
   CanonicalTypeIndex cont_sig_index;
@@ -1269,6 +1276,7 @@ Address suspend_wasmfx_stack(Isolate* isolate, Address sp, Address fp,
   }
 #endif
   from->set_signature_id(cont_sig_index);
+  to->set_wasm_code(nullptr);
 
   if (v8_flags.trace_wasm_stack_switching) {
     PrintF("Switch from stack %d to %d (suspend)\n", from->id(), to->id());
@@ -1283,7 +1291,7 @@ Address switch_wasmfx_stack(Isolate* isolate, Address sp, Address fp,
                             Address arg_buffer, const uint32_t sig_index) {
   Address target_sp, target_fp, target_pc;
   Tagged<Object> cont_obj(cont_raw);
-  auto cont = TrustedCast<WasmContinuationObject>(cont_obj);
+  auto cont = Cast<WasmContinuationObject>(cont_obj);
   wasm::StackMemory* from = isolate->isolate_data()->active_stack();
 
   cont->set_stack_obj(from->stack_obj());
@@ -1332,11 +1340,24 @@ void return_jspi_stack(Isolate* isolate, wasm::StackMemory* to) {
 }
 
 void return_wasmfx_stack(Isolate* isolate, wasm::StackMemory* to) {
+  to->set_wasm_code(nullptr);
   return_stack(isolate, to);
 }
 
 void retire_stack(Isolate* isolate, wasm::StackMemory* stack) {
   isolate->RetireWasmStack(stack);
+}
+
+void wasmfx_set_wasm_code(wasm::StackMemory* stack, WasmCode* code) {
+  stack->set_wasm_code(code);
+}
+
+void cont_bind(Address cont_raw, wasm::StackMemory* stack, int num_args,
+               uint32_t new_sig) {
+  auto cont = Cast<WasmContinuationObject>(Tagged<Object>(cont_raw));
+  stack->bind_arguments(num_args);
+  stack->set_signature_id(CanonicalTypeIndex{new_sig});
+  stack->set_current_continuation(cont);
 }
 
 intptr_t switch_to_the_central_stack(Isolate* isolate, uintptr_t current_sp) {

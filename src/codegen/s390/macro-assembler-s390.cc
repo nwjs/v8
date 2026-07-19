@@ -662,66 +662,18 @@ void MacroAssembler::MultiPopV128(DoubleRegList dregs, Register scratch,
 void MacroAssembler::MultiPushF64OrV128(DoubleRegList dregs, Register scratch,
                                         Register location) {
 #if V8_ENABLE_WEBASSEMBLY
-  bool generating_builtins =
-      isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
-  if (generating_builtins) {
-    Label push_doubles, simd_pushed;
-    Move(r1, ExternalReference::supports_simd_128_address());
-    LoadU8(r1, MemOperand(r1));
-    LoadAndTestP(r1, r1);  // If > 0 then simd is available.
-    ble(&push_doubles, Label::kNear);
-    // Save vector registers, don't save double registers anymore.
-    MultiPushV128(dregs, scratch);
-    b(&simd_pushed);
-    bind(&push_doubles);
-    // Simd not supported, only save double registers.
-    MultiPushDoubles(dregs);
-    // We still need to allocate empty space on the stack as if
-    // Simd rgeisters were saved (see kFixedFrameSizeFromFp).
-    lay(sp, MemOperand(sp, -(dregs.Count() * kDoubleSize)));
-    bind(&simd_pushed);
-  } else {
-    if (CpuFeatures::SupportsSimd128()) {
-      MultiPushV128(dregs, scratch);
-    } else {
-      MultiPushDoubles(dregs);
-      lay(sp, MemOperand(sp, -(dregs.Count() * kDoubleSize)));
-    }
-  }
+  MultiPushV128(dregs, scratch, location);
 #else
-  MultiPushDoubles(dregs);
+  MultiPushDoubles(dregs, location);
 #endif
 }
 
 void MacroAssembler::MultiPopF64OrV128(DoubleRegList dregs, Register scratch,
                                        Register location) {
 #if V8_ENABLE_WEBASSEMBLY
-  bool generating_builtins =
-      isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
-  if (generating_builtins) {
-    Label pop_doubles, simd_popped;
-    Move(r1, ExternalReference::supports_simd_128_address());
-    LoadU8(r1, MemOperand(r1));
-    LoadAndTestP(r1, r1);  // If > 0 then simd is available.
-    ble(&pop_doubles, Label::kNear);
-    // Pop vector registers, don't pop double registers anymore.
-    MultiPopV128(dregs, scratch);
-    b(&simd_popped);
-    bind(&pop_doubles);
-    // Simd not supported, only pop double registers.
-    lay(sp, MemOperand(sp, dregs.Count() * kDoubleSize));
-    MultiPopDoubles(dregs);
-    bind(&simd_popped);
-  } else {
-    if (CpuFeatures::SupportsSimd128()) {
-      MultiPopV128(dregs, scratch);
-    } else {
-      lay(sp, MemOperand(sp, dregs.Count() * kDoubleSize));
-      MultiPopDoubles(dregs);
-    }
-  }
+  MultiPopV128(dregs, scratch, location);
 #else
-  MultiPopDoubles(dregs);
+  MultiPopDoubles(dregs, location);
 #endif
 }
 
@@ -2401,7 +2353,7 @@ int MacroAssembler::CallCFunction(Register function, int num_reg_arguments,
     // Save the frame pointer and PC so that the stack layout remains iterable,
     // even without an ExitFrame which normally exists between JS and C frames.
     // See x64 code for reasoning about how to address the isolate data fields.
-    larl(r0, &get_pc);
+    GetLabelAddress(r0, &get_pc);
     CHECK(root_array_available());
     StoreU64(r0,
              ExternalReferenceAsOperand(IsolateFieldId::kFastCCallCallerPC));
@@ -4897,7 +4849,8 @@ void MacroAssembler::StoreReturnAddressAndCall(Register target) {
   Register ra = r14;
 #endif
   Label return_label;
-  larl(ra, &return_label);  // Generate the return addr of call later.
+  GetLabelAddress(ra,
+                  &return_label);  // Generate the return addr of call later.
 #if V8_OS_ZOS
   // Mimic the XPLINK expected no-op (2-byte) instruction at the return point.
   // When the C call returns, the 2 bytes are skipped and then the proper
@@ -6277,7 +6230,7 @@ void MacroAssembler::Switch(Register scratch, Register value,
 
   int entry_size_log2 = 3;
   ShiftLeftU32(value, value, Operand(entry_size_log2));
-  larl(r1, &jump_table);
+  GetLabelAddress(r1, &jump_table);
   lay(r1, MemOperand(value, r1));
   b(r1);
 

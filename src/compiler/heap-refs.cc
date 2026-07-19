@@ -13,6 +13,7 @@
 #include "src/objects/elements-kind.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/instance-type-inl.h"
+#include "src/objects/js-proxy-inl.h"
 #include "src/sandbox/bounded-size-inl.h"
 
 #ifdef ENABLE_SLOW_DCHECKS
@@ -25,7 +26,9 @@
 #include "src/compiler/js-heap-broker-inl.h"
 #include "src/execution/protectors-inl.h"
 #include "src/heap/heap-layout-inl.h"
+#include "src/ic/handler-configuration.h"
 #include "src/objects/allocation-site-inl.h"
+#include "src/objects/data-handler-inl.h"
 #include "src/objects/descriptor-array.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
@@ -318,14 +321,12 @@ class JSProxyData : public JSReceiverData {
 namespace {
 
 // Separate function for racy HeapNumber value read, so that we can explicitly
-// suppress it in TSAN (see tools/sanitizers/tsan_suppressions.txt).
-// We prevent inlining of this function in TSAN builds, so that TSAN does indeed
-// see that this is where the race is, and does indeed ignore it.
-#ifdef V8_IS_TSAN
-V8_NOINLINE
-#endif
+// suppress it in TSAN.
 uint64_t RacyReadHeapNumberBits(Tagged<HeapNumber> value) {
-  return value->value_as_bits();
+  TSAN_IGNORE_READS_BEGIN;
+  uint64_t result = value->value_as_bits();
+  TSAN_IGNORE_READS_END;
+  return result;
 }
 
 std::optional<Tagged<Object>> GetOwnFastConstantDataPropertyFromHeap(
@@ -429,21 +430,20 @@ OptionalObjectRef GetOwnDictionaryPropertyFromHeap(
 }
 
 // Separate function for racy JSTypedArray length read, so that we can
-// explicitly suppress it in TSAN (see tools/sanitizers/tsan_suppressions.txt).
-// We prevent inlining of this function in TSAN builds, so that TSAN does indeed
-// see that this is where the race is, and does indeed ignore it.
-#ifdef V8_IS_TSAN
-V8_NOINLINE
-#endif
+// explicitly suppress it in TSAN.
 size_t RacyReadJSTypedArrayLength(Tagged<JSTypedArray> object) {
+  TSAN_IGNORE_READS_BEGIN;
   Address field_address =
       object->address() + offsetof(JSArrayBufferView, raw_byte_length_);
+  size_t result;
 #ifdef V8_ENABLE_SANDBOX
   size_t raw_value = base::ReadUnalignedValue<size_t>(field_address);
-  return raw_value >> kBoundedSizeShift;
+  result = raw_value >> kBoundedSizeShift;
 #else
-  return ReadMaybeUnalignedValue<size_t>(field_address);
+  result = ReadMaybeUnalignedValue<size_t>(field_address);
 #endif
+  TSAN_IGNORE_READS_END;
+  return result;
 }
 
 }  // namespace
@@ -728,16 +728,28 @@ void JSFunctionData::Cache(JSHeapBroker* broker) {
   if (function->has_prototype_slot()) {
     prototype_or_initial_map_ = broker->GetOrCreateData(
         function->prototype_or_initial_map(kAcquireLoad), kAssumeMemoryFence);
+
+    // See JSFunctionWithPrototype::has_instance_prototype().
     has_instance_prototype_ =
         (prototype_or_initial_map_ != broker->the_hole_value().data());
 
     if (has_instance_prototype_) {
-      has_initial_map_ = prototype_or_initial_map_->IsMap();
+      // Unwrap prototype_or_initial_map_ to get initial map and instance
+      // prototype values. See JSFunction::initial_map() and
+      // JSFunction::instance_prototype().
+      ObjectData* proto_or_map = prototype_or_initial_map_;
+      if (proto_or_map->IsTuple2()) {
+        Tagged<Tuple2> tuple = Cast<Tuple2>(*proto_or_map->object());
+        proto_or_map =
+            broker->GetOrCreateData(tuple->value1(), kAssumeMemoryFence);
+      }
+
+      has_initial_map_ = proto_or_map->IsMap();
       if (has_initial_map_) {
         // MapData is not used for initial_map_ because some
         // AlwaysSharedSpaceJSObject subclass constructors (e.g. SharedArray)
         // have initial maps in RO space, which can be accessed directly.
-        initial_map_ = prototype_or_initial_map_;
+        initial_map_ = proto_or_map;
 
         MapRef initial_map_ref =
             TryMakeRefFromData<Map>(broker, initial_map_).value();
@@ -755,10 +767,8 @@ void JSFunctionData::Cache(JSHeapBroker* broker) {
                 broker, Cast<Map>(initial_map_->object())->prototype())
                 .data();
       } else {
-        static_assert(std::is_same_v<JSPrototype, UnionOf<JSReceiver, Null>>);
-        DCHECK(prototype_or_initial_map_->IsJSReceiver() ||
-               prototype_or_initial_map_->IsNull());
-        instance_prototype_ = prototype_or_initial_map_;
+        DCHECK(proto_or_map->IsJSReceiver());
+        instance_prototype_ = proto_or_map;
       }
     }
   }
@@ -1034,13 +1044,13 @@ class FixedArrayData : public FixedArrayBaseData {
 };
 
 // Only used in JSNativeContextSpecialization.
-class ScriptContextTableData : public FixedArrayBaseData {
+class ScriptContextTableData : public HeapObjectData {
  public:
   ScriptContextTableData(JSHeapBroker* broker, ObjectData** storage,
                          InstanceType instance_type,
                          IndirectHandle<ScriptContextTable> object,
                          ObjectDataKind kind)
-      : FixedArrayBaseData(broker, storage, instance_type, object, kind) {}
+      : HeapObjectData(broker, storage, instance_type, object, kind) {}
 };
 
 class JSArrayData : public JSObjectData {
@@ -1265,13 +1275,7 @@ bool MapRef::IsUndefinedMap(JSHeapBroker* broker) const {
   return *this == broker->undefined_map();
 }
 
-bool MapRef::IsSeqStringMap() const {
-  return InstanceTypeChecker::IsSeqString(*object());
-}
 
-bool MapRef::IsThinStringMap() const {
-  return InstanceTypeChecker::IsThinString(*object());
-}
 
 bool MapRef::IsStringWrapperMap() const {
   return IsJSPrimitiveWrapperMap() &&
@@ -2722,6 +2726,35 @@ unsigned CodeRef::GetInlinedBytecodeSize() const {
     return 0;
   }
   return value;
+}
+
+int DataHandlerRef::data_field_count() const {
+  return object()->data_field_count();
+}
+
+OptionalObjectRef DataHandlerRef::data(JSHeapBroker* broker, int index) const {
+  DCHECK_GE(index, 1);
+  int array_index = index - 1;
+  DCHECK_LT(array_index, data_field_count());
+  Tagged<MaybeObject> data_val = object()->data()[array_index].Relaxed_Load();
+  if (data_val.IsSmi()) {
+    return MakeRefAssumeMemoryFence(broker, Cast<Smi>(data_val));
+  }
+  Tagged<HeapObject> heap_object;
+  if (data_val.GetHeapObject(&heap_object)) {
+    return TryMakeRef<Object>(broker, heap_object, kAssumeMemoryFence);
+  }
+  return std::nullopt;
+}
+
+bool DataHandlerRef::IsFastProxyHandler() const {
+  Tagged<UnionOf<Smi, Code>> smi_handler = object()->smi_handler();
+  if (!smi_handler.IsSmi()) return false;
+  if (LoadHandler::KindBits::decode(Cast<Smi>(smi_handler).value()) !=
+      LoadHandler::Kind::kProxy) {
+    return false;
+  }
+  return data_field_count() >= LoadHandler::kProxyTrapMethodDataIndex;
 }
 
 #undef BIMODAL_ACCESSOR

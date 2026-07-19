@@ -13,8 +13,7 @@
 // Include the non-inl header before the rest of the headers.
 
 #include "src/execution/simulator-base.h"
-#include "src/objects/js-function.h"
-#include "src/objects/object-predicates-inl.h"
+#include "src/objects/js-function-inl.h"
 
 namespace v8::internal::compiler::turboshaft {
 
@@ -35,10 +34,17 @@ void WasmWrapperTSGraphBuilder<Assembler>::AbortIfNot(
 template <typename Assembler>
 auto WasmWrapperTSGraphBuilder<Assembler>::BuildChangeInt32ToNumber(
     compiler::turboshaft::V<Word32> value) -> V<Number> {
+  // When inlining into JS, emit a "high-level" JS conversion to allow
+  // further optimizations. These are lowered in the MachineLoweringPhase
+  // in the JS pipeline.
+  if (is_inlining_into_js_) {
+    return __ ConvertInt32ToNumber(value);
+  }
+
   // We expect most integers at runtime to be Smis, so it is important for
   // wrapper performance that Smi conversion be inlined.
   if constexpr (SmiValuesAre32Bits()) {
-    return BuildChangeInt32ToSmi(value);
+    return __ TagSmi(value);
   }
   DCHECK(SmiValuesAre31Bits());
 
@@ -49,8 +55,7 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildChangeInt32ToNumber(
   IF_NOT (UNLIKELY(ovf)) {
     // If it didn't overflow, the result is {2 * value} as pointer-sized
     // value.
-    result = __ BitcastWordPtrToSmi(
-        __ ChangeInt32ToIntPtr(__ template Projection<0>(add)));
+    result = __ BitcastWord32ToSmi(__ template Projection<0>(add));
   } ELSE {
     // Otherwise, call builtin, to convert to a HeapNumber.
     result = CallBuiltin<WasmInt32ToHeapNumberDescriptor>(
@@ -108,18 +113,16 @@ auto WasmWrapperTSGraphBuilder<Assembler>::ToJS(OpIndex ret,
   if (type.is_numeric()) {
     switch (type.numeric_kind()) {
       case NumericKind::kI32:
-        // When inlining into JS, emit a "high-level" JS conversion to allow
-        // further optimizations. These are lowered in the MachineLoweringPhase
-        // in the JS pipeline.
-        return is_inlining_into_js_ ? __ ConvertInt32ToNumber(ret)
-                                    : BuildChangeInt32ToNumber(ret);
+        return BuildChangeInt32ToNumber(ret);
       case NumericKind::kI64:
         return this->BuildChangeInt64ToBigInt(
             ret, StubCallMode::kCallBuiltinPointer);
       case NumericKind::kF32:
-        return BuildChangeFloat32ToNumber(ret);
+        return CallBuiltin<WasmFloat32ToNumberDescriptor>(
+            Builtin::kWasmFloat32ToNumber, Operator::kNoProperties, ret);
       case NumericKind::kF64:
-        return BuildChangeFloat64ToNumber(ret);
+        return CallBuiltin<WasmFloat64ToTaggedDescriptor>(
+            Builtin::kWasmFloat64ToNumber, Operator::kNoProperties, ret);
       case NumericKind::kS128:
       case NumericKind::kI8:
       case NumericKind::kI16:
@@ -473,7 +476,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmToJSWrapper(
                          {}, native_context);
       __ Unreachable();
     }
-    if (v8_flags.experimental_wasm_wasmfx) {
+    if (v8_flags.wasm_wasmfx) {
       // Also check that potential inactive WasmFX stacks don't contain host
       // frames.
       OpIndex isolate = __ IsolateField(IsolateFieldId::kIsolateAddress);

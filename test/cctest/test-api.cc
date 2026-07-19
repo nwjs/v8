@@ -27,11 +27,13 @@
 
 #include "test/cctest/test-api.h"
 
+#include <array>
 #include <climits>
 #include <csignal>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 
@@ -5546,7 +5548,7 @@ THREADED_TEST(Array_New_FromVector) {
   LocalContext context;
   v8::HandleScope scope(context.isolate());
   Local<v8::Array> array;
-  auto numbers = v8::to_array<Local<Value>>({v8_num(1), v8_num(2), v8_num(3)});
+  auto numbers = std::to_array<Local<Value>>({v8_num(1), v8_num(2), v8_num(3)});
   array = v8::Array::New(context.isolate(), numbers.data(), numbers.size());
   CHECK_EQ(numbers.size(), array->Length());
   ExpectArrayValues({1, 2, 3}, context.local(), array);
@@ -16379,8 +16381,6 @@ TEST(ErrorLevelWarning) {
 v8::PromiseRejectEvent reject_event = v8::kPromiseRejectWithNoHandler;
 int promise_reject_counter = 0;
 int promise_revoke_counter = 0;
-int promise_reject_after_resolved_counter = 0;
-int promise_resolve_after_resolved_counter = 0;
 int promise_reject_msg_line_number = -1;
 int promise_reject_msg_column_number = -1;
 int promise_reject_line_number = -1;
@@ -16437,12 +16437,12 @@ void PromiseRejectCallback(v8::PromiseRejectMessage reject_message) {
       break;
     }
       START_ALLOW_USE_DEPRECATED();
-    case v8::kPromiseRejectAfterResolved: {
-      promise_reject_after_resolved_counter++;
+    case v8::kDeprecatedPromiseRejectAfterResolved: {
+      // Unreachable
       break;
     }
-    case v8::kPromiseResolveAfterResolved: {
-      promise_resolve_after_resolved_counter++;
+    case v8::kDeprecatedPromiseResolveAfterResolved: {
+      // Unreachable
       break;
     }
       END_ALLOW_USE_DEPRECATED();
@@ -16468,8 +16468,6 @@ v8::Local<v8::Value> RejectValue() {
 void ResetPromiseStates() {
   promise_reject_counter = 0;
   promise_revoke_counter = 0;
-  promise_reject_after_resolved_counter = 0;
-  promise_resolve_after_resolved_counter = 0;
   promise_reject_msg_line_number = -1;
   promise_reject_msg_column_number = -1;
   promise_reject_line_number = -1;
@@ -16708,8 +16706,6 @@ TEST(PromiseRejectCallback) {
   CHECK(!GetPromise("v0")->HasHandler());
   CHECK_EQ(0, promise_reject_counter);
   CHECK_EQ(0, promise_revoke_counter);
-  CHECK_EQ(1, promise_reject_after_resolved_counter);
-  CHECK_EQ(0, promise_resolve_after_resolved_counter);
 
   ResetPromiseStates();
 
@@ -16726,8 +16722,6 @@ TEST(PromiseRejectCallback) {
   CHECK(!GetPromise("y0")->HasHandler());
   CHECK_EQ(1, promise_reject_counter);
   CHECK_EQ(0, promise_revoke_counter);
-  CHECK_EQ(0, promise_reject_after_resolved_counter);
-  CHECK_EQ(1, promise_resolve_after_resolved_counter);
 
   // Test stack frames.
   env.isolate()->SetCaptureStackTraceForUncaughtExceptions(true);
@@ -20794,22 +20788,24 @@ TEST(EnqueueMicrotask) {
   CHECK_EQ(0, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(0, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
 
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskOne).ToLocalChecked());
+  auto* microtask_queue = env.local()->GetMicrotaskQueue();
+
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskOne).ToLocalChecked());
   CompileRun("1+1;");
   CHECK_EQ(1, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(0, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
 
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskOne).ToLocalChecked());
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskOne).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   CompileRun("1+1;");
   CHECK_EQ(2, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(1, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
 
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   CompileRun("1+1;");
   CHECK_EQ(2, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(2, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
@@ -20819,20 +20815,22 @@ TEST(EnqueueMicrotask) {
   CHECK_EQ(2, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
 
   g_passed_to_three = nullptr;
-  env.isolate()->EnqueueMicrotask(MicrotaskThree, v8::Undefined(env.isolate()));
+  microtask_queue->EnqueueMicrotask(env.isolate(), MicrotaskThree,
+                                    v8::Undefined(env.isolate()));
   CompileRun("1+1;");
   CHECK(!g_passed_to_three);
   CHECK_EQ(2, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(2, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
 
   int dummy;
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskOne).ToLocalChecked());
-  env.isolate()->EnqueueMicrotask(
-      MicrotaskThree, v8::External::New(env.isolate(), &dummy,
-                                        v8::kExternalPointerTypeTagDefault));
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskOne).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), MicrotaskThree,
+      v8::External::New(env.isolate(), &dummy,
+                        v8::kExternalPointerTypeTagDefault));
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   CompileRun("1+1;");
   CHECK_EQ(&dummy, g_passed_to_three);
   CHECK_EQ(3, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
@@ -20885,9 +20883,12 @@ TEST(RunMicrotasksIgnoresThrownExceptions) {
   CompileRun(
       "var exception1Calls = 0;"
       "var exception2Calls = 0;");
-  isolate->EnqueueMicrotask(
+  auto* microtask_queue = env.local()->GetMicrotaskQueue();
+  microtask_queue->EnqueueMicrotask(
+      isolate,
       Function::New(env.local(), MicrotaskExceptionOne).ToLocalChecked());
-  isolate->EnqueueMicrotask(
+  microtask_queue->EnqueueMicrotask(
+      isolate,
       Function::New(env.local(), MicrotaskExceptionTwo).ToLocalChecked());
   TryCatch try_catch(isolate);
   CompileRun("1+1;");
@@ -20933,9 +20934,11 @@ TEST_WITH_PLATFORM(RunMicrotasksIgnoresThrownExceptionsFromApi, MockPlatform) {
   v8::TryCatch try_catch(isolate);
   {
     CHECK(!isolate->IsExecutionTerminating());
-    isolate->EnqueueMicrotask(ThrowExceptionMicrotask, v8::Undefined(isolate));
-    isolate->EnqueueMicrotask(IncrementCounterMicrotask,
-                              v8::Undefined(isolate));
+    auto* microtask_queue = env.local()->GetMicrotaskQueue();
+    microtask_queue->EnqueueMicrotask(isolate, ThrowExceptionMicrotask,
+                                      v8::Undefined(isolate));
+    microtask_queue->EnqueueMicrotask(isolate, IncrementCounterMicrotask,
+                                      v8::Undefined(isolate));
     CHECK(!platform.dump_without_crashing_called());
     isolate->PerformMicrotaskCheckpoint();
     CHECK(platform.dump_without_crashing_called());
@@ -20969,8 +20972,10 @@ TEST(SetAutorunMicrotasks) {
   CHECK_EQ(0, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(4u, microtasks_completed_callback_count);
 
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskOne).ToLocalChecked());
+  auto* microtask_queue = env.local()->GetMicrotaskQueue();
+
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskOne).ToLocalChecked());
   CompileRun("1+1;");
   CHECK_EQ(1, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(0, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
@@ -20978,10 +20983,10 @@ TEST(SetAutorunMicrotasks) {
 
   // If the policy is explicit, microtask checkpoints are explicitly invoked.
   env.isolate()->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskOne).ToLocalChecked());
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskOne).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   CompileRun("1+1;");
   CHECK_EQ(1, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(0, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
@@ -20992,8 +20997,8 @@ TEST(SetAutorunMicrotasks) {
   CHECK_EQ(1, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(8u, microtasks_completed_callback_count);
 
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   CompileRun("1+1;");
   CHECK_EQ(2, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(1, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
@@ -21005,15 +21010,15 @@ TEST(SetAutorunMicrotasks) {
   CHECK_EQ(9u, microtasks_completed_callback_count);
 
   env.isolate()->SetMicrotasksPolicy(v8::MicrotasksPolicy::kAuto);
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   CompileRun("1+1;");
   CHECK_EQ(2, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(3, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(12u, microtasks_completed_callback_count);
 
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   {
     v8::Isolate::SuppressMicrotaskExecutionScope suppress(env.isolate());
     CompileRun("1+1;");
@@ -21040,8 +21045,8 @@ TEST(SetAutorunMicrotasks) {
 
   env.isolate()->RemoveMicrotasksCompletedCallback(
       &MicrotasksCompletedCallback);
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskOne).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskOne).ToLocalChecked());
   CompileRun("1+1;");
   CHECK_EQ(3, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
   CHECK_EQ(4, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
@@ -21057,8 +21062,8 @@ TEST(RunMicrotasksWithoutEnteringContext) {
   {
     Context::Scope context_scope(context);
     CompileRun("var ext1Calls = 0;");
-    isolate->EnqueueMicrotask(
-        Function::New(context, MicrotaskOne).ToLocalChecked());
+    context->GetMicrotaskQueue()->EnqueueMicrotask(
+        isolate, Function::New(context, MicrotaskOne).ToLocalChecked());
   }
   isolate->PerformMicrotaskCheckpoint();
   {
@@ -21084,8 +21089,8 @@ static void Regress808911_CurrentContextWrapper(
   v8::Isolate* isolate = info.GetIsolate();
   CHECK(isolate->GetCurrentContext() !=
         isolate->GetEnteredOrMicrotaskContext());
-  isolate->EnqueueMicrotask(
-      Regress808911_MicrotaskCallback,
+  isolate->GetCurrentContext()->GetMicrotaskQueue()->EnqueueMicrotask(
+      isolate, Regress808911_MicrotaskCallback,
       v8::External::New(isolate, isolate, v8::kExternalPointerTypeTagDefault));
   isolate->PerformMicrotaskCheckpoint();
 }
@@ -21110,10 +21115,12 @@ TEST(ScopedMicrotasks) {
   LocalContext env;
   v8::HandleScope handles(env.isolate());
   env.isolate()->SetMicrotasksPolicy(v8::MicrotasksPolicy::kScoped);
+  auto* microtask_queue = env.local()->GetMicrotaskQueue();
   {
     v8::MicrotasksScope scope1(env.local(),
                                v8::MicrotasksScope::kRunMicrotasks);
-    env.isolate()->EnqueueMicrotask(
+    microtask_queue->EnqueueMicrotask(
+        env.isolate(),
         Function::New(env.local(), MicrotaskOne).ToLocalChecked());
     CompileRun("var ext1Calls = 0;");
   }
@@ -21125,7 +21132,8 @@ TEST(ScopedMicrotasks) {
   {
     v8::MicrotasksScope scope1(env.local(),
                                v8::MicrotasksScope::kRunMicrotasks);
-    env.isolate()->EnqueueMicrotask(
+    microtask_queue->EnqueueMicrotask(
+        env.isolate(),
         Function::New(env.local(), MicrotaskOne).ToLocalChecked());
     CompileRun("throw new Error()");
   }
@@ -21137,7 +21145,8 @@ TEST(ScopedMicrotasks) {
   {
     v8::MicrotasksScope scope1(env.local(),
                                v8::MicrotasksScope::kRunMicrotasks);
-    env.isolate()->EnqueueMicrotask(
+    microtask_queue->EnqueueMicrotask(
+        env.isolate(),
         Function::New(env.local(), MicrotaskOne).ToLocalChecked());
     v8::TryCatch try_catch(env.isolate());
     CompileRun("throw new Error()");
@@ -21150,13 +21159,15 @@ TEST(ScopedMicrotasks) {
   {
     v8::MicrotasksScope scope1(env.local(),
                                v8::MicrotasksScope::kRunMicrotasks);
-    env.isolate()->EnqueueMicrotask(
+    microtask_queue->EnqueueMicrotask(
+        env.isolate(),
         Function::New(env.local(), MicrotaskOne).ToLocalChecked());
     env.isolate()->TerminateExecution();
     {
       v8::MicrotasksScope scope2(env.local(),
                                  v8::MicrotasksScope::kRunMicrotasks);
-      env.isolate()->EnqueueMicrotask(
+      microtask_queue->EnqueueMicrotask(
+          env.isolate(),
           Function::New(env.local(), MicrotaskOne).ToLocalChecked());
     }
   }
@@ -21165,7 +21176,8 @@ TEST(ScopedMicrotasks) {
     v8::MicrotasksScope scope1(env.local(),
                                v8::MicrotasksScope::kRunMicrotasks);
     ExpectInt32("ext1Calls", 3);
-    env.isolate()->EnqueueMicrotask(
+    microtask_queue->EnqueueMicrotask(
+        env.isolate(),
         Function::New(env.local(), MicrotaskOne).ToLocalChecked());
   }
   {
@@ -21178,7 +21190,8 @@ TEST(ScopedMicrotasks) {
   {
     v8::MicrotasksScope scope1(env.local(),
                                v8::MicrotasksScope::kDoNotRunMicrotasks);
-    env.isolate()->EnqueueMicrotask(
+    microtask_queue->EnqueueMicrotask(
+        env.isolate(),
         Function::New(env.local(), MicrotaskOne).ToLocalChecked());
     CompileRun(
         "var ext1Calls = 0;"
@@ -21206,7 +21219,8 @@ TEST(ScopedMicrotasks) {
     }
     CHECK_EQ(1, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
     CHECK_EQ(0, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
-    env.isolate()->EnqueueMicrotask(
+    microtask_queue->EnqueueMicrotask(
+        env.isolate(),
         Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   }
 
@@ -21236,7 +21250,8 @@ TEST(ScopedMicrotasks) {
                               v8::MicrotasksScope::kDoNotRunMicrotasks);
     CHECK_EQ(1, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
     CHECK_EQ(1, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
-    env.isolate()->EnqueueMicrotask(
+    microtask_queue->EnqueueMicrotask(
+        env.isolate(),
         Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   }
 
@@ -21274,7 +21289,8 @@ TEST(ScopedMicrotasks) {
                               v8::MicrotasksScope::kDoNotRunMicrotasks);
     CHECK_EQ(1, CompileRun("ext1Calls")->Int32Value(env.local()).FromJust());
     CHECK_EQ(2, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
-    env.isolate()->EnqueueMicrotask(
+    microtask_queue->EnqueueMicrotask(
+        env.isolate(),
         Function::New(env.local(), MicrotaskTwo).ToLocalChecked());
   }
 
@@ -21287,8 +21303,8 @@ TEST(ScopedMicrotasks) {
     CHECK_EQ(3, CompileRun("ext2Calls")->Int32Value(env.local()).FromJust());
   }
 
-  env.isolate()->EnqueueMicrotask(
-      Function::New(env.local(), MicrotaskOne).ToLocalChecked());
+  microtask_queue->EnqueueMicrotask(
+      env.isolate(), Function::New(env.local(), MicrotaskOne).ToLocalChecked());
   {
     v8::Isolate::SuppressMicrotaskExecutionScope scope1(env.isolate());
     v8::MicrotasksScope::PerformCheckpoint(env.isolate());
@@ -24846,6 +24862,11 @@ TEST(StreamingWithIsolateScriptCache) {
 // Variant of the above test which evicts the root SharedFunctionInfo from the
 // Isolate script cache but still reuses the same Script.
 TEST(StreamingWithIsolateScriptCacheClearingRootSFI) {
+  if (i::v8_flags.conservative_stack_scanning) {
+    // CSS may retain object non-deterministically, which makes this test flaky.
+    return;
+  }
+
   StreamingWithIsolateScriptCache(true);
 }
 
@@ -24954,7 +24975,7 @@ Local<Module> CompileAndInstantiateModule(v8::Isolate* isolate,
 
 Local<Module> CreateAndInstantiateSyntheticModule(
     v8::Isolate* isolate, Local<String> module_name, Local<Context> context,
-    const v8::MemorySpan<const v8::Local<v8::String>>& export_names,
+    const std::span<const v8::Local<v8::String>>& export_names,
     v8::Module::SyntheticModuleEvaluationSteps evaluation_steps) {
   Local<Module> module = v8::Module::CreateSyntheticModule(
       isolate, module_name, export_names, evaluation_steps);
@@ -24988,7 +25009,7 @@ Local<Module> CompileAndInstantiateModuleFromCache(
 v8::MaybeLocal<Module> SyntheticModuleResolveCallback(
     Local<Context> context, Local<String> specifier,
     Local<FixedArray> import_attributes, Local<Module> referrer) {
-  auto export_names = v8::to_array<Local<v8::String>>({v8_str("test_export")});
+  auto export_names = std::to_array<Local<v8::String>>({v8_str("test_export")});
   Local<Module> module = CreateAndInstantiateSyntheticModule(
       CcTest::isolate(),
       v8_str("SyntheticModuleResolveCallback-TestSyntheticModule"), context,
@@ -24999,7 +25020,7 @@ v8::MaybeLocal<Module> SyntheticModuleResolveCallback(
 v8::MaybeLocal<Module> SyntheticModuleThatThrowsDuringEvaluateResolveCallback(
     Local<Context> context, Local<String> specifier,
     Local<FixedArray> import_attributes, Local<Module> referrer) {
-  auto export_names = v8::to_array<Local<v8::String>>({v8_str("test_export")});
+  auto export_names = std::to_array<Local<v8::String>>({v8_str("test_export")});
   Local<Module> module = CreateAndInstantiateSyntheticModule(
       CcTest::isolate(),
       v8_str("SyntheticModuleThatThrowsDuringEvaluateResolveCallback-"
@@ -25092,7 +25113,7 @@ TEST(CreateSyntheticModule) {
   v8::Local<v8::Context> context = v8::Context::New(isolate);
   v8::Context::Scope cscope(context);
 
-  auto export_names = v8::to_array<Local<v8::String>>({v8_str("default")});
+  auto export_names = std::to_array<Local<v8::String>>({v8_str("default")});
 
   Local<Module> module = CreateAndInstantiateSyntheticModule(
       isolate, v8_str("CreateSyntheticModule-TestSyntheticModule"), context,
@@ -25133,7 +25154,7 @@ TEST(CreateSyntheticModuleGC) {
   v8::Local<v8::Context> context = v8::Context::New(isolate);
   v8::Context::Scope cscope(context);
 
-  auto export_names = v8::to_array<Local<v8::String>>({v8_str("default")});
+  auto export_names = std::to_array<Local<v8::String>>({v8_str("default")});
   v8::Local<v8::String> module_name =
       v8_str("CreateSyntheticModule-TestSyntheticModuleGC");
 
@@ -25157,7 +25178,7 @@ TEST(CreateSyntheticModuleGCName) {
 
   {
     v8::EscapableHandleScope inner_scope(isolate);
-    auto export_names = v8::to_array<Local<v8::String>>({v8_str("default")});
+    auto export_names = std::to_array<Local<v8::String>>({v8_str("default")});
     v8::Local<v8::String> module_name =
         v8_str("CreateSyntheticModuleGCName-TestSyntheticModule");
     module = inner_scope.Escape(v8::Module::CreateSyntheticModule(
@@ -25184,7 +25205,7 @@ TEST(SyntheticModuleSetExports) {
 
   Local<String> foo_string = v8_str("foo");
   Local<String> bar_string = v8_str("bar");
-  auto export_names = v8::to_array<Local<v8::String>>({foo_string});
+  auto export_names = std::to_array<Local<v8::String>>({foo_string});
 
   Local<Module> module = CreateAndInstantiateSyntheticModule(
       isolate, v8_str("SyntheticModuleSetExports-TestSyntheticModule"), context,
@@ -25252,7 +25273,7 @@ TEST(SyntheticModuleEvaluationStepsNoThrow) {
   v8::Local<v8::Context> context = v8::Context::New(isolate);
   v8::Context::Scope cscope(context);
 
-  auto export_names = v8::to_array<Local<v8::String>>({v8_str("default")});
+  auto export_names = std::to_array<Local<v8::String>>({v8_str("default")});
 
   Local<Module> module = CreateAndInstantiateSyntheticModule(
       isolate,
@@ -25274,7 +25295,7 @@ TEST(SyntheticModuleEvaluationStepsThrow) {
   v8::Local<v8::Context> context = CcTest::isolate()->GetCurrentContext();
   v8::Context::Scope cscope(context);
 
-  auto export_names = v8::to_array<Local<v8::String>>({v8_str("default")});
+  auto export_names = std::to_array<Local<v8::String>>({v8_str("default")});
 
   Local<Module> module = CreateAndInstantiateSyntheticModule(
       isolate,
@@ -25300,7 +25321,7 @@ TEST(SyntheticModuleEvaluationStepsSetExport) {
   v8::Context::Scope cscope(context);
 
   Local<String> test_export_string = v8_str("test_export");
-  auto export_names = v8::to_array<Local<v8::String>>({test_export_string});
+  auto export_names = std::to_array<Local<v8::String>>({test_export_string});
 
   Local<Module> module = CreateAndInstantiateSyntheticModule(
       isolate,
@@ -30593,28 +30614,51 @@ TEST(CodeLikeFunction) {
   ExpectInt32("new Function(new CodeLike())()", 7);
 }
 
+namespace {
+#ifdef V8_CPPGC_MICROTASK_QUEUE
+template <typename T>
+T* GetRaw(T* ptr) {
+  return ptr;
+}
+#else
+template <typename T>
+T* GetRaw(const std::unique_ptr<T>& ptr) {
+  return ptr.get();
+}
+#endif  // V8_CPPGC_MICROTASK_QUEUE
+}  // namespace
+
 THREADED_TEST(MicrotaskQueueOfContext) {
+  // TODO(https://crbug.com/515252150): remove once the old Api is removed.
+  START_ALLOW_USE_DEPRECATED()
   auto microtask_queue = v8::MicrotaskQueue::New(CcTest::isolate());
+  END_ALLOW_USE_DEPRECATED()
   v8::HandleScope scope(CcTest::isolate());
   v8::Local<Context> context = Context::New(
       CcTest::isolate(), nullptr, v8::MaybeLocal<ObjectTemplate>(),
       v8::MaybeLocal<Value>(), v8::DeserializeInternalFieldsCallback(),
-      microtask_queue.get());
-  CHECK_EQ(context->GetMicrotaskQueue(), microtask_queue.get());
+      GetRaw(microtask_queue));
+  CHECK_EQ(context->GetMicrotaskQueue(), GetRaw(microtask_queue));
 }
 
 THREADED_TEST(SetMicrotaskQueueOfContext) {
+  // TODO(https://crbug.com/515252150): remove once the old Api is removed.
+  START_ALLOW_USE_DEPRECATED()
   auto microtask_queue = v8::MicrotaskQueue::New(CcTest::isolate());
+  END_ALLOW_USE_DEPRECATED()
   v8::HandleScope scope(CcTest::isolate());
   v8::Local<Context> context = Context::New(
       CcTest::isolate(), nullptr, v8::MaybeLocal<ObjectTemplate>(),
       v8::MaybeLocal<Value>(), v8::DeserializeInternalFieldsCallback(),
-      microtask_queue.get());
-  CHECK_EQ(context->GetMicrotaskQueue(), microtask_queue.get());
+      GetRaw(microtask_queue));
+  CHECK_EQ(context->GetMicrotaskQueue(), GetRaw(microtask_queue));
 
+  // TODO(https://crbug.com/515252150): remove once the old Api is removed.
+  START_ALLOW_USE_DEPRECATED()
   auto new_microtask_queue = v8::MicrotaskQueue::New(CcTest::isolate());
-  context->SetMicrotaskQueue(new_microtask_queue.get());
-  CHECK_EQ(context->GetMicrotaskQueue(), new_microtask_queue.get());
+  END_ALLOW_USE_DEPRECATED()
+  context->SetMicrotaskQueue(GetRaw(new_microtask_queue));
+  CHECK_EQ(context->GetMicrotaskQueue(), GetRaw(new_microtask_queue));
 }
 
 namespace {
@@ -31517,8 +31561,8 @@ TEST(EnqueMicrotaskContinuationPreservedEmbedderData_CallbackTask) {
   v8::HandleScope scope(isolate);
 
   isolate->SetContinuationPreservedEmbedderDataV2(v8_str("foo"));
-  isolate->EnqueueMicrotask(
-      &CallbackTaskMicrotask,
+  env.local()->GetMicrotaskQueue()->EnqueueMicrotask(
+      isolate, &CallbackTaskMicrotask,
       v8::External::New(isolate, isolate, v8::kExternalPointerTypeTagDefault));
   isolate->SetContinuationPreservedEmbedderDataV2(v8::Undefined(isolate));
 
@@ -31544,7 +31588,8 @@ TEST(EnqueMicrotaskContinuationPreservedEmbedderData_CallableTask) {
   v8::HandleScope scope(isolate);
 
   isolate->SetContinuationPreservedEmbedderDataV2(v8_str("foo"));
-  env.isolate()->EnqueueMicrotask(
+  env.local()->GetMicrotaskQueue()->EnqueueMicrotask(
+      env.isolate(),
       Function::New(env.local(), CallableTaskMicrotask).ToLocalChecked());
   isolate->SetContinuationPreservedEmbedderDataV2(v8::Undefined(isolate));
 
@@ -31661,8 +31706,8 @@ THREADED_TEST(Regress40643872) {
       CompileRun("new Uint8Array()").As<v8::Uint8Array>();
 
   uint8_t buffer[i::JSTypedArray::kMaxSizeInHeap];
-  v8::MemorySpan<uint8_t> storage(buffer);
-  v8::MemorySpan<uint8_t> contents = ta->GetContents(storage);
+  std::span<uint8_t> storage(buffer);
+  std::span<uint8_t> contents = ta->GetContents(storage);
   CHECK_EQ(contents.data(), nullptr);
   CHECK_EQ(contents.size(), 0);
 }
@@ -31783,7 +31828,7 @@ class GCedWithCppHeapExternalJSRef
     v8::HandleScope scope(isolate_);
     v8::Local<v8::CppHeapExternal> external =
         v8::CppHeapExternal::New<TestGarbagedCollectedData>(
-            isolate, data, v8::CppHeapPointerTag::kDefaultTag);
+            isolate, data, v8::CppHeapPointerTag::kTagForTesting);
     v8_cpp_heap_external_.Reset(isolate_, external);
   }
 
@@ -31794,8 +31839,8 @@ class GCedWithCppHeapExternalJSRef
     auto external = v8::Local<v8::CppHeapExternal>::Cast(data);
     return external->Value<TestGarbagedCollectedData>(
         isolate_,
-        v8::CppHeapPointerTagRange(v8::CppHeapPointerTag::kDefaultTag,
-                                   v8::CppHeapPointerTag::kDefaultTag));
+        v8::CppHeapPointerTagRange(v8::CppHeapPointerTag::kTagForTesting,
+                                   v8::CppHeapPointerTag::kTagForTesting));
   }
 
   void Trace(cppgc::Visitor* v) const { v->Trace(v8_cpp_heap_external_); }
@@ -31867,7 +31912,7 @@ TEST(ContinuationPreservedEmbedderDataV2_CppHeapExternal) {
             cpp_heap->GetAllocationHandle()));
     v8::Local<v8::CppHeapExternal> external =
         v8::CppHeapExternal::New<TestGarbagedCollectedData>(
-            isolate, cpp_object.Get(), v8::CppHeapPointerTag::kDefaultTag);
+            isolate, cpp_object.Get(), v8::CppHeapPointerTag::kTagForTesting);
     isolate->SetContinuationPreservedEmbedderDataV2(external);
 
     v8::Local<v8::Data> result =
@@ -31876,9 +31921,9 @@ TEST(ContinuationPreservedEmbedderDataV2_CppHeapExternal) {
     TestGarbagedCollectedData* data =
         v8::Local<v8::CppHeapExternal>::Cast(result)
             ->Value<TestGarbagedCollectedData>(
-                isolate,
-                v8::CppHeapPointerTagRange(v8::CppHeapPointerTag::kDefaultTag,
-                                           v8::CppHeapPointerTag::kDefaultTag));
+                isolate, v8::CppHeapPointerTagRange(
+                             v8::CppHeapPointerTag::kTagForTesting,
+                             v8::CppHeapPointerTag::kTagForTesting));
     CHECK_EQ(data, cpp_object.Get());
   }
 

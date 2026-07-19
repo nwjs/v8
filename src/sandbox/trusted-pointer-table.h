@@ -20,6 +20,7 @@ namespace internal {
 
 class Counters;
 class Isolate;
+class ReadOnlyArtifacts;
 class TrustedPointerPublishingScope;
 
 /**
@@ -141,6 +142,10 @@ class V8_EXPORT_PRIVATE TrustedPointerTable
   using Space = ExternalEntityTable<TrustedPointerTableEntry,
                                     kTrustedPointerTableReservationSize>::Space;
 
+  // Initializes all slots in the RO space from pre-existing artifacts.
+  void SetUpFromReadOnlyArtifacts(Space* read_only_space,
+                                  const ReadOnlyArtifacts* artifacts);
+
   // Retrieves the content of the entry referenced by the given handle.
   //
   // This method is atomic and can be called from background threads.
@@ -156,6 +161,12 @@ class V8_EXPORT_PRIVATE TrustedPointerTable
   // This method is atomic and can be called from background threads.
   inline void Set(TrustedPointerHandle handle, Address pointer,
                   IndirectPointerTag tag);
+
+  // Sets the content of the entry referenced by the given handle. Will preserve
+  // the currently set tag.
+  //
+  // This method is atomic and can be called from background threads.
+  inline void Update(TrustedPointerHandle handle, Address pointer);
 
   // Allocates a new entry in the table and initialize it.
   //

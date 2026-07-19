@@ -675,6 +675,10 @@ class BodyGen {
 
   template <ValueKind T>
   void try_block(DataRange* data) {
+    if (!v8_flags.wasm_legacy_eh) {
+      Generate(ValueType::Primitive(T), data);
+      return;
+    }
     try_block_helper(ValueType::Primitive(T), data);
   }
 
@@ -1063,16 +1067,37 @@ class BodyGen {
         ? Generate<kI64, arg_kinds...>(data)
         : Generate<kI32, arg_kinds...>(data);
 
+    bool emit_acq_rel = false;
+    uint8_t order_imm = 0;
+    if (is_atomic && v8_flags.wasm_acquire_release) {
+      uint8_t acq_rel_randomness = data->get<uint8_t>();
+      emit_acq_rel = acq_rel_randomness & 1;
+      if (emit_acq_rel) {
+        uint8_t order =
+            (acq_rel_randomness & 2) ? kAtomicSeqCst : kAtomicAcqRel;
+        order_imm = WasmOpcodes::IsAtomicRmwOpcode(memory_op)
+                        ? (order | (order << 4))
+                        : order;
+      }
+    }
+
     // Format of the instruction (supports multi-memory):
-    // memory_op (align | 0x40) memory_index offset
+    // memory_op (align | 0x40 [ | 0x20 ]) memory_index [order_imm] offset
     if (WasmOpcodes::IsPrefixOpcode(static_cast<WasmOpcode>(memory_op >> 8))) {
       DCHECK(memory_op >> 8 == kAtomicPrefix || memory_op >> 8 == kSimdPrefix);
       builder_->EmitWithPrefix(memory_op);
     } else {
       builder_->Emit(memory_op);
     }
-    builder_->EmitU32V(align | 0x40);
+    uint32_t align_byte = align | 0x40;
+    if (emit_acq_rel) {
+      align_byte |= 0x20;
+    }
+    builder_->EmitU32V(align_byte);
     builder_->EmitU32V(memory_index);
+    if (emit_acq_rel) {
+      builder_->EmitByte(order_imm);
+    }
     builder_->EmitU64V(offset);
   }
 
@@ -1084,7 +1109,7 @@ class BodyGen {
 
   template <WasmOpcode Op, ValueKind... Args>
   void wide_arithmetic_op(DataRange* data) {
-    if (!v8_flags.experimental_wasm_wide_arithmetic) {
+    if (!v8_flags.wasm_wide_arithmetic) {
       GenerateI64(data);
       return;
     }
@@ -1465,6 +1490,9 @@ class BodyGen {
   void set_global(DataRange* data) { global_op<kVoid>(data); }
 
   void throw_or_rethrow(DataRange* data) {
+    if (!v8_flags.wasm_legacy_eh) {
+      return;
+    }
     bool rethrow = data->get<bool>();
     if (rethrow && !catch_blocks_.empty()) {
       int control_depth = static_cast<int>(blocks_.size() - 1);
@@ -1841,7 +1869,7 @@ class BodyGen {
   }
 
   bool array_atomic_get_helper(ValueType value_type, DataRange* data) {
-    if (!v8_flags.experimental_wasm_shared) {
+    if (!v8_flags.wasm_shared) {
       return false;
     }
 
@@ -1892,7 +1920,7 @@ class BodyGen {
 
   bool array_atomic_rmw_helper(WasmOpcode opcode, ValueType value_type,
                                DataRange* data) {
-    if (!v8_flags.experimental_wasm_shared) {
+    if (!v8_flags.wasm_shared) {
       return false;
     }
 
@@ -2093,7 +2121,7 @@ class BodyGen {
   }
 
   void array_atomic_set(DataRange* data) {
-    if (!v8_flags.experimental_wasm_shared) {
+    if (!v8_flags.wasm_shared) {
       return;
     }
 
@@ -2214,7 +2242,7 @@ class BodyGen {
   }
 
   bool struct_atomic_get_helper(ValueType value_type, DataRange* data) {
-    if (!v8_flags.experimental_wasm_shared) {
+    if (!v8_flags.wasm_shared) {
       return false;
     }
 
@@ -2264,7 +2292,7 @@ class BodyGen {
 
   bool struct_atomic_rmw_helper(WasmOpcode opcode, ValueType value_type,
                                 DataRange* data) {
-    if (!v8_flags.experimental_wasm_shared) {
+    if (!v8_flags.wasm_shared) {
       return false;
     }
     std::optional<std::pair<ModuleTypeIndex, uint32_t>> field =
@@ -2617,7 +2645,7 @@ class BodyGen {
   }
 
   void struct_atomic_set(DataRange* data) {
-    if (!v8_flags.experimental_wasm_shared) {
+    if (!v8_flags.wasm_shared) {
       return;
     }
 
@@ -4455,7 +4483,7 @@ class ModuleGen {
       // Can't have a descriptor if this is the last type in the recgroup or
       // the last struct type.
       bool can_have_descriptor =
-          v8_flags.experimental_wasm_custom_descriptors &&
+          v8_flags.wasm_custom_descriptors &&
           current_type_index != current_rec_group_end &&
           current_type_index < last_struct_type_index - 1;
       if (have_descriptor && !can_have_descriptor) {

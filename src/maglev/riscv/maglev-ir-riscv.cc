@@ -157,8 +157,8 @@ void BuiltinStringFromCharCode::GenerateCode(MaglevAssembler* masm,
   Register result_string = ToRegister(result());
   if (Int32Constant* constant =
           CharCodeInput().node()->TryCast<Int32Constant>()) {
-    int32_t char_code = constant->value() & 0xFFFF;
-    if (0 <= char_code && char_code < String::kMaxOneByteCharCode) {
+    uint32_t char_code = constant->value() & 0xFFFF;
+    if (char_code <= String::kMaxOneByteCharCode) {
       __ LoadSingleCharacterString(result_string, char_code);
     } else {
       __ AllocateTwoByteString(register_snapshot(), result_string, 1);
@@ -1019,6 +1019,7 @@ void CheckJSDataViewBounds::GenerateCode(MaglevAssembler* masm,
     __ bind(&limit_not_zero);
   }
   Label index_no_oob;
+  __ SignExtendWord(index, index);
   __ MacroAssembler::Branch(&index_no_oob, ult, index, Operand(limit),
                             Label::Distance::kNear);
   __ EmitEagerDeopt(this, DeoptimizeReason::kOutOfBounds);

@@ -95,17 +95,19 @@ V8InspectorSessionImpl* V8InspectorSessionImpl::create(
     V8InspectorImpl* inspector, int contextGroupId, int sessionId,
     V8Inspector::ManagedChannel* channel, StringView state,
     V8Inspector::ClientTrustLevel clientTrustLevel,
-    std::shared_ptr<V8DebuggerBarrier> debuggerBarrier) {
-  return new V8InspectorSessionImpl(inspector, contextGroupId, sessionId,
-                                    channel, state, clientTrustLevel,
-                                    std::move(debuggerBarrier));
+    std::shared_ptr<V8DebuggerBarrier> debuggerBarrier,
+    V8EmbedderState embedderState) {
+  return new V8InspectorSessionImpl(
+      inspector, contextGroupId, sessionId, channel, state, clientTrustLevel,
+      std::move(debuggerBarrier), std::move(embedderState));
 }
 
 V8InspectorSessionImpl::V8InspectorSessionImpl(
     V8InspectorImpl* inspector, int contextGroupId, int sessionId,
     V8Inspector::ManagedChannel* channel, StringView savedState,
     V8Inspector::ClientTrustLevel clientTrustLevel,
-    std::shared_ptr<V8DebuggerBarrier> debuggerBarrier)
+    std::shared_ptr<V8DebuggerBarrier> debuggerBarrier,
+    V8EmbedderState embedderState)
     : m_contextGroupId(contextGroupId),
       m_sessionId(sessionId),
       m_inspector(inspector),
@@ -128,7 +130,8 @@ V8InspectorSessionImpl::V8InspectorSessionImpl(
   protocol::Runtime::Dispatcher::wire(&m_dispatcher, m_runtimeAgent.get());
 
   m_debuggerAgent.reset(new V8DebuggerAgentImpl(
-      this, this, agentState(protocol::Debugger::Metainfo::domainName)));
+      this, this, agentState(protocol::Debugger::Metainfo::domainName),
+      std::move(embedderState.urlBreakpoints)));
   protocol::Debugger::Dispatcher::wire(&m_dispatcher, m_debuggerAgent.get());
 
   m_consoleAgent.reset(new V8ConsoleAgentImpl(
@@ -199,13 +202,6 @@ void V8InspectorSessionImpl::SendProtocolResponse(
 void V8InspectorSessionImpl::SendProtocolNotification(
     std::unique_ptr<protocol::Serializable> message) {
   m_channel->sendNotification(serializeForFrontend(std::move(message)));
-}
-
-void V8InspectorSessionImpl::FallThrough(int callId,
-                                         const v8_crdtp::span<uint8_t> method,
-                                         v8_crdtp::span<uint8_t> message) {
-  // There's no other layer to handle the command.
-  UNREACHABLE();
 }
 
 void V8InspectorSessionImpl::FlushProtocolNotifications() {
@@ -364,7 +360,8 @@ void V8InspectorSessionImpl::reportAllContexts(V8RuntimeAgentImpl* agent) {
                               });
 }
 
-void V8InspectorSessionImpl::dispatchProtocolMessage(StringView message) {
+void V8InspectorSessionImpl::dispatchProtocolMessage(
+    StringView message, StringView associated_data) {
   KeepSessionAliveScope keepAlive(*this);
 
   using v8_crdtp::span;
@@ -387,7 +384,18 @@ void V8InspectorSessionImpl::dispatchProtocolMessage(StringView message) {
     }
     cbor = SpanFrom(converted_cbor);
   }
-  v8_crdtp::Dispatchable dispatchable(cbor);
+  std::string associated_data_copy;
+  std::string_view associated_data_view;
+  if (associated_data.is8Bit()) {
+    associated_data_view = std::string_view(
+        reinterpret_cast<const char*>(associated_data.characters8()),
+        associated_data.length());
+  } else {
+    associated_data_copy = toString16(associated_data).utf8();
+    associated_data_view = associated_data_copy;
+  }
+  v8_crdtp::Dispatchable dispatchable(cbor, associated_data_view,
+                                      v8_crdtp::FallthroughCallback());
   if (!dispatchable.ok()) {
     if (!dispatchable.HasCallId()) {
       m_channel->sendNotification(serializeForFrontend(
@@ -400,7 +408,7 @@ void V8InspectorSessionImpl::dispatchProtocolMessage(StringView message) {
     }
     return;
   }
-  m_dispatcher.Dispatch(dispatchable).Run();
+  m_dispatcher.Dispatch(dispatchable);
 }
 
 std::vector<uint8_t> V8InspectorSessionImpl::state() {

@@ -13,9 +13,11 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
+#include "include/cppgc/persistent.h"
 #include "include/v8-context.h"
 #include "include/v8-internal.h"
 #include "include/v8-isolate.h"
@@ -47,7 +49,6 @@
 #include "src/objects/js-objects.h"
 #include "src/objects/tagged.h"
 #include "src/runtime/runtime.h"
-#include "src/sandbox/code-pointer-table.h"
 #include "src/sandbox/external-pointer-table.h"
 #include "src/sandbox/trusted-pointer-table.h"
 #include "src/utils/allocation.h"
@@ -519,7 +520,6 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(const intptr_t*, api_external_references, nullptr)                      \
   V(AddressToIndexHashMap*, external_reference_map, nullptr)                \
   V(HeapObjectToIndexHashMap*, root_index_map, nullptr)                     \
-  V(MicrotaskQueue*, default_microtask_queue, nullptr)                      \
   V(CodeTracer*, code_tracer, nullptr)                                      \
   V(PromiseRejectCallback, promise_reject_callback, nullptr)                \
   V(ExceptionPropagationCallback, exception_propagation_callback, nullptr)  \
@@ -1017,10 +1017,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Walks the JS stack to find the first `frame_data.size()` frames and writes
   // them into `frame_data` and returns the number of frames written.
   size_t CurrentScriptIdsAndContexts(
-      v8::MemorySpan<StackTrace::ScriptIdAndContext> frame_data);
+      std::span<StackTrace::ScriptIdAndContext> frame_data);
   // Walks the JS stack to find the first `frame_data.size()` frames and writes
   // them into `frame_data` and returns the number of frames written.
-  size_t CurrentScriptData(v8::MemorySpan<StackTrace::ScriptData> frame_data);
+  size_t CurrentScriptData(std::span<StackTrace::ScriptData> frame_data);
 
   MaybeDirectHandle<Script> CurrentReferrerScript();
   bool GetStackTraceLimit(Isolate* isolate, int* result);
@@ -1070,6 +1070,16 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void OnPromiseAfter(DirectHandle<JSPromise> promise);
   void OnStackTraceCaptured(DirectHandle<StackTraceInfo> stack_trace);
   void OnTerminationDuringRunMicrotasks();
+#ifdef V8_CPPGC_MICROTASK_QUEUE
+  // Remove dead microtask queues from the list.
+  void CompactMicrotaskQueues();
+  void RegisterMicrotaskQueue(MicrotaskQueue* queue);
+
+  const std::vector<cppgc::WeakPersistent<MicrotaskQueue>>& microtask_queues()
+      const {
+    return microtask_queues_;
+  }
+#endif  // V8_CPPGC_MICROTASK_QUEUE
 
   // Re-throw an exception.  This involves no error reporting since error
   // reporting was handled when the exception was thrown originally.
@@ -1163,6 +1173,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   ISOLATE_INIT_LIST(GLOBAL_ACCESSOR)
 #undef GLOBAL_ACCESSOR
 
+  inline MicrotaskQueue* default_microtask_queue() const;
+  inline void set_default_microtask_queue(MicrotaskQueue* value);
+
   void SetDetailedSourcePositionsForProfiling(bool value) {
     if (value) {
       CollectSourcePositionsForAllBytecodeArrays();
@@ -1217,7 +1230,17 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
                                       OFFSET_OF(Isolate, heap_));
   }
 
+  static Isolate* FromHandleScopeImplementer(
+      const HandleScopeImplementer* handle_scope_implementer) {
+    Address hsi_addr = reinterpret_cast<Address>(handle_scope_implementer);
+    Address isolate_addr = hsi_addr -
+                           IsolateData::kHandleScopeImplementerOffset -
+                           OFFSET_OF(Isolate, isolate_data_);
+    return reinterpret_cast<Isolate*>(isolate_addr);
+  }
+
   const IsolateData* isolate_data() const { return &isolate_data_; }
+
   IsolateData* isolate_data() { return &isolate_data_; }
 
   // When pointer compression is on, this is the base address of the pointer
@@ -1400,9 +1423,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return &isolate_data_.handle_scope_data_;
   }
 
-  HandleScopeImplementer* handle_scope_implementer() const {
-    DCHECK(handle_scope_implementer_);
-    return handle_scope_implementer_;
+  HandleScopeImplementer* handle_scope_implementer() {
+    return isolate_data_.handle_scope_implementer();
   }
 
   UnicodeCache* unicode_cache() const { return unicode_cache_; }
@@ -1902,10 +1924,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     javascript_execution_counter_++;
   }
 
-  Address handle_scope_implementer_address() {
-    return reinterpret_cast<Address>(&handle_scope_implementer_);
-  }
-
   void SetReleaseCppHeapCallback(v8::Isolate::ReleaseCppHeapCallback callback);
 
   void RunReleaseCppHeapCallback(std::unique_ptr<v8::CppHeap> cpp_heap);
@@ -2328,9 +2346,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     isolate_data_.trusted_pointer_publishing_scope_ = scope;
   }
 
-  Address code_pointer_table_base_address() {
-    return isolate_data_.code_pointer_table_base_address_;
-  }
 #endif  // V8_ENABLE_SANDBOX
 
   JSDispatchTable& js_dispatch_table() {
@@ -2656,7 +2671,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   StackTrace::StackTraceOptions stack_trace_for_uncaught_exceptions_options_ =
       StackTrace::kOverview;
   DescriptorLookupCache* descriptor_lookup_cache_ = nullptr;
-  HandleScopeImplementer* handle_scope_implementer_ = nullptr;
   UnicodeCache* unicode_cache_ = nullptr;
   AccountingAllocator* allocator_ = nullptr;
   InnerPointerToCodeCache* inner_pointer_to_code_cache_ = nullptr;
@@ -2809,6 +2823,15 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   ISOLATE_INIT_ARRAY_LIST(ISOLATE_FIELD_OFFSET)
 #undef ISOLATE_FIELD_OFFSET
 #endif
+
+#ifdef V8_CPPGC_MICROTASK_QUEUE
+  cppgc::Persistent<MicrotaskQueue> default_microtask_queue_;
+  // This list is used for visiting Microtask objects within live
+  // microtask queues during atomic pause.
+  std::vector<cppgc::WeakPersistent<MicrotaskQueue>> microtask_queues_;
+#else
+  MicrotaskQueue* default_microtask_queue_ = nullptr;
+#endif  // V8_CPPGC_MICROTASK_QUEUE
 
   bool detailed_source_positions_for_profiling_;
   bool preprocessing_exception_ = false;
@@ -3020,6 +3043,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   bool is_frozen_ = false;
 
+  friend class HandleScopeImplementer;
   friend class GlobalSafepoint;
   friend class heap::HeapTester;
   friend class IsolateForPointerCompression;

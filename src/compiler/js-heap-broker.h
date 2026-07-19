@@ -305,8 +305,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
       *find_result.entry =
           local_isolate()->heap()->NewPersistentHandle(object).location();
     } else {
-      DCHECK(PersistentHandlesScope::IsActive(isolate()));
-      *find_result.entry = IndirectHandle<T>(object, isolate()).location();
+      *find_result.entry = AllocatePersistentHandle(object);
     }
     return Handle<T>(*find_result.entry);
   }
@@ -438,6 +437,8 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
     return std::move(ph_);
   }
 
+  Address* AllocatePersistentHandle(Tagged<Object> object);
+
   void set_canonical_handles(CanonicalHandlesMap* canonical_handles) {
     canonical_handles_ = canonical_handles;
   }
@@ -548,6 +549,14 @@ class V8_NODISCARD UnparkedScopeIfNeeded {
       if (local_isolate != nullptr && local_isolate->heap()->IsParked()) {
         unparked_scope.emplace(local_isolate->heap());
       }
+    }
+  }
+
+  explicit UnparkedScopeIfNeeded(LocalIsolate* local_isolate,
+                                 bool extra_condition = true) {
+    if (extra_condition && local_isolate != nullptr &&
+        local_isolate->heap()->IsParked()) {
+      unparked_scope.emplace(local_isolate->heap());
     }
   }
 

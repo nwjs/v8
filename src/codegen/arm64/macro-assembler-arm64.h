@@ -1743,22 +1743,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void StoreIndirectPointerField(Register value, MemOperand dst_field_operand);
 
 #ifdef V8_ENABLE_SANDBOX
-  // Retrieve the heap object referenced by the given indirect pointer handle,
-  // which can either be a trusted pointer handle or a code pointer handle.
+  // Retrieve the heap object referenced by the given indirect pointer handle.
   void ResolveIndirectPointerHandle(Register destination, Register handle,
                                     IndirectPointerTagRange tag_range);
-
-  // Retrieve the heap object referenced by the given trusted pointer handle.
-  void ResolveTrustedPointerHandle(Register destination, Register handle,
-                                   IndirectPointerTagRange tag_range);
-
-  // Retrieve the Code object referenced by the given code pointer handle.
-  void ResolveCodePointerHandle(Register destination, Register handle);
-
-  // Load the value of Code pointer table corresponding to
-  // IsolateGroup::current()->code_pointer_table_.
-  // Only available when the sandbox is enabled.
-  void LoadCodePointerTableBase(Register destination);
 #endif
 
   void LoadEntrypointFromJSDispatchTable(Register destination,
@@ -2584,6 +2571,7 @@ class V8_NODISCARD UseScratchRegisterScope {
   // automatically when the scope ends.
   Register AcquireW() { return AcquireNextAvailable(available_).W(); }
   Register AcquireX() { return AcquireNextAvailable(available_).X(); }
+  VRegister AcquireH() { return AcquireNextAvailable(availablefp_).H(); }
   VRegister AcquireS() { return AcquireNextAvailable(availablefp_).S(); }
   VRegister AcquireD() { return AcquireNextAvailable(availablefp_).D(); }
   VRegister AcquireQ() { return AcquireNextAvailable(availablefp_).Q(); }

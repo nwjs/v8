@@ -8,6 +8,8 @@
 #include "src/execution/isolate.h"
 #include "src/execution/local-isolate.h"
 #include "src/heap/factory.h"
+#include "src/objects/objects.h"
+#include "src/objects/string.h"
 #include "src/utils/memcopy.h"
 
 namespace v8 {
@@ -34,6 +36,23 @@ size_t LiteralBuffer::NewCapacity(size_t min_capacity) {
 
 void LiteralBuffer::ExpandBuffer() {
   size_t min_capacity = std::max(kInitialCapacity, backing_store_.size());
+  base::Vector<uint8_t> new_store =
+      base::Vector<uint8_t>::New(NewCapacity(min_capacity));
+  if (position_ > 0) {
+    MemCopy(new_store.begin(), backing_store_.begin(), position_);
+  }
+  backing_store_.Dispose();
+  backing_store_ = new_store;
+}
+
+void LiteralBuffer::ExpandBufferTo(size_t min_size) {
+  // Round up the min_size to the next even number. This prevents the buffer
+  // from acquiring an odd capacity, which can lead to a heap-buffer-overflow
+  // (out-of-bounds write) during in-place transition to two-byte mode when the
+  // buffer is at capacity minus one.
+  size_t min_capacity = RoundUp<2>(min_size);
+  min_capacity =
+      std::max({kInitialCapacity, backing_store_.size(), min_capacity});
   base::Vector<uint8_t> new_store =
       base::Vector<uint8_t>::New(NewCapacity(min_capacity));
   if (position_ > 0) {

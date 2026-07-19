@@ -37,12 +37,14 @@ class Mips64OperandGenerator final : public OperandGenerator {
   InstructionOperand UseRegisterOrImmediateZero(OpIndex node) {
     if (const ConstantOp* constant =
             selector()->Get(node).TryCast<ConstantOp>()) {
-      if ((constant->IsIntegral() && constant->integral() == 0) ||
-          (constant->kind == ConstantOp::Kind::kFloat32 &&
-           constant->float32().get_bits() == 0) ||
-          (constant->kind == ConstantOp::Kind::kFloat64 &&
-           constant->float64().get_bits() == 0)) {
-        return UseImmediate(node);
+      if (!constant->IsRelocatable()) {
+        if ((constant->IsIntegral() && constant->integral() == 0) ||
+            (constant->kind == ConstantOp::Kind::kFloat32 &&
+             constant->float32().get_bits() == 0) ||
+            (constant->kind == ConstantOp::Kind::kFloat64 &&
+             constant->float64().get_bits() == 0)) {
+          return UseImmediate(node);
+        }
       }
     }
     return UseRegister(node);
@@ -480,6 +482,13 @@ void InstructionSelector::VisitStore(OpIndex node) {
 
   if (v8_flags.enable_unconditional_write_barriers && CanBeTaggedPointer(rep)) {
     write_barrier_kind = kFullWriteBarrier;
+  }
+
+  // For build: mips64 backend hasn't been ported for verify_write_barriers;
+  // treat eliminated barriers as kNoWriteBarrier so mksnapshot completes.
+  if (write_barrier_kind == kSkippedWriteBarrier ||
+      write_barrier_kind == kAssertNoWriteBarrier) {
+    write_barrier_kind = kNoWriteBarrier;
   }
 
   // TODO(mips): I guess this could be done in a better way.

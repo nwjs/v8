@@ -113,7 +113,7 @@ void StackMemory::Iterate(v8::internal::RootVisitor* v, Isolate* isolate,
   for (; !it.done(); it.Advance()) {
     it.frame()->Iterate(v);
   }
-  if (v8_flags.experimental_wasm_wasmfx) {
+  if (v8_flags.wasm_wasmfx) {
     v->VisitRootPointer(
         Root::kStackRoots, nullptr,
         FullObjectSlot(reinterpret_cast<Address>(&current_cont_)));
@@ -226,6 +226,7 @@ void StackMemory::Reset() {
   num_bound_args_ = 0;
   param_types_ = {};
   signature_id_ = CanonicalTypeIndex{kInvalidCanonicalIndex};
+  wasm_code_ = nullptr;
 }
 
 bool StackMemory::IsValidContinuation(Tagged<WasmContinuationObject> cont) {

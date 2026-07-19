@@ -120,9 +120,11 @@ BlockProcessResult MaglevPhiRepresentationSelector::PreProcessBasicBlock(
 bool MaglevPhiRepresentationSelector::CanHoistUntaggingTo(BasicBlock* block) {
   if (block->successors().size() != 1) return false;
   BasicBlock* next = block->successors()[0];
+  // A stateless successor is a peeled loop-header clone, never an edge-split.
+  DCHECK_IMPLIES(!next->has_state(), !next->is_edge_split_block());
   // To be able to hoist above resumable loops we would have to be able to
   // convert during resumption.
-  return !next->state()->is_resumable_loop();
+  return !next->has_state() || !next->state()->is_resumable_loop();
 }
 
 MaglevPhiRepresentationSelector::ProcessPhiResult
@@ -1053,10 +1055,11 @@ ProcessResult MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
   }
 
   if (old_untagging->Is<CheckedSmiUntag>() && SmiValuesAre31Bits()) {
-    // Similar to CheckSmi, the CheckedSmiUntag **must** fail if the Phi has a
-    // non-Smi type, so the Phi's type must include Smi (cf comment in
-    // UpdateNodePhiInput(CheckSmi)).
-    CHECK(NodeTypeCanBe(phi->type(), NodeType::kSmi));
+    if (GetRetaggingKindForPhi(phi) == RetaggingKind::kHeapNumber) {
+      // Similar to CheckSmi, the CheckedSmiUntag **must** fail if the Phi has a
+      // non-Smi type (cf comment in UpdateNodePhiInput(CheckSmi)).
+      return EmitUnconditionalDeopt(old_untagging, DeoptimizeReason::kNotASmi);
+    }
 
     // CheckedSmiUntag serves a dual-purpose: it untags a Smi but it also
     // ensures that this value is a Smi (and is therefore in Smi range). We need
@@ -1113,16 +1116,43 @@ ProcessResult MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
     return ProcessResult::kContinue;
   }
 
-  // The graph builder inserts 3 kind of Tagged->Int32 conversions that can have
-  // heap number as input: CheckedTruncateNumberToInt32, which truncates its
-  // input (and deopts if it's not a HeapNumber), TruncateNumberToInt32, which
-  // truncates its input (assuming that it's indeed a HeapNumber) and
-  // CheckedSmiTag, which deopts on non-smi inputs. The first 2 cannot deopt if
-  // we have Float64 phi and will happily truncate it, but the 3rd one should
-  // deopt if it cannot be converted without loss of precision.
-  bool conversion_is_truncating_float64 =
-      old_untagging->Is<TruncateCheckedNumberOrOddballToInt32>() ||
-      old_untagging->Is<TruncateUnsafeNumberOrOddballToInt32>();
+  // To be safe, GetOpcodeForConversion (called below) always return a
+  // conversion that deopts when converting a non-int32 float64 to int32 (eg,
+  // when attempting to convert 3.35 to int32). However, some Float64->Int32 and
+  // HoleyFloat64->Int32 conversions are truncating, and thus don't care about
+  // loss of precision. For such cases, we set
+  // {conversion_is_truncating_float64} to true, which will cause
+  // GetOpcodeForConversion to return a truncating conversion that doesn't deopt
+  // when losing precision.
+  bool conversion_is_truncating_float64 = false;
+  if (old_untagging->Is<TruncateUnsafeNumberOrOddballToInt32>()) {
+    conversion_is_truncating_float64 = true;
+  } else if (old_untagging->Is<TruncateCheckedNumberOrOddballToInt32>()) {
+    if (from_repr == ValueRepresentation::kFloat64) {
+      // If {from_repr} is Float64, then the "CheckedNumber" part is
+      // guaranteed to pass and this operation just truncates its value to
+      // Int32.
+      conversion_is_truncating_float64 = true;
+    } else {
+      DCHECK_EQ(from_repr, ValueRepresentation::kHoleyFloat64);
+      const auto* truncate =
+          old_untagging->Cast<TruncateCheckedNumberOrOddballToInt32>();
+      // A HoleyFloat64 hole really means Undefined rather than the_hole:
+      // whenever it gets rematerialized, it will always be rematerialized as
+      // Undefined. So, we can use a truncating conversion as long as the
+      // original ConversionType was allowing truncating Undefined.
+      switch (truncate->conversion_type()) {
+        case TaggedToFloat64ConversionType::kOnlyNumber:
+        case TaggedToFloat64ConversionType::kNumberOrBoolean:
+          // Need to deopt for Hole/Undefined ==> not truncating.
+          break;
+        case TaggedToFloat64ConversionType::kNumberOrUndefined:
+        case TaggedToFloat64ConversionType::kNumberOrOddball:
+          conversion_is_truncating_float64 = true;
+          break;
+      }
+    }
+  }
 
   Opcode needed_conversion = GetOpcodeForConversion(
       from_repr, to_repr, conversion_is_truncating_float64);
@@ -1180,17 +1210,18 @@ ProcessResult MaglevPhiRepresentationSelector::UpdateNodePhiInput(
     return ProcessResult::kContinue;
   }
 
-  // The retagging rule is that Phis whose type cannot be Smi are always
-  // retagged to HeapNumber, and every other Phi is retagged to Number with
-  // CanonicalizeSmi=true. So, if we somehow end up with a Phi with non-smi type
-  // flowing into a CheckSmi, the CheckSmi **must** fail, even if the value of
-  // the Phi is representable on a Smi. I don't think that this should happen,
-  // because the graph builder should have replaced such CheckSmi by
-  // unconditional deopts. Still, with non-eager inlining, it's hard to tell.
-  // The CHECK below is to make sure that things remain safe if we end up with
-  // such a CheckSmi. If this CHECK were to fail for a legit reason, then we
-  // should overwrite the CheckSmi into an unconditional deopt.
-  CHECK(NodeTypeCanBe(phi->type(), NodeType::kSmi));
+  if (GetRetaggingKindForPhi(phi) == RetaggingKind::kHeapNumber) {
+    // The retagging rule is that Phis whose type cannot be Smi are always
+    // retagged to HeapNumber, and every other Phi is retagged to Number with
+    // CanonicalizeSmi=true. So, if we somehow end up with a Phi with non-smi
+    // type flowing into a CheckSmi, the CheckSmi **must** fail, even if the
+    // value of the Phi is representable on a Smi. This should only happen if
+    // non-eager optimizations earlier lead to a type-any value initially
+    // flowing into the CheckSmi but then subsequent optimizations revealed that
+    // the input had non-Smi type but didn't replace the CheckSmi by an
+    // unconditional deopt.
+    return EmitUnconditionalDeopt(node, DeoptimizeReason::kNotASmi);
+  }
 
   switch (phi->value_representation()) {
     case ValueRepresentation::kInt32:
@@ -1377,6 +1408,36 @@ ProcessResult MaglevPhiRepresentationSelector::UpdateNodePhiInput(
   return ProcessResult::kContinue;
 }
 
+namespace {
+NumberConversionMode ModeForRetaggingKind(
+    MaglevPhiRepresentationSelector::RetaggingKind kind) {
+  switch (kind) {
+    case MaglevPhiRepresentationSelector::RetaggingKind::kSmi:
+      // If the RetaggingKind is kSmi, we should use a conversion that always
+      // forces Smis rather than relying on one that could potentially
+      // introduce a HeapNumber (like all of the conversions that have a
+      // NumberConversionMode do).
+      UNREACHABLE();
+    case MaglevPhiRepresentationSelector::RetaggingKind::kHeapNumber:
+      return NumberConversionMode::kForceHeapNumber;
+    case MaglevPhiRepresentationSelector::RetaggingKind::kAnyNumber:
+      return NumberConversionMode::kCanonicalizeSmi;
+  }
+}
+}  // namespace
+
+MaglevPhiRepresentationSelector::RetaggingKind
+MaglevPhiRepresentationSelector::GetRetaggingKindForPhi(Phi* phi) {
+  NodeType static_type = phi->type();
+  if (NodeTypeIsSmi(static_type)) {
+    return RetaggingKind::kSmi;
+  } else if (!NodeTypeCanBe(static_type, NodeType::kSmi)) {
+    return RetaggingKind::kHeapNumber;
+  } else {
+    return RetaggingKind::kAnyNumber;
+  }
+}
+
 ValueNode* MaglevPhiRepresentationSelector::EnsurePhiTagged(
     Phi* phi, BasicBlock* block, BasicBlockPosition pos,
     const ProcessingState* state, std::optional<int> predecessor_index) {
@@ -1450,54 +1511,39 @@ ValueNode* MaglevPhiRepresentationSelector::EnsurePhiTagged(
   // 3. Or, the graph builder didn't care about Sminess/HeapObjectness of this
   //    Phi, and so we can retag the phi however we want here. If possible,
   //    we'll use kCanonicalizeSmi in that case.
-  NodeType static_type = phi->type();
-  const bool force_heap_number = !NodeTypeCanBe(static_type, NodeType::kSmi);
-  const bool is_smi = NodeTypeIsSmi(static_type);
 
-  CHECK_IMPLIES(force_heap_number,
-                phi->value_representation() != ValueRepresentation::kInt32);
-  CHECK_IMPLIES(
-      !NodeTypeCanBe(static_type, NodeType::kSmi),
-      phi->value_representation() == ValueRepresentation::kFloat64 ||
-          phi->value_representation() == ValueRepresentation::kHoleyFloat64);
+  RetaggingKind kind = GetRetaggingKindForPhi(phi);
 
   // We didn't already Tag {phi} on the current path; creating this tagging now.
   ValueNode* tagged = nullptr;
   switch (phi->value_representation()) {
     case ValueRepresentation::kFloat64: {
-      if (is_smi) {
+      if (kind == RetaggingKind::kSmi) {
         tagged =
             AddNewNodeNoInputConversion<UnsafeSmiTagFloat64>(block, pos, {phi});
       } else {
         tagged = AddNewNodeNoInputConversion<Float64ToTagged>(
-            block, pos, {phi},
-            force_heap_number ? NumberConversionMode::kForceHeapNumber
-                              : NumberConversionMode::kCanonicalizeSmi);
+            block, pos, {phi}, ModeForRetaggingKind(kind));
       }
       break;
     }
     case ValueRepresentation::kHoleyFloat64: {
-      if (is_smi) {
+      if (kind == RetaggingKind::kSmi) {
         tagged = AddNewNodeNoInputConversion<UnsafeSmiTagHoleyFloat64>(
             block, pos, {phi});
       } else {
         tagged = AddNewNodeNoInputConversion<HoleyFloat64ToTagged>(
-            block, pos, {phi},
-            force_heap_number ? NumberConversionMode::kForceHeapNumber
-                              : NumberConversionMode::kCanonicalizeSmi);
+            block, pos, {phi}, ModeForRetaggingKind(kind));
       }
       break;
     }
     case ValueRepresentation::kInt32:
-      if (is_smi) {
-        CHECK(!force_heap_number);
+      if (kind == RetaggingKind::kSmi) {
         tagged =
             AddNewNodeNoInputConversion<UnsafeSmiTagInt32>(block, pos, {phi});
       } else {
         tagged = AddNewNodeNoInputConversion<Int32ToNumber>(
-            block, pos, {phi},
-            force_heap_number ? NumberConversionMode::kForceHeapNumber
-                              : NumberConversionMode::kCanonicalizeSmi);
+            block, pos, {phi}, ModeForRetaggingKind(kind));
       }
       break;
     case ValueRepresentation::kTagged:
@@ -1658,6 +1704,14 @@ void MaglevPhiRepresentationSelector::PreparePhiTaggings(
   };
 
   phi_taggings_.StartNewSnapshot(base::VectorOf(predecessors_), merge_taggings);
+}
+
+ProcessResult MaglevPhiRepresentationSelector::EmitUnconditionalDeopt(
+    NodeBase* node, DeoptimizeReason reason) {
+  eager_deopt_frame_ = &node->eager_deopt_info()->top_frame();
+  ReduceResult result = reducer_.EmitUnconditionalDeopt(reason);
+  CHECK(result.IsDoneWithAbort());
+  return ProcessResult::kTruncateBlock;
 }
 
 bool MaglevPhiRepresentationSelector::ShouldSkipUntagging(Phi* phi) {

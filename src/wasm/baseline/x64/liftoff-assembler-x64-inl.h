@@ -292,7 +292,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
     j(above_equal, &continuation, Label::kNear);
   }
 
-  if (v8_flags.experimental_wasm_growable_stacks) {
+  if (v8_flags.wasm_growable_stacks) {
     LiftoffRegList regs_to_save;
     regs_to_save.set(WasmHandleStackOverflowDescriptor::GapRegister());
     regs_to_save.set(WasmHandleStackOverflowDescriptor::FrameBaseRegister());
@@ -367,7 +367,7 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
 }
 
 Register LiftoffAssembler::LoadOldFramePointer() {
-  if (!v8_flags.experimental_wasm_growable_stacks) {
+  if (!v8_flags.wasm_growable_stacks) {
     return rbp;
   }
   LiftoffRegister old_fp = GetUnusedRegister(RegClass::kGpReg, {});
@@ -681,6 +681,7 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
     case StoreType::kF32StoreF16: {
       CpuFeatureScope fscope(this, F16C);
       vcvtps2ph(kScratchDoubleReg, src.fp(), 0);
+      if (trapping_store_pc) *trapping_store_pc = pc_offset();
       Pextrw(dst_op, kScratchDoubleReg, static_cast<uint8_t>(0));
       break;
     }
@@ -1145,7 +1146,13 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
   }
 }
 
-void LiftoffAssembler::AtomicFence() { mfence(); }
+void LiftoffAssembler::AtomicFence(AtomicMemoryOrder order) {
+  if (order == AtomicMemoryOrder::kSeqCst) {
+    mfence();
+  } else {
+    DCHECK_EQ(order, AtomicMemoryOrder::kAcqRel);
+  }
+}
 
 void LiftoffAssembler::Pause() { pause(); }
 
@@ -1828,6 +1835,30 @@ void LiftoffAssembler::emit_i64_shli(LiftoffRegister dst, LiftoffRegister src,
                                      int32_t amount) {
   if (dst.gp() != src.gp()) movq(dst.gp(), src.gp());
   shlq(dst.gp(), Immediate(amount & 63));
+}
+
+void LiftoffAssembler::emit_i64_rol(LiftoffRegister dst, LiftoffRegister src,
+                                    Register amount) {
+  liftoff::EmitShiftOperation<kI64>(this, dst.gp(), src.gp(), amount,
+                                    &Assembler::rolq_cl);
+}
+
+void LiftoffAssembler::emit_i64_roli(LiftoffRegister dst, LiftoffRegister src,
+                                     int32_t amount) {
+  if (dst.gp() != src.gp()) movq(dst.gp(), src.gp());
+  rolq(dst.gp(), Immediate(amount & 63));
+}
+
+void LiftoffAssembler::emit_i64_ror(LiftoffRegister dst, LiftoffRegister src,
+                                    Register amount) {
+  liftoff::EmitShiftOperation<kI64>(this, dst.gp(), src.gp(), amount,
+                                    &Assembler::rorq_cl);
+}
+
+void LiftoffAssembler::emit_i64_rori(LiftoffRegister dst, LiftoffRegister src,
+                                     int32_t amount) {
+  if (dst.gp() != src.gp()) movq(dst.gp(), src.gp());
+  rorq(dst.gp(), Immediate(amount & 63));
 }
 
 void LiftoffAssembler::emit_i64_sar(LiftoffRegister dst, LiftoffRegister src,
@@ -5232,6 +5263,13 @@ void LiftoffAssembler::MaybeOSR() {
   cmpq(liftoff::kOSRTargetSlot, Immediate(0));
   j(not_equal, static_cast<Address>(Builtin::kWasmOnStackReplace),
     RelocInfo::WASM_STUB_CALL);
+}
+
+void LiftoffAssembler::AssertOSREmpty() {
+  if (v8_flags.debug_code) {
+    cmpq(liftoff::kOSRTargetSlot, Immediate(0));
+    Check(equal, AbortReason::kOSREmptyCheckFailed);
+  }
 }
 
 void LiftoffStackSlots::Construct(int param_slots) {

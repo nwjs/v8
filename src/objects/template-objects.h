@@ -8,7 +8,6 @@
 #include "src/objects/fixed-array.h"
 #include "src/objects/struct.h"
 #include "src/objects/tagged-field.h"
-#include "src/objects/torque-defined-classes.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -18,8 +17,6 @@ namespace internal {
 
 class Oddball;
 class StructBodyDescriptor;
-
-#include "torque-generated/src/objects/template-objects-tq.inc"
 
 // TemplateObjectDescription is a tuple of raw strings and cooked strings for
 // tagged template literals. Used to communicate with the runtime for template

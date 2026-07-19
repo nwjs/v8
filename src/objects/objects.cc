@@ -54,12 +54,14 @@
 #include "src/objects/free-space-inl.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/heap-object-inl.h"
+#include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-collection-inl.h"
 #include "src/objects/js-disposable-stack-inl.h"
 #include "src/objects/js-generator-inl.h"
+#include "src/objects/js-proxy-inl.h"
 #include "src/objects/js-regexp-inl.h"
 #include "src/objects/js-weak-refs-inl.h"
 #include "src/objects/keys.h"
@@ -594,7 +596,7 @@ MaybeDirectHandle<String> Object::NoSideEffectsToMaybeString(
       Tagged<HeapObject> target = Cast<JSProxy>(currInput)->target();
       currInput = direct_handle(target, isolate);
     } while (IsJSProxy(*currInput));
-    return NoSideEffectsToString(isolate, currInput);
+    return NoSideEffectsToMaybeString(isolate, currInput);
   } else if (IsBigInt(*input)) {
     return BigInt::NoSideEffectsToString(isolate, Cast<BigInt>(input));
   } else if (IsJSFunctionOrBoundFunctionOrWrappedFunction(*input)) {
@@ -663,17 +665,31 @@ MaybeDirectHandle<String> Object::NoSideEffectsToMaybeString(
       DirectHandle<Object> ctor = JSReceiver::GetDataProperty(
           isolate, receiver, isolate->factory()->constructor_string());
       if (IsJSFunctionOrBoundFunctionOrWrappedFunction(*ctor)) {
+        auto ClearExceptionIfNeeded = [isolate]() {
+          if (isolate->has_exception() &&
+              isolate->is_catchable_by_javascript(isolate->exception())) {
+            isolate->clear_exception();
+          }
+        };
+
         DirectHandle<String> ctor_name;
-        if (IsJSBoundFunction(*ctor)) {
-          ctor_name =
-              JSBoundFunction::GetName(isolate, Cast<JSBoundFunction>(ctor))
-                  .ToHandleChecked();
-        } else if (IsJSFunction(*ctor)) {
-          ctor_name = JSFunction::GetName(isolate, Cast<JSFunction>(ctor));
-        } else if (IsJSWrappedFunction(*ctor)) {
-          ctor_name =
-              JSWrappedFunction::GetName(isolate, Cast<JSWrappedFunction>(ctor))
-                  .ToHandleChecked();
+        if (DirectHandle<JSBoundFunction> bound_fun;
+            TryCast<JSBoundFunction>(ctor, &bound_fun)) {
+          if (!JSBoundFunction::GetName(isolate, bound_fun)
+                   .ToHandle(&ctor_name)) {
+            ClearExceptionIfNeeded();
+            return {};
+          }
+        } else if (DirectHandle<JSFunction> js_fun;
+                   TryCast<JSFunction>(ctor, &js_fun)) {
+          ctor_name = JSFunction::GetName(isolate, js_fun);
+        } else if (DirectHandle<JSWrappedFunction> wrapped_fun;
+                   TryCast<JSWrappedFunction>(ctor, &wrapped_fun)) {
+          if (!JSWrappedFunction::GetName(isolate, wrapped_fun)
+                   .ToHandle(&ctor_name)) {
+            ClearExceptionIfNeeded();
+            return {};
+          }
         } else {
           UNREACHABLE();
         }
@@ -684,7 +700,10 @@ MaybeDirectHandle<String> Object::NoSideEffectsToMaybeString(
           builder.AppendString(ctor_name);
           builder.AppendCharacter('>');
 
-          return builder.Finish().ToHandleChecked();
+          DirectHandle<String> result;
+          if (builder.Finish().ToHandle(&result)) return result;
+          ClearExceptionIfNeeded();
+          return {};
         }
       }
     }
@@ -731,7 +750,10 @@ DirectHandle<String> Object::NoSideEffectsToString(Isolate* isolate,
 
   IncrementalStringBuilder builder(isolate);
   builder.AppendCStringLiteral("[object ");
-  builder.AppendString(tag);
+  // This threshold must be sufficiently far below String::kMaxLength that
+  // the {builder}'s result can never exceed that limit.
+  constexpr int kMaxPrintedStringLength = 1000;
+  builder.AppendStringCapped(tag, kMaxPrintedStringLength);
   builder.AppendCharacter(']');
 
   return builder.Finish().ToHandleChecked();
@@ -5221,7 +5243,7 @@ template <typename Derived, typename Shape>
 void HashTable<Derived, Shape>::Rehash() {
   DisallowGarbageCollection no_gc;
   WriteBarrierModeScope mode = GetWriteBarrierMode(no_gc);
-  EarlyReadOnlyRoots roots = EarlyGetReadOnlyRoots();
+  EarlyReadOnlyRoots roots = ReadOnlyHeap::EarlyGetReadOnlyRoots(this);
   uint32_t capacity = Capacity();
   bool done = false;
   for (int probe = 1; !done; probe++) {

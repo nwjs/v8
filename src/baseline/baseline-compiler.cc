@@ -10,6 +10,7 @@
 
 #include "src/base/bits.h"
 #include "src/base/logging.h"
+#include "src/base/numerics/clamped_math.h"
 #include "src/baseline/baseline-assembler-inl.h"
 #include "src/baseline/baseline-assembler.h"
 #include "src/builtins/builtins-constructor.h"
@@ -364,9 +365,15 @@ MaybeHandle<Code> BaselineCompiler::Build() {
   Factory::CodeBuilder code_builder(local_isolate_, desc, CodeKind::BASELINE);
   code_builder.set_bytecode_offset_table(bytecode_offset_table);
   if (shared_function_info_->HasInterpreterData(local_isolate_)) {
-    code_builder.set_interpreter_data(
-        handle(shared_function_info_->interpreter_data(local_isolate_),
-               local_isolate_));
+    // The SFI lives inside the sandbox and may have been mutated between the
+    // main-thread snapshot of |bytecode_| and this background-thread re-read.
+    // Refuse to bake a foreign InterpreterData (whose bytecode_array() does
+    // not match the snapshot) into the trusted Code object.
+    Handle<InterpreterData> interpreter_data(
+        shared_function_info_->interpreter_data(local_isolate_),
+        local_isolate_);
+    SBXCHECK_EQ(interpreter_data->bytecode_array(), *bytecode_);
+    code_builder.set_interpreter_data(interpreter_data);
   } else {
     code_builder.set_interpreter_data(bytecode_);
   }
@@ -1245,7 +1252,8 @@ void BaselineCompiler::VisitDefineKeyedOwnPropertyInLiteral() {
 
 void BaselineCompiler::VisitAdd() {
   CallBuiltin<Builtin::kAdd_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitAdd_StringConstant_Internalize() {
@@ -1269,117 +1277,140 @@ void BaselineCompiler::VisitAdd_StringConstant_Internalize() {
 
 void BaselineCompiler::VisitSub() {
   CallBuiltin<Builtin::kSubtract_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitMul() {
   CallBuiltin<Builtin::kMultiply_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitDiv() {
   CallBuiltin<Builtin::kDivide_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitMod() {
   CallBuiltin<Builtin::kModulus_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitExp() {
   CallBuiltin<Builtin::kExponentiate_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitBitwiseOr() {
   CallBuiltin<Builtin::kBitwiseOr_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitBitwiseXor() {
   CallBuiltin<Builtin::kBitwiseXor_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitBitwiseAnd() {
   CallBuiltin<Builtin::kBitwiseAnd_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitShiftLeft() {
   CallBuiltin<Builtin::kShiftLeft_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitShiftRight() {
   CallBuiltin<Builtin::kShiftRight_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitShiftRightLogical() {
   CallBuiltin<Builtin::kShiftRightLogical_Baseline>(
-      RegisterOperand(0), kInterpreterAccumulatorRegister, FeedbackSlot(1));
+      RegisterOperand(0), kInterpreterAccumulatorRegister,
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitAddSmi() {
-  CallBuiltin<Builtin::kAddSmi_Baseline>(kInterpreterAccumulatorRegister,
-                                         IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kAddSmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitSubSmi() {
-  CallBuiltin<Builtin::kSubtractSmi_Baseline>(kInterpreterAccumulatorRegister,
-                                              IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kSubtractSmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitMulSmi() {
-  CallBuiltin<Builtin::kMultiplySmi_Baseline>(kInterpreterAccumulatorRegister,
-                                              IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kMultiplySmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitDivSmi() {
-  CallBuiltin<Builtin::kDivideSmi_Baseline>(kInterpreterAccumulatorRegister,
-                                            IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kDivideSmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitModSmi() {
-  CallBuiltin<Builtin::kModulusSmi_Baseline>(kInterpreterAccumulatorRegister,
-                                             IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kModulusSmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitExpSmi() {
   CallBuiltin<Builtin::kExponentiateSmi_Baseline>(
-      kInterpreterAccumulatorRegister, IntAsSmi(0), FeedbackSlot(1));
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitBitwiseOrSmi() {
-  CallBuiltin<Builtin::kBitwiseOrSmi_Baseline>(kInterpreterAccumulatorRegister,
-                                               IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kBitwiseOrSmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitBitwiseXorSmi() {
-  CallBuiltin<Builtin::kBitwiseXorSmi_Baseline>(kInterpreterAccumulatorRegister,
-                                                IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kBitwiseXorSmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitBitwiseAndSmi() {
-  CallBuiltin<Builtin::kBitwiseAndSmi_Baseline>(kInterpreterAccumulatorRegister,
-                                                IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kBitwiseAndSmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitShiftLeftSmi() {
-  CallBuiltin<Builtin::kShiftLeftSmi_Baseline>(kInterpreterAccumulatorRegister,
-                                               IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kShiftLeftSmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitShiftRightSmi() {
-  CallBuiltin<Builtin::kShiftRightSmi_Baseline>(kInterpreterAccumulatorRegister,
-                                                IntAsSmi(0), FeedbackSlot(1));
+  CallBuiltin<Builtin::kShiftRightSmi_Baseline>(
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitShiftRightLogicalSmi() {
   CallBuiltin<Builtin::kShiftRightLogicalSmi_Baseline>(
-      kInterpreterAccumulatorRegister, IntAsSmi(0), FeedbackSlot(1));
+      kInterpreterAccumulatorRegister, IntAsSmi(0),
+      iterator().GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex));
 }
 
 void BaselineCompiler::VisitInc() {
@@ -2336,7 +2367,8 @@ void BaselineCompiler::VisitJumpLoop() {
 
     __ Bind(&osr);
     Label do_osr;
-    weight = bytecode_->length() * v8_flags.osr_to_tierup;
+    weight =
+        base::ClampMul(bytecode_->length(), v8_flags.osr_to_tierup.value());
     __ Push(maybe_target_code);
     UpdateInterruptBudgetAndJumpToLabel(-weight, nullptr, &do_osr,
                                         kDisableStackCheck);

@@ -36,6 +36,7 @@
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
+#include "src/objects/js-proxy-inl.h"
 #include "src/objects/megadom-handler.h"
 #include "src/objects/property-descriptor.h"
 #include "src/objects/prototype.h"
@@ -1216,7 +1217,7 @@ MaybeObjectHandle LoadIC::ComputeHandler(LookupIterator* lookup) {
             exports->FindEntry(roots, lookup->name(),
                                Smi::ToInt(Object::GetHash(*lookup->name())));
         // We found the accessor, so the entry must exist.
-        DCHECK(entry.is_found());
+        CHECK(entry.is_found());
         int value_index = ObjectHashTable::EntryToValueIndex(entry);
         Handle<Smi> smi_handler =
             LoadHandler::LoadModuleExport(isolate(), value_index);
@@ -1484,8 +1485,10 @@ MaybeObjectHandle LoadIC::ComputeHandler(LookupIterator* lookup) {
             DirectHandle<Smi> get_smi_handler = LoadHandler::LoadField(
                 isolate(), it.GetFieldIndex(), it.GetFieldDescriptorIndex());
             if (DirectHandle<JSFunction> trap; TryCast(trap_method, &trap)) {
-              return MaybeObjectHandle(LoadHandler::LoadProxyFast(
-                  isolate(), target_map, handler_map, get_smi_handler, trap));
+              if (!trap->shared()->is_class_constructor()) {
+                return MaybeObjectHandle(LoadHandler::LoadProxyFast(
+                    isolate(), target_map, handler_map, get_smi_handler, trap));
+              }
             }
           }
         }
@@ -1854,6 +1857,24 @@ enum KeyType { kIntPtr, kName, kBailout };
 // CodeStubAssembler::TryToIntptr can handle!
 KeyType TryConvertKey(Handle<Object> key, Isolate* isolate, intptr_t* index_out,
                       Handle<Name>* name_out) {
+  ReadOnlyRoots roots(isolate);
+  if (*key == roots.undefined_value()) {
+    *name_out = isolate->factory()->undefined_string();
+    return kName;
+  }
+  if (*key == roots.null_value()) {
+    *name_out = isolate->factory()->null_string();
+    return kName;
+  }
+  if (*key == roots.true_value()) {
+    *name_out = isolate->factory()->true_string();
+    return kName;
+  }
+  if (*key == roots.false_value()) {
+    *name_out = isolate->factory()->false_string();
+    return kName;
+  }
+
   if (IsSmi(*key)) {
     *index_out = Smi::ToInt(*key);
     return kIntPtr;

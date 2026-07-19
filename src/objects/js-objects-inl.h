@@ -20,7 +20,9 @@
 #include "src/objects/embedder-data-slot-inl.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/field-index-inl.h"
+#include "src/objects/fixed-array-base.h"
 #include "src/objects/fixed-array.h"
+#include "src/objects/fixed-primitive-array.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object-inl.h"
@@ -42,8 +44,6 @@
 #include "src/objects/object-macros.h"
 
 namespace v8::internal {
-
-#include "torque-generated/src/objects/js-objects-tq-inl.inc"
 
 Tagged<FixedArrayBase> JSObject::elements() const { return elements_.load(); }
 
@@ -1074,7 +1074,7 @@ DEF_GETTER(JSReceiver, HasFastProperties, bool) {
 }
 
 DEF_GETTER(JSReceiver, property_dictionary, Tagged<NameDictionary>) {
-  DCHECK(!IsJSGlobalObject(this));
+  DCHECK(!Is<JSGlobalObject>(this));
   DCHECK(!HasFastProperties());
   DCHECK(!V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL);
 
@@ -1086,7 +1086,7 @@ DEF_GETTER(JSReceiver, property_dictionary, Tagged<NameDictionary>) {
 }
 
 DEF_GETTER(JSReceiver, property_dictionary_swiss, Tagged<SwissNameDictionary>) {
-  DCHECK(!IsJSGlobalObject(this));
+  DCHECK(!Is<JSGlobalObject>(this));
   DCHECK(!HasFastProperties());
   DCHECK(V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL);
 

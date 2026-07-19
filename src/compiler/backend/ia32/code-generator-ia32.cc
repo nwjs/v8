@@ -4224,7 +4224,7 @@ void CodeGenerator::AssembleConstructFrame() {
         __ j(above_equal, &done, Label::kNear);
       }
 
-      if (v8_flags.experimental_wasm_growable_stacks) {
+      if (v8_flags.wasm_growable_stacks) {
         RegList regs_to_save;
         regs_to_save.set(WasmHandleStackOverflowDescriptor::GapRegister());
         regs_to_save.set(
@@ -4335,7 +4335,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
 
 #if V8_ENABLE_WEBASSEMBLY
   if (call_descriptor->IsAnyWasmFunctionCall() &&
-      v8_flags.experimental_wasm_growable_stacks) {
+      v8_flags.wasm_growable_stacks) {
     __ cmp(MemOperand(ebp, TypedFrameConstants::kFrameTypeOffset),
            Immediate(StackFrame::TypeToMarker(StackFrame::WASM_SEGMENT_START)));
     Label done;
@@ -4449,10 +4449,7 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
   auto rep = LocationOperand::cast(source)->representation();
   int new_slots = ElementSizeInPointers(rep);
   IA32OperandConverter g(this, nullptr);
-  int last_frame_slot_id =
-      frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-  int sp_delta = frame_access_state_->sp_delta();
-  int slot_id = last_frame_slot_id + sp_delta + new_slots;
+  int slot_id = frame_access_state()->GetSPSlotCount() - 1 + new_slots;
   AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
   if (source->IsRegister()) {
     __ push(g.ToRegister(source));
@@ -4481,10 +4478,7 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
     frame_access_state()->IncreaseSPDelta(-dropped_slots);
     __ pop(g.ToOperand(dest));
   } else {
-    int last_frame_slot_id =
-        frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
-    int sp_delta = frame_access_state_->sp_delta();
-    int slot_id = last_frame_slot_id + sp_delta;
+    int slot_id = frame_access_state()->GetSPSlotCount() - 1;
     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
     AssembleMove(&stack_slot, dest);
     frame_access_state()->IncreaseSPDelta(-dropped_slots);

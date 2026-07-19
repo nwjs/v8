@@ -10,14 +10,17 @@
 #endif  // !V8_ENABLE_WEBASSEMBLY
 
 // Each entry in this file generates a V8 command-line flag with the prefix
-// "--experimental-wasm-".
+// "--wasm-".
 //
 // For example, to enable "my_feature", pass
-// --experimental-wasm-my-feature to d8, or
-// --js-flags=--experimental-wasm-my-feature to Chrome.
+// --wasm-my-feature to d8, or
+// --js-flags=--wasm-my-feature to Chrome.
+//
+// For backward compatibility, the prefix "--experimental-wasm-" is also
+// supported as a temporary alias (to be dropped in V8 v15.3).
 //
 // To disable "my_feature", add the "--no-" prefix:
-// --no-experimental-wasm-my-feature.
+// --no-wasm-my-feature.
 //
 // See https://github.com/WebAssembly/proposals for an overview of current
 // WebAssembly proposals.
@@ -34,14 +37,9 @@
   /* V8 side owner: manoskouk */                                               \
   V(shared, "shared-everything threads", false)                                \
                                                                                \
-  /* Acq-Rel memory ordering from Shared-Everything Threads proposal. */       \
-  /* Part of https://github.com/WebAssembly/shared-everything-threads */       \
-  /* V8 side owner: rezvan */                                                  \
-  V(acquire_release, "acquire_release memory ordering", false)                 \
-                                                                               \
   /* FP16 proposal. */                                                         \
   /* https://github.com/WebAssembly/half-precision */                          \
-  /* V8 side owner: irezvov */                                                 \
+  /* V8 side owner: dahlb */                                                   \
   V(fp16, "fp16", false)                                                       \
                                                                                \
   /* Memory Control proposal */                                                \
@@ -50,7 +48,7 @@
   V(memory_control, "memory control", false)                                   \
   /* Core stack switching, main proposal */                                    \
   /* https://github.com/WebAssembly/stack-switching */                         \
-  /* V8 side owner: fgm */                                                     \
+  /* V8 side owner: fgm, thibaudm */                                           \
   V(wasmfx, "core stack switching", false)                                     \
                                                                                \
   /* Compilation hints */                                                      \
@@ -88,6 +86,11 @@
   /* https://github.com/WebAssembly/wide-arithmetic */                         \
   /* V8 side owner: ryandiaz */                                                \
   V(wide_arithmetic, "wide arithmetic", false)                                 \
+                                                                               \
+  /* Acq-Rel memory ordering from Shared-Everything Threads proposal. */       \
+  /* Part of https://github.com/WebAssembly/shared-everything-threads */       \
+  /* V8 side owner: rezvan */                                                  \
+  V(acquire_release, "acquire_release memory ordering", false)                 \
   // add pre-staged features right before this line
 
 // #############################################################################

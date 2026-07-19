@@ -334,7 +334,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
     Branch(&continuation, uge, sp, Operand(stack_limit));
   }
 
-  if (v8_flags.experimental_wasm_growable_stacks) {
+  if (v8_flags.wasm_growable_stacks) {
     LiftoffRegList regs_to_save;
     regs_to_save.set(WasmHandleStackOverflowDescriptor::GapRegister());
     regs_to_save.set(WasmHandleStackOverflowDescriptor::FrameBaseRegister());
@@ -420,7 +420,7 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
 }
 
 Register LiftoffAssembler::LoadOldFramePointer() {
-  if (!v8_flags.experimental_wasm_growable_stacks) {
+  if (!v8_flags.wasm_growable_stacks) {
     return fp;
   }
 
@@ -1324,7 +1324,7 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
   }
 }
 
-void LiftoffAssembler::AtomicFence() { dbar(0); }
+void LiftoffAssembler::AtomicFence(AtomicMemoryOrder /*order*/) { dbar(0x10); }
 
 void LiftoffAssembler::Pause() { ibar(0); }
 
@@ -1873,9 +1873,22 @@ I64_BINOP_I(xor, Xor)
 I64_SHIFTOP_I(shl, sll_d, slli_d)
 I64_SHIFTOP_I(sar, sra_d, srai_d)
 I64_SHIFTOP_I(shr, srl_d, srli_d)
+I64_SHIFTOP_I(ror, rotr_d, rotri_d)
 
 #undef I64_SHIFTOP
 #undef I64_SHIFTOP_I
+
+void LiftoffAssembler::emit_i64_rol(LiftoffRegister dst, LiftoffRegister src,
+                                    Register amount) {
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+  Sub_d(scratch, zero_reg, amount);
+  rotr_d(dst.gp(), src.gp(), scratch);
+}
+void LiftoffAssembler::emit_i64_roli(LiftoffRegister dst, LiftoffRegister src,
+                                     int32_t amount) {
+  rotri_d(dst.gp(), src.gp(), (64 - amount) & 63);
+}
 
 void LiftoffAssembler::emit_u32_to_uintptr(Register dst, Register src) {
   bstrpick_d(dst, src, 31, 0);
@@ -4466,7 +4479,6 @@ void LiftoffAssembler::DeallocateStackSlot(uint32_t size) {
   addi_d(sp, sp, size);
 }
 
-void LiftoffAssembler::MaybeOSR() {}
 
 void LiftoffStackSlots::Construct(int param_slots) {
   DCHECK_LT(0, slots_.size());

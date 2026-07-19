@@ -312,7 +312,7 @@ DirectHandle<JSObject> GetTypeForFunction(Isolate* isolate,
 
   // Now add the result types if needed.
   // With WasmFX, tags are allowed to have return types.
-  if (for_tag && !v8_flags.experimental_wasm_wasmfx) {
+  if (for_tag && !v8_flags.wasm_wasmfx) {
     DCHECK_EQ(sig->returns().size(), 0);
   } else {
     int result_index = 0;
@@ -596,8 +596,9 @@ DirectHandle<JSArray> GetCustomSections(
     DirectHandle<String> name, ErrorThrower* thrower) {
   Factory* factory = isolate->factory();
 
-  base::Vector<const uint8_t> wire_bytes =
-      module_object->native_module()->wire_bytes();
+  Managed<wasm::NativeModule>::Ptr native_module =
+      module_object->native_module();
+  base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();
   std::vector<CustomSectionOffset> custom_sections =
       DecodeCustomSections(wire_bytes);
 

@@ -17,6 +17,7 @@
 #include "src/objects/js-collection-inl.h"
 #include "src/objects/js-generator-inl.h"
 #include "src/objects/js-promise-inl.h"
+#include "src/objects/js-proxy-inl.h"
 #include "src/objects/js-weak-refs-inl.h"
 #include "src/runtime/runtime-utils.h"
 #include "src/runtime/runtime.h"
@@ -857,7 +858,9 @@ RUNTIME_FUNCTION(Runtime_DebugCollectWasmCoverage) {
     const CoverageScript& script_data = coverage->at(i);
     Handle<Script> script = script_data.script;
     DCHECK_EQ(script->type(), Script::Type::kWasm);
-    const wasm::WasmModule* module = script->wasm_native_module()->module();
+    Managed<wasm::NativeModule>::Ptr native_module =
+        script->wasm_native_module();
+    const wasm::WasmModule* module = native_module->module();
 
     std::vector<CoverageBlock> ranges;
     int num_functions = static_cast<int>(script_data.functions.size());

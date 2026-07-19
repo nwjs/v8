@@ -494,6 +494,7 @@ class WasmShuffleReducer : public Next {
         } else {
           index = __ IntPtrConstant(load.offset);
         }
+        DCHECK_EQ(load.element_size_log2, 0);
 
         Simd128LaneMemoryOp::LaneKind lane_kind =
             Simd128LaneMemoryOp::LaneKindFromBytes(
@@ -507,7 +508,7 @@ class WasmShuffleReducer : public Next {
     }
 
 #if V8_TARGET_ARCH_ARM64
-    if (!v8_flags.experimental_wasm_deinterleave_loads) goto no_change;
+    if (!v8_flags.wasm_deinterleave_loads) goto no_change;
 
     if (load.loaded_rep != MemoryRepresentation::Simd128()) goto no_change;
 
@@ -568,7 +569,7 @@ class WasmShuffleReducer : public Next {
     auto og_right = __ MapToNewGraph(shuffle.right());
 #if V8_TARGET_ARCH_ARM64
     if (auto maybe_deinterleaved_load = IsDeinterleaveLoadShuffle(&shuffle)) {
-      DCHECK(v8_flags.experimental_wasm_deinterleave_loads);
+      DCHECK(v8_flags.wasm_deinterleave_loads);
       const auto* deinterleaved_load = maybe_deinterleaved_load.value();
       return __ Projection(deinterleaved_load->og_index,
                            deinterleaved_load->result_index,

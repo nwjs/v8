@@ -54,9 +54,10 @@
 // mutable value. That's okay since the value always equals the default.
 #define FLAG_READONLY(ftype, ctype, nam, def, cmt) \
   {Flag::TYPE_##ftype, #nam, nullptr, &FLAGDEFAULT_##nam, cmt, false},
-#define FLAG_ALIAS(ftype, ctype, alias, nam)                       \
-  {Flag::TYPE_##ftype,  #alias, &v8_flags.nam, &FLAGDEFAULT_##nam, \
-   "alias for --" #nam, false},  // NOLINT(whitespace/indent)
+#define FLAG_ALIAS_WITH_COMMENT(ftype, ctype, alias, nam, cmt) \
+  {Flag::TYPE_##ftype, #alias, &v8_flags.nam, &FLAGDEFAULT_##nam, cmt, false},
+#define FLAG_ALIAS(ftype, ctype, alias, nam) \
+  FLAG_ALIAS_WITH_COMMENT(ftype, ctype, alias, nam, "alias for --" #nam)
 
 // We produce the code to set flags when it is implied by another flag.
 #elif defined(FLAG_MODE_DEFINE_IMPLICATIONS)
@@ -130,6 +131,10 @@
 
 #ifndef FLAG_READONLY
 #define FLAG_READONLY(ftype, ctype, nam, def, cmt)
+#endif
+
+#ifndef FLAG_ALIAS_WITH_COMMENT
+#define FLAG_ALIAS_WITH_COMMENT(ftype, ctype, alias, nam, cmt)
 #endif
 
 #ifndef FLAG_ALIAS
@@ -218,6 +223,8 @@
 #define DEFINE_SIZE_T(nam, def, cmt) FLAG(SIZE_T, size_t, nam, def, cmt)
 #define DEFINE_STRING(nam, def, cmt) FLAG(STRING, const char*, nam, def, cmt)
 #define DEFINE_ALIAS_BOOL(alias, nam) FLAG_ALIAS(BOOL, bool, alias, nam)
+#define DEFINE_ALIAS_BOOL_WITH_COMMENT(alias, nam, cmt) \
+  FLAG_ALIAS_WITH_COMMENT(BOOL, bool, alias, nam, cmt)
 #define DEFINE_ALIAS_INT(alias, nam) FLAG_ALIAS(INT, int, alias, nam)
 #define DEFINE_ALIAS_FLOAT(alias, nam) FLAG_ALIAS(FLOAT, double, alias, nam)
 #define DEFINE_ALIAS_SIZE_T(alias, nam) FLAG_ALIAS(SIZE_T, size_t, alias, nam)
@@ -236,6 +243,9 @@
 #else
 #define DEFINE_DEBUG_BOOL DEFINE_BOOL_READONLY
 #endif
+
+#define TEMPORARY_WASM_ALIAS_COMMENT(nam) \
+  "temporary alias for --" #nam " (to be dropped in V8 v15.3)"
 
 //
 // Flags in all modes.
@@ -337,6 +347,7 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
   V(js_immutable_arraybuffer, "Immutable ArrayBuffer") \
   V(js_joint_iteration, "joint iteration")             \
   V(js_import_text, "import text")                     \
+  V(js_import_bytes, "import bytes")                   \
   V(js_defer_import_eval, "defer import eval")         \
   V(js_iterator_includes, "Iterator.prototype.includes")
 
@@ -414,6 +425,8 @@ HARMONY_SHIPPING(FLAG_SHIPPING_FEATURES)
 JAVASCRIPT_SHIPPING_FEATURES(FLAG_SHIPPING_FEATURES)
 DEFINE_NEG_NEG_IMPLICATION(harmony_shipping, js_shipping)
 #undef FLAG_SHIPPING_FEATURES
+
+DEFINE_IMPLICATION(js_import_bytes, js_immutable_arraybuffer)
 
 DEFINE_BOOL(builtin_subclassing, true,
             "subclassing support in built-in methods")
@@ -605,9 +618,10 @@ DEFINE_BOOL_READONLY(local_off_stack_check,
 // stage them yet. Once sufficiently stable, they should be moved to
 // --future, --wasm-staging or a similar flag that indicates its readiness
 // for staging.
-DEFINE_BOOL(experimental_fuzzing, false,
-            "Implies all experimental pre-staged features that can already be "
-            "fuzzed but are not ready for staging yet.")
+DEFINE_EXPERIMENTAL_FEATURE(
+    experimental_fuzzing,
+    "Implies all experimental pre-staged features that can already be "
+    "fuzzed but are not ready for staging yet.")
 
 #ifdef V8_ENABLE_FUTURE
 #define FUTURE_BOOL true
@@ -699,21 +713,24 @@ DEFINE_WEAK_IMPLICATION(maglev_future, maglev_inline_api_calls)
 DEFINE_WEAK_IMPLICATION(maglev_future, maglev_escape_analysis)
 DEFINE_WEAK_IMPLICATION(maglev_future, maglev_licm)
 
-DEFINE_BOOL(turbolev_truncated_int32_phis, false,
+DEFINE_BOOL(turbolev_truncated_int32_phis, true,
             "Enable truncated to int32 representation in the phi selector")
-DEFINE_WEAK_IMPLICATION(turbolev_future, turbolev_truncated_int32_phis)
 
-DEFINE_EXPERIMENTAL_FEATURE(maglev_range_analysis,
-                            "Enable Maglev range value analysis pass")
+// TODO(victorgomes): Consider renaming this to turbolev range analysis, since
+// it doesn't not enable this pass in the maglev pipeline?
+DEFINE_BOOL(maglev_range_analysis, true,
+            "Enable Maglev range value analysis pass")
 DEFINE_DEVELOPER_FLAG(trace_maglev_range_analysis,
                       "Trace Maglev range value analysis pass")
 DEFINE_DEVELOPER_FLAG(trace_maglev_kna, "Trace Maglev known node aspects")
 DEFINE_BOOL(maglev_use_unreliable_maps, true,
             "Use unreliable unstable maps in Maglev")
-DEFINE_WEAK_IMPLICATION(turbolev_future, maglev_range_analysis)
 DEFINE_BOOL(maglev_range_verification, false,
             "Run integer range verifiction pass in Turbolev frontend pipeline")
 DEFINE_WEAK_IMPLICATION(maglev_assert, maglev_range_verification)
+DEFINE_BOOL(maglev_verify_dominance, false,
+            "verify dominance of eager deopt frame inputs")
+DEFINE_WEAK_IMPLICATION(maglev_assert, maglev_verify_dominance)
 
 DEFINE_UINT(
     concurrent_maglev_max_threads, 2,
@@ -758,14 +775,13 @@ DEFINE_WEAK_VALUE_IMPLICATION(maglev_as_top_tier,
 
 DEFINE_BOOL(maglev_reuse_stack_slots, true,
             "reuse stack slots in the maglev optimizing compiler")
-DEFINE_BOOL(maglev_untagged_phis, false,
+DEFINE_BOOL(maglev_untagged_phis, true,
             "enable phi untagging in the maglev optimizing compiler")
 DEFINE_INT(maglev_untagged_phis_bisect_limit, -1,
            "limit the number of Phis we untag in Maglev phi untagging (-1 for "
            "unbounded)")
-DEFINE_BOOL(turbolev_untagged_phis, false,
+DEFINE_BOOL(turbolev_untagged_phis, true,
             "enable phi untagging in the Turbolev optimizing compiler")
-DEFINE_WEAK_IMPLICATION(turbolev_future, turbolev_untagged_phis)
 
 DEFINE_BOOL(maglev_hoist_osr_value_phi_untagging, true,
             "enable phi untagging to hoist untagging of osr values")
@@ -779,6 +795,11 @@ DEFINE_BOOL(maglev_non_eager_inlining, false,
             "enable Maglev non-eager inlining")
 DEFINE_BOOL(turbolev_non_eager_inlining, true,
             "enable Turbolev non-eager inlining")
+DEFINE_WEAK_IMPLICATION(turbolev_future, turbolev_non_eager_loop_peeling)
+DEFINE_EXPERIMENTAL_FEATURE(turbolev_non_eager_loop_peeling,
+                            "enable Turbolev non-eager loop peeling")
+DEFINE_DEVELOPER_FLAG(turbolev_trace_loop_peeling,
+                      "trace turbolev non-eager loop peeling decisions")
 
 DEFINE_STRING(maglev_filter, "*", "optimization filter for the maglev compiler")
 DEFINE_STRING(maglev_print_filter, "*",
@@ -816,6 +837,9 @@ DEFINE_DEVELOPER_FLAG(trace_maglev_inlining, "trace maglev inlining")
 DEFINE_DEVELOPER_FLAG(trace_maglev_kna_processor,
                       "trace maglev known node aspects processor")
 DEFINE_DEVELOPER_FLAG(trace_maglev_scope_info, "trace maglev scope info")
+DEFINE_DEVELOPER_FLAG(trace_maglev, "trace Maglev IR to JSON")
+DEFINE_STRING(trace_maglev_file_prefix, "maglev",
+              "write maglev trace files with given prefix")
 
 #ifdef V8_ENABLE_MAGLEV_GRAPH_PRINTER
 DEFINE_DEVELOPER_FLAG(print_maglev_deopt_verbose, "print verbose deopt info")
@@ -861,10 +885,8 @@ DEFINE_EXPERIMENTAL_FEATURE(
 #ifdef V8_TARGET_ARCH_64_BIT
 DEFINE_BOOL(additive_safe_int_feedback, true,
             "Enable the use of AdditiveSafeInteger feedback")
-DEFINE_EXPERIMENTAL_FEATURE(
-    turbolev_additive_safe_int_feedback,
-    "Enable the use of AdditiveSafeInteger feedback for Turbolev")
-DEFINE_WEAK_IMPLICATION(turbolev_future, turbolev_additive_safe_int_feedback)
+DEFINE_BOOL(turbolev_additive_safe_int_feedback, true,
+            "Enable the use of AdditiveSafeInteger feedback for Turbolev")
 
 // Additive safe ints are only used by TurboFan or Turbolev.
 DEFINE_NEG_IMPLICATION(jitless, additive_safe_int_feedback)
@@ -1164,8 +1186,8 @@ DEFINE_WEAK_IMPLICATION(always_osr_from_maglev, osr_from_maglev)
 DEFINE_INT(invocation_count_for_turbofan, 3000,
            "invocation count required for optimizing with TurboFan")
 DEFINE_INT(invocation_count_for_osr, 500, "invocation count required for OSR")
-DEFINE_INT(osr_to_tierup, 1,
-           "number to decrease the invocation budget by when we follow OSR")
+DEFINE_UINT(osr_to_tierup, 1,
+            "number to decrease the invocation budget by when we follow OSR")
 DEFINE_INT(minimum_invocations_after_ic_update, 500,
            "How long to minimally wait after IC update before tier up")
 DEFINE_INT(minimum_invocations_before_optimization, 2,
@@ -1178,6 +1200,11 @@ DEFINE_INT(minimum_invocations_before_optimization, 2,
 // dozen executions of the code instead of a few hundred or thousand. As a rule
 // of thumb, aiming for things to happen 5x to 10x sooner in this mode than
 // they otherwise would is probably not unreasonable.
+//
+// WARNING: Avoid adding implications to this flag unless they always make
+// sense. Unnecessary implications reduce default configuration coverage and
+// limit fuzzer exploration. Prefer flag randomization in fuzzer configs
+// instead.
 DEFINE_BOOL(jit_fuzzing, false,
             "Set JIT tiering thresholds suitable for JIT fuzzing")
 // Tier up to Maglev should happen soon afterwards.
@@ -1677,8 +1704,14 @@ DEFINE_BOOL(turbo_escape, true, "enable escape analysis")
 DEFINE_BOOL(turbo_allocation_folding, true, "TurboFan allocation folding")
 DEFINE_BOOL(turbo_instruction_scheduling, false,
             "enable instruction scheduling in TurboFan")
+DEFINE_BOOL(experimental_turbo_instruction_scheduling, false,
+            "enable experimental instruction scheduling in TurboFan")
+DEFINE_IMPLICATION(experimental_turbo_instruction_scheduling,
+                   turbo_instruction_scheduling)
 DEFINE_BOOL(turbo_stress_instruction_scheduling, false,
             "randomly schedule instructions to stress dependency tracking")
+DEFINE_BOOL(trace_turbo_instruction_scheduling, false,
+            "trace TurboShaft's instruction scheduler")
 DEFINE_IMPLICATION(turbo_stress_instruction_scheduling,
                    turbo_instruction_scheduling)
 DEFINE_BOOL(turbo_store_elimination, true,
@@ -1754,7 +1787,7 @@ DEFINE_BOOL(turboshaft_wasm_load_elimination, true,
             "enable Turboshaft's WasmLoadElimination")
 
 DEFINE_BOOL(
-    wasm_in_js_inlining_body, false,
+    wasm_in_js_inlining_body, true,
     "inline Wasm code into JS functions via Turboshaft. This requires "
     "inlining the wrapper, see --wasm-in-js-inlining-wrapper. For controlling "
     "the inlining in the old Turbofan pipeline, see "
@@ -1762,12 +1795,13 @@ DEFINE_BOOL(
 // The Wasm-in-JS body inlining depends on the Turbolev-based JS-to-Wasm wrapper
 // inlining. Thus both require Turbolev and don't do anything without that.
 DEFINE_IMPLICATION(wasm_in_js_inlining_body, wasm_in_js_inlining_wrapper)
-// Both are staged behind --turbolev-future.
-DEFINE_IMPLICATION(turbolev_future, wasm_in_js_inlining_body)
-
-DEFINE_BOOL(wasm_in_js_inlining_wrapper, false,
+DEFINE_BOOL(wasm_in_js_inlining_wrapper, true,
             "inline JS-to-Wasm wrappers via Turboshaft/Turbolev.")
-DEFINE_IMPLICATION(turbolev_future, wasm_in_js_inlining_wrapper)
+
+DEFINE_EXPERIMENTAL_FEATURE(
+    wasm_in_js_inlining_opt,
+    "enable optimizations for Wasm-in-JS inlining in Turboshaft")
+DEFINE_IMPLICATION(turbolev_future, wasm_in_js_inlining_opt)
 
 DEFINE_BOOL(turboshaft_load_elimination, true,
             "enable Turboshaft's low-level load elimination for JS")
@@ -1778,11 +1812,9 @@ DEFINE_EXPERIMENTAL_FEATURE(turboshaft_random_rescheduling,
 DEFINE_BOOL(turboshaft_string_concat_escape_analysis, true,
             "enable Turboshaft's escape analysis for string concatenation")
 
-DEFINE_BOOL(turboshaft_trusted_load_elimination, false,
+DEFINE_BOOL(turboshaft_trusted_load_elimination, true,
             "enable Turboshaft's low level load elimination for trusted loads "
             "(JS and Wasm)")
-// For now this is staged behind future.
-DEFINE_IMPLICATION(future, turboshaft_trusted_load_elimination)
 DEFINE_IMPLICATION(turboshaft_trusted_load_elimination,
                    turboshaft_load_elimination)
 
@@ -1792,12 +1824,18 @@ DEFINE_EXPERIMENTAL_FEATURE(turboshaft_typed_optimizations,
 #if V8_TARGET_ARCH_ARM64
 DEFINE_BOOL(wasm_simd_opt, true, "enable optimizations for Webassembly SIMD")
 DEFINE_IMPLICATION(future, wasm_simd_opt)
-DEFINE_EXPERIMENTAL_FEATURE(experimental_wasm_simd_opt,
+DEFINE_EXPERIMENTAL_FEATURE(future_wasm_simd_opt,
                             "enable extra optimizations for Webassembly SIMD")
-DEFINE_EXPERIMENTAL_FEATURE(experimental_wasm_deinterleave_loads,
+DEFINE_ALIAS_BOOL_WITH_COMMENT(
+    experimental_wasm_simd_opt, future_wasm_simd_opt,
+    TEMPORARY_WASM_ALIAS_COMMENT(future_wasm_simd_opt))
+DEFINE_EXPERIMENTAL_FEATURE(wasm_deinterleave_loads,
                             "enable deinterleaving loads for Webassembly SIMD")
-DEFINE_IMPLICATION(experimental_wasm_simd_opt, wasm_simd_opt)
-DEFINE_IMPLICATION(experimental_wasm_deinterleave_loads, wasm_simd_opt)
+DEFINE_ALIAS_BOOL_WITH_COMMENT(
+    experimental_wasm_deinterleave_loads, wasm_deinterleave_loads,
+    TEMPORARY_WASM_ALIAS_COMMENT(wasm_deinterleave_loads))
+DEFINE_IMPLICATION(future_wasm_simd_opt, wasm_simd_opt)
+DEFINE_IMPLICATION(wasm_deinterleave_loads, wasm_simd_opt)
 #endif  // V8_TARGET_ARCH_ARM64
 
 DEFINE_BOOL(turbolev, false,
@@ -1821,8 +1859,8 @@ DEFINE_BOOL(
 DEFINE_WEAK_IMPLICATION(future, typed_array_length_loading)
 
 #if V8_ENABLE_WEBASSEMBLY
-DEFINE_IMPLICATION(experimental_wasm_shared, shared_heap)
-DEFINE_IMPLICATION(experimental_wasm_shared, shared_strings)
+DEFINE_IMPLICATION(wasm_shared, shared_heap)
+DEFINE_IMPLICATION(wasm_shared, shared_strings)
 #endif
 
 DEFINE_BOOL(
@@ -2002,8 +2040,8 @@ DEFINE_INT(wasm_stack_switching_stack_size, V8_DEFAULT_STACK_SIZE_KB,
            "default size of stacks for wasm stack-switching (in kB)")
 // 1 will be rounded up to the smallest possible initial stack size, which
 // depends on the stack limit margin and the platform's page size.
-DEFINE_VALUE_IMPLICATION(experimental_wasm_growable_stacks,
-                         wasm_stack_switching_stack_size, 1)
+DEFINE_VALUE_IMPLICATION(wasm_growable_stacks,
+  wasm_stack_switching_stack_size, 1)
 DEFINE_BOOL(liftoff, true,
             "enable Liftoff, the baseline compiler for WebAssembly")
 DEFINE_BOOL(liftoff_only, false,
@@ -2034,15 +2072,18 @@ DEFINE_INT(wasm_tier_mask_for_testing, 0,
 DEFINE_INT(wasm_debug_mask_for_testing, 0,
            "bitmask of declared(!) function indices to compile for debugging, "
            "only applies if the tier is Liftoff")
-// TODO(clemensb): Introduce experimental_wasm_pgo to read from a custom section
-// instead of from a local file.
-DEFINE_BOOL(
-    experimental_wasm_pgo_to_file, false,
+DEFINE_DEVELOPER_FLAG(
+    wasm_pgo_to_file,
     "experimental: dump Wasm PGO information to a local file (for testing)")
-DEFINE_NEG_IMPLICATION(experimental_wasm_pgo_to_file, single_threaded)
-DEFINE_BOOL(
-    experimental_wasm_pgo_from_file, false,
+DEFINE_ALIAS_BOOL_WITH_COMMENT(experimental_wasm_pgo_to_file, wasm_pgo_to_file,
+                               TEMPORARY_WASM_ALIAS_COMMENT(wasm_pgo_to_file))
+DEFINE_NEG_IMPLICATION(wasm_pgo_to_file, single_threaded)
+DEFINE_DEVELOPER_FLAG(
+    wasm_pgo_from_file,
     "experimental: read and use Wasm PGO data from a local file (for testing)")
+DEFINE_ALIAS_BOOL_WITH_COMMENT(experimental_wasm_pgo_from_file,
+                               wasm_pgo_from_file,
+                               TEMPORARY_WASM_ALIAS_COMMENT(wasm_pgo_from_file))
 
 DEFINE_BOOL(validate_asm, false,
             "validate asm.js modules and translate them to Wasm (deprecated)")
@@ -2101,11 +2142,14 @@ DEFINE_SIZE_T(wasm_deopts_per_function_limit, 10,
 // wasm::WasmEnabledFeatures for configurability.
 #include "src/wasm/wasm-feature-flags.h"
 
-#define DECL_WASM_FLAG(feat, desc, val) \
-  DEFINE_BOOL(experimental_wasm_##feat, val, "enable " desc " for Wasm")
-#define DECL_EXPERIMENTAL_WASM_FLAG(feat, desc, val)    \
-  DEFINE_EXPERIMENTAL_FEATURE(experimental_wasm_##feat, \
-                              "enable " desc " for Wasm")
+#define DECL_WASM_FLAG(feat, desc, val)                                 \
+  DEFINE_BOOL(wasm_##feat, val, "enable " desc " for Wasm")             \
+  DEFINE_ALIAS_BOOL_WITH_COMMENT(experimental_wasm_##feat, wasm_##feat, \
+                                 TEMPORARY_WASM_ALIAS_COMMENT(wasm_##feat))
+#define DECL_EXPERIMENTAL_WASM_FLAG(feat, desc, val)                    \
+  DEFINE_EXPERIMENTAL_FEATURE(wasm_##feat, "enable " desc " for Wasm")  \
+  DEFINE_ALIAS_BOOL_WITH_COMMENT(experimental_wasm_##feat, wasm_##feat, \
+                                 TEMPORARY_WASM_ALIAS_COMMENT(wasm_##feat))
 // Experimental wasm features imply --experimental and get the " (experimental)"
 // suffix.
 FOREACH_WASM_EXPERIMENTAL_FEATURE_FLAG(DECL_EXPERIMENTAL_WASM_FLAG)
@@ -2118,34 +2162,45 @@ FOREACH_WASM_SHIPPED_FEATURE_FLAG(DECL_WASM_FLAG)
 
 // Unsafe additions to the GC proposal for performance experiments.
 DEFINE_TEST_ONLY_FLAG(
-    experimental_wasm_assume_ref_cast_succeeds,
+    wasm_assume_ref_cast_succeeds,
     "assume ref.cast always succeeds and skip the related type check")
-DEFINE_TEST_ONLY_FLAG(experimental_wasm_ref_cast_nop,
+DEFINE_ALIAS_BOOL_WITH_COMMENT(
+    experimental_wasm_assume_ref_cast_succeeds, wasm_assume_ref_cast_succeeds,
+    TEMPORARY_WASM_ALIAS_COMMENT(wasm_assume_ref_cast_succeeds))
+DEFINE_TEST_ONLY_FLAG(wasm_ref_cast_nop,
                       "enable unsafe ref.cast_nop instruction")
+DEFINE_ALIAS_BOOL_WITH_COMMENT(experimental_wasm_ref_cast_nop,
+                               wasm_ref_cast_nop,
+                               TEMPORARY_WASM_ALIAS_COMMENT(wasm_ref_cast_nop))
 DEFINE_TEST_ONLY_FLAG(
-    experimental_wasm_skip_null_checks,
+    wasm_skip_null_checks,
     "skip null checks for call.ref and array and struct operations")
-DEFINE_TEST_ONLY_FLAG(experimental_wasm_skip_bounds_checks,
-                      "skip array bounds checks")
+DEFINE_ALIAS_BOOL_WITH_COMMENT(
+    experimental_wasm_skip_null_checks, wasm_skip_null_checks,
+    TEMPORARY_WASM_ALIAS_COMMENT(wasm_skip_null_checks))
+DEFINE_TEST_ONLY_FLAG(wasm_skip_bounds_checks, "skip array bounds checks")
+DEFINE_ALIAS_BOOL_WITH_COMMENT(
+    experimental_wasm_skip_bounds_checks, wasm_skip_bounds_checks,
+    TEMPORARY_WASM_ALIAS_COMMENT(wasm_skip_bounds_checks))
 
 // Experimental variants of the Custom Descriptors prototype implementation.
 DEFINE_EXPERIMENTAL_FEATURE(
-    experimental_wasm_js_interop,
-    "enable JS Interop part of Custom Descriptors proposal")
-DEFINE_IMPLICATION(experimental_wasm_js_interop,
-                   experimental_wasm_custom_descriptors)
+    wasm_js_interop, "enable JS Interop part of Custom Descriptors proposal")
+DEFINE_ALIAS_BOOL_WITH_COMMENT(experimental_wasm_js_interop, wasm_js_interop,
+                               TEMPORARY_WASM_ALIAS_COMMENT(wasm_js_interop))
+DEFINE_IMPLICATION(wasm_js_interop, wasm_custom_descriptors)
 DEFINE_BOOL(wasm_custom_descriptors_permitted, true,
             "Emergency off-switch for Custom Descriptors Origin Trial")
 
 #define WASM_PRE_STAGING_IMPLICATION(feat, desc, val) \
-  DEFINE_IMPLICATION(experimental_fuzzing, experimental_wasm_##feat)
+  DEFINE_IMPLICATION(experimental_fuzzing, wasm_##feat)
 FOREACH_WASM_PRE_STAGING_FEATURE_FLAG(WASM_PRE_STAGING_IMPLICATION)
 #undef WASM_PRE_STAGING_IMPLICATION
 
 DEFINE_BOOL(wasm_staging, false, "enable staged wasm features")
 
 #define WASM_STAGING_IMPLICATION(feat, desc, val) \
-  DEFINE_IMPLICATION(wasm_staging, experimental_wasm_##feat)
+  DEFINE_IMPLICATION(wasm_staging, wasm_##feat)
 FOREACH_WASM_STAGING_FEATURE_FLAG(WASM_STAGING_IMPLICATION)
 #undef WASM_STAGING_IMPLICATION
 
@@ -2195,6 +2250,9 @@ DEFINE_BOOL(wasm_bulkmem_inlining, true,
             "enable inline code generation for small bulk memory operations")
 DEFINE_BOOL(wasm_loop_unrolling, true,
             "enable loop unrolling for wasm functions")
+DEFINE_EXPERIMENTAL_FEATURE(
+    wasm_random_rescheduling,
+    "enable Turbofan's random rescheduling phase for wasm functions")
 DEFINE_BOOL(wasm_loop_peeling, true, "enable loop peeling for wasm functions")
 DEFINE_SIZE_T(wasm_loop_peeling_max_size, 1000, "maximum size for peeling")
 DEFINE_DEVELOPER_FLAG(trace_wasm_loop_peeling, "trace wasm loop peeling")
@@ -2265,8 +2323,11 @@ DEFINE_DEBUG_BOOL(trace_wasm_instances, false,
 // Flags for WASM SIMD256 revectorize
 #ifdef V8_ENABLE_WASM_SIMD256_REVEC
 DEFINE_EXPERIMENTAL_FEATURE(
-    experimental_wasm_revectorize,
-    "enable 128 to 256 bit revectorization for Webassembly SIMD")
+    wasm_revectorize,
+    "enable 128 to 256 bit revectorization for WebAssembly SIMD")
+DEFINE_ALIAS_BOOL_WITH_COMMENT(experimental_wasm_revectorize, wasm_revectorize,
+                               TEMPORARY_WASM_ALIAS_COMMENT(wasm_revectorize))
+DEFINE_WEAK_IMPLICATION(experimental_fuzzing, wasm_revectorize)
 DEFINE_DEVELOPER_FLAG(trace_wasm_revectorize, "trace wasm revectorize")
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
@@ -2429,10 +2490,8 @@ DEFINE_NOT_EXPLICITLY_SET_IMPLICATION(trace_wasm_generate_compilation_hints,
                                       single_threaded)
 // Wasm compilation hints generation is incompatible with features that are not
 // implemented in liftoff yet.
-DEFINE_NEG_IMPLICATION(wasm_generate_compilation_hints,
-                       experimental_wasm_wasmfx)
-DEFINE_NEG_IMPLICATION(trace_wasm_generate_compilation_hints,
-                       experimental_wasm_wasmfx)
+DEFINE_NEG_IMPLICATION(wasm_generate_compilation_hints, wasm_wasmfx)
+DEFINE_NEG_IMPLICATION(trace_wasm_generate_compilation_hints, wasm_wasmfx)
 // Wasm compilation hints generation is incompatible with the testing opcode
 // that bails out liftoff.
 DEFINE_NEG_IMPLICATION(wasm_generate_compilation_hints,
@@ -2450,7 +2509,7 @@ DEFINE_BOOL(lazy_new_space_shrinking, false,
             "Enables the lazy new space shrinking strategy")
 DEFINE_BOOL(trim_descriptor_arrays_in_gc, true,
             "Shrink descriptor arrays during GCs")
-DEFINE_BOOL(trim_descriptor_arrays_in_gc_with_stack, true,
+DEFINE_BOOL(trim_descriptor_arrays_in_gc_with_stack, false,
             "Shrink descriptor arrays during GCs with stack")
 DEFINE_IMPLICATION(trim_descriptor_arrays_in_gc_with_stack,
                    trim_descriptor_arrays_in_gc)
@@ -2485,8 +2544,8 @@ DEFINE_INT(random_gc_interval, 0,
            "Collect garbage after random(0, X) V8 allocations. It overrides "
            "gc_interval.")
 DEFINE_INT(gc_interval, -1, "garbage collect after <n> allocations")
-DEFINE_INT(cppgc_random_gc_interval, 0,
-           "Collect garbage after random(0, X) cppgc allocations.")
+DEFINE_UINT(cppgc_random_gc_interval, 0,
+            "Collect garbage after random(0, X) cppgc allocations.")
 
 #ifdef V8_ENABLE_ALLOCATION_TIMEOUT
 DEFINE_INT(dispatch_table_gc_interval, -1,
@@ -2702,6 +2761,10 @@ DEFINE_BOOL(
 DEFINE_INT(
     sqrt_allocation_limits_factor, 80,
     "When the sqrt heap limit is enabled, multiplier on the heap growth.")
+DEFINE_INT(
+    sqrt_allocation_limits_slow_factor, 80,
+    "When the sqrt heap limit is enabled, multiplier on the heap growth for "
+    "HeapGrowingMode::kSlow.")
 DEFINE_INT(
     sqrt_allocation_limits_minimal_factor, 20,
     "When the sqrt heap limit is enabled, multiplier on the heap growth for "
@@ -2931,6 +2994,8 @@ DEFINE_BOOL(partial_constant_pool, true,
 DEFINE_STRING(sim_arm64_optional_features, "none",
               "enable optional features on the simulator for testing: none or "
               "all")
+DEFINE_BOOL(sim_arm64_tbi, true,
+            "simulate arm64 Top Byte Ignore (TBI) for data accesses")
 DEFINE_BOOL(intel_jcc_erratum_mitigation, true,
             "enable mitigation for Intel JCC erratum on affected CPUs")
 
@@ -3569,6 +3634,10 @@ DEFINE_EXPERIMENTAL_FEATURE(
     "Enable strict terminating DCHECKs to prevent accidentally "
     "keeping on executing JS after terminating V8.")
 
+// WARNING: Avoid adding implications to this flag unless they always make
+// sense. Unnecessary implications reduce default configuration coverage and
+// limit fuzzer exploration. Prefer flag randomization in fuzzer configs
+// instead.
 DEFINE_BOOL(
     fuzzing, false,
     "Fuzzers use this flag to signal that they are ... fuzzing. This causes "
@@ -3620,6 +3689,11 @@ DEFINE_BOOL_READONLY(
 
 #ifdef V8_ENABLE_MEMORY_CORRUPTION_API
 // Sandbox fuzzing mode requires the memory corruption API.
+//
+// WARNING: Avoid adding implications to this flag unless they always make
+// sense. Unnecessary implications reduce default configuration coverage and
+// limit fuzzer exploration. Prefer flag randomization in fuzzer configs
+// instead.
 DEFINE_BOOL(sandbox_fuzzing, false,
             "Enable sandbox fuzzing mode. This exposes the memory corruption "
             "API and enables the sandbox crash filter to terminate the process "
@@ -3735,7 +3809,7 @@ DEFINE_NEG_NEG_IMPLICATION(text_is_readable, partial_constant_pool)
 //
 DEFINE_DEVELOPER_FLAG(trace_minor_ms_parallel_marking,
                       "trace parallel marking for the young generation")
-DEFINE_BOOL(minor_ms, false, "perform young generation mark sweep GCs")
+DEFINE_EXPERIMENTAL_FEATURE(minor_ms, "perform young generation mark sweep GCs")
 DEFINE_IMPLICATION(minor_ms, page_promotion)
 
 DEFINE_BOOL(concurrent_minor_ms_marking, true,
@@ -4233,8 +4307,8 @@ DEFINE_EXPERIMENTAL_FEATURE(
     superspreading,
     "Allow arbitrary length spread arguments on supported builtins")
 
-DEFINE_EXPERIMENTAL_FEATURE(fast_proxy_ic, "Support proxy traps in ICs")
-DEFINE_WEAK_IMPLICATION(experimental, fast_proxy_ic)
+DEFINE_BOOL(fast_proxy_ic, false, "Support proxy traps in ICs")
+DEFINE_WEAK_IMPLICATION(future, fast_proxy_ic)
 
 DEFINE_BOOL(is_standalone_d8_shell, false,
             "Tells V8 it's running as part of the d8. This flag should not be "
@@ -4268,8 +4342,8 @@ DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, perf_prof_delete_file)
 DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, perf_prof_unwinding_info)
 // Experimental PGO/compilation-hints-generation flags.
 #if V8_ENABLE_WEBASSEMBLY
-DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, experimental_wasm_pgo_to_file)
-DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, experimental_wasm_pgo_from_file)
+DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, wasm_pgo_to_file)
+DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, wasm_pgo_from_file)
 DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, wasm_generate_compilation_hints)
 DEFINE_NEG_IMPLICATION(disallow_unsafe_flags,
                        trace_wasm_generate_compilation_hints)
@@ -4291,13 +4365,10 @@ DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, redirect_code_traces)
 #if V8_ENABLE_DRUMBRAKE_TRACING
 DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, redirect_drumbrake_traces)
 #endif  // V8_ENABLE_DRUMBRAKE_TRACING
-DEFINE_NEG_IMPLICATION(disallow_unsafe_flags,
-                       experimental_wasm_assume_ref_cast_succeeds)
-DEFINE_NEG_IMPLICATION(disallow_unsafe_flags,
-                       experimental_wasm_skip_null_checks)
-DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, experimental_wasm_ref_cast_nop)
-DEFINE_NEG_IMPLICATION(disallow_unsafe_flags,
-                       experimental_wasm_skip_bounds_checks)
+DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, wasm_assume_ref_cast_succeeds)
+DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, wasm_skip_null_checks)
+DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, wasm_ref_cast_nop)
+DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, wasm_skip_bounds_checks)
 DEFINE_NEG_IMPLICATION(disallow_unsafe_flags, wasm_unsafe_fast_api_wrapper)
 // Enabled-by-default flags that should not be disabled.
 DEFINE_IMPLICATION(disallow_unsafe_flags, wasm_bounds_checks)
@@ -4416,6 +4487,7 @@ DEFINE_IMPLICATION(gdbjit, log)
 #undef FLAG_READONLY
 #undef FLAG
 #undef FLAG_ALIAS
+#undef FLAG_ALIAS_WITH_COMMENT
 
 #undef DEFINE_BOOL
 #undef DEFINE_MAYBE_BOOL
@@ -4439,9 +4511,12 @@ DEFINE_IMPLICATION(gdbjit, log)
 #undef DEFINE_REQUIREMENT
 #undef DEFINE_NOT_EXPLICITLY_SET_IMPLICATION
 #undef DEFINE_ALIAS_BOOL
+#undef DEFINE_ALIAS_BOOL_WITH_COMMENT
 #undef DEFINE_ALIAS_INT
 #undef DEFINE_ALIAS_STRING
 #undef DEFINE_ALIAS_FLOAT
+
+#undef TEMPORARY_WASM_ALIAS_COMMENT
 
 #undef FLAG_MODE_DECLARE
 #undef FLAG_MODE_DEFINE_DEFAULTS

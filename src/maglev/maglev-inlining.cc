@@ -129,12 +129,14 @@ bool MaglevInliner::InlineCallSites() {
 }
 
 void MaglevInliner::RunOptimizer() {
-  RecomputeKnownNodeAspectsProcessor kna_processor(graph_);
+  ReachableExceptionHandlerTracker exception_handler_tracker(graph_);
+  RecomputeKnownNodeAspectsProcessor kna_processor(graph_,
+                                                   exception_handler_tracker);
   MaglevGraphOptimizer optimizer(graph_, kna_processor);
-  GraphMultiProcessor<MaglevGraphOptimizer&,
+  GraphMultiProcessor<MaglevGraphOptimizer&, ReachableExceptionHandlerTracker&,
                       RecomputeKnownNodeAspectsProcessor&,
                       RecomputePhiUseHintsProcessor>
-      optimization_pass(optimizer, kna_processor,
+      optimization_pass(optimizer, exception_handler_tracker, kna_processor,
                         RecomputePhiUseHintsProcessor{graph_->zone()});
   optimization_pass.ProcessGraph(graph_);
 
@@ -157,14 +159,7 @@ bool MaglevInliner::Run() {
   }
 
   // Clear conversion, identities and ReturnedValues uses from deopt frames.
-  for (DeoptFrame* top_frame : graph_->eager_deopt_top_frames()) {
-    EagerDeoptInfo(zone(), top_frame, {}).Unwrap();
-  }
-  for (auto [top_frame, result_location] : graph_->lazy_deopt_top_frames()) {
-    LazyDeoptInfo(zone(), top_frame, result_location.first,
-                  result_location.second, {})
-        .Unwrap();
-  }
+  graph_->UnwrapDeoptFrames();
   return true;
 }
 
@@ -310,11 +305,11 @@ MaglevInliner::InliningResult MaglevInliner::BuildInlineFunction(
                    << graph_->total_inlined_bytecode_size());
   }
 
-  if (result.IsDoneWithAbort()) {
-    if (inner_graph_builder.should_abort_compilation()) {
-      return InliningResult::kAbort;
-    }
+  if (inner_graph_builder.should_abort_compilation()) {
+    return InliningResult::kAbort;
+  }
 
+  if (result.IsDoneWithAbort()) {
     // Since the rest of the block is dead, these nodes don't belong
     // to any basic block anymore.
     for (auto node : rem_nodes_in_call_block) {
@@ -384,13 +379,13 @@ void MaglevInliner::PrintMaglevGraph(
     tracing_scope.stream() << "\n----- " << msg << " ";
     if (ref) tracing_scope.stream() << *ref;
     tracing_scope.stream() << "-----" << std::endl;
-    PrintGraph(tracing_scope.stream(), graph_);
+    PrintGraph(tracing_scope.stream(), graph_, MaglevPhase::kInlining);
   } else {
     // TODO(victorgomes): port maglev printing to use the code tracer?
     std::cout << "\n----- " << msg << " ";
     if (ref) std::cout << *ref;
     std::cout << "-----" << std::endl;
-    PrintGraph(std::cout, graph_);
+    PrintGraph(std::cout, graph_, MaglevPhase::kInlining);
   }
 }
 
@@ -403,11 +398,9 @@ void MaglevInliner::UpdatePredecessorsOf(BasicBlock* block,
     block->set_predecessor(new_pred);
     return;
   }
-  for (int i = 0; i < block->predecessor_count(); i++) {
-    if (block->predecessor_at(i) == prev_pred) {
-      block->state()->set_predecessor_at(i, new_pred);
-      break;
-    }
+  int predecessor_id = block->get_predecessor_index(prev_pred);
+  if (predecessor_id >= 0) {
+    block->state()->set_predecessor_at(predecessor_id, new_pred);
   }
 }
 

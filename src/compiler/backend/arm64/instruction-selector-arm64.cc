@@ -58,6 +58,7 @@ class Arm64OperandGenerator final : public OperandGenerator {
   bool IsImmediateZero(OpIndex node) {
     if (const ConstantOp* constant =
             selector()->Get(node).TryCast<ConstantOp>()) {
+      if (constant->IsRelocatable()) return false;
       if (constant->IsIntegral() && constant->integral() == 0) return true;
       if (constant->kind == ConstantOp::Kind::kFloat32) {
         return constant->float32().get_bits() == 0;
@@ -4130,7 +4131,10 @@ void VisitAtomicCompareExchange(InstructionSelector* selector, OpIndex node,
       has_write_barrier ? g.UseUniqueRegister(base) : g.UseRegister(base),
       has_write_barrier ? g.UseUniqueRegister(index) : g.UseRegister(index),
       g.UseUniqueRegister(old_value), g.UseUniqueRegister(new_value)};
-  InstructionOperand outputs[1];
+  // When LSE is supported, CAS uses the same register for the |old_value| and
+  // output result. However, to avoid special cases, we let them be different
+  // registers at the expense of an extra mov instruction.
+  InstructionOperand outputs[] = {g.DefineAsRegister(node)};
   InstructionCode code = opcode | AddressingModeField::encode(kMode_MRR) |
                          AtomicWidthField::encode(width);
   if (access_kind == MemoryAccessKind::kTrapping) {
@@ -4138,15 +4142,10 @@ void VisitAtomicCompareExchange(InstructionSelector* selector, OpIndex node,
   }
   if (CpuFeatures::IsSupported(LSE)) {
     InstructionOperand temps[] = {g.TempRegister()};
-    // The tagged variant needs to not overwrite the input register to check
-    // whether the cas was successful and a write barrier needs to be executed.
-    outputs[0] = has_write_barrier ? g.DefineAsRegister(node)
-                                   : g.DefineSameAsInput(node, 2);
     selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
                    arraysize(temps), temps);
   } else {
     InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
-    outputs[0] = g.DefineAsRegister(node);
     selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
                    arraysize(temps), temps);
   }
@@ -6570,6 +6569,58 @@ std::optional<ShufflePair> TryMapCanonicalShuffleToShufflePair(
   return {};
 }
 
+using ShuffleTriplet =
+    std::tuple<InstructionCode, InstructionCode, InstructionCode>;
+std::optional<ShuffleTriplet> TryMapCanonicalShuffleToShuffleTriplet(
+    CanonicalShuffle shuffle) {
+  using CanonicalToInstr = std::tuple<CanonicalShuffle, ShuffleTriplet>;
+
+#define CANONICAL_TO_INSTRS(canonical, opcode1, size1, opcode2, size2, \
+                            opcode3, size3)                            \
+  {                                                                    \
+    CanonicalShuffle::canonical, {                                     \
+      opcode1 | LaneSizeField::encode(size1),                          \
+          opcode2 | LaneSizeField::encode(size2),                      \
+          opcode3 | LaneSizeField::encode(size3)                       \
+    }                                                                  \
+  }
+
+  static constexpr std::array arch_shuffles = std::to_array<CanonicalToInstr>({
+      CANONICAL_TO_INSTRS(kS8x4DeinterleaveEvenEvenEven, kArm64S128UnzipLeft,
+                          LaneSize::kL8, kArm64S128UnzipLeft, LaneSize::kL8,
+                          kArm64S128UnzipLeft, LaneSize::kL8),
+      CANONICAL_TO_INSTRS(kS8x4DeinterleaveOddEvenEven, kArm64S128UnzipRight,
+                          LaneSize::kL8, kArm64S128UnzipLeft, LaneSize::kL8,
+                          kArm64S128UnzipLeft, LaneSize::kL8),
+      CANONICAL_TO_INSTRS(kS8x4DeinterleaveEvenOddEven, kArm64S128UnzipLeft,
+                          LaneSize::kL8, kArm64S128UnzipRight, LaneSize::kL8,
+                          kArm64S128UnzipLeft, LaneSize::kL8),
+      CANONICAL_TO_INSTRS(kS8x4DeinterleaveOddOddEven, kArm64S128UnzipRight,
+                          LaneSize::kL8, kArm64S128UnzipRight, LaneSize::kL8,
+                          kArm64S128UnzipLeft, LaneSize::kL8),
+      CANONICAL_TO_INSTRS(kS8x4DeinterleaveEvenEvenOdd, kArm64S128UnzipLeft,
+                          LaneSize::kL8, kArm64S128UnzipLeft, LaneSize::kL8,
+                          kArm64S128UnzipRight, LaneSize::kL8),
+      CANONICAL_TO_INSTRS(kS8x4DeinterleaveOddEvenOdd, kArm64S128UnzipRight,
+                          LaneSize::kL8, kArm64S128UnzipLeft, LaneSize::kL8,
+                          kArm64S128UnzipRight, LaneSize::kL8),
+      CANONICAL_TO_INSTRS(kS8x4DeinterleaveEvenOddOdd, kArm64S128UnzipLeft,
+                          LaneSize::kL8, kArm64S128UnzipRight, LaneSize::kL8,
+                          kArm64S128UnzipRight, LaneSize::kL8),
+      CANONICAL_TO_INSTRS(kS8x4DeinterleaveOddOddOdd, kArm64S128UnzipRight,
+                          LaneSize::kL8, kArm64S128UnzipRight, LaneSize::kL8,
+                          kArm64S128UnzipRight, LaneSize::kL8),
+  });
+#undef CANONICAL_TO_INSTRS
+
+  for (const auto& [canonical, instr_opcodes] : arch_shuffles) {
+    if (canonical == shuffle) {
+      return instr_opcodes;
+    }
+  }
+  return {};
+}
+
 template <size_t ShuffleSize>
 bool TryCanonicalShuffle(InstructionSelector* selector, OpIndex node,
                          OpIndex input0, OpIndex input1,
@@ -6611,6 +6662,19 @@ bool TryCanonicalShuffle(InstructionSelector* selector, OpIndex node,
                      g.UseRegister(input0), g.UseRegister(input1),
                      g.UseImmediate(8));
       return true;
+    case CanonicalShuffle::kS16x8TopBottomInterleave: {
+      // Move the least-significant half of the vector to even elements, and
+      // the most-significant half to odd elements.
+      InstructionOperand temp = g.TempSimd128Register();
+      // Take the top half.
+      selector->Emit(
+          kArm64S128UnzipRight | LaneSizeField::encode(LaneSize::kL64), temp,
+          g.UseRegister(input0), g.UseRegister(input0));
+      // Interleave the top and bottom.
+      selector->Emit(kArm64S128ZipLeft | LaneSizeField::encode(LaneSize::kL16),
+                     g.DefineAsRegister(node), g.UseRegister(input0), temp);
+      return true;
+    }
   }
 
   if constexpr (ShuffleSize == kSimd128HalfSize ||
@@ -6624,6 +6688,25 @@ bool TryCanonicalShuffle(InstructionSelector* selector, OpIndex node,
                      g.UseRegister(input1));
       selector->Emit(opcode2, g.DefineAsRegister(node), temp, temp);
       return true;
+    }
+  }
+
+  if constexpr (ShuffleSize == kSimd128QuarterSize) {
+    // Performing three operations can still be better than a TBL when we have
+    // two inputs due to their fixed nature and the chances of copies being
+    // introduced.
+    if (input0 != input1) {
+      if (std::optional<ShuffleTriplet> instr_opcodes =
+              TryMapCanonicalShuffleToShuffleTriplet(canonical)) {
+        const auto [opcode1, opcode2, opcode3] = *instr_opcodes;
+        InstructionOperand temp1 = g.TempSimd128Register();
+        InstructionOperand temp2 = g.TempSimd128Register();
+        selector->Emit(opcode1, temp1, g.UseRegister(input0),
+                       g.UseRegister(input1));
+        selector->Emit(opcode2, temp2, temp1, temp1);
+        selector->Emit(opcode3, g.DefineAsRegister(node), temp2, temp2);
+        return true;
+      }
     }
   }
 

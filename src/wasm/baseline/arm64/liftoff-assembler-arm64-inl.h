@@ -391,7 +391,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
     B(hs /* higher or same */, &continuation);
   }
 
-  if (v8_flags.experimental_wasm_growable_stacks) {
+  if (v8_flags.wasm_growable_stacks) {
     LiftoffRegList regs_to_save;
     regs_to_save.set(WasmHandleStackOverflowDescriptor::GapRegister());
     regs_to_save.set(WasmHandleStackOverflowDescriptor::FrameBaseRegister());
@@ -491,7 +491,7 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
 }
 
 Register LiftoffAssembler::LoadOldFramePointer() {
-  if (!v8_flags.experimental_wasm_growable_stacks) {
+  if (!v8_flags.wasm_growable_stacks) {
     return fp;
   }
   LiftoffRegister old_fp = GetUnusedRegister(RegClass::kGpReg, {});
@@ -745,6 +745,14 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
   MemOperand src_op = liftoff::GetMemOp(this, &temps, src_addr, offset_reg,
                                         offset_imm, i64_offset, shift_amount);
   DCHECK(!src_op.IsPostIndex());  // See MacroAssembler::LoadStoreMacroComplex.
+  if (type.value() == LoadType::kF32LoadF16) {
+    constexpr uint8_t kConversionInstruction = 1;
+    GetTrappingInstruction<LoadOrStore::kLoad, kConversionInstruction>
+        collect_trapping_load(this, trapping_load_pc);
+    Ldr(dst.fp().H(), src_op);
+    Fcvt(dst.fp().S(), dst.fp().H());
+    return;
+  }
   GetTrappingInstruction<LoadOrStore::kLoad> collect_trapping_load(
       this, trapping_load_pc);
   switch (type.value()) {
@@ -781,16 +789,14 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
     case LoadType::kF32Load:
       Ldr(dst.fp().S(), src_op);
       break;
-    case LoadType::kF32LoadF16: {
-      Ldr(dst.fp().H(), src_op);
-      Fcvt(dst.fp().S(), dst.fp().H());
-      break;
-    }
     case LoadType::kF64Load:
       Ldr(dst.fp().D(), src_op);
       break;
     case LoadType::kS128Load:
       Ldr(dst.fp().Q(), src_op);
+      break;
+    default:
+      UNREACHABLE();
       break;
   }
 }
@@ -823,8 +829,12 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
       Str(src.gp().X(), dst_op);
       break;
     case StoreType::kF32StoreF16: {
-      Fcvt(src.fp().H(), src.fp().S());
-      Str(src.fp().H(), dst_op);
+      UseScratchRegisterScope temps(this);
+      VRegister temp_h = temps.AcquireH();
+      // We collect the last instruction as the trap so it's safe to emit
+      // multiple instructions as long as the store is last.
+      Fcvt(temp_h, src.fp().S());
+      Str(temp_h, dst_op);
       break;
     }
     case StoreType::kF32Store:
@@ -1475,7 +1485,9 @@ void LiftoffAssembler::AtomicCompareExchangeTaggedPointer(
   }
 }
 
-void LiftoffAssembler::AtomicFence() { Dmb(InnerShareable, BarrierAll); }
+void LiftoffAssembler::AtomicFence(AtomicMemoryOrder /*order*/) {
+  Dmb(InnerShareable, BarrierAll);
+}
 
 void LiftoffAssembler::Pause() { Isb(); }
 
@@ -1819,6 +1831,27 @@ void LiftoffAssembler::emit_i64_shl(LiftoffRegister dst, LiftoffRegister src,
 void LiftoffAssembler::emit_i64_shli(LiftoffRegister dst, LiftoffRegister src,
                                      int32_t amount) {
   Lsl(dst.gp().X(), src.gp().X(), amount & 63);
+}
+
+void LiftoffAssembler::emit_i64_rol(LiftoffRegister dst, LiftoffRegister src,
+                                    Register amount) {
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.AcquireX();
+  Neg(scratch, amount.X());
+  Ror(dst.gp().X(), src.gp().X(), scratch);
+}
+void LiftoffAssembler::emit_i64_roli(LiftoffRegister dst, LiftoffRegister src,
+                                     int32_t amount) {
+  Ror(dst.gp().X(), src.gp().X(), (64 - amount) & 63);
+}
+
+void LiftoffAssembler::emit_i64_ror(LiftoffRegister dst, LiftoffRegister src,
+                                    Register amount) {
+  Ror(dst.gp().X(), src.gp().X(), amount.X());
+}
+void LiftoffAssembler::emit_i64_rori(LiftoffRegister dst, LiftoffRegister src,
+                                     int32_t amount) {
+  Ror(dst.gp().X(), src.gp().X(), amount & 63);
 }
 
 void LiftoffAssembler::emit_i64_sar(LiftoffRegister dst, LiftoffRegister src,
@@ -4626,7 +4659,6 @@ void LiftoffAssembler::DeallocateStackSlot(uint32_t size) {
   Drop(size, 1);
 }
 
-void LiftoffAssembler::MaybeOSR() {}
 
 void LiftoffStackSlots::Construct(int param_slots) {
   DCHECK_LT(0, slots_.size());

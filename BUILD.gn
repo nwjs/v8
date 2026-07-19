@@ -32,6 +32,10 @@ if (is_ios) {
   import("//build/config/apple/mobile_config.gni")  # For `target_platform`.
 }
 
+if (!build_with_v8_embedder && !(defined(build_with_node) && build_with_node)) {
+  import("//third_party/partition_alloc/partition_alloc.gni")
+}
+
 # For faster Windows builds. See https://crbug.com/v8/8475.
 emit_builtins_as_inline_asm = is_win && is_clang
 
@@ -1043,6 +1047,7 @@ external_v8_defines = [
   "V8_USE_PERFETTO",
   "V8_USE_PERFETTO_JSON_EXPORT",
   "V8_USE_PERFETTO_SDK",
+  "V8_CPPGC_MICROTASK_QUEUE",
   "V8_MAP_PACKING",
   "V8_IS_TSAN",
   "V8_ENABLE_DIRECT_HANDLE",
@@ -1100,6 +1105,9 @@ if (v8_use_perfetto_json_export) {
 }
 if (v8_use_perfetto_sdk) {
   enabled_external_v8_defines += [ "V8_USE_PERFETTO_SDK" ]
+}
+if (v8_cppgc_microtask_queue) {
+  enabled_external_v8_defines += [ "V8_CPPGC_MICROTASK_QUEUE" ]
 }
 if (v8_enable_map_packing) {
   enabled_external_v8_defines += [ "V8_MAP_PACKING" ]
@@ -1177,6 +1185,7 @@ external_cppgc_defines = [
   "CPPGC_CAGED_HEAP",
   "CPPGC_ENABLE_API_CHECKS",
   "CPPGC_ENABLE_LARGER_CAGE",
+  "CPPGC_ENABLE_OBJECT_SECTION_GCINFO",
   "CPPGC_ENABLE_SLOW_API_CHECKS",
   "CPPGC_POINTER_COMPRESSION",
   "CPPGC_SLIM_WRITE_BARRIER",
@@ -1215,6 +1224,9 @@ if (cppgc_enable_pointer_compression) {
 }
 if (cppgc_enable_larger_cage) {
   enabled_external_cppgc_defines += [ "CPPGC_ENABLE_LARGER_CAGE" ]
+}
+if (cppgc_enable_object_section_gcinfo) {
+  enabled_external_cppgc_defines += [ "CPPGC_ENABLE_OBJECT_SECTION_GCINFO" ]
 }
 if (cppgc_enable_slim_write_barrier) {
   enabled_external_cppgc_defines += [ "CPPGC_SLIM_WRITE_BARRIER" ]
@@ -1589,6 +1601,12 @@ config("features") {
   if (v8_function_arguments_caller_are_own_props) {
     defines += [ "V8_FUNCTION_ARGUMENTS_CALLER_ARE_OWN_PROPS" ]
   }
+  if (!build_with_v8_embedder &&
+      !(defined(build_with_node) && build_with_node)) {
+    if (enable_user_space_zero_segment) {
+      defines += [ "PA_ENABLE_USER_SPACE_ZERO_SEGMENT" ]
+    }
+  }
 }
 
 config("toolchain") {
@@ -1656,9 +1674,9 @@ config("toolchain") {
     } else {
       defines += [ "__mips_soft_float=1" ]
     }
-    if (mips_arch_variant == "r6") {
-      defines += [ "_MIPS_ARCH_MIPS64R6" ]
-    } else if (mips_arch_variant == "r2") {
+    assert(mips_arch_variant != "r6",
+           "Fatal: mips_arch_variant='r6' has been explicitly disabled.")
+    if (mips_arch_variant == "r2") {
       defines += [ "_MIPS_ARCH_MIPS64R2" ]
     }
   }
@@ -2005,12 +2023,19 @@ if (v8_postmortem_support) {
       "src/objects/descriptor-array-inl.h",
       "src/objects/feedback-cell.h",
       "src/objects/feedback-cell-inl.h",
+      "src/objects/fixed-array-base.h",
+      "src/objects/fixed-array-base-inl.h",
       "src/objects/fixed-array.h",
       "src/objects/fixed-array-inl.h",
+      "src/objects/fixed-primitive-array.h",
+      "src/objects/fixed-primitive-array-inl.h",
+      "src/objects/hash-seed-wrapper.h",
+      "src/objects/hash-seed-wrapper-inl.h",
       "src/objects/heap-number.h",
       "src/objects/heap-number-inl.h",
       "src/objects/heap-object.h",
       "src/objects/heap-object-inl.h",
+      "src/objects/heap-object-set-map-inl.h",
       "src/objects/instance-type.h",
       "src/objects/instance-type-checker.h",
       "src/objects/instance-type-inl.h",
@@ -2047,8 +2072,9 @@ if (v8_postmortem_support) {
       "src/objects/objects-inl.h",
       "src/objects/oddball.h",
       "src/objects/oddball-inl.h",
+      "src/objects/pod-array.h",
+      "src/objects/pod-array-inl.h",
       "src/objects/primitive-heap-object.h",
-      "src/objects/primitive-heap-object-inl.h",
       "src/objects/scope-info.h",
       "src/objects/scope-info-inl.h",
       "src/objects/script.cc",
@@ -2246,7 +2272,9 @@ torque_files = [
   "src/objects/embedder-data-array.tq",
   "src/objects/feedback-cell.tq",
   "src/objects/feedback-vector.tq",
+  "src/objects/fixed-array-base.tq",
   "src/objects/fixed-array.tq",
+  "src/objects/fixed-primitive-array.tq",
   "src/objects/foreign.tq",
   "src/objects/free-space.tq",
   "src/objects/heap-number.tq",
@@ -2448,7 +2476,7 @@ template("run_torque") {
     destination_folder = "$target_gen_dir/torque-generated$suffix"
 
     outputs = [
-      "$destination_folder/bit-fields.h",
+      "$destination_folder/bit-field-asserts.cc",
       "$destination_folder/builtin-definitions.h",
       "$destination_folder/class-debug-readers.cc",
       "$destination_folder/class-debug-readers.h",
@@ -2468,9 +2496,7 @@ template("run_torque") {
       outputs += [
         "$destination_folder/$filetq-csa.cc",
         "$destination_folder/$filetq-csa.h",
-        "$destination_folder/$filetq-inl.inc",
         "$destination_folder/$filetq.cc",
-        "$destination_folder/$filetq.inc",
       ]
     }
 
@@ -2606,6 +2632,7 @@ v8_cluster_source_set("torque_generated_initializers") {
   ]
 
   sources = torque_csa_cc_files + [
+              "$target_gen_dir/torque-generated/bit-field-asserts.cc",
               "$target_gen_dir/torque-generated/csa-types.h",
               "$target_gen_dir/torque-generated/enum-verifiers.cc",
               "$target_gen_dir/torque-generated/exported-macros-assembler.cc",
@@ -2639,14 +2666,9 @@ v8_cluster_source_set("torque_generated_initializers") {
 
 # Build lists of torque-generated definition files for clustering
 torque_def_cc_files = []
-torque_def_inc_files = []
 foreach(file, torque_files) {
   filetq = string_replace(file, ".tq", "-tq")
   torque_def_cc_files += [ "$target_gen_dir/torque-generated/$filetq.cc" ]
-  torque_def_inc_files += [
-    "$target_gen_dir/torque-generated/$filetq-inl.inc",
-    "$target_gen_dir/torque-generated/$filetq.inc",
-  ]
 }
 
 v8_cluster_source_set("torque_generated_definitions") {
@@ -2675,9 +2697,6 @@ v8_cluster_source_set("torque_generated_definitions") {
 
   sources = torque_def_cc_files +
             [ "$target_gen_dir/torque-generated/class-forward-declarations.h" ]
-
-  # Add .inc files (always included, not compiled directly)
-  sources += torque_def_inc_files
 
   configs = [ ":internal_config" ]
 }
@@ -3197,6 +3216,7 @@ generated_file("v8_generate_features_json") {
     v8_optimized_debug = v8_optimized_debug
     v8_random_seed = v8_random_seed
     v8_use_perfetto = v8_use_perfetto
+    v8_cppgc_microtask_queue = v8_cppgc_microtask_queue
     v8_use_siphash = v8_use_siphash
     v8_use_default_hasher_secret = v8_use_default_hasher_secret
   }
@@ -4085,6 +4105,8 @@ v8_header_set("v8_internal_headers") {
     "src/flags/save-flags.h",
     "src/handles/global-handles-inl.h",
     "src/handles/global-handles.h",
+    "src/handles/handle-scope-implementer-inl.h",
+    "src/handles/handle-scope-implementer.h",
     "src/handles/handles-inl.h",
     "src/handles/handles.h",
     "src/handles/local-handles-inl.h",
@@ -4110,7 +4132,6 @@ v8_header_set("v8_internal_headers") {
     "src/heap/conservative-stack-visitor-inl.h",
     "src/heap/conservative-stack-visitor.h",
     "src/heap/cppgc-js/cpp-heap.h",
-    "src/heap/cppgc-js/cpp-marking-state-inl.h",
     "src/heap/cppgc-js/cpp-marking-state.h",
     "src/heap/cppgc-js/cpp-snapshot.h",
     "src/heap/cppgc-js/cross-heap-remembered-set.h",
@@ -4121,7 +4142,6 @@ v8_header_set("v8_internal_headers") {
     "src/heap/ephemeron-remembered-set.h",
     "src/heap/evacuation-allocator-inl.h",
     "src/heap/evacuation-allocator.h",
-    "src/heap/evacuation-verifier-inl.h",
     "src/heap/evacuation-verifier.h",
     "src/heap/factory-base-inl.h",
     "src/heap/factory-base.h",
@@ -4336,19 +4356,26 @@ v8_header_set("v8_internal_headers") {
     "src/objects/field-index-inl.h",
     "src/objects/field-index.h",
     "src/objects/field-type.h",
+    "src/objects/fixed-array-base-inl.h",
+    "src/objects/fixed-array-base.h",
     "src/objects/fixed-array-inl.h",
     "src/objects/fixed-array.h",
+    "src/objects/fixed-primitive-array-inl.h",
+    "src/objects/fixed-primitive-array.h",
     "src/objects/foreign-inl.h",
     "src/objects/foreign.h",
     "src/objects/free-space-inl.h",
     "src/objects/free-space.h",
     "src/objects/function-kind.h",
     "src/objects/function-syntax-kind.h",
+    "src/objects/hash-seed-wrapper-inl.h",
+    "src/objects/hash-seed-wrapper.h",
     "src/objects/hash-table-inl.h",
     "src/objects/hash-table.h",
     "src/objects/heap-number-inl.h",
     "src/objects/heap-number.h",
     "src/objects/heap-object-inl.h",
+    "src/objects/heap-object-set-map-inl.h",
     "src/objects/heap-object.h",
     "src/objects/hole.h",
     "src/objects/instance-type-checker.h",
@@ -4393,9 +4420,7 @@ v8_header_set("v8_internal_headers") {
     "src/objects/js-segments.h",
     "src/objects/js-shadow-realm-inl.h",
     "src/objects/js-shadow-realm.h",
-    "src/objects/js-shared-array-inl.h",
     "src/objects/js-shared-array.h",
-    "src/objects/js-struct-inl.h",
     "src/objects/js-struct.h",
     "src/objects/js-temporal-helpers.h",
     "src/objects/js-weak-refs-inl.h",
@@ -4444,7 +4469,8 @@ v8_header_set("v8_internal_headers") {
     "src/objects/option-utils.h",
     "src/objects/ordered-hash-table-inl.h",
     "src/objects/ordered-hash-table.h",
-    "src/objects/primitive-heap-object-inl.h",
+    "src/objects/pod-array-inl.h",
+    "src/objects/pod-array.h",
     "src/objects/primitive-heap-object.h",
     "src/objects/promise-inl.h",
     "src/objects/promise.h",
@@ -4455,6 +4481,7 @@ v8_header_set("v8_internal_headers") {
     "src/objects/property-descriptor-object-inl.h",
     "src/objects/property-descriptor-object.h",
     "src/objects/property-descriptor.h",
+    "src/objects/property-details-inl.h",
     "src/objects/property-details.h",
     "src/objects/property.h",
     "src/objects/prototype-info-inl.h",
@@ -4505,8 +4532,6 @@ v8_header_set("v8_internal_headers") {
     "src/objects/template-objects.h",
     "src/objects/templates-inl.h",
     "src/objects/templates.h",
-    "src/objects/torque-defined-classes-inl.h",
-    "src/objects/torque-defined-classes.h",
     "src/objects/transitions-inl.h",
     "src/objects/transitions.h",
     "src/objects/trusted-object-inl.h",
@@ -4602,8 +4627,6 @@ v8_header_set("v8_internal_headers") {
     "src/sandbox/bytecode-verifier.h",
     "src/sandbox/check.h",
     "src/sandbox/code-entrypoint-tag.h",
-    "src/sandbox/code-pointer-table-inl.h",
-    "src/sandbox/code-pointer-table.h",
     "src/sandbox/code-sandboxing-mode.h",
     "src/sandbox/compactible-external-entity-table-inl.h",
     "src/sandbox/compactible-external-entity-table.h",
@@ -4783,6 +4806,7 @@ v8_header_set("v8_internal_headers") {
       "src/maglev/maglev-graph-optimizer.h",
       "src/maglev/maglev-graph-printer.h",
       "src/maglev/maglev-graph-processor.h",
+      "src/maglev/maglev-graph-serializer.h",
       "src/maglev/maglev-graph-verifier.h",
       "src/maglev/maglev-graph.h",
       "src/maglev/maglev-inlining.h",
@@ -4791,8 +4815,10 @@ v8_header_set("v8_internal_headers") {
       "src/maglev/maglev-ir.h",
       "src/maglev/maglev-kna-processor.h",
       "src/maglev/maglev-known-node-aspects.h",
+      "src/maglev/maglev-loop-peeler.h",
       "src/maglev/maglev-map-inference.h",
       "src/maglev/maglev-node-type.h",
+      "src/maglev/maglev-phase.h",
       "src/maglev/maglev-phi-representation-selector.h",
       "src/maglev/maglev-pipeline-statistics.h",
       "src/maglev/maglev-post-hoc-optimizations-processors.h",
@@ -4930,6 +4956,7 @@ v8_header_set("v8_internal_headers") {
       "src/wasm/wasm-init-expr.h",
       "src/wasm/wasm-js.h",
       "src/wasm/wasm-linkage.h",
+      "src/wasm/wasm-memory-map-descriptor.h",
       "src/wasm/wasm-module-builder.h",
       "src/wasm/wasm-module-sourcemap.h",
       "src/wasm/wasm-module.h",
@@ -5593,11 +5620,13 @@ if (!v8_enable_maglev) {
     "src/maglev/maglev-graph-labeller.cc",
     "src/maglev/maglev-graph-optimizer.cc",
     "src/maglev/maglev-graph-printer.cc",
+    "src/maglev/maglev-graph-serializer.cc",
     "src/maglev/maglev-graph.cc",
     "src/maglev/maglev-inlining.cc",
     "src/maglev/maglev-interpreter-frame-state.cc",
     "src/maglev/maglev-ir.cc",
     "src/maglev/maglev-known-node-aspects.cc",
+    "src/maglev/maglev-loop-peeler.cc",
     "src/maglev/maglev-node-type.cc",
     "src/maglev/maglev-phi-representation-selector.cc",
     "src/maglev/maglev-range-verification.cc",
@@ -5691,6 +5720,7 @@ if (v8_enable_webassembly) {
     "src/compiler/turboshaft/wasm-gc-optimize-phase.cc",
     "src/compiler/turboshaft/wasm-gc-typed-optimization-reducer.cc",
     "src/compiler/turboshaft/wasm-in-js-inlining-phase.cc",
+    "src/compiler/turboshaft/wasm-load-elimination-reducer.cc",
     "src/compiler/turboshaft/wasm-lowering-phase.cc",
     "src/compiler/turboshaft/wasm-optimize-phase.cc",
     "src/compiler/turboshaft/wasm-shuffle-reducer.cc",
@@ -6009,6 +6039,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
     "src/flags/flags.cc",
     "src/flags/save-flags.cc",
     "src/handles/global-handles.cc",
+    "src/handles/handle-scope-implementer.cc",
     "src/handles/handles.cc",
     "src/handles/local-handles.cc",
     "src/handles/persistent-handles.cc",
@@ -6291,7 +6322,6 @@ v8_cluster_source_set("v8_base_without_compiler") {
     "src/runtime/runtime-weak-refs.cc",
     "src/runtime/runtime.cc",
     "src/sandbox/bytecode-verifier.cc",
-    "src/sandbox/code-pointer-table.cc",
     "src/sandbox/cppheap-pointer-table.cc",
     "src/sandbox/external-pointer-table.cc",
     "src/sandbox/external-strings-cage.cc",
@@ -6397,11 +6427,13 @@ v8_cluster_source_set("v8_base_without_compiler") {
       "src/maglev/maglev-graph-labeller.cc",
       "src/maglev/maglev-graph-optimizer.cc",
       "src/maglev/maglev-graph-printer.cc",
+      "src/maglev/maglev-graph-serializer.cc",
       "src/maglev/maglev-graph.cc",
       "src/maglev/maglev-inlining.cc",
       "src/maglev/maglev-interpreter-frame-state.cc",
       "src/maglev/maglev-ir.cc",
       "src/maglev/maglev-known-node-aspects.cc",
+      "src/maglev/maglev-loop-peeler.cc",
       "src/maglev/maglev-node-type.cc",
       "src/maglev/maglev-phi-representation-selector.cc",
       "src/maglev/maglev-pipeline-statistics.cc",
@@ -6503,6 +6535,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
       "src/wasm/wasm-features.cc",
       "src/wasm/wasm-import-wrapper-cache.cc",
       "src/wasm/wasm-js.cc",
+      "src/wasm/wasm-memory-map-descriptor.cc",
       "src/wasm/wasm-module-builder.cc",
       "src/wasm/wasm-module-sourcemap.cc",
       "src/wasm/wasm-module.cc",
@@ -7025,10 +7058,7 @@ v8_source_set("torque_base") {
     ]
   }
 
-  deps = [
-    ":v8_flags",
-    ":v8_shared_internal_headers",
-  ]
+  deps = [ ":v8_shared_internal_headers" ]
 
   public_deps = [
     ":v8_config_headers",
@@ -7239,6 +7269,8 @@ v8_static_lib("v8_libbase") {
     "src/base/vlq-base64.cc",
     "src/base/vlq-base64.h",
     "src/base/vlq.h",
+    "third_party/rapidhash-v8/rapidhash.h",
+    "third_party/rapidhash-v8/secret.h",
   ]
 
   if (target_cpu == "x86" || target_cpu == "x64") {
@@ -7265,7 +7297,10 @@ v8_static_lib("v8_libbase") {
 
   deps = [ ":v8_config_headers" ]
 
-  public_deps = [ ":v8_abseil" ]
+  public_deps = [
+    ":v8_abseil",
+    "//build:buildflag_header_h",
+  ]
 
   if (current_os == "zos") {
     public_configs += [ ":zoslib_config" ]
@@ -7727,111 +7762,111 @@ v8_cluster_source_set("cppgc_base") {
   visibility = [ ":*" ]
 
   sources = [
-    "src/heap/cppgc/allocation.cc",
-    "src/heap/cppgc/compaction-worklists.cc",
-    "src/heap/cppgc/compaction-worklists.h",
-    "src/heap/cppgc/compactor.cc",
-    "src/heap/cppgc/compactor.h",
-    "src/heap/cppgc/concurrent-marker.cc",
-    "src/heap/cppgc/concurrent-marker.h",
-    "src/heap/cppgc/explicit-management.cc",
-    "src/heap/cppgc/free-list.cc",
-    "src/heap/cppgc/free-list.h",
-    "src/heap/cppgc/garbage-collector.h",
-    "src/heap/cppgc/gc-info-table.cc",
-    "src/heap/cppgc/gc-info-table.h",
-    "src/heap/cppgc/gc-info.cc",
-    "src/heap/cppgc/gc-invoker.cc",
-    "src/heap/cppgc/gc-invoker.h",
-    "src/heap/cppgc/globals.h",
-    "src/heap/cppgc/heap-base.cc",
-    "src/heap/cppgc/heap-base.h",
-    "src/heap/cppgc/heap-config.h",
-    "src/heap/cppgc/heap-consistency.cc",
-    "src/heap/cppgc/heap-growing.cc",
-    "src/heap/cppgc/heap-growing.h",
-    "src/heap/cppgc/heap-object-header.cc",
-    "src/heap/cppgc/heap-object-header.h",
-    "src/heap/cppgc/heap-page.cc",
-    "src/heap/cppgc/heap-page.h",
-    "src/heap/cppgc/heap-space.cc",
-    "src/heap/cppgc/heap-space.h",
-    "src/heap/cppgc/heap-state.cc",
-    "src/heap/cppgc/heap-statistics-collector.cc",
-    "src/heap/cppgc/heap-statistics-collector.h",
-    "src/heap/cppgc/heap-visitor.h",
-    "src/heap/cppgc/heap.cc",
-    "src/heap/cppgc/heap.h",
-    "src/heap/cppgc/liveness-broker.cc",
-    "src/heap/cppgc/liveness-broker.h",
-    "src/heap/cppgc/logging.cc",
-    "src/heap/cppgc/marker.cc",
-    "src/heap/cppgc/marker.h",
-    "src/heap/cppgc/marking-state.cc",
-    "src/heap/cppgc/marking-state.h",
-    "src/heap/cppgc/marking-verifier.cc",
-    "src/heap/cppgc/marking-verifier.h",
-    "src/heap/cppgc/marking-visitor.cc",
-    "src/heap/cppgc/marking-visitor.h",
-    "src/heap/cppgc/marking-worklists.cc",
-    "src/heap/cppgc/marking-worklists.h",
-    "src/heap/cppgc/member-storage.cc",
-    "src/heap/cppgc/member-storage.h",
-    "src/heap/cppgc/memory.cc",
-    "src/heap/cppgc/memory.h",
-    "src/heap/cppgc/metric-recorder.h",
-    "src/heap/cppgc/name-trait.cc",
-    "src/heap/cppgc/object-allocator.cc",
-    "src/heap/cppgc/object-allocator.h",
-    "src/heap/cppgc/object-poisoner.h",
-    "src/heap/cppgc/object-size-trait.cc",
-    "src/heap/cppgc/object-start-bitmap.h",
-    "src/heap/cppgc/object-view.h",
-    "src/heap/cppgc/page-memory.cc",
-    "src/heap/cppgc/page-memory.h",
-    "src/heap/cppgc/persistent-node.cc",
-    "src/heap/cppgc/platform.cc",
-    "src/heap/cppgc/platform.h",
-    "src/heap/cppgc/pointer-policies.cc",
-    "src/heap/cppgc/prefinalizer-handler.cc",
-    "src/heap/cppgc/prefinalizer-handler.h",
-    "src/heap/cppgc/process-heap-statistics.cc",
-    "src/heap/cppgc/process-heap-statistics.h",
-    "src/heap/cppgc/process-heap.cc",
-    "src/heap/cppgc/process-heap.h",
-    "src/heap/cppgc/raw-heap.cc",
-    "src/heap/cppgc/raw-heap.h",
-    "src/heap/cppgc/remembered-set.cc",
-    "src/heap/cppgc/remembered-set.h",
-    "src/heap/cppgc/stats-collector.cc",
-    "src/heap/cppgc/stats-collector.h",
-    "src/heap/cppgc/sweeper.cc",
-    "src/heap/cppgc/sweeper.h",
-    "src/heap/cppgc/task-handle.h",
-    "src/heap/cppgc/unmarker.h",
+    "src/heap/cppgc-internal/allocation.cc",
+    "src/heap/cppgc-internal/compaction-worklists.cc",
+    "src/heap/cppgc-internal/compaction-worklists.h",
+    "src/heap/cppgc-internal/compactor.cc",
+    "src/heap/cppgc-internal/compactor.h",
+    "src/heap/cppgc-internal/concurrent-marker.cc",
+    "src/heap/cppgc-internal/concurrent-marker.h",
+    "src/heap/cppgc-internal/explicit-management.cc",
+    "src/heap/cppgc-internal/free-list.cc",
+    "src/heap/cppgc-internal/free-list.h",
+    "src/heap/cppgc-internal/garbage-collector.h",
+    "src/heap/cppgc-internal/gc-info-table.cc",
+    "src/heap/cppgc-internal/gc-info-table.h",
+    "src/heap/cppgc-internal/gc-info.cc",
+    "src/heap/cppgc-internal/gc-invoker.cc",
+    "src/heap/cppgc-internal/gc-invoker.h",
+    "src/heap/cppgc-internal/globals.h",
+    "src/heap/cppgc-internal/heap-base.cc",
+    "src/heap/cppgc-internal/heap-base.h",
+    "src/heap/cppgc-internal/heap-config.h",
+    "src/heap/cppgc-internal/heap-consistency.cc",
+    "src/heap/cppgc-internal/heap-growing.cc",
+    "src/heap/cppgc-internal/heap-growing.h",
+    "src/heap/cppgc-internal/heap-object-header.cc",
+    "src/heap/cppgc-internal/heap-object-header.h",
+    "src/heap/cppgc-internal/heap-page.cc",
+    "src/heap/cppgc-internal/heap-page.h",
+    "src/heap/cppgc-internal/heap-space.cc",
+    "src/heap/cppgc-internal/heap-space.h",
+    "src/heap/cppgc-internal/heap-state.cc",
+    "src/heap/cppgc-internal/heap-statistics-collector.cc",
+    "src/heap/cppgc-internal/heap-statistics-collector.h",
+    "src/heap/cppgc-internal/heap-visitor.h",
+    "src/heap/cppgc-internal/heap.cc",
+    "src/heap/cppgc-internal/heap.h",
+    "src/heap/cppgc-internal/liveness-broker.cc",
+    "src/heap/cppgc-internal/liveness-broker.h",
+    "src/heap/cppgc-internal/logging.cc",
+    "src/heap/cppgc-internal/marker.cc",
+    "src/heap/cppgc-internal/marker.h",
+    "src/heap/cppgc-internal/marking-state.cc",
+    "src/heap/cppgc-internal/marking-state.h",
+    "src/heap/cppgc-internal/marking-verifier.cc",
+    "src/heap/cppgc-internal/marking-verifier.h",
+    "src/heap/cppgc-internal/marking-visitor.cc",
+    "src/heap/cppgc-internal/marking-visitor.h",
+    "src/heap/cppgc-internal/marking-worklists.cc",
+    "src/heap/cppgc-internal/marking-worklists.h",
+    "src/heap/cppgc-internal/member-storage.cc",
+    "src/heap/cppgc-internal/member-storage.h",
+    "src/heap/cppgc-internal/memory.cc",
+    "src/heap/cppgc-internal/memory.h",
+    "src/heap/cppgc-internal/metric-recorder.h",
+    "src/heap/cppgc-internal/name-trait.cc",
+    "src/heap/cppgc-internal/object-allocator.cc",
+    "src/heap/cppgc-internal/object-allocator.h",
+    "src/heap/cppgc-internal/object-poisoner.h",
+    "src/heap/cppgc-internal/object-size-trait.cc",
+    "src/heap/cppgc-internal/object-start-bitmap.h",
+    "src/heap/cppgc-internal/object-view.h",
+    "src/heap/cppgc-internal/page-memory.cc",
+    "src/heap/cppgc-internal/page-memory.h",
+    "src/heap/cppgc-internal/persistent-node.cc",
+    "src/heap/cppgc-internal/platform.cc",
+    "src/heap/cppgc-internal/platform.h",
+    "src/heap/cppgc-internal/pointer-policies.cc",
+    "src/heap/cppgc-internal/prefinalizer-handler.cc",
+    "src/heap/cppgc-internal/prefinalizer-handler.h",
+    "src/heap/cppgc-internal/process-heap-statistics.cc",
+    "src/heap/cppgc-internal/process-heap-statistics.h",
+    "src/heap/cppgc-internal/process-heap.cc",
+    "src/heap/cppgc-internal/process-heap.h",
+    "src/heap/cppgc-internal/raw-heap.cc",
+    "src/heap/cppgc-internal/raw-heap.h",
+    "src/heap/cppgc-internal/remembered-set.cc",
+    "src/heap/cppgc-internal/remembered-set.h",
+    "src/heap/cppgc-internal/stats-collector.cc",
+    "src/heap/cppgc-internal/stats-collector.h",
+    "src/heap/cppgc-internal/sweeper.cc",
+    "src/heap/cppgc-internal/sweeper.h",
+    "src/heap/cppgc-internal/task-handle.h",
+    "src/heap/cppgc-internal/unmarker.h",
 
     # TODO(v8:11952): Remove the testing header here once depending on both,
     # //v8:v8 and //v8:v8_for_testing does not result in ODR violations.
-    "src/heap/cppgc/testing.cc",
-    "src/heap/cppgc/trace-event.h",
-    "src/heap/cppgc/trace-trait.cc",
-    "src/heap/cppgc/virtual-memory.cc",
-    "src/heap/cppgc/virtual-memory.h",
-    "src/heap/cppgc/visitor.cc",
-    "src/heap/cppgc/visitor.h",
-    "src/heap/cppgc/write-barrier.cc",
-    "src/heap/cppgc/write-barrier.h",
+    "src/heap/cppgc-internal/testing.cc",
+    "src/heap/cppgc-internal/trace-event.h",
+    "src/heap/cppgc-internal/trace-trait.cc",
+    "src/heap/cppgc-internal/virtual-memory.cc",
+    "src/heap/cppgc-internal/virtual-memory.h",
+    "src/heap/cppgc-internal/visitor.cc",
+    "src/heap/cppgc-internal/visitor.h",
+    "src/heap/cppgc-internal/write-barrier.cc",
+    "src/heap/cppgc-internal/write-barrier.h",
   ]
 
   exclude_from_cluster = [
-    "src/heap/cppgc/concurrent-marker.cc",  # kDefaultDeadlineCheckInterval.
+    "src/heap/cppgc-internal/concurrent-marker.cc",  # kDefaultDeadlineCheckInterval.
   ]
 
   if (cppgc_enable_caged_heap) {
     sources += [
-      "src/heap/cppgc/caged-heap-local-data.cc",
-      "src/heap/cppgc/caged-heap.cc",
-      "src/heap/cppgc/caged-heap.h",
+      "src/heap/cppgc-internal/caged-heap-local-data.cc",
+      "src/heap/cppgc-internal/caged-heap.cc",
+      "src/heap/cppgc-internal/caged-heap.h",
     ]
   }
 
@@ -8453,6 +8488,8 @@ v8_executable("d8") {
     "src/d8/d8.h",
     "src/d8/hardware-watchpoints.cc",
     "src/d8/hardware-watchpoints.h",
+    "src/d8/memory-access-information.cc",
+    "src/d8/memory-access-information.h",
   ]
 
   configs = [

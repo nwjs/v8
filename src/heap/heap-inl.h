@@ -38,6 +38,7 @@
 #include "src/objects/map-word-inl.h"
 #include "src/objects/object-predicates-inl.h"
 #include "src/objects/slots-inl.h"
+#include "src/objects/templates.h"
 #include "src/objects/visitors-inl.h"
 #include "src/roots/static-roots.h"
 #include "src/utils/allocation.h"
@@ -190,12 +191,7 @@ Address Heap::code_range_base() {
 }
 
 int Heap::MaxRegularHeapObjectSize(AllocationType allocation) {
-  if (allocation == AllocationType::kCode) {
-    DCHECK_EQ(MemoryChunkLayout::MaxRegularCodeObjectSize(),
-              max_regular_code_object_size_);
-    return max_regular_code_object_size_;
-  }
-  return kMaxRegularHeapObjectSize;
+  return heap_allocator_->MaxRegularHeapObjectSize(allocation);
 }
 
 AllocationResult Heap::AllocateRaw(int size_in_bytes, AllocationType type,

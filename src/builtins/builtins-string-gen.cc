@@ -414,7 +414,7 @@ TNode<String> StringBuiltinsAssembler::StringFromSingleUTF16EncodedCodePoint(
 
   BIND(&if_isword16);
   {
-    var_result = StringFromSingleCharCode(codepoint);
+    var_result = StringFromSingleCharCode(UncheckedCast<Uint16T>(codepoint));
     Goto(&return_result);
   }
 
@@ -690,7 +690,7 @@ TNode<String> StringBuiltinsAssembler::DerefIndirectString(
   return LoadObjectField<String>(string, offsetof(ThinString, actual_));
 }
 
-TF_BUILTIN(StringAdd_CheckNone, StringBuiltinsAssembler) {
+TF_BUILTIN(StringAdd_NoMapCheck, StringBuiltinsAssembler) {
   auto left = Parameter<String>(Descriptor::kLeft);
   auto right = Parameter<String>(Descriptor::kRight);
   TNode<ContextOrEmptyContext> context =
@@ -999,7 +999,7 @@ TF_BUILTIN(WasmJSStringEqual, StringBuiltinsAssembler) {
   GenerateStringEqual(left, right, length);
 }
 
-TF_BUILTIN(WasmStringAdd_CheckNone, StringBuiltinsAssembler) {
+TF_BUILTIN(WasmStringAdd_NoMapCheck, StringBuiltinsAssembler) {
   auto left = Parameter<String>(Descriptor::kLeft);
   auto right = Parameter<String>(Descriptor::kRight);
   TNode<ContextOrEmptyContext> context =
@@ -1061,8 +1061,8 @@ TF_BUILTIN(StringFromCharCode, StringBuiltinsAssembler) {
     // string on the fly otherwise.
     TNode<Object> code = arguments.AtIndex(0);
     TNode<Word32T> code32 = TruncateTaggedToWord32(context, code);
-    TNode<Int32T> code16 =
-        Signed(Word32And(code32, Int32Constant(String::kMaxUtf16CodeUnit)));
+    static_assert(String::kMaxUtf16CodeUnit == kMaxUInt16);
+    TNode<Uint16T> code16 = TruncateWord32ToUint16(code32);
     TNode<String> result = StringFromSingleCharCode(code16);
     arguments.PopAndReturn(result);
   }
@@ -1082,7 +1082,8 @@ TF_BUILTIN(StringFromCharCode, StringBuiltinsAssembler) {
     CodeStubAssembler::VariableList vars({&var_max_index}, zone());
     arguments.ForEach(vars, [&](TNode<Object> arg) {
       TNode<Word32T> code32 = TruncateTaggedToWord32(context, arg);
-      code16 = Word32And(code32, Int32Constant(String::kMaxUtf16CodeUnit));
+      static_assert(String::kMaxUtf16CodeUnit == kMaxUInt16);
+      code16 = TruncateWord32ToUint16(code32);
 
       GotoIf(
           Int32GreaterThan(code16, Int32Constant(String::kMaxOneByteCharCode)),
@@ -1127,8 +1128,8 @@ TF_BUILTIN(StringFromCharCode, StringBuiltinsAssembler) {
         vars,
         [&](TNode<Object> arg) {
           TNode<Word32T> code32 = TruncateTaggedToWord32(context, arg);
-          TNode<Word32T> code16 =
-              Word32And(code32, Int32Constant(String::kMaxUtf16CodeUnit));
+          static_assert(String::kMaxUtf16CodeUnit == kMaxUInt16);
+          TNode<Uint16T> code16 = TruncateWord32ToUint16(code32);
 
           TNode<IntPtrT> offset = ElementOffsetFromIndex(
               var_max_index.value(), UINT16_ELEMENTS,
@@ -1390,7 +1391,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
              match_start_index, subject_string);
     const TNode<String> replacement_string =
         ToString_Inline(context, replacement);
-    var_result = CAST(CallBuiltin(Builtin::kStringAdd_CheckNone, context,
+    var_result = CAST(CallBuiltin(Builtin::kStringAdd_NoMapCheck, context,
                                   var_result.value(), replacement_string));
     Goto(&out);
   }
@@ -1401,7 +1402,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
     const TNode<Object> replacement =
         GetSubstitution(context, subject_string, match_start_index,
                         match_end_index, replace_string);
-    var_result = CAST(CallBuiltin(Builtin::kStringAdd_CheckNone, context,
+    var_result = CAST(CallBuiltin(Builtin::kStringAdd_NoMapCheck, context,
                                   var_result.value(), replacement));
     Goto(&out);
   }
@@ -1412,7 +1413,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
         CallBuiltin(Builtin::kStringSubstring, context, subject_string,
                     SmiUntag(match_end_index), subject_length);
     const TNode<Object> result = CallBuiltin(
-        Builtin::kStringAdd_CheckNone, context, var_result.value(), suffix);
+        Builtin::kStringAdd_NoMapCheck, context, var_result.value(), suffix);
     Return(result);
   }
 }
@@ -1571,7 +1572,7 @@ TNode<JSArray> StringBuiltinsAssembler::StringToArray(
                                      string_data));
           TNode<Uint8T> char_code =
               Load<Uint8T>(string_data, IntPtrAdd(index, string_data_offset));
-          TNode<String> entry = StringFromSingleOneByteCharCode(char_code);
+          TNode<String> entry = StringFromSingleCharCode(char_code);
 
           // TODO(ishell): make it possible to skip write barriers here.
           // The single-character strings are in RO space so it should
@@ -2163,7 +2164,7 @@ TNode<String> StringBuiltinsAssembler::SubString(TNode<String> string,
   // Substrings of length 1 are generated through CharCodeAt and FromCharCode.
   BIND(&single_char);
   {
-    TNode<Int32T> char_code = StringCharCodeAt(string, Unsigned(from));
+    TNode<Uint16T> char_code = StringCharCodeAt(string, Unsigned(from));
     var_result = StringFromSingleCharCode(char_code);
     Goto(&end);
   }

@@ -185,7 +185,7 @@ class DebugInfoImpl {
   // for OSR to find the correct return address.
   int DeadBreakpoint(WasmFrame* frame, base::Vector<const int> breakpoints) {
     FrameSummary::WasmFrameSummary summary =
-        FrameSummary::GetTop(frame).AsWasm();
+        FrameSummary::GetInnermost(frame).AsWasm();
     int func_index = static_cast<int>(summary.function_index());
     const auto& function = native_module_->module()->functions[func_index];
     int offset = summary.SourcePosition() - function.code.offset();
@@ -214,7 +214,7 @@ class DebugInfoImpl {
       WasmFrame* wasm_frame = WasmFrame::cast(it.frame());
       if (wasm_frame->native_module() != native_module_) break;
       FrameSummary::WasmFrameSummary summary =
-          FrameSummary::GetTop(wasm_frame).AsWasm();
+          FrameSummary::GetInnermost(wasm_frame).AsWasm();
       if (static_cast<int>(summary.function_index()) != func_index) break;
       return DeadBreakpoint(wasm_frame, breakpoints);
     }
@@ -389,7 +389,7 @@ class DebugInfoImpl {
     // Generate an additional source position for the current byte offset.
     base::MutexGuard guard(&mutex_);
     WasmCode* new_code = RecompileLiftoffWithBreakpoints(
-        FrameSummary::GetTop(frame).AsWasm().function_index(),
+        FrameSummary::GetInnermost(frame).AsWasm().function_index(),
         base::ArrayVector(kFloodingBreakpoints), 0);
     UpdateReturnAddress(frame, new_code, return_location);
 
@@ -399,7 +399,7 @@ class DebugInfoImpl {
   bool IsFrameBlackboxed(WasmFrame* frame) {
     NativeModule* native_module = frame->native_module();
     FrameSummary::WasmFrameSummary summary =
-        FrameSummary::GetTop(frame).AsWasm();
+        FrameSummary::GetInnermost(frame).AsWasm();
     int func_index = static_cast<int>(summary.function_index());
     WireBytesRef func_code =
         native_module->module()->functions[func_index].code;
@@ -725,37 +725,24 @@ class DebugInfoImpl {
   // code. The frame layout itself should be independent of breakpoints.
   void UpdateReturnAddresses(Isolate* isolate, WasmCode* new_code,
                              StackFrameId stepping_frame) {
-    auto matches = [new_code](WasmFrame* frame) {
-      return frame->native_module() == new_code->native_module() &&
-             FrameSummary::GetTop(frame).AsWasm().function_index() ==
-                 static_cast<uint32_t>(new_code->index()) &&
-             frame->wasm_code()->is_liftoff();
-    };
-
-    // 1. Find and handle the first Wasm frame (potential breakpoint resume).
-    DebuggableStackFrameIterator it(isolate);
-    while (!it.done() && !it.is_wasm()) it.Advance();
-
-    if (!it.done()) {
-      WasmFrame* frame = WasmFrame::cast(it.frame());
-      // We still need the flooded function for stepping.
-      if (frame->id() != stepping_frame &&
-#if V8_ENABLE_DRUMBRAKE
-          // TODO(paolosev@microsoft.com) - Implement for Wasm interpreter.
-          !it.is_wasm_interpreter_entry() &&
-#endif
-          matches(frame)) {
-        UpdateReturnAddress(frame, new_code, kAfterBreakpoint);
-      }
-      it.Advance();
-    }
-
-    // 2. Handle all remaining frames (always at call sites).
+    StackFrameIterator it(isolate);
     for (; !it.done(); it.Advance()) {
-      if (!it.is_wasm()) continue;
+      bool at_breakpoint = it.frame()->is_wasm_debug_break();
+      if (at_breakpoint) {
+        it.Advance();
+        CHECK(!it.done());
+      }
+      if (!it.frame()->is_wasm()) continue;
+#if V8_ENABLE_DRUMBRAKE
+      if (it.frame()->is_wasm_interpreter_entry()) continue;
+#endif
       WasmFrame* frame = WasmFrame::cast(it.frame());
-      if (!matches(frame)) continue;
-      UpdateReturnAddress(frame, new_code, kAfterWasmCall);
+      if (frame->native_module() != new_code->native_module()) continue;
+      WasmCode* code = frame->wasm_code();
+      if (!code->is_liftoff() || code->index() != new_code->index()) continue;
+      if (frame->id() == stepping_frame) continue;
+      UpdateReturnAddress(frame, new_code,
+                          at_breakpoint ? kAfterBreakpoint : kAfterWasmCall);
     }
   }
 
@@ -763,7 +750,7 @@ class DebugInfoImpl {
                            ReturnLocation return_location) {
     DCHECK(new_code->is_liftoff());
     FrameSummary::WasmFrameSummary summary =
-        FrameSummary::GetTop(frame).AsWasm();
+        FrameSummary::GetInnermost(frame).AsWasm();
     DCHECK_EQ(summary.function_index(),
               static_cast<uint32_t>(new_code->index()));
     DCHECK_EQ(frame->native_module(), new_code->native_module());
@@ -791,13 +778,13 @@ class DebugInfoImpl {
 #endif
     // The frame position should still be the same after OSR.
     DCHECK_EQ(old_position,
-              FrameSummary::GetTop(frame).AsWasm().SourcePosition());
+              FrameSummary::GetInnermost(frame).AsWasm().SourcePosition());
   }
 
   bool IsAtReturn(WasmFrame* frame) {
     DisallowGarbageCollection no_gc;
     FrameSummary::WasmFrameSummary summary =
-        FrameSummary::GetTop(frame).AsWasm();
+        FrameSummary::GetInnermost(frame).AsWasm();
     int position = summary.SourcePosition();
     NativeModule* native_module = frame->native_module();
     uint8_t opcode = native_module->wire_bytes()[position];

@@ -680,6 +680,7 @@ bool Code::IsWeakObjectInDeoptimizationLiteralArray(Tagged<Object> object) {
 }
 
 void Code::IterateDeoptimizationLiterals(RootVisitor* v) {
+  DisallowGarbageCollection no_gc;
   if (!uses_deoptimization_data()) {
     DCHECK(kind() == CodeKind::BASELINE ||
            !has_deoptimization_data_or_interpreter_data());
@@ -695,8 +696,11 @@ void Code::IterateDeoptimizationLiterals(RootVisitor* v) {
     Tagged<MaybeObject> maybe_literal = literals->get_raw(i);
     Tagged<HeapObject> heap_literal;
     if (maybe_literal.GetHeapObject(&heap_literal)) {
-      v->VisitRootPointer(Root::kStackRoots, "deoptimization literal",
-                          FullObjectSlot(&heap_literal));
+      {
+        DisableGCMole no_gcmole;
+        v->VisitRootPointer(Root::kStackRoots, "deoptimization literal",
+                            FullObjectSlot(&heap_literal));
+      }
     }
   }
 }
@@ -845,11 +849,12 @@ void Code::SetInstructionStartForOffHeapBuiltin(IsolateForSandbox isolate,
 void Code::ClearInstructionStartForSerialization(IsolateForSandbox isolate) {
 #ifdef V8_ENABLE_SANDBOX
   // The instruction start is stored in this object's code pointer table.
-  WriteField<CodePointerHandle>(
+  WriteField<IndirectPointerHandle>(
       offsetof(ExposedTrustedObject, self_indirect_pointer_),
-      kNullCodePointerHandle);
+      kNullIndirectPointerHandle);
 #endif  // V8_ENABLE_SANDBOX
   set_instruction_start(isolate, kNullAddress);
+  ExternalCodeField<Object>::Release_Store(this, Smi::zero());
 }
 
 void Code::UpdateInstructionStart(IsolateForSandbox isolate,

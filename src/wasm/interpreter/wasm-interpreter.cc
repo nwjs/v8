@@ -450,22 +450,6 @@ void WasmExecutionTimer::Terminate() {
 }
 
 namespace {
-void NopFinalizer(const v8::WeakCallbackInfo<void>& data) {
-  Address* global_handle_location =
-      reinterpret_cast<Address*>(data.GetParameter());
-  GlobalHandles::Destroy(global_handle_location);
-}
-
-IndirectHandle<WasmInstanceObject> MakeWeak(
-    Isolate* isolate, DirectHandle<WasmInstanceObject> instance_object) {
-  Handle<WasmInstanceObject> weak_instance =
-      isolate->global_handles()->Create<WasmInstanceObject>(*instance_object);
-  Address* global_handle_location = weak_instance.location();
-  GlobalHandles::MakeWeak(global_handle_location, global_handle_location,
-                          &NopFinalizer, v8::WeakCallbackType::kParameter);
-  return weak_instance;
-}
-
 std::optional<wasm::ValueType> GetWasmReturnTypeFromSignature(
     const FunctionSig* wasm_signature) {
   if (wasm_signature->return_count() == 0) return {};
@@ -737,21 +721,30 @@ WasmInterpreter::WasmInterpreter(
     const ModuleWireBytes& wire_bytes,
     DirectHandle<WasmInstanceObject> instance_object)
     : zone_(isolate->allocator(), ZONE_NAME),
-      instance_object_(MakeWeak(isolate, instance_object)),
       module_bytes_(wire_bytes.start(), wire_bytes.end(), &zone_),
       codemap_(isolate, module, module_bytes_.data(), &zone_) {
   wasm_runtime_ = std::make_shared<WasmInterpreterRuntime>(
-      module, isolate, instance_object_, &codemap_);
+      module, isolate, instance_object, &codemap_);
   module->SetWasmInterpreter(wasm_runtime_);
 
 #if !defined(V8_DRUMBRAKE_BOUNDS_CHECKS)
-  // TODO(paolosev@microsoft.com) - For modules that have 64-bit Wasm memory we
-  // need to use explicit bound checks; memory guard pages only work with 32-bit
-  // memories. This could be implemented by allocating a different dispatch
-  // table for each instance (probably in the WasmInterpreterRuntime object) and
-  // patching the entries of Load/Store instructions with builtin handlers only
-  // for instances related to modules that have 32-bit memories. 64-bit memories
-  // are not supported yet by DrumBrake.
+  // The no-bounds-check load/store builtins below rely on (a) the 8 GB guard
+  // region around memory32 backing stores and (b) the OS trap handler that
+  // redirects faults to TrapMemOutOfBounds. BOTH are gated on
+  // trap_handler::IsTrapHandlerEnabled() at runtime (see
+  // BackingStore::AllocateWasmMemory and v8::V8::EnableWebAssemblyTrapHandler).
+  // Without it, a Wasm module gets unchecked OOB R/W over ~8 GB. Refuse to run
+  // in that configuration rather than silently mis-execute.
+  CHECK(trap_handler::IsTrapHandlerEnabled());
+
+  // Only modules with 32-bit Wasm memory use the no-bounds-check Load/Store
+  // builtins installed here, which delegate out-of-bounds detection to the
+  // memory guard regions plus the trap handler. Modules with 64-bit memory
+  // instead emit the *_Mem64 / *_MultiMem64 handler variants, which perform
+  // explicit bounds checks, because the memory guard pages only cover 32-bit
+  // memories. See EMIT_MULTI_MEM64_INSTR_HANDLER and
+  // FOREACH_LOAD_STORE_REGULAR_INSTR_HANDLER (which only lists the 32-bit base
+  // handlers that are overwritten with builtins below).
   base::CallOnce(&init_instruction_table_once, &InitInstructionTableOnce,
                  isolate);
   base::CallOnce(&init_trap_handlers_once, &InitTrapHandlersOnce, isolate);
@@ -6157,6 +6150,7 @@ class Handlers : public HandlersBase {
     if (V8_UNLIKELY(wasm_runtime->IsRefNull(struct_obj))) {
       TRAP(MessageTemplate::kWasmTrapNullDereference)
     }
+    DCHECK(IsWasmStruct(*struct_obj));
     int offset = Read<int32_t>(code);
     Address field_addr = (*struct_obj).ptr() + offset;
     push<T>(sp, code, wasm_runtime, base::ReadUnalignedValue<U>(field_addr));
@@ -6180,6 +6174,7 @@ class Handlers : public HandlersBase {
     if (V8_UNLIKELY(wasm_runtime->IsRefNull(struct_obj))) {
       TRAP(MessageTemplate::kWasmTrapNullDereference)
     }
+    DCHECK(IsWasmStruct(*struct_obj));
     int offset = Read<int32_t>(code);
     Address field_addr = (*struct_obj).ptr() + offset;
     // DrumBrake expects pointer compression.
@@ -6203,6 +6198,7 @@ class Handlers : public HandlersBase {
     if (V8_UNLIKELY(wasm_runtime->IsRefNull(struct_obj))) {
       TRAP(MessageTemplate::kWasmTrapNullDereference)
     }
+    DCHECK(IsWasmStruct(*struct_obj));
     Address field_addr = (*struct_obj).ptr() + offset;
     base::WriteUnalignedValue<U>(field_addr, value);
 
@@ -6225,6 +6221,7 @@ class Handlers : public HandlersBase {
     if (V8_UNLIKELY(wasm_runtime->IsRefNull(struct_obj))) {
       TRAP(MessageTemplate::kWasmTrapNullDereference)
     }
+    DCHECK(IsWasmStruct(*struct_obj));
     Address field_addr = (*struct_obj).ptr() + field_offset;
     StoreRefIntoMemory(
         TrustedCast<HeapObject>(*struct_obj), field_addr,

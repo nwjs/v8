@@ -26,9 +26,10 @@
 #include "src/objects/descriptor-array.h"
 #include "src/objects/dictionary.h"
 #include "src/objects/foreign.h"
+#include "src/objects/hash-seed-wrapper.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type-inl.h"
-#include "src/objects/instance-type.h"
 #include "src/objects/js-atomics-synchronization.h"
 #include "src/objects/js-generator.h"
 #include "src/objects/js-shared-array.h"
@@ -36,6 +37,7 @@
 #include "src/objects/literal-objects-inl.h"
 #include "src/objects/lookup-cache.h"
 #include "src/objects/map.h"
+#include "src/objects/megadom-handler.h"
 #include "src/objects/microtask.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/oddball-inl.h"
@@ -51,7 +53,6 @@
 #include "src/objects/synthetic-module.h"
 #include "src/objects/template-objects-inl.h"
 #include "src/objects/templates.h"
-#include "src/objects/torque-defined-classes-inl.h"
 #include "src/objects/turbofan-types.h"
 #include "src/objects/turboshaft-types.h"
 #include "src/regexp/regexp.h"
@@ -653,6 +654,8 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
 
     ALLOCATE_MAP(FOREIGN_TYPE, sizeof(Foreign), foreign)
     ALLOCATE_MAP(TRUSTED_FOREIGN_TYPE, sizeof(TrustedForeign), trusted_foreign)
+    ALLOCATE_MAP(HASH_SEED_WRAPPER_TYPE, sizeof(HashSeedWrapper),
+                 hash_seed_wrapper)
     ALLOCATE_MAP(MEGA_DOM_HANDLER_TYPE, sizeof(MegaDomHandler),
                  mega_dom_handler)
 
@@ -847,6 +850,7 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
                  object_template_info)
     ALLOCATE_MAP(INTERPRETER_DATA_TYPE, sizeof(InterpreterData),
                  interpreter_data)
+    ALLOCATE_MAP(DEBUG_INFO_TYPE, sizeof(DebugInfo), debug_info)
 
     ALLOCATE_MAP(UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_TYPE,
                  sizeof(UncompiledDataWithoutPreparseData),
@@ -973,9 +977,7 @@ bool Heap::CreateImportantReadOnlyObjects() {
   // Hash seed for strings
 
   Factory* factory = isolate()->factory();
-  set_hash_seed(*factory->NewByteArray(HashSeed::kTotalSize,
-                                       AllocationType::kReadOnly,
-                                       AllocationAlignment::kDoubleAligned));
+  set_hash_seed(*factory->NewHashSeedWrapper());
   HashSeed::InitializeRoots(isolate());
 
   // Important strings and symbols

@@ -253,7 +253,12 @@ class OrderedHashTable : public FixedArray {
     return EntryToIndexRaw(entry.as_int());
   }
 
-  int HashToBucket(int hash) { return hash & (NumberOfBuckets() - 1); }
+  int HashToBucket(int hash) {
+    if constexpr (V8_LOWER_LIMITS_MODE_BOOL) {
+      hash &= 0xf;
+    }
+    return hash & (NumberOfBuckets() - 1);
+  }
 
   void SetNumberOfBuckets(int num) {
     set(NumberOfBucketsIndex(), Smi::FromInt(num));
@@ -279,7 +284,7 @@ class OrderedHashTable : public FixedArray {
   friend class OrderedNameDictionaryHandler;
 };
 
-class V8_EXPORT_PRIVATE OrderedHashSet
+V8_OBJECT class V8_EXPORT_PRIVATE OrderedHashSet
     : public OrderedHashTable<OrderedHashSet, 1> {
   using Base = OrderedHashTable<OrderedHashSet, 1>;
 
@@ -318,9 +323,9 @@ class V8_EXPORT_PRIVATE OrderedHashSet
   static inline Handle<Map> GetMap(RootsTable& roots);
   static inline bool Is(DirectHandle<HeapObject> table);
   static const int kPrefixSize = 0;
-};
+} V8_OBJECT_END;
 
-class V8_EXPORT_PRIVATE OrderedHashMap
+V8_OBJECT class V8_EXPORT_PRIVATE OrderedHashMap
     : public OrderedHashTable<OrderedHashMap, 2> {
   using Base = OrderedHashTable<OrderedHashMap, 2>;
 
@@ -367,7 +372,7 @@ class V8_EXPORT_PRIVATE OrderedHashMap
 
   static const int kValueOffset = 1;
   static const int kPrefixSize = 0;
-};
+} V8_OBJECT_END;
 
 // This is similar to the OrderedHashTable, except for the memory
 // layout where we use byte instead of Smi. The max capacity of this
@@ -803,7 +808,7 @@ class V8_EXPORT_PRIVATE OrderedHashSetHandler
       Isolate* isolate, DirectHandle<SmallOrderedHashSet> table);
 };
 
-class V8_EXPORT_PRIVATE OrderedNameDictionary
+V8_OBJECT class V8_EXPORT_PRIVATE OrderedNameDictionary
     : public OrderedHashTable<OrderedNameDictionary, 3> {
   using Base = OrderedHashTable<OrderedNameDictionary, 3>;
 
@@ -878,7 +883,7 @@ class V8_EXPORT_PRIVATE OrderedNameDictionary
   static constexpr int HashIndex() { return PrefixIndex(); }
 
   static const bool kIsOrderedDictionaryType = true;
-};
+} V8_OBJECT_END;
 
 extern template class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
     OrderedHashTableHandler<SmallOrderedNameDictionary, OrderedNameDictionary>;

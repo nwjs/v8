@@ -24,7 +24,13 @@ class NativeModule;
 class CompilationResultResolver;
 
 // This class is an interface for the StreamingDecoder to start the processing
-// of the incoming module bytes.
+// of the incoming module bytes. The StreamingDecoder will call the methods
+// of the StreamingProcessor as the corresponding parts of the module are
+// decoded.
+//
+// In the case of asynchronous streaming compilation, the
+// {AsyncStreamingProcessor} (in module-compiler.cc) is used to connect the
+// decoder to an {AsyncCompileJob}.
 class V8_EXPORT_PRIVATE StreamingProcessor {
  public:
   virtual ~StreamingProcessor() = default;
@@ -76,6 +82,14 @@ class V8_EXPORT_PRIVATE StreamingProcessor {
 // The StreamingDecoder takes a sequence of byte arrays, each received by a call
 // of {OnBytesReceived}, and extracts the bytes which belong to section payloads
 // and function bodies.
+//
+// There are two main implementations:
+// 1. {AsyncStreamingDecoder} (in streaming-decoder.cc): The default
+//    implementation used when --wasm-async-compilation is enabled. It uses an
+//    {AsyncStreamingProcessor} to drive an {AsyncCompileJob}.
+// 2. {SyncStreamingDecoder} (in sync-streaming-decoder.cc): A fallback used
+//    when --no-wasm-async-compilation is set. It buffers all bytes and
+//    performs compilation synchronously when {Finish} is called.
 class V8_EXPORT_PRIVATE StreamingDecoder {
  public:
   virtual ~StreamingDecoder() = default;
@@ -91,9 +105,9 @@ class V8_EXPORT_PRIVATE StreamingDecoder {
 
   virtual void Abort() = 0;
 
-  // Notify the StreamingDecoder that the job was discarded and the
+  // Notify the StreamingDecoder that the job is finished and the
   // StreamingProcessor should not be called anymore.
-  virtual void NotifyCompilationDiscarded() = 0;
+  virtual void NotifyCompilationStopped() = 0;
 
   // Caching support.
   // Sets the callback that is called after a new chunk of the module is tiered

@@ -16,8 +16,6 @@ namespace internal {
 
 class StructBodyDescriptor;
 
-#include "torque-generated/src/objects/struct-tq.inc"
-
 // An abstract superclass, a marker class really, for simple structure classes.
 // It doesn't carry any functionality but allows struct classes to be
 // identified in the type system.
@@ -51,6 +49,7 @@ V8_OBJECT class Tuple2 : public Struct {
   DECL_PRINTER(Tuple2)
 
  private:
+  friend class CodeStubAssembler;
   friend class TorqueGeneratedTuple2Asserts;
   TaggedMember<Object> value1_;
   TaggedMember<Object> value2_;

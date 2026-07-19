@@ -1202,7 +1202,7 @@ void EnableExperimentalWasmFeatures(v8::Isolate* isolate) {
         : isolate(isolate) {
       // Enable all staged features.
 #define ENABLE_PRE_STAGED_AND_STAGED_FEATURES(feat, ...) \
-  v8_flags.experimental_wasm_##feat = true;
+  v8_flags.wasm_##feat = true;
       FOREACH_WASM_PRE_STAGING_FEATURE_FLAG(
           ENABLE_PRE_STAGED_AND_STAGED_FEATURES)
       FOREACH_WASM_STAGING_FEATURE_FLAG(ENABLE_PRE_STAGED_AND_STAGED_FEATURES)
@@ -1219,17 +1219,17 @@ void EnableExperimentalWasmFeatures(v8::Isolate* isolate) {
 
       // The "pure Wasm" part of this proposal is considered ready for
       // fuzzing, the JS-related part (prototypes etc) not yet.
-      v8_flags.experimental_wasm_custom_descriptors = true;
+      v8_flags.wasm_custom_descriptors = true;
 
 #ifdef V8_ENABLE_WASM_SIMD256_REVEC
       // Fuzz revectorization, which is otherwise still considered experimental.
-      v8_flags.experimental_wasm_revectorize = true;
+      v8_flags.wasm_revectorize = true;
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 #if V8_TARGET_ARCH_ARM64
       // Fuzz the Wasm SIMD optimizations in Turboshaft for aarch64.
-      v8_flags.experimental_wasm_simd_opt = true;
-      v8_flags.experimental_wasm_deinterleave_loads = true;
+      v8_flags.future_wasm_simd_opt = true;
+      v8_flags.wasm_deinterleave_loads = true;
 #endif  // V8_TARGET_ARCH_ARM64
 
       // Enforce implications from enabling features.
@@ -1300,15 +1300,30 @@ int WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
   AccountingAllocator allocator;
   Zone zone(&allocator, ZONE_NAME);
 
-  // The first byte specifies some internal configuration, like which function
-  // is compiled with which compiler, and other flags.
-  uint8_t configuration_byte = data.empty() ? 0 : data[0];
+  // The first byte specifies which flags are set.
+  uint8_t flags_byte = data.empty() ? 0 : data[0];
   if (!data.empty()) data += 1;
 
   // Enable Wasm type assertions half the time.
-  const bool assert_types = configuration_byte & 1;
-  configuration_byte >>= 1;
+#if defined(DEBUG) && defined(V8_USE_ADDRESS_SANITIZER)
+  // Disable type assertions on slow builds (Debug + ASan) to avoid timeouts in
+  // TurboFan compilation (see crbug.com/520317061).
+  const bool assert_types = false;
+#else
+  const bool assert_types = flags_byte & 1;
+#endif
+  flags_byte >>= 1;
   FlagScope<bool> assert_types_scope(&v8_flags.wasm_assert_types, assert_types);
+  // Enable rescheduling of operations in the Turboshaft graph half the time.
+  const bool turbofan_random_rescheduling = flags_byte & 1;
+  flags_byte >>= 1;
+  FlagScope<bool> rescheduling_scope(&v8_flags.wasm_random_rescheduling,
+                                     turbofan_random_rescheduling);
+
+  // The next byte specifies some internal configuration, like which function
+  // is compiled with which compiler.
+  uint8_t configuration_byte = data.empty() ? 0 : data[0];
+  if (!data.empty()) data += 1;
 
   // Derive the compiler configuration for the first four functions from the
   // configuration byte, to choose for each function between:

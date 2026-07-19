@@ -8,16 +8,18 @@
 #include "src/objects/source-text-module.h"
 // Include the non-inl header before the rest of the headers.
 
+#include "src/objects/js-function-inl.h"
+#include "src/objects/js-generator-inl.h"
 #include "src/objects/module-inl.h"
 #include "src/objects/objects-inl.h"
+#include "src/objects/oddball-predicates-inl.h"
+#include "src/objects/shared-function-info-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
 
 namespace v8 {
 namespace internal {
-
-#include "torque-generated/src/objects/source-text-module-tq-inl.inc"
 
 Tagged<String> ModuleRequest::specifier() const { return specifier_.load(); }
 void ModuleRequest::set_specifier(Tagged<String> value, WriteBarrierMode mode) {

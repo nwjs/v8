@@ -29,6 +29,8 @@ enum class CppHeapPointerTag : uint16_t {
   kFirstTag = 0,
   kNullTag = 0,
 
+  kFirstObjectWrappableTag = 1,
+
   /**
    * The lower type ids are reserved for the embedder to assign. For that, the
    * main requirement is that all (transitive) child classes of a given parent
@@ -53,8 +55,20 @@ enum class CppHeapPointerTag : uint16_t {
    * SUB with a single AND).
    */
 
-  kDefaultTag = 0x7000,
+  kFirstV8InternalTag = 0x6000,
+  // V8-internal Oilpan objects that use v8::Object::Wrap() should go here.
+  kTagForTesting,
+  kInspectorV8ConsoleTag,
+  kInspectorTaskInfoTag,
+  kWasmMemoryMapDescriptorTag,
+  kLastV8InternalTag,
 
+#if !V8_ENABLE_SANDBOX
+  // Embedders that use the sandbox should use specific tags for each type.
+  kDefaultTag,
+#endif  // !V8_ENABLE_SANDBOX
+
+  kLastObjectWrappableTag = 0x7ffc,
   kZappedEntryTag = 0x7ffd,
   kEvacuationEntryTag = 0x7ffe,
   kFreeEntryTag = 0x7fff,
@@ -62,10 +76,28 @@ enum class CppHeapPointerTag : uint16_t {
   kLastTag = 0x7fff,
 };
 
+static_assert(static_cast<uint16_t>(CppHeapPointerTag::kLastV8InternalTag) <
+              static_cast<uint16_t>(CppHeapPointerTag::kZappedEntryTag));
+
 using CppHeapPointerTagRange = internal::TagRange<CppHeapPointerTag>;
 
 constexpr CppHeapPointerTagRange kAnyCppHeapPointer(
     CppHeapPointerTag::kFirstTag, CppHeapPointerTag::kZappedEntryTag);
+
+// All tags that are used with v8::Object::Wrappable have to be within this
+// tag range. The reason is that in some cases, an APIWrapper object has to be
+// unwrapped to access the v8::Object::Wrappable base class, e.g. to get type
+// information.
+constexpr CppHeapPointerTagRange kObjectWrappableTagRange(
+    CppHeapPointerTag::kFirstObjectWrappableTag,
+    CppHeapPointerTag::kLastObjectWrappableTag);
+
+constexpr CppHeapPointerTagRange kV8InternalTagRange(
+    CppHeapPointerTag::kFirstV8InternalTag,
+    CppHeapPointerTag::kLastV8InternalTag);
+
+static_assert(kObjectWrappableTagRange.Contains(kV8InternalTagRange),
+              "V8Internal tag range must be within kObjectWrappableTagRange");
 
 /**
  * Hardware support for the V8 Sandbox.

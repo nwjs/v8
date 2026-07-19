@@ -292,6 +292,7 @@ class V8_EXPORT_PRIVATE SimdShuffle {
     kS16x8ReverseBytes,
     kS16x8TransposeEven,
     kS16x8TransposeOdd,
+    kS16x8TopBottomInterleave,
     kS16x4DeinterleaveEvenEven,
     kS16x4DeinterleaveOddEven,
     kS16x4DeinterleaveEvenOdd,
@@ -313,6 +314,14 @@ class V8_EXPORT_PRIVATE SimdShuffle {
     kS8x8DeinterleaveOddEven,
     kS8x8DeinterleaveEvenOdd,
     kS8x8DeinterleaveOddOdd,
+    kS8x4DeinterleaveEvenEvenEven,
+    kS8x4DeinterleaveOddEvenEven,
+    kS8x4DeinterleaveEvenOddEven,
+    kS8x4DeinterleaveOddOddEven,
+    kS8x4DeinterleaveEvenEvenOdd,
+    kS8x4DeinterleaveOddEvenOdd,
+    kS8x4DeinterleaveEvenOddOdd,
+    kS8x4DeinterleaveOddOddOdd,
   };
 
   template <size_t N = kSimd128Size>

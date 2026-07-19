@@ -8,7 +8,8 @@
 #include "src/objects/property-array.h"
 // Include the non-inl header before the rest of the headers.
 
-#include "src/objects/objects-inl.h"
+#include "src/objects/heap-object-inl.h"
+#include "src/objects/object-predicates-inl.h"
 #include "src/objects/tagged-field-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -16,8 +17,6 @@
 
 namespace v8 {
 namespace internal {
-
-#include "torque-generated/src/objects/property-array-tq-inl.inc"
 
 int PropertyArray::length_and_hash() const {
   return length_and_hash_.load().value();
@@ -46,7 +45,7 @@ Tagged<Object> PropertyArray::get(int index, SeqCstAccessTag) const {
 }
 
 void PropertyArray::set(int index, Tagged<Object> value) {
-  DCHECK(IsPropertyArray(this));
+  DCHECK(Is<PropertyArray>(this));
   DCHECK_LT(static_cast<uint32_t>(index), this->length(kAcquireLoad).value());
   objects()[index].Relaxed_Store(this, value);
 }
@@ -58,7 +57,7 @@ void PropertyArray::set(int index, Tagged<Object> value,
 }
 
 void PropertyArray::set(int index, Tagged<Object> value, SeqCstAccessTag) {
-  DCHECK(IsPropertyArray(this));
+  DCHECK(Is<PropertyArray>(this));
   DCHECK_LT(static_cast<uint32_t>(index), this->length(kAcquireLoad).value());
   DCHECK(IsShared(value));
   objects()[index].SeqCst_Store(this, value);
@@ -66,7 +65,7 @@ void PropertyArray::set(int index, Tagged<Object> value, SeqCstAccessTag) {
 
 Tagged<Object> PropertyArray::Swap(int index, Tagged<Object> value,
                                    SeqCstAccessTag) {
-  DCHECK(IsPropertyArray(this));
+  DCHECK(Is<PropertyArray>(this));
   DCHECK_LT(static_cast<uint32_t>(index), this->length(kAcquireLoad).value());
   DCHECK(IsShared(value));
   return objects()[index].SeqCst_Swap(this, value);
@@ -75,7 +74,7 @@ Tagged<Object> PropertyArray::Swap(int index, Tagged<Object> value,
 Tagged<Object> PropertyArray::CompareAndSwap(int index, Tagged<Object> expected,
                                              Tagged<Object> value,
                                              SeqCstAccessTag) {
-  DCHECK(IsPropertyArray(this));
+  DCHECK(Is<PropertyArray>(this));
   DCHECK_LT(static_cast<uint32_t>(index), this->length(kAcquireLoad).value());
   DCHECK(IsShared(value));
   return objects()[index].SeqCst_CompareAndSwap(this, expected, value);

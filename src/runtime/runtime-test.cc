@@ -24,7 +24,6 @@
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/arguments-inl.h"
 #include "src/execution/frames-inl.h"
-#include "src/execution/frames.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/protectors-inl.h"
 #include "src/execution/tiering-manager.h"
@@ -33,6 +32,7 @@
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/ic/stub-cache.h"
+#include "src/objects/abstract-code-inl.h"
 #include "src/objects/bytecode-array.h"
 #include "src/objects/js-collection-inl.h"
 #include "src/profiler/heap-profiler.h"
@@ -1193,7 +1193,7 @@ RUNTIME_FUNCTION(Runtime_SetAllocationTimeout) {
   CONVERT_INT32_ARG_FUZZ_SAFE(timeout, 1);
   isolate->heap()->set_allocation_timeout(timeout);
 #else   // !V8_ENABLE_ALLOCATION_TIMEOUT
-  static std::atomic_flag printed_warning{false};
+  static std::atomic_flag printed_warning = ATOMIC_FLAG_INIT;
   if (!printed_warning.test_and_set()) {
     base::OS::PrintError(
         "Warning: %%SetAllocationTimeout has no effect in this build. Set the "
@@ -1576,6 +1576,7 @@ RUNTIME_FUNCTION(Runtime_GlobalPrint) {
     }
   }
 
+  CHECK_UNLESS_FUZZING(args.length() >= 1);
   if (!IsString(args[0])) {
     return args[0];
   }
@@ -2073,6 +2074,22 @@ RUNTIME_FUNCTION(Runtime_TurbofanStaticAssert) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
+RUNTIME_FUNCTION(Runtime_AssertPeeled) {
+  SealHandleScope shs(isolate);
+  // In Turbolev this is lowered to an AssertPeeled node that the loop peeler
+  // removes when it peels the surrounding loop, so we never reach this in
+  // compiled code once peeling fires.
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_AssertNotPeeled) {
+  SealHandleScope shs(isolate);
+  // In Turbolev this is lowered to an AssertPeeled node that fails compilation
+  // if the loop peeler peels the surrounding loop, so we never reach this in
+  // compiled code unless the loop was (correctly) left unpeeled.
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
 RUNTIME_FUNCTION(Runtime_IsBeingInterpreted) {
   SealHandleScope shs(isolate);
   // Always lowered to false in Turbofan, so we never get here in compiled code.
@@ -2420,7 +2437,13 @@ RUNTIME_FUNCTION(Runtime_GetFeedback) {
       if (interpreter::Bytecodes::IsCompareWithEmbeddedFeedback(bytecode)) {
         out << "CompareOp";
         feedback_value.slot_kind_ = out.str();
-        out << ":" << it.GetEmbeddedCompareOperationHint();
+        out << ":" << it.GetEmbeddedOperationHint<CompareOperationFeedback>();
+        feedback_value.details_ = out.str();
+      } else if (interpreter::Bytecodes::IsBinaryOpWithEmbeddedFeedback(
+                     bytecode)) {
+        out << "BinaryOp";
+        feedback_value.slot_kind_ = out.str();
+        out << ":" << it.GetEmbeddedOperationHint<BinaryOperationFeedback>();
         feedback_value.details_ = out.str();
       } else {
         UNREACHABLE();
@@ -2843,6 +2866,61 @@ RUNTIME_FUNCTION(Runtime_AllocateHeapNumberWithValue) {
     return *isolate->factory()->NewHeapNumber(i::Smi::ToInt(*result_handle));
   }
   return *result_handle;
+}
+
+// Blocks the background compiler (or other background tasks) at the specified
+// synchronization point. The task will remain blocked until %Resume is called.
+// This is primarily used for deterministically testing race conditions.
+RUNTIME_FUNCTION(Runtime_BlockAt) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CHECK_UNLESS_FUZZING(IsString(args[0]));
+  CHECK_UNLESS_FUZZING(IsSmi(args[1]));
+  DirectHandle<String> phase_name = args.at<String>(0);
+  base::TimeDelta timeout =
+      base::TimeDelta::FromMilliseconds(args.smi_value_at(1));
+  isolate->isolate_group()->SetBlockAtSynchronizationPointForTesting(
+      phase_name->ToStdString(), timeout);
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
+// Resumes a background compiler (or other background task) that was previously
+// blocked by %BlockAt at the specified synchronization point.
+RUNTIME_FUNCTION(Runtime_Resume) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CHECK_UNLESS_FUZZING(IsString(args[0]));
+  DirectHandle<String> phase_name = args.at<String>(0);
+  bool resumed = isolate->isolate_group()->ResumeSynchronizationPointForTesting(
+      phase_name->ToStdString());
+  if (!resumed) {
+    return isolate->Throw(*isolate->factory()->NewStringFromAsciiChecked(
+        "No thread is currently blocked at this synchronization point"));
+  }
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
+// Waits until the given synchronization point is reached. Throws an exception
+// if the point is not armed or if a timeout is reached. The timeout is
+// provided in milliseconds.
+RUNTIME_FUNCTION(Runtime_WaitUntilBlocked) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CHECK_UNLESS_FUZZING(IsString(args[0]));
+  CHECK_UNLESS_FUZZING(IsSmi(args[1]));
+  DirectHandle<String> phase_name = args.at<String>(0);
+  base::TimeDelta timeout =
+      base::TimeDelta::FromMilliseconds(args.smi_value_at(1));
+
+  bool timed_out = false;
+  bool blocked = isolate->isolate_group()->WaitUntilBlockedForTesting(
+      phase_name->ToStdString(), timeout, timed_out);
+  if (!blocked) {
+    return isolate->Throw(*isolate->factory()->NewStringFromAsciiChecked(
+        timed_out ? "Synchronization point wait timed out"
+                  : "Synchronization point not found or not armed"));
+  }
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 }  // namespace internal
