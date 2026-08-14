@@ -7,6 +7,7 @@
 #include <inttypes.h>
 
 #include "src/base/logging.h"
+#include "src/base/strong-alias.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/reloc-info-inl.h"
 #include "src/common/assert-scope.h"
@@ -15,12 +16,12 @@
 #include "src/handles/global-handles-inl.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
-#include "src/heap/heap-write-barrier.h"
 #include "src/heap/heap.h"
 #include "src/heap/local-heap-inl.h"
 #include "src/logging/local-logger.h"
 #include "src/logging/log.h"
 #include "src/objects/backing-store.h"
+#include "src/objects/heap-object-field-inl.h"
 #include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/maybe-object.h"
@@ -333,7 +334,6 @@ Deserializer<IsolateT>::Deserializer(IsolateT* isolate,
       interceptor_infos_(isolate),
       function_template_infos_(isolate),
       new_scripts_(isolate),
-      new_descriptor_arrays_(isolate->heap()),
       deserializing_user_code_(deserializing_user_code),
       should_rehash_((v8_flags.rehash_snapshot && can_rehash) ||
                      deserializing_user_code),
@@ -431,11 +431,6 @@ void Deserializer<IsolateT>::LogNewMapEvents() {
     LOG(isolate(), MapCreate(*map));
     LOG(isolate(), MapDetails(*map));
   }
-}
-
-template <typename IsolateT>
-void Deserializer<IsolateT>::WeakenDescriptorArrays() {
-  isolate()->heap()->WeakenDescriptorArrays(std::move(new_descriptor_arrays_));
 }
 
 template <typename IsolateT>
@@ -576,12 +571,11 @@ void Deserializer<Isolate>::PostProcessNewJSReceiver(
                                 EmptyBackingStoreBuffer());
     } else {
       auto bs = backing_store(store_index);
-      SharedFlag shared = SharedFlag(bs && bs->is_shared());
+      SharedFlag shared = bs ? bs->is_shared() : SharedFlag{false};
       DCHECK_IMPLIES(bs,
                      buffer->is_resizable_by_js() == bs->is_resizable_by_js());
-      ResizableFlag resizable = bs && bs->is_resizable_by_js()
-                                    ? ResizableFlag::kResizable
-                                    : ResizableFlag::kNotResizable;
+      ResizableFlag resizable =
+          bs ? bs->is_resizable_by_js() : ResizableFlag{false};
       buffer->Setup(shared, resizable, bs, main_thread_isolate(),
                     buffer->views());
     }
@@ -706,10 +700,6 @@ void Deserializer<IsolateT>::PostProcessNewObject(DirectHandle<Map> map,
     no_gc.Release();
     return PostProcessNewJSReceiver(raw_map, Cast<JSReceiver>(obj),
                                     instance_type, space);
-  } else if (InstanceTypeChecker::IsDescriptorArray(instance_type)) {
-    DCHECK(InstanceTypeChecker::IsStrongDescriptorArray(instance_type));
-    auto descriptors = Cast<DescriptorArray>(obj);
-    new_descriptor_arrays_.Push(*descriptors);
   } else if (InstanceTypeChecker::IsNativeContext(instance_type)) {
     Tagged<NativeContext> context = Cast<NativeContext>(raw_obj);
     context->init_microtask_queue(main_thread_isolate(), nullptr);
@@ -827,7 +817,7 @@ Handle<HeapObject> Deserializer<IsolateT>::ReadObject(SnapshotSpace space) {
   //       previously allocated object has a valid size (see `Allocate`).
 
   const InSharedSpace in_shared_space =
-      IsSharedAllocationType(allocation) ? kInSharedSpace : kNotInSharedSpace;
+      InSharedSpace{IsSharedAllocationType(allocation)};
   Tagged<HeapObject> raw_obj =
       Allocate(allocation, size_in_bytes,
                HeapObject::RequiredAlignment(in_shared_space, *map));
@@ -1402,9 +1392,9 @@ int Deserializer<IsolateT>::ReadOffHeapBackingStore(
 
   std::unique_ptr<BackingStore> backing_store;
   if (data == kOffHeapBackingStore) {
-    backing_store = BackingStore::Allocate(main_thread_isolate(), byte_length,
-                                           SharedFlag::kNo,
-                                           InitializedFlag::kUninitialized);
+    backing_store =
+        BackingStore::Allocate(main_thread_isolate(), byte_length,
+                               SharedFlag{false}, InitializedFlag{false});
   } else {
     uint32_t max_byte_length = source_.GetUint32();
     size_t page_size, initial_pages, max_pages;
@@ -1416,7 +1406,7 @@ int Deserializer<IsolateT>::ReadOffHeapBackingStore(
     USE(result);
     backing_store = BackingStore::TryAllocateAndPartiallyCommitMemory(
         main_thread_isolate(), byte_length, max_byte_length, page_size,
-        initial_pages, max_pages, WasmMemoryFlag::kNotWasm, SharedFlag::kNo);
+        initial_pages, max_pages, WasmMemoryFlag::kNotWasm, SharedFlag{false});
   }
   CHECK_NOT_NULL(backing_store);
   source_.CopyRaw(backing_store->buffer_start(), byte_length);

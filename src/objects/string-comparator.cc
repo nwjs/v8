@@ -4,6 +4,7 @@
 
 #include "src/objects/string-comparator.h"
 
+#include "src/heap/read-only-heap-inl.h"
 #include "src/objects/string-inl.h"
 
 namespace v8 {

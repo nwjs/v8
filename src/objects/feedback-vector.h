@@ -323,7 +323,7 @@ V8_OBJECT class FeedbackVector : public HeapObject {
   DECL_GETTER(metadata, Tagged<FeedbackMetadata>)
   DECL_ACQUIRE_GETTER(metadata, Tagged<FeedbackMetadata>)
 
-  inline int length() const;
+  inline SafeHeapObjectSize length() const;
   inline void set_length(int32_t value);
 
   inline int32_t invocation_count() const;

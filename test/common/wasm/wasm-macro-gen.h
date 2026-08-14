@@ -765,24 +765,6 @@ inline uint16_t ExtractPrefixedOpcodeBytes(WasmOpcode opcode) {
 #define WASM_I32_EQZ(x) x, kExprI32Eqz
 
 //------------------------------------------------------------------------------
-// Asmjs Int32 operations
-//------------------------------------------------------------------------------
-#define WASM_ASMJS_OP(op) kAsmJsPrefix, static_cast<uint8_t>(op)
-
-#define WASM_I32_ASMJS_DIVS(x, y) x, y, WASM_ASMJS_OP(kExprI32AsmjsDivS)
-#define WASM_I32_ASMJS_REMS(x, y) x, y, WASM_ASMJS_OP(kExprI32AsmjsRemS)
-#define WASM_I32_ASMJS_DIVU(x, y) x, y, WASM_ASMJS_OP(kExprI32AsmjsDivU)
-#define WASM_I32_ASMJS_REMU(x, y) x, y, WASM_ASMJS_OP(kExprI32AsmjsRemU)
-#define WASM_I32_ASMJS_SCONVERTF32(x) x, WASM_ASMJS_OP(kExprI32AsmjsSConvertF32)
-#define WASM_I32_ASMJS_SCONVERTF64(x) x, WASM_ASMJS_OP(kExprI32AsmjsSConvertF64)
-#define WASM_I32_ASMJS_UCONVERTF32(x) x, WASM_ASMJS_OP(kExprI32AsmjsUConvertF32)
-#define WASM_I32_ASMJS_UCONVERTF64(x) x, WASM_ASMJS_OP(kExprI32AsmjsUConvertF64)
-#define WASM_I32_ASMJS_LOADMEM(x) x, WASM_ASMJS_OP(kExprI32AsmjsLoadMem)
-#define WASM_F32_ASMJS_LOADMEM(x) x, WASM_ASMJS_OP(kExprF32AsmjsLoadMem)
-#define WASM_F64_ASMJS_LOADMEM(x) x, WASM_ASMJS_OP(kExprF64AsmjsLoadMem)
-#define WASM_I32_ASMJS_STOREMEM(x, y) x, y, WASM_ASMJS_OP(kExprI32AsmjsStoreMem)
-
-//------------------------------------------------------------------------------
 // Int64 operations
 //------------------------------------------------------------------------------
 #define WASM_I64_ADD(x, y) x, y, kExprI64Add

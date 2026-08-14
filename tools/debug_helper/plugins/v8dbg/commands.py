@@ -11,11 +11,13 @@ import io
 import os
 import traceback
 
+from .hints import resolve_current_isolate, resolve_heap_hints
 from .inspect import Formatter
 from .models import HeapHints
 
-_V8_USAGE = (
-    "usage: v8 inspect <addr> [--type T] [--depth N] [--array-length N]\n")
+_V8_USAGE = ("usage: v8 <subcommand>\n"
+             "  v8 inspect <addr> [--type T] [--depth N] [--array-length N]\n"
+             "  v8 isolate\n")
 
 _LIB_PATH_ENV = "V8_DEBUG_HELPER_LIB_PATH"
 
@@ -28,8 +30,8 @@ def debug_helper_lib_warning():
           "libv8_debug_helper shared library and reload this plugin.")
 
 
-def dispatch_v8_command(bridge, argv, *, read_memory, eval_address,
-                        hints_resolver, verbose):
+def dispatch_v8_command(bridge, argv, *, read_memory, eval_address, resolver,
+                        verbose):
   """Run one `v8 <subcommand> ...` invocation, capturing its output.
 
   Returns `(True, output)` on success, `(False, error_message)` on failure.
@@ -40,7 +42,9 @@ def dispatch_v8_command(bridge, argv, *, read_memory, eval_address,
   try:
     if argv[0] == "inspect":
       _run_inspect(bridge, argv[1:], buffer, read_memory, eval_address,
-                   hints_resolver)
+                   resolver)
+    elif argv[0] == "isolate":
+      _run_isolate(argv[1:], buffer, resolver)
     else:
       return (True, f"v8: unknown subcommand '{argv[0]}'\n{_V8_USAGE}")
   except Exception:
@@ -73,35 +77,27 @@ def _parse_address(text, eval_address):
   return None
 
 
-def resolve_heap_hints(resolver):
-  """Resolve V8 isolate symbols and offsets through `resolver` into HeapHints."""
-  hints = HeapHints()
-  sym_addr = resolver.global_symbol_address("v8::internal::g_current_isolate_")
-  isolate_addr = resolver.read_pointer(sym_addr) if sym_addr else None
+def _run_isolate(argv, output, resolver):
+  """Print the current Isolate of the selected thread."""
+  if argv:
+    output.write(f"v8 isolate: unexpected argument '{argv[0]}'\n")
+    return
+  if resolver is None:
+    output.write("v8 isolate: no symbol resolver available\n")
+    return
+  isolate_addr = resolve_current_isolate(resolver)
+  if isolate_addr is None:
+    output.write(
+        "v8 isolate: cannot resolve the current isolate for the selected "
+        "thread. Symbols may be missing.\n")
+    return
   if not isolate_addr:
-    return hints
-
-  # v8::internal::IsolateGroup::metadata_pointer_table_, reached via Isolate::isolate_group_.
-  group_offset = resolver.field_offset("v8::internal::Isolate",
-                                       "isolate_group_")
-  if group_offset is not None:
-    group_ptr = resolver.read_pointer(isolate_addr + group_offset)
-    mpt_offset = resolver.field_offset("v8::internal::IsolateGroup",
-                                       "metadata_pointer_table_")
-    if group_ptr and mpt_offset is not None:
-      hints.metadata_pointer_table = group_ptr + mpt_offset
-
-  # The offset of the heap_ member within the Isolate class.
-  heap_isolate_offset = resolver.field_offset("v8::internal::Heap", "isolate_")
-  if heap_isolate_offset is not None:
-    hints.isolate_heap_member_offset = int(heap_isolate_offset)
-
-  # any_heap_pointer is filled in by `_run_inspect` from the CLI address.
-  return hints
+    output.write("isolate = <none>\n")
+    return
+  output.write(f"isolate = 0x{isolate_addr:x}\n")
 
 
-def _run_inspect(bridge, argv, output, read_memory, eval_address,
-                 hints_resolver):
+def _run_inspect(bridge, argv, output, read_memory, eval_address, resolver):
   # TODO(joyee): per-flag error messages, reject negative ints.
   type_hint = None
   depth = 1
@@ -130,8 +126,8 @@ def _run_inspect(bridge, argv, output, read_memory, eval_address,
     return
 
   hints = HeapHints()
-  if hints_resolver is not None:
-    hints = resolve_heap_hints(hints_resolver)
+  if resolver is not None:
+    hints = resolve_heap_hints(resolver)
   if not hints.any_heap_pointer:
     hints.any_heap_pointer = address
 

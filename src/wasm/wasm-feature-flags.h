@@ -107,7 +107,7 @@
   /* Custom Descriptors proposal. */                                           \
   /* https://github.com/WebAssembly/custom-descriptors */                      \
   /* Note: the JS Interop part of the proposal is enabled by */                \
-  /* --experimental-wasm-js-interop for now. */                                \
+  /* --wasm-js-interop for now. */                                             \
   /* V8 side owner: jkummerow */                                               \
   /* Staged (without JS Interop) in v14.8 */                                   \
   V(custom_descriptors, "custom descriptors", false)

@@ -215,7 +215,7 @@ Tagged<Object> StringAdd_StringConstant_Internalize(
 
   FeedbackSlot cache_slot(FeedbackVector::ToSlot(
       slot_index + kAdd_StringConstant_Internalize_CacheSlotOffset));
-  DCHECK_LT(cache_slot.ToInt(), feedback_vector->length());
+  DCHECK_LT(cache_slot.ToInt(), feedback_vector->length().value());
   Handle<Object> cache_obj(Cast<Object>(feedback_vector->Get(cache_slot)),
                            isolate);
   Handle<SimpleNameDictionary> cache;

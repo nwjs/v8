@@ -91,7 +91,7 @@ RegExpMacroAssemblerLOONG64::RegExpMacroAssemblerLOONG64(Isolate* isolate,
                                                          int registers_to_save)
     : NativeRegExpMacroAssembler(isolate, zone, mode),
       masm_(std::make_unique<MacroAssembler>(
-          isolate, CodeObjectRequired::kYes,
+          isolate, CodeObjectRequired{true},
           NewAssemblerBuffer(kInitialBufferSize))),
       no_root_array_scope_(masm_.get()),
       num_registers_(registers_to_save),
@@ -720,7 +720,16 @@ DirectHandle<HeapObject> RegExpMacroAssemblerLOONG64::GetCode(
     // memory when returning from this irregexp code object.
     PushRegExpBasePointer(backtrack_stackpointer(), a1);
 
-    {
+    // Skip the JS stack guard check for patterns whose register file fits
+    // within the stack limit's guaranteed slack: allocating it then can never
+    // push the stack past the point the check would catch, so the check is pure
+    // overhead on every match. This is the same slack that lets optimized JS
+    // elide the entry stack check for small leaf frames (see the static_assert
+    // and CodeGenerator::ShouldApplyOffsetToStackCheck).
+    static constexpr int kMaxRegistersWithoutStackCheck = 32;
+    static_assert(kMaxRegistersWithoutStackCheck * kSystemPointerSize <=
+                  kStackLimitSlackForDeoptimizationInBytes);
+    if (num_registers_ > kMaxRegistersWithoutStackCheck) {
       // Check if we have space on the stack for registers.
       Label stack_limit_hit, stack_ok;
 
@@ -1347,12 +1356,6 @@ void RegExpMacroAssemblerLOONG64::AssertAboveStackLimitMinusSlack() {
 void RegExpMacroAssemblerLOONG64::LoadCurrentCharacterUnchecked(
     int cp_offset, int characters) {
   Register offset = current_input_offset();
-
-  // If unaligned load/stores are not supported then this function must only
-  // be used to load a single character at a time.
-  if (!CanReadUnaligned()) {
-    DCHECK_EQ(1, characters);
-  }
 
   if (cp_offset != 0) {
     // t3 is not being used to store the capture start index at this point.

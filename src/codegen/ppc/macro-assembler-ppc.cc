@@ -431,24 +431,34 @@ Operand MacroAssembler::ClearedValue() const {
 }
 
 void MacroAssembler::Call(Label* target) {
+  // Keep a trampoline pool from being emitted between the branch and the
+  // safepoint record, so pc_offset_for_safepoint_ stays matched to the return
+  // address. The Register and Address overloads rely on the same scope.
+  BlockTrampolinePoolScope block_trampoline_pool(this);
   b(target, SetLK);
   RecordPcForSafepoint();
 }
 
 void MacroAssembler::Push(Handle<HeapObject> handle) {
-  mov(r0, Operand(handle));
-  push(r0);
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+  mov(scratch, Operand(handle));
+  push(scratch);
 }
 
 void MacroAssembler::Push(Tagged<Smi> smi) {
-  mov(r0, Operand(smi));
-  push(r0);
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+  mov(scratch, Operand(smi));
+  push(scratch);
 }
 
 void MacroAssembler::Push(Tagged<TaggedIndex> index) {
   // TaggedIndex is the same as Smi for 32 bit archs.
-  mov(r0, Operand(static_cast<uint32_t>(index.value())));
-  push(r0);
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+  mov(scratch, Operand(static_cast<uint32_t>(index.value())));
+  push(scratch);
 }
 
 void MacroAssembler::PushArray(Register array, Register size, Register scratch,
@@ -798,8 +808,10 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
 
   AddS64(slot_address, object, Operand(offset - kHeapObjectTag));
   if (v8_flags.slow_debug_code) {
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
     Label ok;
-    andi(r0, slot_address, Operand(kTaggedSize - 1));
+    andi(scratch, slot_address, Operand(kTaggedSize - 1));
     beq(&ok, cr0);
     stop();
     bind(&ok);
@@ -819,7 +831,8 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
 
 void MacroAssembler::Zero(const MemOperand& dest) {
   ASM_CODE_COMMENT(this);
-  Register scratch = r0;
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
 
   mov(scratch, Operand::Zero());
   StoreU64(scratch, dest);
@@ -827,7 +840,8 @@ void MacroAssembler::Zero(const MemOperand& dest) {
 
 void MacroAssembler::Zero(const MemOperand& dest1, const MemOperand& dest2) {
   ASM_CODE_COMMENT(this);
-  Register scratch = r0;
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
 
   mov(scratch, Operand::Zero());
   StoreU64(scratch, dest1);
@@ -962,13 +976,11 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
 
   // Record the actual write.
   if (lr_status == kLRHasNotBeenSaved) {
-    mflr(r0);
-    push(r0);
+    PushLR();
   }
   CallRecordWriteStubSaveRegisters(object, slot_address, fp_mode);
   if (lr_status == kLRHasNotBeenSaved) {
-    pop(r0);
-    mtlr(r0);
+    PopLR();
   }
 
   if (v8_flags.slow_debug_code) mov(slot_address, Operand(kZapValue));
@@ -981,6 +993,24 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
     mov(slot_address, Operand(base::bit_cast<intptr_t>(kZapValue + 12)));
     mov(value, Operand(base::bit_cast<intptr_t>(kZapValue + 16)));
   }
+}
+
+void MacroAssembler::PushLR(Register scratch) {
+  UseScratchRegisterScope temps(this);
+  if (scratch == no_reg) {
+    scratch = temps.Acquire();
+  }
+  mflr(scratch);
+  push(scratch);
+}
+
+void MacroAssembler::PopLR(Register scratch) {
+  UseScratchRegisterScope temps(this);
+  if (scratch == no_reg) {
+    scratch = temps.Acquire();
+  }
+  pop(scratch);
+  mtlr(scratch);
 }
 
 void MacroAssembler::PushCommonFrame(Register marker_reg) {
@@ -1266,7 +1296,7 @@ int MacroAssembler::LeaveFrame(StackFrame::Type type, int stack_adjustment) {
 // in the fp register (r31)
 // Then - we buy a new frame
 
-void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
+void MacroAssembler::EnterExitFrame(int stack_space,
                                     StackFrame::Type frame_type) {
   DCHECK(frame_type == StackFrame::EXIT ||
          frame_type == StackFrame::BUILTIN_EXIT ||
@@ -1282,6 +1312,8 @@ void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
   // all of the pushes that have happened inside of V8
   // since we were called from C code
 
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
   mov(scratch, Operand(StackFrame::TypeToMarker(frame_type)));
   PushCommonFrame(scratch);
   // Reserve room for saved entry sp.
@@ -1336,12 +1368,14 @@ int MacroAssembler::ActivationFrameAlignment() {
 #endif
 }
 
-void MacroAssembler::LeaveExitFrame(Register scratch) {
+void MacroAssembler::LeaveExitFrame() {
   ConstantPoolUnavailableScope constant_pool_unavailable(this);
 
   // Restore current context from top and clear it in debug mode.
   LoadU64(cp, AsMemOperand(IsolateFieldId::kContext));
 
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
 #ifdef DEBUG
   mov(scratch, Operand(Context::kNoContext));
   StoreU64(scratch, AsMemOperand(IsolateFieldId::kContext));
@@ -1372,18 +1406,21 @@ void MacroAssembler::LoadStackLimit(Register destination, StackLimitKind kind) {
   LoadU64(destination, MemOperand(kRootRegister, offset));
 }
 
-void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch,
+void MacroAssembler::StackOverflowCheck(Register num_args,
                                         Label* stack_overflow) {
   // Check the stack for overflow. We are not trying to catch
   // interruptions (e.g. debug break and preemption) here, so the "real stack
   // limit" is checked.
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
   LoadStackLimit(scratch, StackLimitKind::kRealStackLimit);
   // Make scratch the space we have left. The stack might already be overflowed
   // here which will cause scratch to become negative.
   sub(scratch, sp, scratch);
   // Check if the arguments will overflow the stack.
-  ShiftLeftU64(r0, num_args, Operand(kSystemPointerSizeLog2));
-  CmpS64(scratch, r0);
+  Register bytes_needed = temps.Acquire();
+  ShiftLeftU64(bytes_needed, num_args, Operand(kSystemPointerSizeLog2));
+  CmpS64(scratch, bytes_needed);
   ble(stack_overflow);  // Signed comparison.
 }
 
@@ -1407,7 +1444,7 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
 
   Label stack_overflow;
   Register scratch = r7;
-  StackOverflowCheck(expected_parameter_count, scratch, &stack_overflow);
+  StackOverflowCheck(expected_parameter_count, &stack_overflow);
 
   // Underapplication. Move the arguments already in the stack, including the
   // receiver and the return address.
@@ -1606,19 +1643,20 @@ void MacroAssembler::IsObjectType(Register object, Register scratch1,
 }
 
 void MacroAssembler::CompareObjectTypeRange(Register object, Register map,
-                                            Register type_reg, Register scratch,
+                                            Register type_reg,
                                             InstanceType lower_limit,
                                             InstanceType upper_limit) {
   ASM_CODE_COMMENT(this);
   LoadMap(map, object);
-  CompareInstanceTypeRange(map, type_reg, scratch, lower_limit, upper_limit);
+  CompareInstanceTypeRange(map, type_reg, lower_limit, upper_limit);
 }
 
-void MacroAssembler::CompareRange(Register value, Register scratch,
-                                  unsigned lower_limit, unsigned higher_limit) {
+void MacroAssembler::CompareRange(Register value, unsigned lower_limit,
+                                  unsigned higher_limit) {
   ASM_CODE_COMMENT(this);
   DCHECK_LT(lower_limit, higher_limit);
-  CHECK_NE(value, scratch);
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
   if (lower_limit != 0) {
     mov(scratch, Operand(lower_limit));
     sub(scratch, value, scratch);
@@ -1630,12 +1668,11 @@ void MacroAssembler::CompareRange(Register value, Register scratch,
 }
 
 void MacroAssembler::CompareInstanceTypeRange(Register map, Register type_reg,
-                                              Register scratch,
                                               InstanceType lower_limit,
                                               InstanceType higher_limit) {
   DCHECK_LT(lower_limit, higher_limit);
   LoadU16(type_reg, FieldMemOperand(map, offsetof(Map, instance_type_)));
-  CompareRange(type_reg, scratch, lower_limit, higher_limit);
+  CompareRange(type_reg, lower_limit, higher_limit);
 }
 
 void MacroAssembler::CompareTaggedRoot(const Register& obj, RootIndex index) {
@@ -1686,11 +1723,10 @@ void MacroAssembler::MaxF64(DoubleRegister dst, DoubleRegister lhs,
   bind(&done);
 }
 
-void MacroAssembler::JumpIfIsInRange(Register value, Register scratch,
-                                     unsigned lower_limit,
+void MacroAssembler::JumpIfIsInRange(Register value, unsigned lower_limit,
                                      unsigned higher_limit,
                                      Label* on_in_range) {
-  CompareRange(value, scratch, lower_limit, higher_limit);
+  CompareRange(value, lower_limit, higher_limit);
   ble(on_in_range);
 }
 
@@ -1704,8 +1740,7 @@ void MacroAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
   TryInlineTruncateDoubleToI(result, double_input, &done, double_scratch);
 
   // If we fell through then inline version didn't succeed - call stub instead.
-  mflr(r0);
-  push(r0);
+  PushLR();
   // Put input on stack.
   stfdu(double_input, MemOperand(sp, -kDoubleSize));
 
@@ -1722,8 +1757,7 @@ void MacroAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
 
   LoadU64(result, MemOperand(sp));
   addi(sp, sp, Operand(kDoubleSize));
-  pop(r0);
-  mtlr(r0);
+  PopLR();
 
   bind(&done);
 }
@@ -2004,10 +2038,9 @@ void MacroAssembler::AssertMap(Register object) {
   ASM_CODE_COMMENT(this);
   TestIfSmi(object, r0);
   Check(ne, AbortReason::kOperandIsNotAMap);
-  Push(object);
-  LoadMap(object, object);
-  CompareInstanceType(object, object, MAP_TYPE);
-  Pop(object);
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.Acquire();
+  CompareObjectType(object, temp, temp, MAP_TYPE);
   Check(eq, AbortReason::kOperandIsNotAMap);
 }
 
@@ -2046,11 +2079,11 @@ void MacroAssembler::AssertFunction(Register object) {
     static_assert(kSmiTag == 0);
     TestIfSmi(object, r0);
     Check(ne, AbortReason::kOperandIsASmiAndNotAFunction, cr0);
-    push(object);
-    LoadMap(object, object);
-    CompareInstanceTypeRange(object, object, r0, FIRST_JS_FUNCTION_TYPE,
+    UseScratchRegisterScope temps(this);
+    Register temp = temps.Acquire();
+    LoadMap(temp, object);
+    CompareInstanceTypeRange(temp, temp, FIRST_JS_FUNCTION_TYPE,
                              LAST_JS_FUNCTION_TYPE);
-    pop(object);
     Check(le, AbortReason::kOperandIsNotAFunction);
   }
 }
@@ -2061,11 +2094,11 @@ void MacroAssembler::AssertCallableFunction(Register object) {
   static_assert(kSmiTag == 0);
   TestIfSmi(object, r0);
   Check(ne, AbortReason::kOperandIsASmiAndNotAFunction, cr0);
-  push(object);
-  LoadMap(object, object);
-  CompareInstanceTypeRange(object, object, r0, FIRST_CALLABLE_JS_FUNCTION_TYPE,
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.Acquire();
+  LoadMap(temp, object);
+  CompareInstanceTypeRange(temp, temp, FIRST_CALLABLE_JS_FUNCTION_TYPE,
                            LAST_CALLABLE_JS_FUNCTION_TYPE);
-  pop(object);
   Check(le, AbortReason::kOperandIsNotACallableFunction);
 }
 
@@ -2074,9 +2107,9 @@ void MacroAssembler::AssertBoundFunction(Register object) {
     static_assert(kSmiTag == 0);
     TestIfSmi(object, r0);
     Check(ne, AbortReason::kOperandIsASmiAndNotABoundFunction, cr0);
-    push(object);
-    CompareObjectType(object, object, object, JS_BOUND_FUNCTION_TYPE);
-    pop(object);
+    UseScratchRegisterScope temps(this);
+    Register temp = temps.Acquire();
+    CompareObjectType(object, temp, temp, JS_BOUND_FUNCTION_TYPE);
     Check(eq, AbortReason::kOperandIsNotABoundFunction);
   }
 }
@@ -2086,28 +2119,23 @@ void MacroAssembler::AssertGeneratorObject(Register object) {
   TestIfSmi(object, r0);
   Check(ne, AbortReason::kOperandIsASmiAndNotAGeneratorObject, cr0);
 
-  // Load map
-  Register map = object;
-  push(object);
-  LoadMap(map, object);
-
   // Check if JSGeneratorObject
-  Register instance_type = object;
-  CompareInstanceTypeRange(map, instance_type, r0,
-                           FIRST_JS_GENERATOR_OBJECT_TYPE,
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.Acquire();
+  LoadMap(temp, object);
+  CompareInstanceTypeRange(temp, temp, FIRST_JS_GENERATOR_OBJECT_TYPE,
                            LAST_JS_GENERATOR_OBJECT_TYPE);
-  // Restore generator object to register and perform assertion
-  pop(object);
   Check(le, AbortReason::kOperandIsNotAGeneratorObject);
 }
 
-void MacroAssembler::AssertUndefinedOrAllocationSite(Register object,
-                                                     Register scratch) {
+void MacroAssembler::AssertUndefinedOrAllocationSite(Register object) {
   if (v8_flags.debug_code) {
     Label done_checking;
     AssertNotSmi(object);
     CompareRoot(object, RootIndex::kUndefinedValue);
     beq(&done_checking);
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
     LoadMap(scratch, object);
     CompareInstanceType(scratch, scratch, ALLOCATION_SITE_TYPE);
     Assert(eq, AbortReason::kExpectedUndefinedOrCell);
@@ -2115,12 +2143,13 @@ void MacroAssembler::AssertUndefinedOrAllocationSite(Register object,
   }
 }
 
-void MacroAssembler::AssertJSAny(Register object, Register map_tmp,
-                                 Register tmp, AbortReason abort_reason) {
+void MacroAssembler::AssertJSAny(Register object, AbortReason abort_reason) {
   if (!v8_flags.debug_code) return;
 
   ASM_CODE_COMMENT(this);
-  DCHECK(!AreAliased(object, map_tmp, tmp));
+  UseScratchRegisterScope temps(this);
+  Register map_tmp = temps.Acquire();
+  Register tmp = temps.Acquire();
   Label ok;
 
   JumpIfSmi(object, &ok);
@@ -5131,7 +5160,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     // Load the number of stack slots to drop before LeaveExitFrame modifies sp.
     __ LoadU64(argc_reg, *argc_operand);
   }
-  __ LeaveExitFrame(scratch);
+  __ LeaveExitFrame();
 
   {
     ASM_CODE_COMMENT_STRING(masm,
@@ -5149,8 +5178,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
       __ Cmp(return_value, kNotInterceptedSentinel);
       __ beq(&ok);
     }
-    __ AssertJSAny(return_value, scratch, scratch2,
-                   AbortReason::kAPICallReturnedInvalidObject);
+    __ AssertJSAny(return_value, AbortReason::kAPICallReturnedInvalidObject);
     __ bind(&ok);
   }
 

@@ -14,6 +14,7 @@
 #include "src/codegen/assembler.h"
 #include "src/codegen/code-desc.h"
 #include "src/codegen/compiler.h"
+#include "src/wasm/baseline/liftoff-bailout-reasons.h"
 #include "src/wasm/compilation-environment.h"
 #include "src/wasm/function-body-decoder.h"
 #include "src/wasm/wasm-code-manager.h"
@@ -27,7 +28,9 @@ namespace v8::internal::wasm {
 class NativeModule;
 struct WasmFunction;
 
-enum class Validation : bool { kAlreadyValidated, kMustValidate };
+using Validation = base::StrongAlias<struct ValidationFlagTag, bool>;
+constexpr Validation kAlreadyValidated{false};
+constexpr Validation kMustValidate{true};
 
 // Stores assumptions that a Wasm compilation job made while executing,
 // so they can be checked for continued validity when the job finishes.
@@ -88,6 +91,7 @@ struct WasmCompilationResult {
   Kind kind = kFunction;
   ForDebugging for_debugging = kNotForDebugging;
   bool frame_has_feedback_slot = false;
+  LiftoffBailoutReason bailout_reason = kNoReason;
 };
 
 class V8_EXPORT_PRIVATE WasmCompilationUnit final {
@@ -156,15 +160,11 @@ class V8_EXPORT_PRIVATE JSToWasmWrapperCompilationUnit final {
   std::unique_ptr<OptimizedCompilationJob> job_;
 };
 
-inline bool CanUseGenericJsToWasmWrapper(ModuleOrigin origin,
-                                         const CanonicalSig* sig) {
+inline bool CanUseGenericJsToWasmWrapper(const CanonicalSig* sig) {
 #if (V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_IA32 ||  \
      V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_S390X || V8_TARGET_ARCH_PPC64 || \
      V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_RISCV64)
-  // We don't use the generic wrapper for asm.js, because it creates invalid
-  // stack traces.
-  return origin == kWasmOrigin && v8_flags.wasm_generic_wrapper &&
-         IsJSCompatibleSignature(sig);
+  return v8_flags.wasm_generic_wrapper && IsJSCompatibleSignature(sig);
 #else
   return false;
 #endif

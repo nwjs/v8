@@ -13,6 +13,8 @@ namespace internal {
 
 class AsyncBuiltinsAssembler : public PromiseBuiltinsAssembler {
  public:
+  enum class AwaitBehavior : bool { kNormal = false, kResumeOnly = true };
+
   explicit AsyncBuiltinsAssembler(compiler::CodeAssemblerState* state)
       : PromiseBuiltinsAssembler(state) {}
 
@@ -32,7 +34,8 @@ class AsyncBuiltinsAssembler : public PromiseBuiltinsAssembler {
   TNode<Object> Await(TNode<Context> context,
                       TNode<JSGeneratorObject> generator, TNode<JSAny> value,
                       TNode<JSPromise> outer_promise,
-                      const GetClosures& get_closures);
+                      const GetClosures& get_closures,
+                      AwaitBehavior await_behavior);
   TNode<Object> Await(TNode<Context> context,
                       TNode<JSGeneratorObject> generator, TNode<JSAny> value,
                       TNode<JSPromise> outer_promise, RootIndex on_resolve_sfi,

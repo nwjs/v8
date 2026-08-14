@@ -174,9 +174,8 @@ bool WasmGraphBuilder::TryWasmInlining(int fct_index,
   }
   base::Vector<const uint8_t> bytes(native_module->wire_bytes().SubVector(
       inlinee.code.offset(), inlinee.code.end_offset()));
-  SharedFlag is_shared = module->type(inlinee.sig_index).is_shared;
   const wasm::FunctionBody inlinee_body(inlinee.sig, inlinee.code.offset(),
-                                        bytes.begin(), bytes.end(), is_shared);
+                                        bytes.begin(), bytes.end());
   bool result = WasmIntoJSInliner::TryInlining(
       graph()->zone(), module, mcgraph_, inlinee_body, bytes,
       source_position_table_, inlining_id);

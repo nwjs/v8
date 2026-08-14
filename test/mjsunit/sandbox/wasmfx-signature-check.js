@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --sandbox-testing --experimental-wasm-wasmfx --expose-memory-corruption-api
+// Flags: --sandbox-testing --wasm-wasmfx --expose-memory-corruption-api
 
 d8.file.execute('test/mjsunit/mjsunit.js');
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');

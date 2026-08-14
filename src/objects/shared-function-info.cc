@@ -8,6 +8,7 @@
 
 #include "src/ast/ast.h"
 #include "src/ast/scopes.h"
+#include "src/base/strong-alias.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/common/globals.h"
@@ -120,11 +121,6 @@ Tagged<Code> SharedFunctionInfo::GetCode(Isolate* isolate) const {
     }
     if (IsWasmCapiFunctionData(trusted_data)) {
       return wasm_capi_function_data()->wrapper_code(isolate);
-    }
-    if (IsAsmWasmData(trusted_data)) {
-      // Having AsmWasmData means we are an asm.js/wasm function.
-      DCHECK(HasAsmWasmData());
-      return isolate->builtins()->code(Builtin::kInstantiateAsmJs);
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
   } else {
@@ -355,8 +351,7 @@ Handle<String> SharedFunctionInfo::DebugName(
     Isolate* isolate, DirectHandle<SharedFunctionInfo> shared,
     AllowAllocation allow_allocation) {
 #if V8_ENABLE_WEBASSEMBLY
-  if (shared->HasWasmExportedFunctionData(isolate) &&
-      allow_allocation == AllowAllocation::kYes) {
+  if (shared->HasWasmExportedFunctionData(isolate) && allow_allocation) {
     return isolate->factory()
         ->NewStringFromUtf8(base::CStrVector(shared->DebugNameCStr().get()))
         .ToHandleChecked();
@@ -507,7 +502,11 @@ Handle<Object> SharedFunctionInfo::GetSourceCodeHarmony(
     return indirect_handle(result, isolate);
   }
   // This should be extremely rare (only when {source} is close to
-  // String::kMaxLength), but it is reachable.
+  // String::kMaxLength), but it is reachable. Finish() threw an
+  // invalid-string-length error; clear it, since we return a valid fallback
+  // string rather than propagating the exception.
+  DCHECK(isolate->has_exception());
+  isolate->clear_exception();
   return isolate->factory()->NewStringFromAsciiChecked("<too long to print>");
 }
 

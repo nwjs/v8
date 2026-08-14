@@ -884,6 +884,14 @@ bool SourceTextModule::MaybeHandleEvaluationException(
       // iii. Set m.[[EvaluationError]] to result.
       descendant->RecordError(isolate, exception);
     }
+    // A stack overflow at the InnerModuleEvaluation entry STACK_CHECK can throw
+    // before this module was appended to `stack`, leaving its
+    // [[EvaluationError]] empty. Record it directly so the top-level capability
+    // rejects with the actual exception rather than the EMPTY (TheHole)
+    // sentinel.
+    if (IsTheHole(this->exception())) {
+      RecordError(isolate, exception);
+    }
     return true;
   }
   // If the exception was a termination exception, rejecting the promise

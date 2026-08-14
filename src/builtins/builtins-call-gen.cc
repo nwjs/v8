@@ -382,7 +382,8 @@ void CallOrConstructBuiltinsAssembler::CallOrConstructDoubleVarargs(
 
 void CallOrConstructBuiltinsAssembler::CallOrConstructWithSpread(
     TNode<JSAny> target, std::optional<TNode<Object>> new_target,
-    TNode<JSAny> spread, TNode<Int32T> args_count, TNode<Context> context) {
+    TNode<JSAny> maybe_spread, TNode<Int32T> args_count,
+    TNode<Context> context) {
   Label if_smiorobject(this), if_double(this),
       if_generic(this, Label::kDeferred);
 
@@ -390,40 +391,71 @@ void CallOrConstructBuiltinsAssembler::CallOrConstructWithSpread(
   TVARIABLE(FixedArrayBase, var_elements);
   TVARIABLE(Int32T, var_elements_kind);
 
-  GotoIf(TaggedIsSmi(spread), &if_generic);
-  TNode<Map> spread_map = LoadMap(CAST(spread));
-  GotoIfNot(IsJSArrayMap(spread_map), &if_generic);
-  TNode<JSArray> spread_array = CAST(spread);
+  GotoIf(TaggedIsSmi(maybe_spread), &if_generic);
 
-  // Check that we have the original Array.prototype.
-  GotoIfNot(IsPrototypeInitialArrayPrototype(context, spread_map), &if_generic);
-
-  // Check that there are no elements on the Array.prototype chain.
-  GotoIf(IsNoElementsProtectorCellInvalid(), &if_generic);
-
-  // Check that the Array.prototype hasn't been modified in a way that would
-  // affect iteration.
-  TNode<PropertyCell> protector_cell = ArrayIteratorProtectorConstant();
-  GotoIf(TaggedEqual(
-             LoadObjectField(protector_cell, offsetof(PropertyCell, value_)),
-             SmiConstant(Protectors::kProtectorInvalid)),
-         &if_generic);
+  // Check FastJSArrayForReadWithNoCustomIteration case.
   {
-    // The fast-path accesses the {spread} elements directly.
-    TNode<Int32T> spread_kind = LoadMapElementsKind(spread_map);
-    var_js_array = spread_array;
-    var_elements_kind = spread_kind;
-    var_elements = LoadElements(spread_array);
+    Label check_next(this);
+    TNode<JSAnyNotSmi> spread = CAST(maybe_spread);
+    // TODO(ishell): unify checking code with CastFastJSArray() or
+    // Cast<FastJSArrayForReadWithNoCustomIteration>() Torque macros.
+    TNode<Map> spread_map = LoadMap(spread);
+    GotoIfNot(IsJSArrayMap(spread_map), &check_next);
+    TNode<JSArray> spread_array = CAST(spread);
 
-    // Check elements kind of {spread}.
-    GotoIf(IsElementsKindLessThanOrEqual(spread_kind, HOLEY_ELEMENTS),
-           &if_smiorobject);
-    GotoIf(IsElementsKindLessThanOrEqual(spread_kind, LAST_FAST_ELEMENTS_KIND),
-           &if_double);
-    Branch(IsElementsKindLessThanOrEqual(spread_kind,
-                                         LAST_ANY_NONEXTENSIBLE_ELEMENTS_KIND),
-           &if_smiorobject, &if_generic);
+    // Check that we have the original Array.prototype.
+    GotoIfNot(IsPrototypeInitialArrayPrototype(context, spread_map),
+              &if_generic);
+
+    // Check that there are no elements on the Array.prototype chain.
+    GotoIf(IsNoElementsProtectorCellInvalid(), &if_generic);
+
+    // Check that the Array.prototype hasn't been modified in a way that would
+    // affect iteration.
+    TNode<PropertyCell> protector_cell = ArrayIteratorProtectorConstant();
+    GotoIf(TaggedEqual(
+               LoadObjectField(protector_cell, offsetof(PropertyCell, value_)),
+               SmiConstant(Protectors::kProtectorInvalid)),
+           &if_generic);
+    {
+      // The fast-path accesses the {spread} elements directly.
+      TNode<Int32T> spread_kind = LoadMapElementsKind(spread_map);
+      var_js_array = spread_array;
+      var_elements_kind = spread_kind;
+      var_elements = LoadElements(spread_array);
+
+      // Check elements kind of {spread}.
+      GotoIf(IsElementsKindLessThanOrEqual(spread_kind, HOLEY_ELEMENTS),
+             &if_smiorobject);
+      GotoIf(
+          IsElementsKindLessThanOrEqual(spread_kind, LAST_FAST_ELEMENTS_KIND),
+          &if_double);
+      Branch(IsElementsKindLessThanOrEqual(
+                 spread_kind, LAST_ANY_NONEXTENSIBLE_ELEMENTS_KIND),
+             &if_smiorobject, &if_generic);
+    }
+    BIND(&check_next);
   }
+  // Check FastIterableToListInterceptor case.
+  {
+    Label if_fast(this), check_next(this);
+    TNode<JSAnyNotSmi> spread = CAST(maybe_spread);
+    BranchIfFastIterableToListInterceptor(spread, &if_fast, &check_next);
+
+    BIND(&if_fast);
+    {
+      TNode<JSArray> list = CAST(CallRuntime(
+          Runtime::kIterableToListWithInterceptor, context, spread));
+      var_js_array = list;
+      var_elements = LoadElements(list);
+      var_elements_kind = LoadElementsKind(list);
+      CSA_DCHECK(this, IsFastElementsKind(var_elements_kind.value()));
+      Branch(IsDoubleElementsKind(var_elements_kind.value()), &if_double,
+             &if_smiorobject);
+    }
+    BIND(&check_next);
+  }
+  Goto(&if_generic);
 
   BIND(&if_generic);
   {
@@ -432,6 +464,7 @@ void CallOrConstructBuiltinsAssembler::CallOrConstructWithSpread(
         throw_spread_error(this, Label::kDeferred);
     TVARIABLE(Smi, message_id);
 
+    TNode<JSAny> spread = maybe_spread;
     GotoIf(IsNullOrUndefined(spread), &if_iterator_is_null_or_undefined);
 
     TNode<Object> iterator_fn =

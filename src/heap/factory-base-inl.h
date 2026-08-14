@@ -13,6 +13,7 @@
 #include "src/execution/local-isolate-inl.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/heap-object-field-inl.h"
 #include "src/objects/map.h"
 #include "src/objects/slots-inl.h"
 #include "src/objects/smi.h"

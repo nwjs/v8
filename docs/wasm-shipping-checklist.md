@@ -27,7 +27,7 @@ We usually define one or more command line flags that guard the feature from bei
 
 ### Wasm feature flags vs. V8 flags
 
-In WebAssembly, we have the option of using a Wasm feature flag (`--experimental-wasm-*`) which is defined via a macro in [`src/wasm/wasm-feature-flags.h`](https://cs.chromium.org/chromium/src/v8/src/wasm/wasm-feature-flags.h) (different macros for different phases of development). These flags are usually used for new functionality, e.g. related to a new WebAssembly proposal.
+In WebAssembly, we have the option of using a Wasm feature flag (`--wasm-*`) which is defined via a macro in [`src/wasm/wasm-feature-flags.h`](https://cs.chromium.org/chromium/src/v8/src/wasm/wasm-feature-flags.h) (different macros for different phases of development). These flags are usually used for new functionality, e.g. related to a new WebAssembly proposal.
 
 Alternatively, one can use a regular V8 flag as defined in [`src/flags/flag-definitions.h`](https://cs.chromium.org/chromium/src/v8/src/flags/flag-definitions.h). These flags are commonly used for architectural changes or optimizations. In early stages, you should use `DEFINE_EXPERIMENTAL_FEATURE()`.
 

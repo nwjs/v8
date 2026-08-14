@@ -124,3 +124,19 @@ runNearStackLimit(function TestPushWithLargePrecedingArgs() {
   arr.push(...preceding, ...spread);
   assertEquals(100 + kSize, arr.length);
 });
+
+
+runNearStackLimit(function () {
+  let spread_array = new Array(kSize).fill(1);
+  let receiver = new Proxy([], {
+    set(target, prop, value, receiver) {
+      if (prop === '50') {
+        spread_array[kSize-1] = 42;
+        spread_array.length = 10;
+      }
+      return Reflect.set(target, prop, value, receiver);
+    }
+  });
+  Array.prototype.push.apply(receiver, spread_array);
+  assertEquals(receiver[kSize-1], 1);
+});

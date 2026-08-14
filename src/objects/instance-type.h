@@ -281,9 +281,7 @@ V8_EXPORT_PRIVATE std::string ToString(InstanceType instance_type);
 
 // This list must contain only maps that are shared by all objects of their
 // instance type AND respective object must not represent a parent class for
-// multiple instance types (e.g. DescriptorArray has a unique map, but it has
-// a subclass StrongDescriptorArray which is included into the "DescriptorArray"
-// range of instance types).
+// multiple instance types.
 #define UNIQUE_LEAF_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                     \
   V(_, AccessorInfoMap, accessor_info_map, AccessorInfo)                       \
   V(_, AccessorPairMap, accessor_pair_map, AccessorPair)                       \
@@ -344,8 +342,6 @@ V8_EXPORT_PRIVATE std::string ToString(InstanceType instance_type);
     SloppyArgumentsElements)                                                   \
   V(_, WeakArrayListMap, weak_array_list_map, WeakArrayList)                   \
   V(_, DescriptorArrayMap, descriptor_array_map, DescriptorArray)              \
-  V(_, StrongDescriptorArrayMap, strong_descriptor_array_map,                  \
-    StrongDescriptorArray)                                                     \
   V(_, OnHeapBasicBlockProfilerDataMap, on_heap_basic_block_profiler_data_map, \
     OnHeapBasicBlockProfilerData)                                              \
   V(_, TurbofanBitsetTypeMap, turbofan_bitset_type_map, TurbofanBitsetType)    \

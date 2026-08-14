@@ -1,5 +1,5 @@
 ---
-name: v8_log
+name: v8-log
 description: Understanding v8.log files.
 ---
 

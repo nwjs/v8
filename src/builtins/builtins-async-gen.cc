@@ -47,25 +47,32 @@ TNode<Context> AsyncBuiltinsAssembler::AllocateAwaitContext(
                                     generator);
   return await_context;
 }
-
 TNode<Object> AsyncBuiltinsAssembler::Await(TNode<Context> context,
                                             TNode<JSGeneratorObject> generator,
                                             TNode<JSAny> value,
                                             TNode<JSPromise> outer_promise,
                                             RootIndex on_resolve_sfi,
                                             RootIndex on_reject_sfi) {
-  return Await(context, generator, value, outer_promise,
-               [&](TNode<NativeContext> native_context) {
-                 TNode<Context> await_context =
-                     AllocateAwaitContext(native_context, generator);
-                 auto on_resolve = AllocateRootFunctionWithContext(
-                     on_resolve_sfi, await_context, native_context);
-                 auto on_reject = AllocateRootFunctionWithContext(
-                     on_reject_sfi, await_context, native_context);
-                 return std::make_pair(on_resolve, on_reject);
-               });
-}
+  AwaitBehavior await_behavior =
+      (on_resolve_sfi ==
+           RootIndex::kAsyncFunctionAwaitResolveClosureSharedFun ||
+       on_resolve_sfi == RootIndex::kAsyncGeneratorAwaitResolveClosureSharedFun)
+          ? AwaitBehavior::kResumeOnly
+          : AwaitBehavior::kNormal;
 
+  return Await(
+      context, generator, value, outer_promise,
+      [&](TNode<NativeContext> native_context) {
+        TNode<Context> await_context =
+            AllocateAwaitContext(native_context, generator);
+        auto on_resolve = AllocateRootFunctionWithContext(
+            on_resolve_sfi, await_context, native_context);
+        auto on_reject = AllocateRootFunctionWithContext(
+            on_reject_sfi, await_context, native_context);
+        return std::make_pair(on_resolve, on_reject);
+      },
+      await_behavior);
+}
 void AsyncBuiltinsAssembler::BranchIfNonThenable(TNode<Context> context,
                                                  TNode<Object> value,
                                                  Label* if_non_thenable,
@@ -126,8 +133,19 @@ TNode<Object> AsyncBuiltinsAssembler::Await(TNode<Context> context,
                                             TNode<JSGeneratorObject> generator,
                                             TNode<JSAny> value,
                                             TNode<JSPromise> outer_promise,
-                                            const GetClosures& get_closures) {
+                                            const GetClosures& get_closures,
+                                            AwaitBehavior await_behavior) {
   const TNode<NativeContext> native_context = LoadNativeContext(context);
+
+  TNode<Uint32T> promiseHookFlags = PromiseHookFlags();
+  TNode<BoolT> has_instrumentation =
+      IsIsolatePromiseHookEnabledOrDebugIsActiveOrHasAsyncEventDelegate(
+          promiseHookFlags);
+
+  TNode<BoolT> bypass_closures = Int32FalseConstant();
+  if (await_behavior == AwaitBehavior::kResumeOnly) {
+    bypass_closures = Word32BinaryNot(has_instrumentation);
+  }
 
   // Fast path for non-thenable values: skip creating a wrapper promise and
   // directly enqueue a microtask that will call the resolve handler.
@@ -139,12 +157,26 @@ TNode<Object> AsyncBuiltinsAssembler::Await(TNode<Context> context,
 
   BIND(&if_non_thenable_fast_path);
   {
-    // Get or allocate resolve and reject handlers.
-    auto [on_resolve, on_reject] = get_closures(native_context);
-    // Directly enqueue a microtask for the non-thenable value.
-    // We pass Undefined as throwaway since no hooks are enabled.
-    CallBuiltin(Builtin::kAsyncAwaitNonThenableFastPath, native_context, value,
-                on_resolve, UndefinedConstant());
+    Label if_bypass_non_thenable(this), if_normal_non_thenable(this),
+        non_thenable_done(this);
+    Branch(bypass_closures, &if_bypass_non_thenable, &if_normal_non_thenable);
+
+    BIND(&if_bypass_non_thenable);
+    {
+      CallBuiltin(Builtin::kAsyncAwaitNonThenableFastPath, native_context,
+                  value, generator, UndefinedConstant());
+      Goto(&non_thenable_done);
+    }
+
+    BIND(&if_normal_non_thenable);
+    {
+      auto closures = get_closures(native_context);
+      CallBuiltin(Builtin::kAsyncAwaitNonThenableFastPath, native_context,
+                  value, closures.first, UndefinedConstant());
+      Goto(&non_thenable_done);
+    }
+
+    BIND(&non_thenable_done);
     // Return undefined - the caller will handle the actual return value.
     // This matches what PerformPromiseThen returns for the throwaway promise.
     var_result = UndefinedConstant();
@@ -205,8 +237,21 @@ TNode<Object> AsyncBuiltinsAssembler::Await(TNode<Context> context,
     value = var_value.value();
   }
 
-  // Get or allocate resolve and reject handlers
-  auto [on_resolve, on_reject] = get_closures(native_context);
+  // Get or allocate resolve and reject handlers conditionally.
+  TVARIABLE(Object, var_on_resolve, generator);
+  TVARIABLE(Object, var_on_reject, generator);
+
+  Label if_load_closures(this), if_load_closures_done(this);
+  Branch(bypass_closures, &if_load_closures_done, &if_load_closures);
+
+  BIND(&if_load_closures);
+  {
+    auto closures = get_closures(native_context);
+    var_on_resolve = closures.first;
+    var_on_reject = closures.second;
+    Goto(&if_load_closures_done);
+  }
+  BIND(&if_load_closures_done);
 
   // Deal with PromiseHooks and debug support in the runtime. This
   // also allocates the throwaway promise, which is only needed in
@@ -214,10 +259,7 @@ TNode<Object> AsyncBuiltinsAssembler::Await(TNode<Context> context,
   TVARIABLE(Object, var_throwaway, UndefinedConstant());
   Label if_instrumentation(this, Label::kDeferred),
       if_instrumentation_done(this);
-  TNode<Uint32T> promiseHookFlags = PromiseHookFlags();
-  GotoIf(IsIsolatePromiseHookEnabledOrDebugIsActiveOrHasAsyncEventDelegate(
-             promiseHookFlags),
-         &if_instrumentation);
+  GotoIf(has_instrumentation, &if_instrumentation);
 #ifdef V8_ENABLE_JAVASCRIPT_PROMISE_HOOKS
   // This call to NewJSPromise is to keep behaviour parity with what happens
   // in Runtime::kDebugAsyncFunctionSuspended below if native hooks are set.
@@ -232,7 +274,7 @@ TNode<Object> AsyncBuiltinsAssembler::Await(TNode<Context> context,
   {
     var_throwaway =
         CallRuntime(Runtime::kDebugAsyncFunctionSuspended, native_context,
-                    value, outer_promise, on_reject, generator);
+                    value, outer_promise, var_on_reject.value(), generator);
     Goto(&if_instrumentation_done);
   }
   BIND(&if_instrumentation_done);
@@ -264,15 +306,18 @@ TNode<Object> AsyncBuiltinsAssembler::Await(TNode<Context> context,
 
     // Enqueue the reaction job natively.
     CallBuiltin(Builtin::kAsyncAwaitNonThenableFastPath, native_context,
-                fulfilled_value, on_resolve, UndefinedConstant());
+                fulfilled_value, var_on_resolve.value(), UndefinedConstant());
     var_result = UndefinedConstant();
     Goto(&done);
   }
 
   BIND(&if_perform_promise_then);
-  var_result = CallBuiltin(Builtin::kPerformPromiseThen, native_context, value,
-                           on_resolve, on_reject, var_throwaway.value());
-  Goto(&done);
+  {
+    var_result = CallBuiltin(Builtin::kPerformPromiseThen, native_context,
+                             value, var_on_resolve.value(),
+                             var_on_reject.value(), var_throwaway.value());
+    Goto(&done);
+  }
 
   BIND(&done);
   return var_result.value();
@@ -329,7 +374,8 @@ TNode<Object> AsyncBuiltinsAssembler::AwaitWithReusableClosures(
 
         BIND(&closures_ready);
         return std::make_pair(var_on_resolve.value(), var_on_reject.value());
-      });
+      },
+      AwaitBehavior::kNormal);
 }
 
 TNode<JSFunction> AsyncBuiltinsAssembler::CreateUnwrapClosure(

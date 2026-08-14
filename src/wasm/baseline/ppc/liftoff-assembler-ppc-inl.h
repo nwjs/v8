@@ -202,7 +202,14 @@ void LiftoffAssembler::PatchPrepareStackFrame(
       AssemblerOptions{},
       ExternalAssemblerBuffer(buffer_start_ + offset, kInstrSize + kGap));
 
-  if (V8_LIKELY(frame_size < 4 * KB)) {
+  int max_stack_space =
+      frame_size + max_pushed_argument_slots_ * kSystemPointerSize;
+
+  // The threshold here must match the DCHECK in {Isolate::StackOverflow}:
+  // we could use up this limit once for parameters in a caller, once for the
+  // fixed frame size in its callee, plus we must leave some space for the
+  // runtime call that leads to the DCHECK.
+  if (V8_LIKELY(max_stack_space < 3 * KB)) {
     patching_assembler.addi(sp, sp, Operand(-frame_size));
     return;
   }
@@ -235,11 +242,11 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   // check in the condition code.
   RecordComment("OOL: stack check for large frame");
   Label continuation;
-  if (frame_size < v8_flags.stack_size * 1024) {
+  if (max_stack_space < v8_flags.stack_size * 1024) {
     UseScratchRegisterScope temps(this);
     Register stack_limit = temps.Acquire();
     LoadStackLimit(stack_limit, StackLimitKind::kRealStackLimit);
-    AddS64(stack_limit, stack_limit, Operand(frame_size));
+    AddS64(stack_limit, stack_limit, Operand(max_stack_space));
     CmpU64(sp, stack_limit);
     bge(&continuation);
   }
@@ -252,7 +259,8 @@ void LiftoffAssembler::PatchPrepareStackFrame(
     for (auto reg : kFpParamRegisters) regs_to_save.set(reg);
     for (auto reg : kSimd128ParamRegisters) regs_to_save.set(reg);
     PushRegisters(regs_to_save);
-    mov(WasmHandleStackOverflowDescriptor::GapRegister(), Operand(frame_size));
+    mov(WasmHandleStackOverflowDescriptor::GapRegister(),
+        Operand(max_stack_space));
     AddS64(WasmHandleStackOverflowDescriptor::FrameBaseRegister(), fp,
            Operand(stack_param_slots * kSystemPointerSize +
                    CommonFrameConstants::kFixedFrameSizeAboveFp));
@@ -415,6 +423,13 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
     default:
       UNREACHABLE();
   }
+}
+
+void LiftoffAssembler::PrepareDebugTrap(MessageTemplate message) {
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+  mov(scratch, Operand(Smi::FromInt(static_cast<int>(message))));
+  push(scratch);
 }
 
 void LiftoffAssembler::LoadInstanceDataFromFrame(Register dst) {
@@ -3195,8 +3210,7 @@ void LiftoffAssembler::TailCallNativeWasmCode(Address addr) {
   Jump(addr, RelocInfo::WASM_CALL);
 }
 
-void LiftoffAssembler::CallIndirect(const ValueKindSig* sig,
-                                    compiler::CallDescriptor* call_descriptor,
+void LiftoffAssembler::CallIndirect(compiler::CallDescriptor* call_descriptor,
                                     Register target) {
   DCHECK(target != no_reg);
   CallWasmCodePointer(target);

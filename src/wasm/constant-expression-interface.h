@@ -50,13 +50,11 @@ class V8_EXPORT_PRIVATE ConstantExpressionInterface {
 
   ConstantExpressionInterface(
       const WasmModule* module, Isolate* isolate,
-      DirectHandle<WasmTrustedInstanceData> trusted_instance_data,
-      DirectHandle<WasmTrustedInstanceData> shared_trusted_instance_data)
+      DirectHandle<WasmTrustedInstanceData> trusted_instance_data)
       : module_(module),
         outer_module_(nullptr),
         isolate_(isolate),
-        trusted_instance_data_(trusted_instance_data),
-        shared_trusted_instance_data_(shared_trusted_instance_data) {
+        trusted_instance_data_(trusted_instance_data) {
     DCHECK_NOT_NULL(isolate);
   }
 
@@ -94,11 +92,8 @@ class V8_EXPORT_PRIVATE ConstantExpressionInterface {
 
  private:
   bool generate_value() const { return isolate_ != nullptr && !has_error(); }
-  DirectHandle<WasmTrustedInstanceData> GetTrustedInstanceDataForTypeIndex(
-      ModuleTypeIndex index);
 
-  DirectHandle<Map> GetRtt(DirectHandle<WasmTrustedInstanceData> data,
-                           ModuleTypeIndex index, const TypeDefinition& type,
+  DirectHandle<Map> GetRtt(ModuleTypeIndex index, const TypeDefinition& type,
                            const Value& descriptor);
 
   void ArrayNewImpl(FullDecoder* decoder, const ArrayIndexImmediate& imm,
@@ -113,7 +108,6 @@ class V8_EXPORT_PRIVATE ConstantExpressionInterface {
   WasmModule* outer_module_;
   Isolate* isolate_;
   DirectHandle<WasmTrustedInstanceData> trusted_instance_data_;
-  DirectHandle<WasmTrustedInstanceData> shared_trusted_instance_data_;
 };
 
 }  // namespace wasm

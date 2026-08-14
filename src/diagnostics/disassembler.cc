@@ -282,10 +282,12 @@ static void PrintRelocInfo(std::ostringstream& out, Isolate* isolate,
     }
 #if V8_ENABLE_WEBASSEMBLY
   } else if (RelocInfo::IsWasmStubCall(rmode) && host.is_wasm_code()) {
-    // Host is isolate-independent, try wasm native module instead.
-    const char* runtime_stub_name = Builtins::name(
+    Builtin builtin =
         host.as_wasm_code()->native_module()->GetBuiltinInJumptableSlot(
-            relocinfo->wasm_stub_call_address()));
+            relocinfo->wasm_stub_call_address());
+    const char* runtime_stub_name = builtin == Builtin::kNoBuiltinId
+                                        ? "<unknown wasm stub>"
+                                        : Builtins::name(builtin);
     out << "    ;; wasm stub: " << runtime_stub_name;
 #endif  // V8_ENABLE_WEBASSEMBLY
   } else {

@@ -3412,6 +3412,21 @@ IGNITION_HANDLER(GetIterator, InterpreterAssembler) {
   Dispatch();
 }
 
+// ArrayDestructure <reglist> <regcount>
+//
+// Destructures the object in the accumulator into registers starting at
+// <reglist>.
+IGNITION_HANDLER(ArrayDestructure, InterpreterAssembler) {
+  TNode<Object> receiver = GetAccumulator();
+  TNode<Context> context = GetContext();
+  RegListNodePair outputs = GetRegisterListAtOperandIndex(0);
+
+  CallBuiltin(Builtin::kArrayDestructure, context, receiver,
+              outputs.reg_count(), outputs.base_reg_location());
+  ClobberAccumulator(UndefinedConstant());
+  Dispatch();
+}
+
 // Wide
 //
 // Prefix bytecode indicating next bytecode has wide (16-bit) operands.

@@ -166,8 +166,13 @@ class BasicBlock {
   }
 
   int predecessor_count() const {
-    DCHECK(has_state());
-    return state()->predecessor_count();
+    if (type_ == kEdgeSplit || type_ == kOther) {
+      DCHECK_NOT_NULL(predecessor());
+      return 1;
+    } else {
+      DCHECK(has_state());
+      return state()->predecessor_count();
+    }
   }
 
   bool IsUnreachable() const {

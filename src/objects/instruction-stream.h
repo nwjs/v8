@@ -122,8 +122,19 @@ V8_OBJECT class InstructionStream : public TrustedObject {
                           Heap* heap);
   V8_INLINE bool IsFullyInitialized();
 
+#ifdef V8_ENABLE_GENERATED_CODE_VALIDATOR
+  bool IsValidated() const;
+  void SetValidated();
+#endif  // V8_ENABLE_GENERATED_CODE_VALIDATOR
+
   DECL_PRINTER(InstructionStream)
   DECL_VERIFIER(InstructionStream)
+
+#ifdef V8_ENABLE_GENERATED_CODE_VALIDATOR
+#define ISTREAM_FIELDS_VALIDATION(V) V(kIsValidatedOffset, kUInt8Size)
+#else  // !V8_ENABLE_GENERATED_CODE_VALIDATOR
+#define ISTREAM_FIELDS_VALIDATION(V)
+#endif  // V8_ENABLE_GENERATED_CODE_VALIDATOR
 
   // Layout description.
 #define ISTREAM_FIELDS(V)                                                     \
@@ -133,10 +144,12 @@ V8_OBJECT class InstructionStream : public TrustedObject {
   V(kDataStart, 0)                                                            \
   V(kBodySizeOffset, kUInt32Size)                                             \
   V(kConstantPoolOffsetOffset, V8_EMBEDDED_CONSTANT_POOL_BOOL ? kIntSize : 0) \
+  ISTREAM_FIELDS_VALIDATION(V)                                                \
   V(kUnalignedSize, OBJECT_POINTER_PADDING(kUnalignedSize))                   \
   V(kHeaderSize, 0)
   DEFINE_FIELD_OFFSET_CONSTANTS(sizeof(TrustedObject), ISTREAM_FIELDS)
 #undef ISTREAM_FIELDS
+#undef ISTREAM_FIELDS_VALIDATION
 
   static_assert(kCodeAlignment >= kHeaderSize);
   // We do two things to ensure kCodeAlignment of the entry address:

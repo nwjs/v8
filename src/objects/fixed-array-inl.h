@@ -10,6 +10,7 @@
 
 #include <optional>
 
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
 #include "src/common/ptr-compr-inl.h"
 #include "src/handles/handles-inl.h"
@@ -301,8 +302,7 @@ Handle<TrustedFixedArray> TrustedFixedArray::New(IsolateT* isolate,
 // static
 template <class IsolateT>
 Handle<ProtectedFixedArray> ProtectedFixedArray::New(IsolateT* isolate,
-                                                     uint32_t capacity,
-                                                     SharedFlag shared) {
+                                                     uint32_t capacity) {
   if (V8_UNLIKELY(capacity > ProtectedFixedArray::kMaxLength)) {
     base::FatalNoSecurityImpact(
         "Fatal JavaScript invalid size error %d (see crbug.com/1201626)",
@@ -311,9 +311,7 @@ Handle<ProtectedFixedArray> ProtectedFixedArray::New(IsolateT* isolate,
 
   std::optional<DisallowGarbageCollection> no_gc;
   Handle<ProtectedFixedArray> result = TrustedCast<ProtectedFixedArray>(
-      Allocate(isolate, capacity, &no_gc,
-               shared == SharedFlag::kYes ? AllocationType::kSharedTrusted
-                                          : AllocationType::kTrusted));
+      Allocate(isolate, capacity, &no_gc, AllocationType::kTrusted));
   MemsetTagged((*result)->RawFieldOfFirstElement(), Smi::zero(), capacity);
   return result;
 }

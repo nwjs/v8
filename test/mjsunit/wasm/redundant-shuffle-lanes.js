@@ -1798,3 +1798,228 @@ RunMaxIndexTests(
   const wasm = builder.instantiate().exports;
   assertEquals(99, wasm.repeated());
 })();
+
+(function ShuffleWindowNeedsOutputOffset() {
+  print(arguments.callee.name);
+
+  const a = Array.from({length: 16}, (_, i) => i);
+  const b = Array.from({length: 16}, (_, i) => 200 + i);
+  const shuffle_in_pattern =
+      Array.from({length: 16}, (_, i) => i);  // identity
+
+  // shuffle_out reads an 8-lane window starting at output lane 4 that only
+  // uses lanes 2 and 3 from shuffle_in so only two bytes are demanded from
+  // shuffle_in.
+  const shuffle_out_pattern =
+      [19, 18, 17, 16, 2, 3, 2, 3, 2, 3, 2, 3, 20, 21, 22, 23];
+
+  // Extract lane 10, which is sourced from shuffle_in (lane 2), which would
+  // become lane 0 if shuffle_in is reduced.
+  const extract_lane = 10;
+
+  const builder = new WasmModuleBuilder();
+  builder.addFunction('test', makeSig([], [kWasmI32])).addBody([
+      ...wasmS128Const(a),
+      ...wasmS128Const(a),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_in_pattern,
+      ...wasmS128Const(b),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_out_pattern,
+      kSimdPrefix, kExprI8x16ExtractLaneU, extract_lane,
+  ]).exportFunc();
+
+  const wasm = builder.instantiate().exports;
+  const expected = a[2];
+  assertEquals(expected, wasm.test());
+})();
+
+(function ShuffleRightHalfKeepsBaseOffset() {
+  print(arguments.callee.name);
+  const a = Array.from({length: 16}, (_, i) => 10 + i);   // filler
+  const b = Array.from({length: 16}, (_, i) => i);       // distinct
+  const shuffle_in_pattern =
+      Array.from({length: 16}, (_, i) => i);  // identity
+
+  // shuffle_out consumes a four-lane window that starts at input lane 0 of
+  // shuffle_in, the rhs operand, and appears at output lanes 4..7.
+  // Ensure the base offset is maintained so that we still read from the rhs
+  // and not the lhs.
+  const shuffle_out_pattern =
+      [0, 1, 2, 3,
+       16, 17, 18, 19,
+       8, 9, 10, 11,
+       12, 13, 14, 15];
+  const extract_lane = 6;  // lane 18 = lane 2 of b.
+
+  const builder = new WasmModuleBuilder();
+  builder.addFunction('test', makeSig([], [kWasmI32])).addBody([
+      ...wasmS128Const(a),
+      ...wasmS128Const(a),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_in_pattern,
+      ...wasmS128Const(b),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_out_pattern,
+      kSimdPrefix, kExprI8x16ExtractLaneU, extract_lane,
+  ]).exportFunc();
+
+  const wasm = builder.instantiate().exports;
+  const expected = b[2];
+  assertEquals(expected, wasm.test());
+})();
+
+(function ShuffleWindowRewriteUsesOutputOffset() {
+  print(arguments.callee.name);
+
+  const a = Array.from({length: 16}, (_, i) => i);
+  const b = Array.from({length: 16}, (_, i) => 200 + i);
+  const shuffle_in_pattern = Array.from({length: 16}, (_, i) => i);  // identity
+
+  // Window of lanes 2 and 3 from shuffle_in placed at output lanes 6..9.
+  const shuffle_out_pattern = [
+      16, 17, 18, 19, 20, 21,
+      2, 3, 2, 3,              // window that should be rewritten in-place
+      22, 23, 24, 25, 26, 27
+  ];
+  const extract_lane = 7;  // == 3 == a[3]
+
+  const builder = new WasmModuleBuilder();
+  builder.addFunction('test', makeSig([], [kWasmI32])).addBody([
+      ...wasmS128Const(a),
+      ...wasmS128Const(a),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_in_pattern,
+      ...wasmS128Const(b),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_out_pattern,
+      kSimdPrefix, kExprI8x16ExtractLaneU, extract_lane,
+  ]).exportFunc();
+
+  const wasm = builder.instantiate().exports;
+  const expected = a[3];
+  assertEquals(expected, wasm.test());
+})();
+
+(function ShuffleRightWindowKeepsBaseAfterShift() {
+  print(arguments.callee.name);
+
+  const a = Array.from({length: 16}, (_, i) => 10 + i);
+  const b = Array.from({length: 16}, (_, i) => 200 + i);
+  const shuffle_in_pattern = Array.from({length: 16}, (_, i) => i);  // identity
+
+  // A two-byte window from the right operand (indices 16, 17) that will be
+  // shifted. The consumer must preserve the base offset so it still reads from
+  // the rhs after rewriting.
+  const shuffle_out_pattern = [
+      16, 17, 16, 17,  // window (begin_input_index = 16)
+      0, 1, 2, 3,
+      20, 21, 22, 23,
+      24, 25, 26, 27
+  ];
+  const extract_lane = 1;  // == 17 == b[1]
+
+  const builder = new WasmModuleBuilder();
+  builder.addFunction('test', makeSig([], [kWasmI32])).addBody([
+      ...wasmS128Const(a),
+      ...wasmS128Const(a),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_in_pattern,
+      ...wasmS128Const(b),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_out_pattern,
+      kSimdPrefix, kExprI8x16ExtractLaneU, extract_lane,
+  ]).exportFunc();
+
+  const wasm = builder.instantiate().exports;
+  const expected = b[1];
+  assertEquals(expected, wasm.test());
+})();
+
+(function ShuffleLeftWindowCorrectSpan() {
+  print(arguments.callee.name);
+
+  const a = Array.from({length: 16}, (_, i) => 10 + i);
+  const b = Array.from({length: 16}, (_, i) => 200 + i);
+  const shuffle_in_pattern = Array.from({length: 16}, (_, i) => i);  // identity
+
+  // A four-byte window from the left operand (indices 0, 1, 2, 3) that will be
+  // shifted.
+  const shuffle_out_pattern = [
+      16, 17, 16, 17,
+      0, 1, 2, 3,
+      20, 21, 22, 23,
+      24, 25, 26, 27
+  ];
+
+  const builder = new WasmModuleBuilder();
+  builder.addFunction('test', makeSig([], [kWasmI32])).addBody([
+      ...wasmS128Const(a),
+      ...wasmS128Const(a),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_in_pattern,
+      ...wasmS128Const(b),
+      kSimdPrefix, kExprI8x16Shuffle, ...shuffle_out_pattern,
+      kSimdPrefix, kExprI32x4ExtractLane, 1,
+  ]).exportFunc();
+
+  const wasm = builder.instantiate().exports;
+  const expected = a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
+  assertEquals(expected, wasm.test());
+})();
+
+(function MiddleShuffleIsShiftedInputAndRewrittenOutput() {
+  print(arguments.callee.name);
+
+  const val01 = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f];
+  const val02 = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f];
+  const val03 = [0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+                 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f];
+  const val04 = [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57,
+                 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f];
+
+  const extract_low_i8x4 = [
+    ...SimdInstr(kExprI16x8SConvertI8x16Low),
+    ...SimdInstr(kExprI32x4SConvertI16x8Low),
+    kExprLocalTee, 0,
+    kSimdPrefix, kExprI32x4ExtractLane, 0,
+    kExprLocalGet, 0,
+    kSimdPrefix, kExprI32x4ExtractLane, 1,
+    kExprI32Sub,
+    kExprLocalGet, 0,
+    kSimdPrefix, kExprI32x4ExtractLane, 2,
+    kExprI32Sub,
+    kExprLocalGet, 0,
+    kSimdPrefix, kExprI32x4ExtractLane, 3,
+    kExprI32Sub,
+  ];
+
+  const builder = new WasmModuleBuilder();
+  const simd = [
+    ...wasmS128Const(val01),
+    ...wasmS128Const(val02),
+    kSimdPrefix, kExprI8x16Shuffle,                    // A.
+    0x00, 0x01, 0x02, 0x03, 0x08, 0x09, 0x0a, 0x0b,
+    0x10, 0x11, 0x12, 0x13, 0x18, 0x19, 0x1a, 0x1b,
+    ...wasmS128Const(val03),
+    kSimdPrefix, kExprI8x16Shuffle,                    // B = shuffle(A, val03).
+    // The low lanes read A[4..7], so B will update these indices after A is
+    // shifted. C below reads B[4..7], so B will also shift that window to low.
+    0x04, 0x05, 0x06, 0x07, 0x10, 0x11, 0x12, 0x13,
+    0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+    ...wasmS128Const(val04),
+    kSimdPrefix, kExprI8x16Shuffle,                    // C = shuffle(B, val04).
+    0x04, 0x05, 0x06, 0x07, 0x10, 0x11, 0x12, 0x13,
+    0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+    ...extract_low_i8x4,
+  ];
+  const expected = [
+    ...wasmS128Const([0x40, 0x41, 0x42, 0x43, 0, 0, 0, 0,
+                      0, 0, 0, 0, 0, 0, 0, 0]),
+    ...extract_low_i8x4,
+  ];
+  builder.addFunction('simd', kSig_i_v)
+      .addLocals(kWasmS128, 1)
+      .addBody(simd)
+      .exportFunc();
+  builder.addFunction('expected', kSig_i_v)
+      .addLocals(kWasmS128, 1)
+      .addBody(expected)
+      .exportFunc();
+
+  const wasm = builder.instantiate().exports;
+  assertEquals(wasm.expected(), wasm.simd());
+})();

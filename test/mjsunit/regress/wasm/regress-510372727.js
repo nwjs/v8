@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --fuzzing --single-threaded --experimental-wasm-pgo-to-file
+// Flags: --fuzzing --single-threaded --wasm-pgo-to-file
 
 let bytes = new Uint8Array([
   0x00, 0x61, 0x73, 0x6d,  // wasm magic

@@ -244,6 +244,12 @@ JSDurationFormat::Separator GetSeparator(const icu::Locale& l) {
 MaybeDirectHandle<JSDurationFormat> JSDurationFormat::New(
     Isolate* isolate, DirectHandle<Map> map, DirectHandle<Object> locales,
     DirectHandle<Object> input_options, const char* method_name) {
+  StackLimitCheck stack_check(isolate);
+  if (stack_check.JsHasOverflowed(16 * KB)) {
+    isolate->StackOverflow();
+    return {};
+  }
+
   Factory* factory = isolate->factory();
 
   // 3. Let requestedLocales be ? CanonicalizeLocaleList(locales).

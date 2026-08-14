@@ -853,55 +853,6 @@ TEST_ALL_SCENARIA(SharedHeapTestStateWithRawPointerUnparked, ToEachTheirOwn,
 #undef TEST_SCENARIO
 #undef TEST_ALL_SCENARIA
 
-// TODO(358918874): Re-enable this test once allocation paths are using the
-// right tag for trusted pointers in shared objects.
-#if false
-TEST_F(SharedHeapTest, SharedUntrustedToSharedTrustedPointer) {
-  Isolate* isolate = i_isolate();
-  Factory* factory = isolate->factory();
-  ManualGCScope manual_gc_scope(isolate);
-
-  // Allocate an object in the shared trusted space.
-  // Use random bytes here since we don't ever run the bytecode.
-  constexpr uint8_t kRawBytes[] = {0x1, 0x2, 0x3, 0x4};
-  constexpr int kRawBytesSize = sizeof(kRawBytes);
-  constexpr int32_t kFrameSize = 32;
-  constexpr uint16_t kParameterCount = 2;
-  constexpr uint16_t kMaxArguments = 0;
-  Handle<TrustedFixedArray> constant_pool =
-      factory->NewTrustedFixedArray(0, AllocationType::kSharedTrusted);
-  Handle<TrustedByteArray> handler_table =
-      factory->NewTrustedByteArray(3, AllocationType::kSharedTrusted);
-  Handle<BytecodeArray> bytecode_array = factory->NewBytecodeArray(
-      kRawBytesSize, kRawBytes, kFrameSize, kParameterCount, kMaxArguments,
-      constant_pool, handler_table, AllocationType::kSharedTrusted);
-  CHECK_EQ(MemoryChunk::FromHeapObject(*bytecode_array)
-               ->Metadata()
-               ->owner()
-               ->identity(),
-           SHARED_TRUSTED_SPACE);
-
-  // Start incremental marking
-  isolate->heap()->StartIncrementalMarking(GCFlag::kNoFlags,
-                                           GarbageCollectionReason::kTesting);
-
-  // Allocate an object in the shared untrusted space.
-  Handle<BytecodeWrapper> bytecode_wrapper =
-      factory->NewBytecodeWrapper(AllocationType::kSharedOld);
-  CHECK_EQ(MemoryChunk::FromHeapObject(*bytecode_wrapper)
-               ->Metadata()
-               ->owner()
-               ->identity(),
-           SHARED_SPACE);
-
-  // Create a shared untrusted to shared trusted reference (with a write
-  // barrier)
-  bytecode_wrapper->set_bytecode(*bytecode_array);
-  bytecode_array->wrapper()->clear_bytecode();
-  bytecode_array->set_wrapper(*bytecode_wrapper);
-}
-#endif  // false
-
 namespace {
 class UpdateExternalMemoryWorkerThread : public ParkingThread {
  public:
@@ -983,6 +934,39 @@ TEST_F(SharedHeapTest, WriteBarrierForRange_SharedHeapMarking) {
   });
 
   InvokeMajorGC(isolate);
+}
+
+template <typename TMixin>
+class WithEmptySharedHeapFlagsMixin : public TMixin {
+ public:
+  WithEmptySharedHeapFlagsMixin() { i::v8_flags.empty_shared_heap = true; }
+};
+
+using SharedHeapEmptyTestPlatform =
+    WithDefaultPlatformMixin<WithEmptySharedHeapFlagsMixin<::testing::Test>>;
+
+using SharedHeapEmptyTest = WithInternalIsolateMixin<
+    WithIsolateScopeMixin<WithIsolateMixin<SharedHeapEmptyTestPlatform>>>;
+
+TEST_F(SharedHeapEmptyTest, FlagImplications) {
+  EXPECT_TRUE(v8_flags.empty_shared_heap);
+  EXPECT_TRUE(v8_flags.shared_heap);
+  EXPECT_FALSE(v8_flags.shared_string_table);
+}
+
+TEST_F(SharedHeapEmptyTest, EmptySharedHeapPasses) {
+  i_isolate()->factory()->NewFixedArray(10, AllocationType::kYoung);
+  i_isolate()->factory()->NewFixedArray(10, AllocationType::kOld);
+  InvokeMajorGC(i_isolate());
+}
+
+TEST_F(SharedHeapEmptyTest, EmptySharedHeapCrashes) {
+  EXPECT_DEATH_IF_SUPPORTED(
+      {
+        i_isolate()->factory()->NewFixedArray(10, AllocationType::kSharedOld);
+        InvokeMajorGC(i_isolate());
+      },
+      "");
 }
 
 }  // namespace internal

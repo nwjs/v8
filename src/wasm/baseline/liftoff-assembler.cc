@@ -308,6 +308,10 @@ void LiftoffAssembler::CacheState::GetTaggedSlotsForOOLCode(
 
     slots->push_back(GetSafepointIndexForStackSlot(slot));
   }
+  if (spill_location == SpillLocation::kTopOfStack &&
+      cached_instance_data != no_reg) {
+    spills->set(LiftoffRegister{cached_instance_data});
+  }
 }
 
 void LiftoffAssembler::CacheState::DefineSafepoint(
@@ -368,7 +372,7 @@ AssemblerOptions DefaultLiftoffOptions() {
 
 LiftoffAssembler::LiftoffAssembler(Zone* zone,
                                    std::unique_ptr<AssemblerBuffer> buffer)
-    : MacroAssembler(zone, DefaultLiftoffOptions(), CodeObjectRequired::kNo,
+    : MacroAssembler(zone, DefaultLiftoffOptions(), CodeObjectRequired{false},
                      std::move(buffer)),
       cache_state_(zone) {
   set_abort_hard(true);  // Avoid calls to Abort.
@@ -743,6 +747,7 @@ void LiftoffAssembler::PrepareBuiltinCall(
   SpillAllRegisters();
   int param_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
   if (param_slots > 0) {
+    RecordPushedCallArgs(param_slots);
     stack_slots.Construct(param_slots);
   }
   // Execute the stack transfers before filling the instance register.
@@ -789,20 +794,18 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
   }
 
   // If the target register overlaps with a parameter register, then move the
-  // target to another free register, or spill to the stack.
+  // target to another free register.
   if (target && param_regs.has(LiftoffRegister(*target))) {
-    // Try to find another free register.
+    // Find another free register. Since all platforms have more cache regs
+    // than param regs, this will always succeed.
+    static_assert(arraysize(kGpParamRegisters) <
+                  kGpCacheRegList.GetNumRegsSet());
     LiftoffRegList free_regs = kGpCacheRegList.MaskOut(param_regs);
+    DCHECK(!free_regs.is_empty());
+    LiftoffRegister new_target = free_regs.GetFirstRegSet();
     static_assert(sizeof(WasmCodePointer) == kUInt32Size);
-    if (!free_regs.is_empty()) {
-      LiftoffRegister new_target = free_regs.GetFirstRegSet();
-      parallel_move.MoveRegister(new_target, LiftoffRegister(*target), kI32);
-      *target = new_target.gp();
-    } else {
-      stack_slots.Add(VarState(kI32, LiftoffRegister(*target), 0), param_slots);
-      param_slots++;
-      *target = no_reg;
-    }
+    parallel_move.MoveRegister(new_target, LiftoffRegister(*target), kI32);
+    *target = new_target.gp();
   }
 
   // After figuring out all register and stack moves, drop the parameter slots
@@ -828,6 +831,7 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
       [](const VarState& slot) { return slot.is_stack() || slot.is_const(); }));
 
   if (param_slots > 0) {
+    RecordPushedCallArgs(param_slots);
     stack_slots.Construct(param_slots);
   }
   // Execute the stack transfers before filling the instance register.

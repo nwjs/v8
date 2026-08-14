@@ -271,8 +271,8 @@ TEST_F(BytecodeVerifierTest, HandlerTableEntryWithInvalidRange) {
 
   Handle<TrustedFixedArray> constant_pool = factory->NewTrustedFixedArray(0);
 
-  Handle<TrustedByteArray> handler_table = factory->NewTrustedByteArray(
-      HandlerTable::LengthForRange(1), AllocationType::kTrusted);
+  Handle<TrustedByteArray> handler_table =
+      factory->NewTrustedByteArray(HandlerTable::LengthForRange(1));
   {
     HandlerTable table(*handler_table);
     table.SetRangeStart(0, 1);
@@ -305,8 +305,8 @@ TEST_F(BytecodeVerifierTest, HandlerTableEntryWithHandlerBeforeEnd) {
 
   Handle<TrustedFixedArray> constant_pool = factory->NewTrustedFixedArray(0);
 
-  Handle<TrustedByteArray> handler_table = factory->NewTrustedByteArray(
-      HandlerTable::LengthForRange(1), AllocationType::kTrusted);
+  Handle<TrustedByteArray> handler_table =
+      factory->NewTrustedByteArray(HandlerTable::LengthForRange(1));
   {
     HandlerTable table(*handler_table);
     table.SetRangeStart(0, kLdaZeroOffset);
@@ -336,8 +336,8 @@ TEST_F(BytecodeVerifierTest, HandlerTableEntryWithInvalidData) {
 
   Handle<TrustedFixedArray> constant_pool = factory->NewTrustedFixedArray(0);
 
-  Handle<TrustedByteArray> handler_table = factory->NewTrustedByteArray(
-      HandlerTable::LengthForRange(1), AllocationType::kTrusted);
+  Handle<TrustedByteArray> handler_table =
+      factory->NewTrustedByteArray(HandlerTable::LengthForRange(1));
   {
     HandlerTable table(*handler_table);
     table.SetRangeStart(0, kLdaZeroOffset);
@@ -366,8 +366,8 @@ TEST_F(BytecodeVerifierTest, HandlerTableEntryWithInvalidValueData) {
 
   Handle<TrustedFixedArray> constant_pool = factory->NewTrustedFixedArray(0);
 
-  Handle<TrustedByteArray> handler_table = factory->NewTrustedByteArray(
-      HandlerTable::LengthForRange(1), AllocationType::kTrusted);
+  Handle<TrustedByteArray> handler_table =
+      factory->NewTrustedByteArray(HandlerTable::LengthForRange(1));
   {
     HandlerTable table(*handler_table);
     table.SetRangeStart(0, kLdaZeroOffset);
@@ -389,8 +389,8 @@ TEST_F(BytecodeVerifierTest, HandlerTableEntryWithNegativeRange) {
 
   Handle<TrustedFixedArray> constant_pool = factory->NewTrustedFixedArray(0);
 
-  Handle<TrustedByteArray> handler_table = factory->NewTrustedByteArray(
-      HandlerTable::LengthForRange(1), AllocationType::kTrusted);
+  Handle<TrustedByteArray> handler_table =
+      factory->NewTrustedByteArray(HandlerTable::LengthForRange(1));
   {
     HandlerTable table(*handler_table);
     table.SetRangeStart(0, -1);
@@ -415,8 +415,8 @@ TEST_F(BytecodeVerifierTest, HandlerTableEntryWithInvalidHandler) {
 
   Handle<TrustedFixedArray> constant_pool = factory->NewTrustedFixedArray(0);
 
-  Handle<TrustedByteArray> handler_table = factory->NewTrustedByteArray(
-      HandlerTable::LengthForRange(1), AllocationType::kTrusted);
+  Handle<TrustedByteArray> handler_table =
+      factory->NewTrustedByteArray(HandlerTable::LengthForRange(1));
   {
     HandlerTable table(*handler_table);
     table.SetRangeStart(0, 0);
@@ -441,8 +441,8 @@ TEST_F(BytecodeVerifierTest, HandlerTableEntryWithMisalignedHandler) {
 
   Handle<TrustedFixedArray> constant_pool = factory->NewTrustedFixedArray(0);
 
-  Handle<TrustedByteArray> handler_table = factory->NewTrustedByteArray(
-      HandlerTable::LengthForRange(1), AllocationType::kTrusted);
+  Handle<TrustedByteArray> handler_table =
+      factory->NewTrustedByteArray(HandlerTable::LengthForRange(1));
   {
     HandlerTable table(*handler_table);
     table.SetRangeStart(0, 0);

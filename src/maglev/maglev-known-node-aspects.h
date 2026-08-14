@@ -23,6 +23,8 @@ struct LoopEffects;
 class KnownNodeAspects;
 class TraceLogger;
 
+enum class EnsureTypeResult { kAlreadyHadType, kTypeUpdated, kContradiction };
+
 using PossibleMaps = compiler::ZoneRefSet<Map>;
 
 #ifdef DEBUG
@@ -62,8 +64,7 @@ class NodeInfo {
     if (other.val.possible_maps_are_known_) {
       possible_maps_ = other.val.possible_maps_;
       possible_maps_are_known_ = true;
-      any_map_or_node_type_is_unstable_ =
-          other.val.any_map_or_node_type_is_unstable_;
+      any_map_is_unstable_ = other.val.any_map_is_unstable_;
       OnSideEffect();
     }
   }
@@ -186,6 +187,7 @@ class NodeInfo {
         case UseRepresentation::kHoleyFloat64:
           return holey_float64();
         case UseRepresentation::kUint32:
+        case UseRepresentation::kNonTruncated:
           UNREACHABLE();
       }
       UNREACHABLE();
@@ -262,12 +264,10 @@ class NodeInfo {
       }
     }
 
-    any_map_or_node_type_is_unstable_ =
-        possible_maps_are_known_ && (any_map_or_node_type_is_unstable_ ||
-                                     other.any_map_or_node_type_is_unstable_);
+    any_map_is_unstable_ = possible_maps_are_known_ &&
+                           (any_map_is_unstable_ || other.any_map_is_unstable_);
 
-    if (NodeTypeIsUnstable(type_) ||
-        (any_map_or_node_type_is_unstable_ && !maps_are_stale_)) {
+    if (any_map_is_unstable_ && !maps_are_stale_) {
       side_effects_require_invalidation = true;
     }
   }
@@ -281,18 +281,13 @@ class NodeInfo {
     alternative_.FillMissingFrom(other.alternative_);
   }
 
-  bool possible_maps_are_unstable() const {
-    return any_map_or_node_type_is_unstable_;
-  }
-
   void OnSideEffect() {
-    if (any_map_or_node_type_is_unstable_) maps_are_stale_ = true;
-    type_ = MakeTypeStable(type_);
+    if (any_map_is_unstable_) maps_are_stale_ = true;
   }
 
   template <typename Function>
   bool MarkMapsStaleIfAny(const Function& condition) {
-    if (!any_map_or_node_type_is_unstable_) return false;
+    if (!any_map_is_unstable_) return false;
     for (auto map : possible_maps_) {
       if (condition(map)) {
         maps_are_stale_ = true;
@@ -315,17 +310,17 @@ class NodeInfo {
                                    const NodeInfo* node_info,
                                    const PossibleMaps& possible_maps);
 
-  void SetPossibleMaps(const PossibleMaps& possible_maps,
-                       bool any_map_or_node_type_is_unstable,
-                       NodeType possible_type, compiler::JSHeapBroker* broker,
-                       const KnownNodeAspects& known_node_aspects) {
+  V8_NODISCARD bool SetPossibleMaps(
+      const PossibleMaps& possible_maps, bool any_map_is_unstable,
+      NodeType possible_type, compiler::JSHeapBroker* broker,
+      const KnownNodeAspects& known_node_aspects) {
     if (V8_UNLIKELY(v8_flags.trace_maglev_kna)) {
       TraceSetPossibleMaps(known_node_aspects, this, possible_maps);
     }
 
     possible_maps_ = possible_maps;
     possible_maps_are_known_ = true;
-    any_map_or_node_type_is_unstable_ = any_map_or_node_type_is_unstable;
+    any_map_is_unstable_ = any_map_is_unstable;
     maps_are_stale_ = false;
 #ifdef DEBUG
     if (possible_maps.size()) {
@@ -341,6 +336,14 @@ class NodeInfo {
     }
 #endif
     IntersectType(possible_type);
+#ifdef DEBUG
+    DCHECK_IMPLIES(
+        !possible_maps_.is_empty() && NodeTypeCanBe(type_, NodeType::kSmi),
+        std::any_of(
+            possible_maps_.begin(), possible_maps_.end(),
+            [](compiler::MapRef map) { return map.IsHeapNumberMap(); }));
+#endif
+    return !IsEmptyNodeType(type_);
   }
 
   // "Stale" means that 1. we've seen unstable maps, and 2. a side effect may
@@ -351,24 +354,12 @@ class NodeInfo {
   // Objects with "unstable" maps may transition and thus need protection with
   // map checks. (Objects with "stable" maps invalidate compilation
   // dependencies when transitioning.)
-  // Note this may also be true if a NodeType is unstable, see below.
-  bool any_map_or_node_type_is_unstable() const {
-    return any_map_or_node_type_is_unstable_;
-  }
-
-  // Unstable NodeTypes: this is a different concept than unstable maps. These
-  // are simply NodeTypes that may change. Currently only String types can do
-  // so.
-  void set_node_type_is_unstable() {
-    // Reuse any_map_or_node_type_is_unstable to signal that the node type is
-    // unstable.
-    any_map_or_node_type_is_unstable_ = true;
-  }
+  bool any_map_is_unstable() const { return any_map_is_unstable_; }
 
  private:
   NodeType type_ = NodeType::kUnknown;
 
-  bool any_map_or_node_type_is_unstable_ = false;
+  bool any_map_is_unstable_ = false;
   bool maps_are_stale_ = false;
 
   // Maps for a node. Sets of maps that only contain stable maps are valid
@@ -413,7 +404,16 @@ class KnownNodeAspects {
 
   void ClearUnstableNodeAspectsForStoreMap(StoreMap* node,
                                            bool is_tracing_enabled);
+  void ClearUnstableNodeAspectsForElementsTransition(
+      const ZoneVector<compiler::MapRef>& transition_sources,
+      bool is_tracing_enabled);
   void ClearUnstableNodeAspects(bool is_tracing_enabled);
+
+  // Returns the node info for `object` if its possible maps are known and not
+  // stale, otherwise nullptr. Cached [Elements] facts survive an elements-kind
+  // transition only for such objects: stale or unknown maps mean the object
+  // may alias a transition source, whose elements store can be reallocated.
+  const NodeInfo* TryGetInfoWithFreshMaps(ValueNode* object) const;
 
   void OnSideEffect() {
     // A side effect could change existing objects' maps. For stable maps we
@@ -444,6 +444,7 @@ class KnownNodeAspects {
   void ClearAll() {
     loaded_constant_properties_.clear();
     loaded_properties_.clear();
+    loaded_tagged_keyed_properties_.clear();
     loaded_context_constants_.clear();
     loaded_context_slots_.clear();
     available_expressions_.clear();
@@ -545,29 +546,32 @@ class KnownNodeAspects {
         GetTypeUnchecked(broker, node));
   }
 
-  bool EnsureType(compiler::JSHeapBroker* broker, ValueNode* node,
-                  NodeType type, NodeType* old_type = nullptr) {
+  EnsureTypeResult EnsureType(compiler::JSHeapBroker* broker, ValueNode* node,
+                              NodeType type, NodeType* old_type = nullptr) {
     NodeType static_type = node->GetStaticType(broker);
     if (old_type) *old_type = static_type;
-    // TODO(428667907): Ideally we should bail out early for the kNone type.
     if (NodeTypeIs(static_type, type, NodeTypeIsVariant::kAllowNone)) {
-      return true;
+      if (static_type == NodeType::kNone) {
+        return EnsureTypeResult::kContradiction;
+      }
+      return EnsureTypeResult::kAlreadyHadType;
     }
     NodeInfo* known_info = GetOrCreateInfoFor(broker, node);
     if (old_type) *old_type = known_info->type();
-    // TODO(428667907): Ideally we should bail out early for the kNone type.
     if (NodeTypeIs(known_info->type(), type, NodeTypeIsVariant::kAllowNone)) {
-      return true;
+      if (known_info->type() == NodeType::kNone) {
+        return EnsureTypeResult::kContradiction;
+      }
+      return EnsureTypeResult::kAlreadyHadType;
     }
     known_info->IntersectType(type);
     if (auto phi = node->TryCast<Phi>()) {
       known_info->IntersectType(phi->type());
     }
-    if (NodeTypeIsUnstable(type)) {
-      known_info->set_node_type_is_unstable();
-      side_effects_require_invalidation_ = true;
+    if (known_info->type() == NodeType::kNone) {
+      return EnsureTypeResult::kContradiction;
     }
-    return false;
+    return EnsureTypeResult::kTypeUpdated;
   }
 
   void Merge(const KnownNodeAspects& other, Zone* zone);
@@ -633,6 +637,31 @@ class KnownNodeAspects {
     return false;
   }
 
+  // Cache of LoadFixedArrayElement results keyed by (elements, index). Any
+  // write that does not pass PreservesTaggedKeyedProperties clears it.
+  LoadFixedArrayElement* TryFindTaggedKeyedProperty(ValueNode* elements,
+                                                    ValueNode* index) {
+    auto it = loaded_tagged_keyed_properties_.find(
+        {elements->UnwrapIdentities(), index->UnwrapIdentities()});
+    if (it == loaded_tagged_keyed_properties_.end()) return nullptr;
+    return it->second->UnwrapIdentities()->TryCast<LoadFixedArrayElement>();
+  }
+  void RecordTaggedKeyedProperty(ValueNode* elements, ValueNode* index,
+                                 LoadFixedArrayElement* load) {
+    std::pair<ValueNode*, ValueNode*> key{elements->UnwrapIdentities(),
+                                          index->UnwrapIdentities()};
+    auto it = loaded_tagged_keyed_properties_.find(key);
+    if (it != loaded_tagged_keyed_properties_.end()) {
+      it->second = load;
+      return;
+    }
+    if (loaded_tagged_keyed_properties_.size() >= kMaxTaggedKeyedProperties) {
+      return;
+    }
+    loaded_tagged_keyed_properties_.emplace(key, load);
+  }
+  void ClearTaggedKeyedProperties() { loaded_tagged_keyed_properties_.clear(); }
+
   void increment_effect_epoch() {
     if (effect_epoch_ < kEffectEpochOverflow) effect_epoch_++;
   }
@@ -666,7 +695,8 @@ class KnownNodeAspects {
           std::forward_as_tuple(std::forward<Args>(args)...)) {
         int i = 0;
         for (const auto& inp : inputs) {
-          if (inp != candidate->input(i).node()) {
+          if (inp->UnwrapIdentities() !=
+              candidate->input(i).node()->UnwrapIdentities()) {
             break;
           }
           i++;
@@ -768,6 +798,10 @@ class KnownNodeAspects {
 
     increment_effect_epoch();
 
+    if constexpr (!PreservesTaggedKeyedProperties(Node::opcode_of<NodeT>)) {
+      loaded_tagged_keyed_properties_.clear();
+    }
+
     if constexpr (Node::opcode_of<NodeT> == Opcode::kMaybeGrowFastElements) {
       if (ClearLoadedPropertiesForKey(broker->length_string())) {
         if (V8_UNLIKELY(v8_flags.trace_maglev_kna && is_tracing_enabled)) {
@@ -783,11 +817,18 @@ class KnownNodeAspects {
         }
       }
     } else if constexpr (std::is_same_v<NodeT, CheckMapsWithMigration> ||
+                         std::is_same_v<NodeT,
+                                        CheckMapsWithMigrationAndDeopt> ||
                          std::is_same_v<NodeT, MigrateMapIfNeeded>) {
       // These instructions only migrate representations of values, not the
       // values themselves, so cached values are still valid.
     } else if constexpr (std::is_same_v<NodeT, StoreMap>) {
       ClearUnstableNodeAspectsForStoreMap(node, is_tracing_enabled);
+    } else if constexpr (std::is_same_v<NodeT, TransitionElementsKind> ||
+                         std::is_same_v<NodeT,
+                                        TransitionElementsKindOrCheckMap>) {
+      ClearUnstableNodeAspectsForElementsTransition(node->transition_sources(),
+                                                    is_tracing_enabled);
     } else if constexpr (!IsSimpleFieldStore(Node::opcode_of<NodeT>) &&
                          !IsTypedArrayStore(Node::opcode_of<NodeT>)) {
       // Don't change known node aspects for simple field stores. The only
@@ -804,6 +845,7 @@ class KnownNodeAspects {
   explicit KnownNodeAspects(Zone* zone)
       : loaded_constant_properties_(zone),
         loaded_properties_(zone),
+        loaded_tagged_keyed_properties_(zone),
         loaded_context_constants_(zone),
         loaded_context_slots_(zone),
         available_expressions_(zone),
@@ -876,6 +918,12 @@ class KnownNodeAspects {
   LoadedPropertyMap loaded_constant_properties_;
   // Flushed after side-effecting calls.
   LoadedPropertyMap loaded_properties_;
+  // (elements, index) -> LoadFixedArrayElement. Flushed by any write that
+  // does not pass PreservesTaggedKeyedProperties. Bounded by
+  // kMaxTaggedKeyedProperties, since the map is copied at every clone.
+  static constexpr size_t kMaxTaggedKeyedProperties = 100;
+  ZoneMap<std::pair<ValueNode*, ValueNode*>, ValueNode*>
+      loaded_tagged_keyed_properties_;
   // Unconditionally valid across side-effecting calls.
   ZoneMap<std::tuple<ValueNode*, int>, ValueNode*> loaded_context_constants_;
   // Flushed after side-effecting calls.
@@ -961,7 +1009,9 @@ class KnownMapsMerger {
           // approximation. This filtering is done to avoid creating
           // non-sensical types later (e.g. if we think only a non-string map
           // is possible, after a string check).
-          if (IsInstanceOfNodeType(possible_map, type, broker_)) {
+          if (IsInstanceOfNodeType(possible_map, type, broker_) ||
+              (possible_map.IsHeapNumberMap() &&
+               NodeTypeCanBe(type, NodeType::kSmi))) {
             InsertMap(possible_map);
           }
         } else {
@@ -969,6 +1019,7 @@ class KnownMapsMerger {
         }
       }
       if (intersect_set_.is_empty()) {
+        // TODO(marja): Refactor to return false here explicitly.
         node_type_ = EmptyNodeType();
       }
     } else {
@@ -983,25 +1034,27 @@ class KnownMapsMerger {
     }
   }
 
-  void UpdateKnownNodeAspects(ValueNode* object,
-                              KnownNodeAspects& known_node_aspects) {
+  // Returns false if the object now has the empty type, true otherwise.
+  V8_NODISCARD bool UpdateKnownNodeAspects(
+      ValueNode* object, KnownNodeAspects& known_node_aspects) {
     // Update known maps.
     auto node_info = known_node_aspects.GetOrCreateInfoFor(broker_, object);
-    node_info->SetPossibleMaps(intersect_set_,
-                               any_map_or_node_type_is_unstable_, node_type_,
-                               broker_, known_node_aspects);
+    if (!node_info->SetPossibleMaps(intersect_set_, any_map_is_unstable_,
+                                    node_type_, broker_, known_node_aspects)) {
+      return false;
+    }
     // Make sure known_node_aspects.side_effects_require_invalidation is updated
-    // in case any_map_or_node_type_is_unstable changed to true for this object
+    // in case any_map_is_unstable changed to true for this object
     // -- this can happen if this was an intersection with the universal set
     // which added new possible unstable maps.
-    if (any_map_or_node_type_is_unstable_) {
+    if (any_map_is_unstable_) {
       known_node_aspects.MarkSideEffectsRequireInvalidation();
     }
     // At this point, known_node_aspects.side_effects_require_invalidation may
     // be true despite there no longer being any unstable maps for any nodes (if
     // this was the only node with unstable maps and this intersection removed
     // those). This is ok, because that's at worst just an overestimate -- we
-    // could track whether this node's any_map_or_node_type_is_unstable flipped
+    // could track whether this node's any_map_is_unstable flipped
     // from true to false, but this is likely overkill. Insert stable map
     // dependencies which weren't inserted yet. This is only needed if our set
     // of known maps was empty and we created it anew based on maps we checked.
@@ -1015,6 +1068,7 @@ class KnownMapsMerger {
       // TODO(victorgomes): Add a DCHECK_SLOW that checks if the maps already
       // exist in the CompilationDependencySet.
     }
+    return true;
   }
 
   bool known_maps_are_subset_of_requested_maps() const {
@@ -1028,6 +1082,12 @@ class KnownMapsMerger {
 
   NodeType node_type() const { return node_type_; }
 
+  bool RequestedMapsAdmitSmis() const {
+    return std::any_of(
+        requested_maps_.begin(), requested_maps_.end(),
+        [](compiler::MapRef map) { return map.IsHeapNumberMap(); });
+  }
+
  private:
   compiler::JSHeapBroker* broker_;
   Zone* zone_;
@@ -1036,7 +1096,7 @@ class KnownMapsMerger {
   bool known_maps_are_subset_of_requested_maps_ = true;
   bool existing_known_maps_found_ = true;
   bool emit_check_with_migration_ = false;
-  bool any_map_or_node_type_is_unstable_ = false;
+  bool any_map_is_unstable_ = false;
   NodeType node_type_ = EmptyNodeType();
 
   Zone* zone() const { return zone_; }
@@ -1051,7 +1111,7 @@ class KnownMapsMerger {
     }
     node_type_ = UnionType(node_type_, new_type);
     if (!map.is_stable()) {
-      any_map_or_node_type_is_unstable_ = true;
+      any_map_is_unstable_ = true;
     }
     intersect_set_.insert(map, zone());
   }

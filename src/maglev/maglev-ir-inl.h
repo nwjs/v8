@@ -143,7 +143,6 @@ void NodeBase::OverwriteWith(Opcode new_opcode,
 #endif
   set_opcode(new_opcode);
   set_properties(new_properties);
-  if (new_opcode == Opcode::kDead) return;
   int new_input_count = StaticInputCountForOpcode(new_opcode);
   if (input_count() != new_input_count) {
     bitfield_ = InputCountField::update(bitfield_, new_input_count);

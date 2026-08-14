@@ -122,6 +122,29 @@ int Script::GetEvalPosition(Isolate* isolate, DirectHandle<Script> script) {
   return position;
 }
 
+void Script::set_eval_from_shared(Tagged<SharedFunctionInfo> shared,
+                                  WriteBarrierMode mode) {
+  DCHECK(!is_wrapped());
+  set_eval_from_shared_or_wrapped_arguments(shared, mode);
+}
+
+Tagged<SharedFunctionInfo> Script::eval_from_shared() const {
+  DCHECK(has_eval_from_shared());
+  return Cast<SharedFunctionInfo>(eval_from_shared_or_wrapped_arguments());
+}
+
+Tagged<Script> Script::GetEvalOrigin() {
+  DisallowGarbageCollection no_gc;
+  Tagged<Script> origin_script = this;
+  while (origin_script->has_eval_from_shared()) {
+    Tagged<HeapObject> maybe_script =
+        origin_script->eval_from_shared()->script();
+    CHECK(IsScript(maybe_script));
+    origin_script = Cast<Script>(maybe_script);
+  }
+  return origin_script;
+}
+
 String::LineEndsVector Script::GetLineEnds(Isolate* isolate,
                                            DirectHandle<Script> script) {
   DCHECK(!script->has_line_ends());
@@ -208,18 +231,6 @@ bool Script::IsUserJavaScript() const {
   return type() == Script::Type::kNormal;
 }
 
-#if V8_ENABLE_WEBASSEMBLY
-bool Script::ContainsAsmModule() {
-  DisallowGarbageCollection no_gc;
-  SharedFunctionInfo::ScriptIterator iter(Isolate::Current(), this);
-  for (Tagged<SharedFunctionInfo> sfi = iter.Next(); !sfi.is_null();
-       sfi = iter.Next()) {
-    if (sfi->HasAsmWasmData()) return true;
-  }
-  return false;
-}
-#endif  // V8_ENABLE_WEBASSEMBLY
-
 void Script::TraceScriptRundown() {
   DisallowGarbageCollection no_gc;
   Isolate* isolate = Isolate::Current();
@@ -286,18 +297,17 @@ void Script::TraceScriptRundownSources() {
                 "ScriptCatchup", "data", std::move(value));
   } else {
     int32_t split_count = source_length / kSplitMaxLength + 1;
-    std::unique_ptr<char[]> source_ptr = source->ToCString();
     for (int32_t i = 0; i < split_count; i++) {
       int32_t begin = i * kSplitMaxLength;
-      int32_t end = std::min(begin + kSplitMaxLength, source_length);
+      int32_t length = std::min(kSplitMaxLength, source_length - begin);
       auto split_trace_value = v8::tracing::TracedValue::Create();
       split_trace_value->SetInteger("splitIndex", i);
       split_trace_value->SetInteger("splitCount", split_count);
       split_trace_value->SetString(
           "isolate", std::to_string(isolate->debug()->IsolateId()));
       split_trace_value->SetInteger("scriptId", script_id);
-      split_trace_value->SetString(
-          "sourceText", std::string(source_ptr.get() + begin, end - begin));
+      split_trace_value->SetString("sourceText",
+                                   source->ToCString(begin, length).get());
       TRACE_EVENT(
           TRACE_DISABLED_BY_DEFAULT("devtools.v8-source-rundown-sources"),
           "LargeScriptCatchup", "data", std::move(split_trace_value));

@@ -406,18 +406,19 @@ BlockProcessResult MaglevPrintingVisitor::PreProcessBasicBlock(
     if (const LoopEffects* loop_effects = block->state()->loop_effects()) {
       os_ << " (effects:";
       if (loop_effects->unstable_aspects_cleared) {
-        if (loop_effects->unstable_aspects_cleared) {
-          os_ << " ua";
-        }
-        if (loop_effects->context_slot_written.size()) {
-          os_ << " c" << loop_effects->context_slot_written.size();
-        }
-        if (loop_effects->objects_written.size()) {
-          os_ << " o" << loop_effects->objects_written.size();
-        }
-        if (loop_effects->keys_cleared.size()) {
-          os_ << " k" << loop_effects->keys_cleared.size();
-        }
+        os_ << " ua";
+      }
+      if (loop_effects->elements_kind_transitioned) {
+        os_ << " et";
+      }
+      if (loop_effects->context_slot_written.size()) {
+        os_ << " c" << loop_effects->context_slot_written.size();
+      }
+      if (loop_effects->objects_written.size()) {
+        os_ << " o" << loop_effects->objects_written.size();
+      }
+      if (loop_effects->keys_cleared.size()) {
+        os_ << " k" << loop_effects->keys_cleared.size();
       }
       os_ << ")";
     }
@@ -548,6 +549,7 @@ void PrintVirtualObject(std::ostream& os, VirtualObject* vobj) {
         switch (desc.type) {
           case maglev::vobj::FieldType::kTagged:
           case maglev::vobj::FieldType::kTrustedPointer:
+          case maglev::vobj::FieldType::kInt32:
           case maglev::vobj::FieldType::kFloat64: {
             if (!is_first) os << ",";
             is_first = false;
@@ -558,7 +560,6 @@ void PrintVirtualObject(std::ostream& os, VirtualObject* vobj) {
             }
             break;
           }
-          case maglev::vobj::FieldType::kInt32:
           case maglev::vobj::FieldType::kNone:
             UNREACHABLE();
         }

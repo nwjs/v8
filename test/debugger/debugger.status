@@ -69,12 +69,15 @@
 
   # https://crbug.com/v8/14420
   'debug/side-effect/debug-evaluate-no-side-effect-builtins': [SKIP],
+  # b/532099983: too many allocations under GC stress
+  'debug/side-effect/regress-532099983': [SKIP],
 }],  # 'gc_stress == True'
 
 ##############################################################################
 ['gc_fuzzer', {
   # Slow tests.
   'regress/regress-2318': [SKIP],
+  'debug/side-effect/regress-532099983': [SKIP],
 }],  # 'gc_fuzzer'
 
 ##############################################################################
@@ -145,5 +148,10 @@
 ['variant == stress_snapshot', {
   '*': [SKIP],  # only relevant for mjsunit tests.
 }],
+
+################################################################################
+['variant == always_sparkplug or variant == always_sparkplug_and_stress_regexp_jit', {
+  'debug/side-effect/regress-532099983': [SKIP],
+}],  # variant == always_sparkplug or variant == always_sparkplug_and_stress_regexp_jit
 
 ]

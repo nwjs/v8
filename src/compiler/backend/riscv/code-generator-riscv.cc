@@ -3417,8 +3417,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ bind(&done);
       break;
     }
-    case kRiscvF64x2NearestInt: {
-      __ VU.SetSimd128(E64);
+    case kRiscvVFNearestInt: {
+      auto sew = DecodeElementWidth(opcode);
+      __ VU.SetSimd128(sew);
       __ Round(i.OutputSimd128Register(), i.InputSimd128Register(0),
                kScratchReg, kSimd128ScratchReg);
       break;
@@ -3463,8 +3464,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vmerge_vi(i.OutputSimd128Register(), -1, kSimd128ScratchReg);
       break;
     }
-    case kRiscvF64x2Trunc: {
-      __ VU.SetSimd128(E64);
+    case kRiscvVFTrunc: {
+      auto sew = DecodeElementWidth(opcode);
+      __ VU.SetSimd128(sew);
       __ Trunc(i.OutputSimd128Register(), i.InputSimd128Register(0),
                kScratchReg, kSimd128ScratchReg);
       break;
@@ -3479,14 +3481,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vfabs_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
       break;
     }
-    case kRiscvF64x2Ceil: {
-      __ VU.SetSimd128(E64);
+    case kRiscvVFCeil: {
+      auto sew = DecodeElementWidth(opcode);
+      __ VU.SetSimd128(sew);
       __ Ceil(i.OutputSimd128Register(), i.InputSimd128Register(0), kScratchReg,
               kSimd128ScratchReg);
       break;
     }
-    case kRiscvF64x2Floor: {
-      __ VU.SetSimd128(E64);
+    case kRiscvVFFloor: {
+      auto sew = DecodeElementWidth(opcode);
+      __ VU.SetSimd128(sew);
       __ Floor(i.OutputSimd128Register(), i.InputSimd128Register(0),
                kScratchReg, kSimd128ScratchReg);
       break;
@@ -3499,7 +3503,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                     i.InputSimd128Register(0));
       break;
     }
-    case kRiscvFMin: {
+    case kRiscvVFMin: {
       auto sew = DecodeElementWidth(opcode);
       __ VU.SetSimd128(sew);
       // Detect NaNs. Simply compare the vector to itself. Only non-NaNs will
@@ -3541,7 +3545,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vmv_vv(i.OutputSimd128Register(), result);
       break;
     }
-    case kRiscvFMax: {
+    case kRiscvVFMax: {
       auto sew = DecodeElementWidth(opcode);
       __ VU.SetSimd128(sew);
       // Detect NaNs. Simply compare the vector to itself. Only non-NaNs will
@@ -3664,18 +3668,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vfmv_fs(i.OutputDoubleRegister(), kSimd128ScratchReg);
       break;
     }
-    case kRiscvF32x4Trunc: {
-      __ VU.SetSimd128(E32);
-      __ Trunc(i.OutputSimd128Register(), i.InputSimd128Register(0),
-               kScratchReg, kSimd128ScratchReg);
-      break;
-    }
-    case kRiscvF32x4NearestInt: {
-      __ VU.SetSimd128(E32);
-      __ Round(i.OutputSimd128Register(), i.InputSimd128Register(0),
-               kScratchReg, kSimd128ScratchReg);
-      break;
-    }
     case kRiscvF32x4DemoteF64x2Zero: {
       __ VU.SetSimd128Half(E32);
       __ vfncvt_f_f_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
@@ -3695,25 +3687,58 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vfabs_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
       break;
     }
-    case kRiscvF32x4Ceil: {
-      __ VU.SetSimd128(E32);
-      __ Ceil(i.OutputSimd128Register(), i.InputSimd128Register(0), kScratchReg,
-              kSimd128ScratchReg);
+    case kRiscvF16x8DemoteF32x4Zero: {
+      __ VU.SetSimd128Half(E16);
+      __ vfncvt_f_f_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      __ VU.SetSimd128(E16);
+      __ li(kScratchReg, 0b11110000);
+      __ vmv_sx(v0, kScratchReg);
+      __ vmerge_vx(i.OutputSimd128Register(), zero_reg,
+                   i.OutputSimd128Register());
       break;
     }
-    case kRiscvF32x4Floor: {
-      __ VU.SetSimd128(E32);
-      __ Floor(i.OutputSimd128Register(), i.InputSimd128Register(0),
-               kScratchReg, kSimd128ScratchReg);
+    case kRiscvF16x8DemoteF64x2Zero: {
+      // convert the first two lanes of f64 to f16
+      // and store them in the first two lanes of
+      // the output vector
+      __ VU.SetSimd128(E64);
+      __ vfmv_fs(kScratchDoubleReg, i.InputSimd128Register(0));
+      __ fcvt_h_d(kScratchDoubleReg, kScratchDoubleReg);
+      __ fmv_x_h(kScratchReg, kScratchDoubleReg);
+      __ VU.SetSimd128(E16, tu);
+      __ vmv_vx(kSimd128ScratchReg3, zero_reg);
+      __ vmv_sx(kSimd128ScratchReg3, kScratchReg);
+      // convert the second two lanes of f64 to f16
+      __ VU.SetSimd128(E64);
+      __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0), 1);
+      __ vfmv_fs(kScratchDoubleReg, kSimd128ScratchReg);
+      __ fcvt_h_d(kScratchDoubleReg, kScratchDoubleReg);
+      __ fmv_x_h(kScratchReg2, kScratchDoubleReg);
+      __ VU.SetSimd128(E16);
+      __ li(kScratchReg, 0b10);
+      __ vmv_sx(v0, kScratchReg);
+      __ vmerge_vx(i.OutputSimd128Register(), kScratchReg2,
+                   kSimd128ScratchReg3);
       break;
     }
-    case kRiscvF32x4UConvertI32x4: {
-      __ VU.SetSimd128(E32);
+    case kRiscvF32x4PromoteLowF16x8: {
+      __ VU.SetSimd128Half(E16);
+      if (i.OutputSimd128Register() != i.InputSimd128Register(0)) {
+        __ vfwcvt_f_f_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      } else {
+        __ vfwcvt_f_f_v(kSimd128ScratchReg3, i.InputSimd128Register(0));
+        __ VU.SetSimd128(E16);
+        __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg3);
+      }
+      break;
+    }
+    case kRiscvVFcvtFXU: {
+      __ VU.SetSimd128(DecodeElementWidth(instr->opcode()));
       __ vfcvt_f_xu_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
       break;
     }
-    case kRiscvF32x4SConvertI32x4: {
-      __ VU.SetSimd128(E32);
+    case kRiscvVFcvtFX: {
+      __ VU.SetSimd128(DecodeElementWidth(instr->opcode()));
       __ vfcvt_f_x_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
       break;
     }
@@ -3804,6 +3829,20 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kRiscvF32x4Qfms: {
       __ VU.SetSimd128(E32);
+      __ vfnmsub_vv(i.InputSimd128Register(0), i.InputSimd128Register(1),
+                    i.InputSimd128Register(2));
+      __ vmv_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      break;
+    }
+    case kRiscvF16x8Qfma: {
+      __ VU.SetSimd128(E16);
+      __ vfmadd_vv(i.InputSimd128Register(0), i.InputSimd128Register(1),
+                   i.InputSimd128Register(2));
+      __ vmv_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      break;
+    }
+    case kRiscvF16x8Qfms: {
+      __ VU.SetSimd128(E16);
       __ vfnmsub_vv(i.InputSimd128Register(0), i.InputSimd128Register(1),
                     i.InputSimd128Register(2));
       __ vmv_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
@@ -4155,8 +4194,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
       break;
     }
-    case kRiscvI32x4SConvertF32x4: {
-      __ VU.SetSimd128(E32);
+    case kRiscvVFcvtXF: {
+      VSew sew = DecodeElementWidth(instr->opcode());
+      __ VU.SetSimd128(sew);
       __ VU.set(FPURoundingMode::RTZ);
       __ vmfeq_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(0));
       if (i.OutputSimd128Register() != i.InputSimd128Register(0)) {
@@ -4171,8 +4211,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ VU.set(FPURoundingMode::RNE);
       break;
     }
-    case kRiscvI32x4UConvertF32x4: {
-      __ VU.SetSimd128(E32);
+    case kRiscvVFcvtXUF: {
+      VSew sew = DecodeElementWidth(instr->opcode());
+      __ VU.SetSimd128(sew);
       __ VU.set(FPURoundingMode::RTZ);
       __ vmfeq_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(0));
       if (i.OutputSimd128Register() != i.InputSimd128Register(0)) {

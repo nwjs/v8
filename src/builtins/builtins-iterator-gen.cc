@@ -166,7 +166,17 @@ void IteratorBuiltinsAssembler::Iterate(
     TNode<Context> context, TNode<JSAny> iterable, TNode<Object> iterable_fn,
     std::function<void(TNode<Object>)> func,
     std::initializer_list<compiler::CodeAssemblerVariable*> merged_variables) {
-  Label done(this);
+  Iterate(
+      context, iterable, iterable_fn, [this]() { return Int32TrueConstant(); },
+      func, merged_variables);
+}
+
+void IteratorBuiltinsAssembler::Iterate(
+    TNode<Context> context, TNode<JSAny> iterable, TNode<Object> iterable_fn,
+    std::function<TNode<BoolT>()> condition,
+    std::function<void(TNode<Object>)> func,
+    std::initializer_list<compiler::CodeAssemblerVariable*> merged_variables) {
+  Label done(this), early_break(this);
 
   IteratorRecord iterator_record = GetIterator(context, iterable, iterable_fn);
 
@@ -178,6 +188,8 @@ void IteratorBuiltinsAssembler::Iterate(
 
   BIND(&loop_start);
   {
+    GotoIfNot(condition(), &early_break);
+
     TNode<JSReceiver> next = IteratorStep(context, iterator_record, &done);
     TNode<Object> next_value = IteratorValue(context, next);
 
@@ -190,8 +202,14 @@ void IteratorBuiltinsAssembler::Iterate(
     Goto(&loop_start);
   }
 
-  BIND(&if_exception);
-  {
+  if (early_break.is_used()) {
+    BIND(&early_break);
+    IteratorClose(context, iterator_record);
+    Goto(&done);
+  }
+
+  if (if_exception.is_used()) {
+    BIND(&if_exception);
     TNode<HeapObject> message = GetPendingMessage();
     SetPendingMessage(TheHoleConstant());
     IteratorCloseOnException(context, iterator_record.object);
@@ -399,64 +417,100 @@ TF_BUILTIN(IterableToListConvertHoles, IteratorBuiltinsAssembler) {
 }
 
 void IteratorBuiltinsAssembler::FastIterableToList(
-    TNode<Context> context, TNode<JSAny> iterable,
+    TNode<Context> context, TNode<JSAny> maybe_iterable,
     TVariable<JSArray>* var_result, Label* slow) {
-  Label done(this), check_string(this), check_map(this), check_set(this);
+  Label done(this);
+
+  GotoIfForceSlowPath(slow);
 
   // Always call the `next()` builtins when the debugger is
   // active, to ensure we capture side-effects correctly.
   GotoIf(IsDebugActive(), slow);
 
-  GotoIfNot(
-      Word32Or(IsFastJSArrayWithNoCustomIteration(context, iterable),
-               IsFastJSArrayForReadWithNoCustomIteration(context, iterable)),
-      &check_string);
+  GotoIf(TaggedIsSmi(maybe_iterable), slow);
+  TNode<JSAnyNotSmi> iterable = CAST(maybe_iterable);
 
-  // Fast path for fast JSArray.
-  *var_result = CAST(
-      CallBuiltin(Builtin::kCloneFastJSArrayFillingHoles, context, iterable));
-  Goto(&done);
-
-  BIND(&check_string);
+  // Check FastJSArrayForReadWithNoCustomIteration case.
   {
-    Label string_maybe_fast_call(this);
+    Label check_next(this);
+    GotoIfNot(IsFastJSArrayForReadWithNoCustomIteration(context, iterable),
+              &check_next);
+
+    // Fast path for fast JSArray.
+    *var_result = CAST(
+        CallBuiltin(Builtin::kCloneFastJSArrayFillingHoles, context, iterable));
+    Goto(&done);
+
+    BIND(&check_next);
+  }
+  // Check StringPrimitiveWithNoCustomIteration case.
+  {
+    Label if_fast(this), check_next(this);
     StringBuiltinsAssembler string_assembler(state());
     string_assembler.BranchIfStringPrimitiveWithNoCustomIteration(
-        iterable, context, &string_maybe_fast_call, &check_map);
+        iterable, &if_fast, &check_next);
 
-    BIND(&string_maybe_fast_call);
-    const TNode<Uint32T> length = LoadStringLengthAsWord32(CAST(iterable));
-    // Use string length as conservative approximation of number of codepoints.
-    GotoIf(
-        Uint32GreaterThan(length, Uint32Constant(JSArray::kMaxFastArrayLength)),
-        slow);
-    *var_result = CAST(CallBuiltin(Builtin::kStringToList, context, iterable));
-    Goto(&done);
+    BIND(&if_fast);
+    {
+      const TNode<Uint32T> length = LoadStringLengthAsWord32(CAST(iterable));
+      // Use string length as conservative approximation of number of
+      // codepoints.
+      GotoIf(Uint32GreaterThan(length,
+                               Uint32Constant(JSArray::kMaxFastArrayLength)),
+             slow);
+      *var_result =
+          CAST(CallBuiltin(Builtin::kStringToList, context, iterable));
+      Goto(&done);
+    }
+
+    BIND(&check_next);
   }
-
-  BIND(&check_map);
+  // Check FastIterableToListInterceptor case.
   {
-    Label map_fast_call(this);
+    Label if_fast(this), check_next(this);
+    BranchIfFastIterableToListInterceptor(iterable, &if_fast, &check_next);
+
+    BIND(&if_fast);
+    {
+      TNode<Object> result = CallRuntime(
+          Runtime::kIterableToListWithInterceptor, context, iterable);
+      *var_result = CAST(result);
+      Goto(&done);
+    }
+
+    BIND(&check_next);
+  }
+  // Check IterableWithOriginalKeyOrValueMapIterator case.
+  {
+    Label if_fast(this), check_next(this);
     BranchIfIterableWithOriginalKeyOrValueMapIterator(
-        state(), iterable, context, &map_fast_call, &check_set);
+        state(), iterable, context, &if_fast, &check_next);
 
-    BIND(&map_fast_call);
-    *var_result =
-        CAST(CallBuiltin(Builtin::kMapIteratorToList, context, iterable));
-    Goto(&done);
+    BIND(&if_fast);
+    {
+      *var_result =
+          CAST(CallBuiltin(Builtin::kMapIteratorToList, context, iterable));
+      Goto(&done);
+    }
+
+    BIND(&check_next);
   }
-
-  BIND(&check_set);
+  // Check IterableWithOriginalValueSetIterator case.
   {
-    Label set_fast_call(this);
+    Label if_fast(this), check_next(this);
     BranchIfIterableWithOriginalValueSetIterator(state(), iterable, context,
-                                                 &set_fast_call, slow);
+                                                 &if_fast, &check_next);
 
-    BIND(&set_fast_call);
-    *var_result =
-        CAST(CallBuiltin(Builtin::kSetOrSetIteratorToList, context, iterable));
-    Goto(&done);
+    BIND(&if_fast);
+    {
+      *var_result = CAST(
+          CallBuiltin(Builtin::kSetOrSetIteratorToList, context, iterable));
+      Goto(&done);
+    }
+
+    BIND(&check_next);
   }
+  Goto(slow);
 
   BIND(&done);
 }

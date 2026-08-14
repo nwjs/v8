@@ -363,7 +363,8 @@ class MergePointInterpreterFrameState {
   // Merges an unmerged framestate into a possibly merged framestate at the
   // start of the target catchblock.
   void MergeThrow(Graph* graph, bool is_tracing,
-                  const InterpreterFrameState& builder_frame,
+                  const InterpreterFrameState& handler_frame,
+                  const KnownNodeAspects& known_node_aspects,
                   const MaglevCompilationUnit* handler_unit);
 
   // Merges a dead framestate (e.g. one which has been early terminated with a
@@ -507,6 +508,11 @@ class MergePointInterpreterFrameState {
   void set_is_resumable_loop(Graph* graph);
   bool is_loop_with_peeled_iteration() const {
     return kIsLoopWithPeeledIterationBit::decode(bitfield_);
+  }
+  void set_is_loop_with_peeled_iteration() {
+    DCHECK(is_loop());
+    DCHECK(!is_resumable_loop());
+    bitfield_ = kIsLoopWithPeeledIterationBit::update(bitfield_, true);
   }
 
   int merge_offset() const { return merge_offset_; }
@@ -678,10 +684,14 @@ struct LoopEffects {
   ZoneSet<PropertyKey> keys_cleared;
   ZoneSet<InlinedAllocation*> allocations;
   bool unstable_aspects_cleared = false;
+  bool elements_kind_transitioned = false;
   bool may_have_aliasing_contexts = false;
   void Merge(const LoopEffects* other) {
     if (!unstable_aspects_cleared) {
       unstable_aspects_cleared = other->unstable_aspects_cleared;
+    }
+    if (!elements_kind_transitioned) {
+      elements_kind_transitioned = other->elements_kind_transitioned;
     }
     if (!may_have_aliasing_contexts) {
       may_have_aliasing_contexts = other->may_have_aliasing_contexts;

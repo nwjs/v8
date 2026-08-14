@@ -19,6 +19,7 @@
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-verifier.h"
 #include "src/heap/incremental-marking.h"
+#include "src/heap/main-allocator-inl.h"
 #include "src/heap/mark-compact.h"
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/marking-state.h"
@@ -501,7 +502,7 @@ bool SemiSpaceNewSpace::AddParkedAllocationBuffer(
        it != parked_allocation_buffers_.end();) {
     parked_size = it->first;
     start = it->second;
-    int filler_size = Heap::GetFillToAlign(start, alignment);
+    int filler_size = MainAllocator::GetFillToAlign(start, alignment);
     if (size_in_bytes + filler_size <= parked_size) {
       parked_allocation_buffers_.erase(it);
       NormalPage* page = NormalPage::FromAddress(start);
@@ -725,7 +726,7 @@ std::optional<std::pair<Address, Address>> SemiSpaceNewSpace::Allocate(
   if (top) {
     DCHECK_SEMISPACE_ALLOCATION_TOP(allocation_top(), to_space_);
     Address high = to_space_.page_high();
-    int filler_size = Heap::GetFillToAlign(top, alignment);
+    int filler_size = MainAllocator::GetFillToAlign(top, alignment);
     int aligned_size_in_bytes = size_in_bytes + filler_size;
 
     if (top + aligned_size_in_bytes <= high) {

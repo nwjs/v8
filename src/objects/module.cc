@@ -158,11 +158,11 @@ void Module::ResetGraph(Isolate* isolate, DirectHandle<Module> module) {
 void Module::Reset(Isolate* isolate, DirectHandle<Module> module) {
   DCHECK(module->status() == kPreLinking || module->status() == kLinking);
   DCHECK(IsTheHole(module->exception()));
-  // The namespace object cannot exist, because it would have been created
-  // by RunInitializationCode, which is called only after this module's SCC
-  // succeeds instantiation.
-  DCHECK(IsUndefined(module->module_namespace()) &&
-         IsUndefined(module->deferred_module_namespace()));
+  // The namespace cells could have been created during ResolveExport for
+  // 'export * as ns', reset them here.
+  module->set_module_namespace(ReadOnlyRoots(isolate).undefined_value());
+  module->set_deferred_module_namespace(
+      ReadOnlyRoots(isolate).undefined_value());
   const uint32_t export_count =
       IsSourceTextModule(*module)
           ? Cast<SourceTextModule>(*module)

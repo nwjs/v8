@@ -14,6 +14,7 @@
 #include "src/base/strings.h"
 #include "src/base/vector.h"
 #include "src/common/globals.h"
+#include "src/heap/read-only-heap-inl.h"
 #include "src/objects/object-predicates-inl.h"
 #include "src/regexp/regexp-flags.h"
 #include "src/strings/string-builder-inl.h"

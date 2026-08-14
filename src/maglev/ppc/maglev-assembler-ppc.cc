@@ -496,15 +496,13 @@ void MaglevAssembler::TruncateDoubleToInt32(Register dst, DoubleRegister src) {
   Label* slow_path = MakeDeferredCode(
       [](MaglevAssembler* masm, DoubleRegister src, Register dst,
          ZoneLabelRef done) {
-        __ mflr(r0);
-        __ push(r0);
+        __ PushLR();
         __ AllocateStackSpace(kDoubleSize);
         __ StoreF64(src, MemOperand(sp));
         __ CallBuiltin(Builtin::kDoubleToI);
         __ LoadU64(dst, MemOperand(sp));
         __ addi(sp, sp, Operand(kDoubleSize));
-        __ pop(r0);
-        __ mtlr(r0);
+        __ PopLR();
         __ Jump(*done);
       },
       src, dst, done);

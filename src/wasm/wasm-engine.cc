@@ -63,10 +63,10 @@ namespace v8::internal::wasm {
 // In the other direction, the Scripts keep the NativeModule alive, IOW
 // usually the Scripts die first, and the WeakScriptHandles are cleared
 // before being freed.
-// In case of asm.js modules and in case of Isolate shutdown, it can happen
-// that the NativeModule dies first, so the WeakScriptHandles are no longer
-// needed and should be destroyed. That can only happen on the main thread of
-// the Isolate they belong to, whereas the last thread that releases a
+// In case of Isolate shutdown (or other corner cases like debugging), it can
+// happen that the NativeModule dies first, so the WeakScriptHandles are no
+// longer needed and should be destroyed. That can only happen on the main
+// thread of the Isolate they belong to, whereas the last thread that releases a
 // NativeModule might be any other thread, so we post a
 // ClearWeakScriptHandleTask to that isolate's foreground task runner.
 // In case of Isolate shutdown at an inconvenient moment, this task runner can
@@ -240,7 +240,7 @@ class WeakScriptHandle {
     // because the Script keeps the NativeModule alive. In that case,
     // {location_} is already cleared, and there is nothing to do.
     if (location_ == nullptr || *location_ == nullptr) return;
-    // For asm.js modules, the Script usually outlives the NativeModule.
+    // In some corner cases, the Script can outlive the NativeModule.
     // We must destroy the GlobalHandle before freeing the memory that's
     // backing {location_}, so that when the Script does die eventually, there
     // is no lingering weak GlobalHandle that would try to clear {location_}.
@@ -294,11 +294,10 @@ std::vector<std::shared_ptr<NativeModule>>* native_modules_kept_alive_for_pgo;
 }  // namespace
 
 std::shared_ptr<NativeModule> NativeModuleCache::MaybeGetNativeModule(
-    ModuleOrigin origin, base::Vector<const uint8_t> wire_bytes,
+    base::Vector<const uint8_t> wire_bytes,
     WasmEnabledFeatures enabled_features,
     const CompileTimeImports& compile_imports) {
   if (!v8_flags.wasm_native_module_cache) return nullptr;
-  if (origin != kWasmOrigin) return nullptr;
   base::MutexGuard lock(&mutex_);
   size_t prefix_hash = PrefixHash(wire_bytes);
   NativeModuleCache::Key key{prefix_hash, enabled_features, compile_imports,
@@ -327,8 +326,12 @@ std::shared_ptr<NativeModule> NativeModuleCache::MaybeGetNativeModule(
         return shared_native_module;
       }
     }
-    // TODO(11858): This deadlocks in predictable mode, because there is only a
-    // single thread.
+    // If we are in single-threaded or predictable mode, we cannot wait for
+    // other jobs to finish, since the current thread is the only one that
+    // could make progress. We return nullptr instead, which will cause the
+    // current job to compile the module again. The redundant result will be
+    // de-duplicated in {UpdateNativeModuleCache}.
+    if (v8_flags.predictable || v8_flags.single_threaded) return nullptr;
     cache_cv_.Wait(&mutex_);
   }
 }
@@ -365,7 +368,6 @@ std::shared_ptr<NativeModule> NativeModuleCache::Update(
     std::shared_ptr<NativeModule> native_module, bool error) {
   DCHECK_NOT_NULL(native_module);
   if (!v8_flags.wasm_native_module_cache) return native_module;
-  if (native_module->module()->origin != kWasmOrigin) return native_module;
   base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();
   DCHECK(!wire_bytes.empty());
   size_t prefix_hash = PrefixHash(native_module->wire_bytes());
@@ -403,7 +405,6 @@ std::shared_ptr<NativeModule> NativeModuleCache::Update(
 
 void NativeModuleCache::Erase(NativeModule* native_module) {
   if (!v8_flags.wasm_native_module_cache) return;
-  if (native_module->module()->origin != kWasmOrigin) return;
   // Happens in some tests where bytes are set directly.
   if (native_module->wire_bytes().empty()) return;
   base::MutexGuard lock(&mutex_);
@@ -597,76 +598,12 @@ bool WasmEngine::SyncValidate(Isolate* isolate, WasmEnabledFeatures enabled,
 
   WasmDetectedFeatures unused_detected_features;
   auto result =
-      DecodeWasmModule(isolate, enabled, bytes, true, kWasmOrigin,
-                       DecodingMethod::kSync, &unused_detected_features);
+      DecodeWasmModule(isolate, enabled, bytes, true, DecodingMethod::kSync,
+                       &unused_detected_features);
   if (result.failed()) return false;
   WasmError error = ValidateAndSetBuiltinImports(
       result.value().get(), bytes, compile_imports, &unused_detected_features);
   return !error.has_error();
-}
-
-MaybeHandle<AsmWasmData> WasmEngine::SyncCompileTranslatedAsmJs(
-    Isolate* isolate, ErrorThrower* thrower,
-    base::OwnedVector<const uint8_t> bytes, DirectHandle<Script> script,
-    base::Vector<const uint8_t> asm_js_offset_table_bytes,
-    DirectHandle<HeapNumber> uses_bitset, LanguageMode language_mode) {
-  int compilation_id = next_compilation_id_.fetch_add(1);
-  TRACE_EVENT("v8.wasm", "wasm.SyncCompileTranslatedAsmJs", "id",
-              compilation_id);
-  ModuleOrigin origin = language_mode == LanguageMode::kSloppy
-                            ? kAsmJsSloppyOrigin
-                            : kAsmJsStrictOrigin;
-  WasmDetectedFeatures detected_features;
-  ModuleResult result = DecodeWasmModule(
-      isolate, WasmEnabledFeatures::ForAsmjs(), bytes.as_vector(), false,
-      origin, DecodingMethod::kSync, &detected_features);
-  if (result.failed()) {
-    // This happens once in a while when we have missed some limit check
-    // in the asm parser. Output an error message to help diagnose, but crash.
-    std::cout << result.error().message();
-    UNREACHABLE();
-  }
-
-  result.value()->asm_js_offset_information =
-      std::make_unique<AsmJsOffsetInformation>(asm_js_offset_table_bytes);
-
-  // Transfer ownership of the WasmModule to the {Managed<WasmModule>} generated
-  // in {CompileToNativeModule}.
-  constexpr ProfileInformation* kNoProfileInformation = nullptr;
-  v8::metrics::Recorder::ContextId context_id =
-      isolate->GetOrRegisterRecorderContextId(isolate->native_context());
-  std::shared_ptr<NativeModule> native_module = CompileToNativeModule(
-      isolate, WasmEnabledFeatures::ForAsmjs(), detected_features,
-      CompileTimeImports{}, thrower, std::move(result).value(),
-      std::move(bytes), compilation_id, context_id, kNoProfileInformation);
-  if (!native_module) return {};
-
-  native_module->LogWasmCodes(isolate, *script);
-  {
-    // Register the script with the isolate. We do this unconditionally for
-    // consistency; it is in particular required for logging lazy-compiled code.
-    base::MutexGuard guard(&mutex_);
-    DCHECK(isolates_.contains(isolate));
-    auto& scripts = isolates_[isolate]->scripts;
-    // If the same asm.js module is instantiated repeatedly, then we
-    // deduplicate the NativeModule, so the script exists already.
-    if (!scripts.contains(native_module.get())) {
-      scripts.emplace(native_module.get(), WeakScriptHandle(script, isolate));
-    }
-  }
-
-  return AsmWasmData::New(isolate, std::move(native_module),
-                          uses_bitset->value_as_bits());
-}
-
-DirectHandle<WasmModuleObject> WasmEngine::FinalizeTranslatedAsmJs(
-    Isolate* isolate, DirectHandle<AsmWasmData> asm_wasm_data,
-    DirectHandle<Script> script) {
-  std::shared_ptr<wasm::NativeModule> native_module =
-      asm_wasm_data->managed_native_module()->get();
-  DirectHandle<WasmModuleObject> module_object =
-      WasmModuleObject::New(isolate, std::move(native_module), script);
-  return module_object;
 }
 
 MaybeDirectHandle<WasmModuleObject> WasmEngine::SyncCompile(
@@ -683,9 +620,9 @@ MaybeDirectHandle<WasmModuleObject> WasmEngine::SyncCompile(
   {
     // This is where sync / sync streaming compilations validate function
     // bodies. See {DecodeWasmModule} for an overview.
-    ModuleResult result = DecodeWasmModule(
-        isolate, enabled_features, bytes.as_vector(), true, kWasmOrigin,
-        DecodingMethod::kSync, &detected_features);
+    ModuleResult result =
+        DecodeWasmModule(isolate, enabled_features, bytes.as_vector(), true,
+                         DecodingMethod::kSync, &detected_features);
     if (result.failed()) {
       thrower->CompileFailed(result.error());
       return {};
@@ -744,11 +681,9 @@ MaybeDirectHandle<WasmModuleObject> WasmEngine::SyncCompile(
 MaybeDirectHandle<WasmInstanceObject> WasmEngine::SyncInstantiate(
     Isolate* isolate, ErrorThrower* thrower,
     DirectHandle<WasmModuleObject> module_object,
-    MaybeDirectHandle<JSReceiver> imports,
-    MaybeDirectHandle<JSArrayBuffer> memory) {
+    MaybeDirectHandle<JSReceiver> imports) {
   TRACE_EVENT("v8.wasm", "wasm.SyncInstantiate");
-  return InstantiateToInstanceObject(isolate, thrower, module_object, imports,
-                                     memory);
+  return InstantiateToInstanceObject(isolate, thrower, module_object, imports);
 }
 
 void WasmEngine::AsyncInstantiate(
@@ -766,8 +701,7 @@ void WasmEngine::AsyncInstantiate(
   catcher.SetCaptureMessage(false);
 
   MaybeDirectHandle<WasmInstanceObject> instance_object =
-      SyncInstantiate(isolate, &thrower, module_object, imports,
-                      DirectHandle<JSArrayBuffer>::null());
+      SyncInstantiate(isolate, &thrower, module_object, imports);
 
   if (!instance_object.is_null()) {
     resolver->OnInstantiationSucceeded(instance_object.ToHandleChecked());
@@ -797,7 +731,7 @@ void WasmEngine::AsyncCompile(
   int compilation_id = next_compilation_id_.fetch_add(1);
   TRACE_EVENT("v8.wasm", "wasm.AsyncCompile", "id", compilation_id);
 
-  if (!v8_flags.wasm_async_compilation || v8_flags.wasm_jitless) {
+  if (v8_flags.wasm_jitless) {
     // Asynchronous compilation disabled; fall back on synchronous compilation.
     ErrorThrower thrower(isolate, api_method_name_for_errors);
     MaybeDirectHandle<WasmModuleObject> module_object;
@@ -862,15 +796,10 @@ std::shared_ptr<StreamingDecoder> WasmEngine::StartStreamingCompilation(
   int compilation_id = next_compilation_id_.fetch_add(1);
   TRACE_EVENT("v8.wasm", "wasm.StartStreamingCompilation", "id",
               compilation_id);
-  if (v8_flags.wasm_async_compilation) {
-    AsyncCompileJob* job = CreateAsyncCompileJob(
-        enabled, std::move(compile_imports), {}, api_method_name,
-        std::move(resolver), compilation_id);
-    return job->CreateStreamingDecoder();
-  }
-  return StreamingDecoder::CreateSyncStreamingDecoder(
-      enabled, std::move(compile_imports), api_method_name,
-      std::move(resolver));
+  AsyncCompileJob* job = CreateAsyncCompileJob(
+      enabled, std::move(compile_imports), {}, api_method_name,
+      std::move(resolver), compilation_id);
+  return job->CreateStreamingDecoder();
 }
 
 void WasmEngine::CompileFunction(NativeModule* native_module,
@@ -1655,14 +1584,14 @@ void WasmEngine::UseNativeModuleInIsolate(NativeModule* native_module,
 }
 
 std::shared_ptr<NativeModule> WasmEngine::MaybeGetNativeModule(
-    ModuleOrigin origin, base::Vector<const uint8_t> wire_bytes,
+    base::Vector<const uint8_t> wire_bytes,
     WasmEnabledFeatures enabled_features,
     const CompileTimeImports& compile_imports) {
   TRACE_EVENT("v8.wasm", "wasm.GetNativeModuleFromCache", "wire_bytes",
               wire_bytes.size());
   std::shared_ptr<NativeModule> native_module =
-      native_module_cache_.MaybeGetNativeModule(
-          origin, wire_bytes, enabled_features, compile_imports);
+      native_module_cache_.MaybeGetNativeModule(wire_bytes, enabled_features,
+                                                compile_imports);
   if (native_module) {
     // Create a marker in the trace.
     TRACE_EVENT("v8.wasm", "CacheHit");

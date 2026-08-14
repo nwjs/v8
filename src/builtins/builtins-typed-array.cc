@@ -599,7 +599,7 @@ BUILTIN(Uint8ArrayFromBase64) {
 
   MaybeDirectHandle<JSArrayBuffer> result_buffer =
       isolate->factory()->NewJSArrayBufferAndBackingStore(
-          output_length, InitializedFlag::kUninitialized);
+          output_length, InitializedFlag{false});
   if (!result_buffer.ToHandle(&buffer)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewRangeError(MessageTemplate::kOutOfMemory,
@@ -918,7 +918,7 @@ BUILTIN(Uint8ArrayFromHex) {
 
   MaybeDirectHandle<JSArrayBuffer> result_buffer =
       isolate->factory()->NewJSArrayBufferAndBackingStore(
-          output_length, InitializedFlag::kUninitialized);
+          output_length, InitializedFlag{false});
 
   if (!result_buffer.ToHandle(&buffer)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -936,13 +936,13 @@ BUILTIN(Uint8ArrayFromHex) {
         base::Vector<const uint8_t> input_vector =
             input_content.ToOneByteVector();
         result = ArrayBufferFromHex(
-            input_vector, /*is_shared*/ false,
+            input_vector, SharedFlag{false},
             static_cast<uint8_t*>(buffer->backing_store()), output_length);
       } else {
         base::Vector<const base::uc16> input_vector =
             input_content.ToUC16Vector();
         result = ArrayBufferFromHex(
-            input_vector, /*is_shared*/ false,
+            input_vector, SharedFlag{false},
             static_cast<uint8_t*>(buffer->backing_store()), output_length);
       }
   }

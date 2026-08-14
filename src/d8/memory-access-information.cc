@@ -16,8 +16,48 @@
 
 namespace v8 {
 
+namespace {
+int width_from_suffix(char c) {
+  switch (c) {
+    case 'b':
+      return 1;
+    case 'w':
+      return 2;
+    case 'l':
+    case 'd':
+      return 4;
+    case 'q':
+      return 8;
+    default:
+      return 8;
+  }
+}
+}  // namespace
+
 MemoryAccessInformation ParseMemoryAccessInformationFromInstruction(
     const char* insn_pos, struct user_regs_struct& regs) {
+  if (memcmp(insn_pos, "rep movs", 8) == 0) {
+    int width = width_from_suffix(insn_pos[8]);
+    return {.kind = MemoryAccessInformation::kRepMovs,
+            .result_reg = nullptr,
+            .xmm_reg_index = -1,
+            .k_reg_index = -1,
+            .access_width = width,
+            .dest_width = width,
+            .extension = MemoryAccessInformation::kNoExtend};
+  } else if (memcmp(insn_pos, "rep ", 4) == 0 ||
+             memcmp(insn_pos, "repne ", 6) == 0) {
+    // Treat other repeating string instructions as a write, which is safely
+    // ignored.
+    return {.kind = MemoryAccessInformation::kWrite,
+            .result_reg = nullptr,
+            .xmm_reg_index = -1,
+            .k_reg_index = -1,
+            .access_width = 8,
+            .dest_width = 8,
+            .extension = MemoryAccessInformation::kNoExtend};
+  }
+
   const char* space_pos = strchr(insn_pos, ' ');
   CHECK_NOT_NULL(space_pos);
   size_t mnem_len = space_pos - insn_pos;
@@ -27,11 +67,15 @@ MemoryAccessInformation ParseMemoryAccessInformationFromInstruction(
       MemoryAccessInformation::kNoExtend;
 
   char suffix;
+  char dest_suffix;
   if (mnem_len >= 6 && (memcmp(insn_pos, "movzx", 5) == 0 ||
                         memcmp(insn_pos, "movsx", 5) == 0)) {
     extension = (insn_pos[3] == 'z') ? MemoryAccessInformation::kZeroExtend
                                      : MemoryAccessInformation::kSignExtend;
     suffix = insn_pos[5];
+    // The char after the source-width suffix is the destination width (e.g.
+    // movsxbl sign-extends a byte into a 32-bit register).
+    dest_suffix = mnem_len >= 7 ? insn_pos[6] : suffix;
   } else {
     DCHECK_GT(mnem_len, 0);
     suffix = insn_pos[mnem_len - 1];
@@ -42,17 +86,11 @@ MemoryAccessInformation ParseMemoryAccessInformationFromInstruction(
     if (suffix == 'l') {
       extension = MemoryAccessInformation::kZeroExtend;
     }
+    dest_suffix = suffix;
   }
 
-  if (suffix == 'b') {
-    access_width = 1;
-  } else if (suffix == 'w') {
-    access_width = 2;
-  } else if (suffix == 'l' || suffix == 'd') {
-    access_width = 4;
-  } else if (suffix == 'q') {
-    access_width = 8;
-  }
+  access_width = width_from_suffix(suffix);
+  int dest_width = width_from_suffix(dest_suffix);
 
   if (memcmp(insn_pos, "cmp", 3) == 0 || memcmp(insn_pos, "test", 4) == 0 ||
       memcmp(insn_pos, "comi", 4) == 0 || memcmp(insn_pos, "ucomi", 5) == 0 ||
@@ -72,6 +110,10 @@ MemoryAccessInformation ParseMemoryAccessInformationFromInstruction(
             .extension = extension};
   }
 
+  if (memcmp(insn_pos, "lddqu", 5) == 0 || memcmp(insn_pos, "vlddqu", 6) == 0) {
+    access_width = 16;
+  }
+
   // TODO(clemensb): Implement more instructions if necessary.
   auto match_mnem = [&](std::initializer_list<const char*> prefixes) {
     for (const char* prefix : prefixes) {
@@ -84,7 +126,8 @@ MemoryAccessInformation ParseMemoryAccessInformationFromInstruction(
                    "vmul",   "vdiv",   "padd",  "psub", "pmul",   "vor",
                    "vxor",   "vand",   "por",   "pxor", "pand",   "vpbroadcast",
                    "vpinsr", "vpextr", "vpmov", "pmov", "vshuf",  "pshuf",
-                   "vunpck", "punpck", "vpack", "pack", "vblend", "pblend"})) {
+                   "vunpck", "punpck", "vpack", "pack", "vblend", "pblend",
+                   "lddqu",  "vlddqu"})) {
     FATAL("Not a recognized instruction: %s\n", insn_pos);
   }
 
@@ -172,6 +215,19 @@ MemoryAccessInformation ParseMemoryAccessInformationFromInstruction(
             .result_reg = matched_reg,
             .xmm_reg_index = -1,
             .access_width = access_width,
+            .dest_width = dest_width,
+            .extension = extension};
+  }
+
+  if (op[0] == 'k' && op[1] >= '0' && op[1] <= '7' &&
+      (op[2] == ',' || op[2] == ' ' || op[2] == '\0')) {
+    int reg_num = op[1] - '0';
+    return {.kind = MemoryAccessInformation::kRead,
+            .result_reg = nullptr,
+            .xmm_reg_index = -1,
+            .k_reg_index = reg_num,
+            .access_width = access_width,
+            .dest_width = dest_width,
             .extension = extension};
   }
 

@@ -367,7 +367,7 @@ def parse_args(args):
     options.random_seed = random_seed()
 
   # Ensure we have a test case.
-  options.testcase = Path(options.testcase)
+  options.testcase = Path(options.testcase).resolve()
   assert options.testcase.is_file(), (
       f"Test case {options.testcase} doesn't exist")
 

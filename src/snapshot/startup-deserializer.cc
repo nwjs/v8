@@ -83,7 +83,6 @@ void StartupDeserializer::DeserializeIntoIsolate() {
   isolate()->builtins()->MarkInitialized();
 
   LogNewMapEvents();
-  WeakenDescriptorArrays();
 
   if (should_rehash()) {
     // Hash seed was initialized in ReadOnlyDeserializer.

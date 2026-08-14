@@ -26,8 +26,13 @@ TracedNode* TracedNodeBlock::AllocateNode() {
 
 std::pair<TracedNodeBlock*, TracedNode*> TracedHandles::AllocateNode() {
   if (V8_UNLIKELY(usable_blocks_.empty())) {
-    RefillUsableNodeBlocks();
+    return RefillAndAllocateNode();
   }
+  return AllocateNodeUnchecked();
+}
+
+V8_INLINE std::pair<TracedNodeBlock*, TracedNode*>
+TracedHandles::AllocateNodeUnchecked() {
   TracedNodeBlock* block = usable_blocks_.Front();
   auto* node = block->AllocateNode();
   DCHECK(node->IsMetadataCleared());

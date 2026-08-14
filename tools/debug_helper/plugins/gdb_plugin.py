@@ -34,8 +34,8 @@ def _ptr_size():
     return None
 
 
-class _GdbHintsResolver:
-  """GDB Adapter for resolve_heap_hints."""
+class _GdbResolver:
+  """GDB adapter for resolving symbols, pointers, offsets, etc."""
 
   def __init__(self, ptr_size):
     self._ptr_size = ptr_size
@@ -47,23 +47,37 @@ class _GdbHintsResolver:
       return None
     if len(data) != self._ptr_size:
       return None
-    return int.from_bytes(data, "little", signed=False)
+    return int.from_bytes(data, "little")
 
-  def global_symbol_address(self, name):
+  def symbol_address(self, name):
+    """Resolve the address of the variable `name` for the selected thread.
+
+    For a TLS variable this is the address of the selected thread's copy.
+    """
     try:
+      addr = None
       sym = gdb.lookup_global_symbol(name)
-      if sym is None:
-        return None
-      value = sym.value()
-      addr = value.address
+      if sym is not None:
+        try:
+          addr = sym.value().address
+        except Exception:
+          # If we cannot locate the TLS symbol, fall back to evaluation.
+          pass
       if addr is None:
-        # Try `&name` via parse_and_eval, which resolves TLS for the selected thread.
+        # `&name` via parse_and_eval resolves TLS for the selected thread and,
+        # unlike lookup_global_symbol, also sees minimal symbols from release
+        # builds.
         addr = gdb.parse_and_eval(f"&'{name}'")
       if addr is None:
         return None
       return int(addr)
     except Exception:
+      if _VERBOSE:
+        traceback.print_exc()
       return None
+
+  # gdb resolves TLS natively.
+  debug_symbol_address = symbol_address
 
   def field_offset(self, type_name, field_name):
     """Return the byte offset of `field_name` inside `type_name`."""
@@ -107,11 +121,18 @@ class V8DbgFrameDecorator(FrameDecorator):
         if _VERBOSE:
           traceback.print_exc()
         base_name = ""
-    # TODO(joyee): "Builtin" substring check is a coarse heuristic for
-    # detecting JS-bridge frames whose native name should not suppress the
-    # JS annotation; it can also match unrelated builtins with JS-y names.
-    # Refine this when we have a robust way to identify V8 trampoline frames.
-    if base_name and "Builtin" not in base_name:
+    # On non-pointer-compressed builds with short builtin calls enabled, the
+    # builtins are remapped and no longer sit at the in-binary address range
+    # registered in the symbol table, so gdb cannot symbolize them and renders
+    # them as '???'. Strip the placeholder so an annotated frame does not read
+    # '??? [func @ ...]'.
+    if base_name == "???":
+      base_name = ""
+    # This is a heuristic to early skip frames that clearly not builtin frames.
+    # We only try to symbolicate frames that are either not symbolicated, or have a
+    # name that starts with "Builtins_". The call frame_suffix() below will check
+    # if it's a genuine JS frame.
+    if base_name and not base_name.startswith("Builtins_"):
       return base_name
     frame_pointer = 0
     # Extend this register list as the plugin grows support for more
@@ -130,6 +151,8 @@ class V8DbgFrameDecorator(FrameDecorator):
     if not frame_pointer:
       return base_name
 
+    # frame_suffix() consults debug_helper, which returns a non-empty
+    # annotation only for genuine JS frames, otherwise it returns an empty string.
     bridge = get_bridge(_ptr_size())
     suffix = bridge.frame_suffix(frame_pointer, _read_memory_callback)
     if not suffix:
@@ -170,6 +193,10 @@ class V8Command(gdb.Command):
       * --type T: treat the object as if it has type T (e.g. `v8::internal::JSArray`).
       * --depth N: limit recursive inspection depth to N (default: 1).
       * --array-length N: for arrays, inspect up to N elements (default: 16).
+
+    - isolate -- Print the current Isolate address of the selected thread.
+
+      v8 isolate
   """
 
   def __init__(self):
@@ -187,7 +214,7 @@ class V8Command(gdb.Command):
         argv,
         read_memory=_read_memory_callback,
         eval_address=_evaluate_address_in_gdb,
-        hints_resolver=_GdbHintsResolver(bridge.ptr_size),
+        resolver=_GdbResolver(bridge.ptr_size),
         verbose=_VERBOSE,
     )
     if not ok:

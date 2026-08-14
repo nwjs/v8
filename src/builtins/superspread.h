@@ -27,9 +27,10 @@ struct SuperSpreadArgs {
 // TODO(olivf): Support more builtins.
 #define SUPERSPREAD_BUILTINS(V) V(ArrayPrototypePush, GenericArrayPushVararg)
 
-#define DECLARE_SUPER_SPREAD_HANDLER(_, Name)             \
-  V8_EXPORT_PRIVATE Tagged<Object> Name(Isolate* isolate, \
-                                        RuntimeArguments& args);
+#define DECLARE_SUPER_SPREAD_HANDLER(_, Name)                              \
+  V8_EXPORT_PRIVATE Tagged<Object> Name(Isolate* isolate,                  \
+                                        DirectHandle<JSReceiver> receiver, \
+                                        DirectHandle<FixedArray> merged_args);
 SUPERSPREAD_BUILTINS(DECLARE_SUPER_SPREAD_HANDLER)
 #undef DECLARE_SUPER_SPREAD_HANDLER
 

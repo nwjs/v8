@@ -1269,6 +1269,7 @@ TEST_F(HeapTest, ReportStatsAsCrashKeys) {
   stats.malloced_memory = ByteSize(next_value());
   stats.malloced_peak_memory = ByteSize(next_value());
   stats.isolate_count = next_value();
+  stats.native_context_count = next_value();
   stats.is_main_isolate = true;
   stats.last_os_error = next_value();
 
@@ -1352,6 +1353,7 @@ TEST_F(HeapTest, ReportStatsAsCrashKeys) {
        stats.near_death_global_handle_count},
       {"v8-oom-free-global-handle-count", stats.free_global_handle_count},
       {"v8-oom-isolate-count", stats.isolate_count},
+      {"v8-oom-native-context-count", stats.native_context_count},
       {"v8-oom-last-os-error", stats.last_os_error},
   };
 
@@ -1412,7 +1414,7 @@ void FatalMemoryErrorCallbackForTest(const char* location,
                                      const OOMDetails& details) {
   CHECK_NOT_NULL(g_crash_key_store_for_oom);
   // Update this number when adding/removing crash keys.
-  CHECK_EQ(g_crash_key_store_for_oom->size(), 41u);
+  CHECK_EQ(g_crash_key_store_for_oom->size(), 42u);
   CHECK(g_crash_key_store_for_oom->HasKey("v8-oom-stack"));
   base::OS::PrintError("Reached end of test.\n");
   std::abort();

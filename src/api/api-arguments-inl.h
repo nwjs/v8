@@ -581,6 +581,22 @@ uint32_t PropertyCallbackArguments::CallIndexedIndexOf(
            callback_info);
 }
 
+DirectHandle<JSAny> PropertyCallbackArguments::CallIndexedIterableToList(
+    Isolate* isolate, DirectHandle<InterceptorInfo> interceptor) {
+  DCHECK(!is_setter_definer_deleter_);
+  set_property_key(0);
+  slot_at(kCallbackInfoIndex).store(*interceptor);
+  slot_at(kReturnValueIndex).store(ReadOnlyRoots(isolate).undefined_value());
+
+  IndexedPropertyIterableToListCallback f =
+      reinterpret_cast<IndexedPropertyIterableToListCallback>(
+          interceptor->indexed_iterable_to_list(isolate));
+  PREPARE_CALLBACK_INFO_INTERCEPTOR(isolate, f, v8::Value, interceptor,
+                                    ExceptionContext::kUnknown);
+  f(callback_info);
+  return GetReturnValue<JSAny>();
+}
+
 // -------------------------------------------------------------------------
 // Accessors
 

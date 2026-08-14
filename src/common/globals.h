@@ -172,10 +172,16 @@ namespace internal {
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
 #endif
 
+// V8_DEFAULT_STACK_SIZE_KB is the default stack size for JS/Wasm.
+// V8_STACK_LIMIT_MARGIN_KB is an extra safety headroom between the JS/Wasm
+// stack limit and the estimated system stack limit. It is needed to safely run
+// C++ code or builtins without stack checks when JS/Wasm is close to the stack
+// limit.
 #if V8_TARGET_ARCH_ARM
 // Set stack limit lower for ARM than for other architectures because stack
 // allocating MacroAssembler takes 120K bytes.  See issue crbug.com/405338
 #define V8_DEFAULT_STACK_SIZE_KB 864
+#define V8_STACK_LIMIT_MARGIN_KB 160
 #elif V8_TARGET_ARCH_IA32
 // As of crrev.com/c/2461589, Chrome creates some threads (at least worker
 // pools threads, maybe others) on 32-bit Windows with only 512 KB of stack
@@ -185,6 +191,7 @@ namespace internal {
 // Rationale behind the specific value: leave the same 40 KB of slack as
 // the 984 KB limit we used on systems with 1 MB stack size.
 #define V8_DEFAULT_STACK_SIZE_KB 472
+#define V8_STACK_LIMIT_MARGIN_KB 40
 #elif V8_USE_ADDRESS_SANITIZER
 // ASan makes C++ frames consume more stack, so V8 should leave more stack
 // space available in case a C++ call happens. ClusterFuzz found a case where
@@ -192,10 +199,12 @@ namespace internal {
 // crbug.com/1486275); to be more robust towards future CF reports we'll
 // use an even lower limit.
 #define V8_DEFAULT_STACK_SIZE_KB 960
+#define V8_STACK_LIMIT_MARGIN_KB 64
 #else
 // Slightly less than 1MB, since Windows' default stack size for
 // the main execution thread is 1MB.
 #define V8_DEFAULT_STACK_SIZE_KB 984
+#define V8_STACK_LIMIT_MARGIN_KB 40
 #endif
 
 // Helper macros to enable handling of direct C calls in the simulator.
@@ -1196,7 +1205,6 @@ class Debug;
 class DebugInfo;
 class Descriptor;
 class DescriptorArray;
-class StrongDescriptorArray;
 template <typename T>
 class DirectHandle;
 #ifdef V8_ENABLE_DIRECT_HANDLE
@@ -1576,14 +1584,16 @@ constexpr const char* ToString(AllocationType kind) {
   UNREACHABLE();
 }
 
-enum class AllowAllocation : uint8_t { kYes, kNo };
+using AllowAllocation = base::StrongAlias<struct AllowAllocationTag, bool>;
 
 inline std::ostream& operator<<(std::ostream& os, AllocationType type) {
   return os << ToString(type);
 }
 
-enum class PerformHeapLimitCheck { kYes, kNo };
-enum class PerformIneffectiveMarkCompactCheck { kYes, kNo };
+using PerformHeapLimitCheck =
+    base::StrongAlias<struct PerformHeapLimitCheckTag, bool>;
+using PerformIneffectiveMarkCompactCheck =
+    base::StrongAlias<struct PerformIneffectiveMarkCompactCheckTag, bool>;
 
 enum class RequestedGCKind : uint8_t { kMajor = 1, kLastResort = 1 << 1 };
 
@@ -2915,29 +2925,49 @@ enum class CachedTieringDecision : int32_t {
 #ifdef V8_ENABLE_SPARKPLUG_PLUS
 #define IF_SPARKPLUG_PLUS(V, ...) EXPAND(V(__VA_ARGS__))
 
-#define TYPED_EQUAL_STUB_LIST(V) \
-  V(None)                        \
-  V(SignedSmall)                 \
-  V(Number)                      \
-  V(InternalizedString)          \
-  V(String)                      \
-  V(Receiver)                    \
-  V(Any)
+#define TYPED_EQUAL_STUB_LIST(V, ...)  \
+  V(None, ##__VA_ARGS__)               \
+  V(SignedSmall, ##__VA_ARGS__)        \
+  V(Number, ##__VA_ARGS__)             \
+  V(InternalizedString, ##__VA_ARGS__) \
+  V(String, ##__VA_ARGS__)             \
+  V(Receiver, ##__VA_ARGS__)           \
+  V(Any, ##__VA_ARGS__)
 
-#define TYPED_STRICTEQUAL_STUB_LIST(V) \
-  TYPED_EQUAL_STUB_LIST(V)             \
-  V(Symbol)
+#define TYPED_STRICTEQUAL_STUB_LIST(V, ...) \
+  TYPED_EQUAL_STUB_LIST(V, ##__VA_ARGS__)   \
+  V(Symbol, ##__VA_ARGS__)
 
-#define TYPED_RELATIONAL_COMPARE_STUB_LIST(V) \
-  V(None)                                     \
-  V(SignedSmall)                              \
-  V(Number)
+#define TYPED_RELATIONAL_COMPARE_STUB_LIST(V, ...) \
+  V(None, ##__VA_ARGS__)                           \
+  V(SignedSmall, ##__VA_ARGS__)                    \
+  V(Number, ##__VA_ARGS__)
+
+#define TYPED_BITWISE_BINOP_STUB_LIST(V, ...) \
+  V(None, ##__VA_ARGS__)                      \
+  V(SignedSmall, ##__VA_ARGS__)
+
+#define TYPED_BINOP_STUB_LIST(V, ...)             \
+  TYPED_BITWISE_BINOP_STUB_LIST(V, ##__VA_ARGS__) \
+  V(Number, ##__VA_ARGS__)
+
+#define TYPED_ADD_STUB_LIST(V, ...)       \
+  TYPED_BINOP_STUB_LIST(V, ##__VA_ARGS__) \
+  V(String, ##__VA_ARGS__)
+
+#define TYPED_EXP_STUB_LIST(V, ...) \
+  V(None, ##__VA_ARGS__)            \
+  V(Number, ##__VA_ARGS__)
 #else
 #define IF_SPARKPLUG_PLUS(V, ...)
 
-#define TYPED_STRICTEQUAL_STUB_LIST(V)
-#define TYPED_EQUAL_STUB_LIST(V)
-#define TYPED_RELATIONAL_COMPARE_STUB_LIST(V)
+#define TYPED_STRICTEQUAL_STUB_LIST(V, ...)
+#define TYPED_EQUAL_STUB_LIST(V, ...)
+#define TYPED_RELATIONAL_COMPARE_STUB_LIST(V, ...)
+#define TYPED_BINOP_STUB_LIST(V, ...)
+#define TYPED_ADD_STUB_LIST(V, ...)
+#define TYPED_EXP_STUB_LIST(V, ...)
+#define TYPED_BITWISE_BINOP_STUB_LIST(V, ...)
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
 
 enum class SpeculationMode {
@@ -2984,10 +3014,10 @@ inline std::ostream& operator<<(std::ostream& os, ConcurrencyMode mode) {
   return os << ToString(mode);
 }
 
-enum class SharedFlag : bool { kNo = false, kYes = true };
+using SharedFlag = base::StrongAlias<struct SharedFlagTag, bool>;
 
 inline std::ostream& operator<<(std::ostream& os, SharedFlag shared) {
-  return os << (shared == SharedFlag::kYes ? "shared" : "not shared");
+  return os << (shared ? "shared" : "non-shared");
 }
 
 // An architecture independent representation of the sets of registers available
@@ -3120,7 +3150,7 @@ enum class StubCallMode {
   kCallBuiltinPointer,
 };
 
-enum class NeedsContext { kYes, kNo };
+using NeedsContext = base::StrongAlias<struct NeedsContextTag, bool>;
 
 constexpr int kInvalidInfoId = -1;
 constexpr int kFunctionLiteralIdTopLevel = 0;
@@ -3130,9 +3160,9 @@ constexpr int kSwissNameDictionaryInitialCapacity = 4;
 constexpr int kSmallOrderedHashSetMinCapacity = 4;
 constexpr int kSmallOrderedHashMapMinCapacity = 4;
 
-enum class AdaptArguments { kYes, kNo };
-constexpr AdaptArguments kAdapt = AdaptArguments::kYes;
-constexpr AdaptArguments kDontAdapt = AdaptArguments::kNo;
+using AdaptArguments = base::StrongAlias<struct AdaptArgumentsTag, bool>;
+constexpr AdaptArguments kAdapt = AdaptArguments{true};
+constexpr AdaptArguments kDontAdapt = AdaptArguments{false};
 
 constexpr int kJSArgcReceiverSlots = 1;
 constexpr uint16_t kDontAdaptArgumentsSentinel = 0;

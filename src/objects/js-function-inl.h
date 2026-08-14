@@ -218,17 +218,14 @@ void JSFunction::set_dispatch_handle(JSDispatchHandle handle,
 }
 void JSFunction::UpdateDispatchEntry(Isolate* isolate, Tagged<Code> new_code,
                                      WriteBarrierMode mode) {
-  JSDispatchHandle handle = dispatch_handle();
-  isolate->js_dispatch_table().SetCodeNoWriteBarrier(handle, new_code);
-  WriteBarrier::ForJSDispatchHandle(this, handle, mode);
+  isolate->js_dispatch_table().SetCode(dispatch_handle(), new_code, this,
+                                       isolate, mode);
 }
 void JSFunction::UpdateDispatchEntryKeepTieringRequest(Isolate* isolate,
                                                        Tagged<Code> new_code,
                                                        WriteBarrierMode mode) {
-  JSDispatchHandle handle = dispatch_handle();
-  isolate->js_dispatch_table().SetCodeKeepTieringRequestNoWriteBarrier(
-      handle, new_code);
-  WriteBarrier::ForJSDispatchHandle(this, handle, mode);
+  isolate->js_dispatch_table().SetCodeKeepTieringRequest(
+      dispatch_handle(), new_code, this, isolate, mode);
 }
 JSDispatchHandle JSFunction::dispatch_handle() const {
   return dispatch_handle_.Relaxed_Load();

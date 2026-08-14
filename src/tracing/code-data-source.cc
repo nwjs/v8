@@ -50,7 +50,8 @@ InternedV8JsScript::Type GetJsScriptType(Tagged<Script> script) {
       return InternedV8JsScript::TYPE_NORMAL;
 #if V8_ENABLE_WEBASSEMBLY
     case Script::Type::kWasm:
-      UNREACHABLE();
+      // Hit for JS-to-Wasm or Wasm-to-JS wrappers.
+      return InternedV8JsScript::TYPE_UNKNOWN;
 #endif  // V8_ENABLE_WEBASSEMBLY
     case Script::Type::kInspector:
       return InternedV8JsScript::TYPE_INSPECTOR;

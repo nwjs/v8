@@ -207,32 +207,43 @@ MaybeDirectHandle<Context> NewScriptContext(
   Handle<ScriptContextTable> script_context(
       native_context->script_context_table(), isolate);
 
+  // Returns true, with a pending exception, if declaring `name` with `mode`
+  // would be a disallowed redeclaration of a variable already present in
+  // `script_context`. Reads `script_context`, so callers must keep it pointing
+  // at the current table.
+  auto has_lexical_clash = [&](DirectHandle<String> name,
+                               VariableMode mode) -> bool {
+    VariableLookupResult lookup;
+    if (!script_context->Lookup(name, &lookup)) return false;
+    if (!IsLexicalVariableMode(mode) && !IsLexicalVariableMode(lookup.mode)) {
+      return false;
+    }
+    DirectHandle<Context> context(script_context->get(lookup.context_index),
+                                  isolate);
+    // If we are trying to redeclare a REPL-mode let as a let, REPL-mode const
+    // as a const, REPL-mode using as a using and REPL-mode await using as an
+    // await using allow it.
+    if ((mode == lookup.mode && IsLexicalVariableMode(mode)) &&
+        scope_info->IsReplModeScope() &&
+        context->scope_info()->IsReplModeScope()) {
+      return false;
+    }
+    // https://tc39.es/ecma262/#sec-globaldeclarationinstantiation:
+    // If envRec.HasLexicalDeclaration(name) is true, throw a SyntaxError
+    // exception.
+    MessageLocation location(script, 0, 1);
+    isolate->ThrowAt(isolate->factory()->NewSyntaxError(
+                         MessageTemplate::kVarRedeclaration, name),
+                     &location);
+    return true;
+  };
+
   // Find name clashes.
+  const uint32_t initial_length = script_context->length(kAcquireLoad).value();
   for (auto name_it : ScopeInfo::IterateLocalNames(scope_info)) {
     Handle<String> name(name_it->name(), isolate);
     VariableMode mode = scope_info->ContextLocalMode(name_it->index());
-    VariableLookupResult lookup;
-    if (script_context->Lookup(name, &lookup)) {
-      if (IsLexicalVariableMode(mode) || IsLexicalVariableMode(lookup.mode)) {
-        DirectHandle<Context> context(script_context->get(lookup.context_index),
-                                      isolate);
-        // If we are trying to redeclare a REPL-mode let as a let, REPL-mode
-        // const as a const, REPL-mode using as a using and REPL-mode await
-        // using as an await using allow it.
-        if (!((mode == lookup.mode && IsLexicalVariableMode(mode)) &&
-              scope_info->IsReplModeScope() &&
-              context->scope_info()->IsReplModeScope())) {
-          // https://tc39.es/ecma262/#sec-globaldeclarationinstantiation 5.b:
-          // If envRec.HasLexicalDeclaration(name) is true, throw a SyntaxError
-          // exception.
-          MessageLocation location(script, 0, 1);
-          isolate->ThrowAt(isolate->factory()->NewSyntaxError(
-                               MessageTemplate::kVarRedeclaration, name),
-                           &location);
-          return MaybeDirectHandle<Context>();
-        }
-      }
-    }
+    if (has_lexical_clash(name, mode)) return MaybeDirectHandle<Context>();
 
     if (IsLexicalVariableMode(mode)) {
       Maybe<bool> has_restricted = JSGlobalObject::HasRestrictedGlobalProperty(
@@ -252,6 +263,27 @@ MaybeDirectHandle<Context> NewScriptContext(
       }
 
       JSGlobalObject::InvalidatePropertyCell(global_object, name);
+
+      // HasRestrictedGlobalProperty can run user code via a global-object
+      // property interceptor, which may re-entrantly add script contexts and
+      // replace the table. Reload it so the clash checks above on later
+      // iterations (and the extension below) observe those additions instead
+      // of clobbering them. PatchValue reuses the handle rather than allocating
+      // one per iteration.
+      script_context.PatchValue(native_context->script_context_table());
+    }
+  }
+
+  // The per-name check above runs before that name's interceptor, so a
+  // re-entrant declaration clashing with the current or an already-checked
+  // name goes unnoticed there and ScriptContextTable::Add below would silently
+  // add a duplicate. If an interceptor grew the table, re-check every name
+  // against the now-final table, which contains all re-entrant additions.
+  if (script_context->length(kAcquireLoad).value() != initial_length) {
+    for (auto name_it : ScopeInfo::IterateLocalNames(scope_info)) {
+      Handle<String> name(name_it->name(), isolate);
+      VariableMode mode = scope_info->ContextLocalMode(name_it->index());
+      if (has_lexical_clash(name, mode)) return MaybeDirectHandle<Context>();
     }
   }
 

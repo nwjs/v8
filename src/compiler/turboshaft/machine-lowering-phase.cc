@@ -15,6 +15,11 @@
 #include "src/compiler/turboshaft/string-escape-analysis-reducer.h"
 #include "src/compiler/turboshaft/value-numbering-reducer.h"
 #include "src/compiler/turboshaft/variable-reducer.h"
+#include "src/heap/factory-inl.h"
+#include "src/heap/read-only-heap-inl.h"
+#include "src/numbers/conversions-inl.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/oddball-inl.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/compiler/turboshaft/wasm-lowering-reducer.h"

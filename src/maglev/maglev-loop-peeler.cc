@@ -35,6 +35,16 @@ void RegisterClonedNode(Graph* graph, NodeBase* clone, const NodeBase* src) {
     graph->graph_labeller()->RegisterNode(
         clone, &graph->graph_labeller()->GetNodeProvenance(src));
   }
+  // Register the cloned deopt top frame(s) so passes walking the graph's frame
+  // sets (e.g. RecomputePhiUseHintsProcessor) see the peeled iteration.
+  if (clone->properties().has_eager_deopt_info()) {
+    graph->AddEagerTopFrame(&clone->eager_deopt_info()->top_frame());
+  }
+  if (clone->properties().can_lazy_deopt()) {
+    auto [top_frame, result_location, result_size] =
+        clone->lazy_deopt_info()->GetFrameForCloning();
+    graph->AddLazyTopFrame(top_frame, result_location, result_size);
+  }
 }
 
 int LoopHeaderBytecodeOffset(BasicBlock* block) {
@@ -454,15 +464,6 @@ bool MaglevLoopPeeler::IsCloneable(const LoopInfo& loop) const {
   DCHECK(loop.preheader->control_node()->Is<Jump>() ||
          loop.preheader->control_node()->Is<CheckpointedJump>());
 
-  // TODO(victorgomes): support an edge-split pre-header. Retargeting it to the
-  // (stateless) cloned header leaves an edge-split block whose successor isn't
-  // a merge, which breaks the edge-split walk in the KNA recompute during the
-  // post-peel PostOptimizerPhase. Bail for now.
-  if (loop.preheader->is_edge_split_block()) {
-    TRACE_PEEL_SKIP("@" << header_offset
-                        << ": skip (pre-header is an edge-split block)");
-    return false;
-  }
 
   // Collect every value defined in the loop body so the walk further below can
   // reject any body value that is used outside the body (peeling would break
@@ -510,11 +511,13 @@ bool MaglevLoopPeeler::IsCloneable(const LoopInfo& loop) const {
                             << ": skip (unsupported switch control node)");
         return false;
       }
-      if (control->Is<TerminalControlNode>()) {
-        // TODO(victorgomes): Support TerminalControlNode (Return, Deopt, etc.)
-        // in loop peeling.
-        TRACE_PEEL_SKIP("@" << header_offset
-                            << ": skip (unsupported terminal control node)");
+      if (control->Is<Throw>() &&
+          control->exception_handler_info()->HasExceptionHandler() &&
+          !control->exception_handler_info()->ShouldLazyDeopt()) {
+        // TODO(victorgomes): Support live catch blocks.
+        TRACE_PEEL_SKIP("@"
+                        << header_offset
+                        << ": skip (unsupported throw with live catch block)");
         return false;
       }
       // This is not the backedge, and the loop is innermost.
@@ -663,6 +666,7 @@ void MaglevLoopPeeler::PeelLoop(const LoopInfo& loop) {
   RewireLoopConnections(ctx);
   SplicePeeledBlocks(ctx);
 
+  loop.header()->state()->set_is_loop_with_peeled_iteration();
   TRACE_PEEL_PEELED("@" << LoopHeaderBytecodeOffset(loop.header())
                         << ": peeled (body=" << loop.body.size()
                         << " block(s), exits=" << loop.exits.size());
@@ -682,9 +686,12 @@ void MaglevLoopPeeler::CloneBodySubgraph(PeelContext& ctx) {
   // Allocate one cloned block per body block, in RPO order.
   for (BasicBlock* block : ctx.loop.body) {
     if (block == ctx.loop.header()) {
-      BasicBlock* cloned_block =
-          zone()->New<BasicBlock>(/* state */ nullptr, zone());
-      cloned_block->set_predecessor(ctx.loop.preheader);
+      BasicBlock** preds = zone()->AllocateArray<BasicBlock*>(1);
+      preds[0] = ctx.loop.preheader;
+      MergePointInterpreterFrameState* state =
+          MergePointInterpreterFrameState::NewForPeel(
+              block->state()->unit(), *block->state(), preds, 1);
+      BasicBlock* cloned_block = zone()->New<BasicBlock>(state, zone());
       ctx.block_map[block] = cloned_block;
     } else if (block->is_merge_block()) {
       int predecessor_count = block->predecessor_count();
@@ -987,6 +994,7 @@ void MaglevLoopPeeler::CloneLoopBodyControl(PeelContext& ctx) {
     break;
       CONDITIONAL_CONTROL_NODE_LIST(CLONE_CONTROL_CASE)
       UNCONDITIONAL_CONTROL_NODE_LIST(CLONE_CONTROL_CASE)
+      TERMINAL_CONTROL_NODE_LIST(CLONE_CONTROL_CASE)
 #undef CLONE_CONTROL_CASE
       default:
         UNREACHABLE();
@@ -1048,6 +1056,8 @@ void MaglevLoopPeeler::CloneLoopBodyControl(PeelContext& ctx) {
         clone_uc->set_target(cloned_exit.target);
         clone_uc->set_predecessor_id(cloned_exit.predecessor_id);
       }
+    } else if (control->Is<TerminalControlNode>()) {
+      // Terminal control nodes have no successors, nothing to retarget.
     } else {
       UNREACHABLE();
     }

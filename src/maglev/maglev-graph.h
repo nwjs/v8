@@ -93,6 +93,17 @@ class Graph final : public ZoneObject {
   int num_blocks() const { return static_cast<int>(blocks_.size()); }
   ZoneVector<BasicBlock*>& blocks() { return blocks_; }
 
+  // TODO(dmercadier): it would be nice to do better than a linear search here,
+  // for instance by storing their index in each block.
+  int block_offset(const BasicBlock* target) {
+    for (int i = 0; i < num_blocks(); i++) {
+      if (blocks()[i] == target) {
+        return i;
+      }
+    }
+    UNREACHABLE();
+  }
+
   BlockConstIterator begin() const { return blocks_.begin(); }
   BlockConstIterator end() const { return blocks_.end(); }
   BlockConstReverseIterator rbegin() const { return blocks_.rbegin(); }
@@ -216,6 +227,11 @@ class Graph final : public ZoneObject {
       lazy_deopt_top_frames_.emplace(
           frame, std::make_pair(result_location, result_size));
     }
+  }
+
+  void ClearRecordedFrames() {
+    eager_deopt_top_frames_.clear();
+    lazy_deopt_top_frames_.clear();
   }
 
   void UnwrapDeoptFrames();

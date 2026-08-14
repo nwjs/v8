@@ -1746,7 +1746,7 @@ DirectHandle<JSArray> NewJSArrayWithElements(Isolate* isolate,
 }  // namespace
 
 // Slow path for:
-// https://tc39.es/ecma262/#sec-regexp.prototype-@@replace
+// https://tc39.es/ecma262/#sec-regexp.prototype-@@split
 // RegExp.prototype [ @@split ] ( string, limit )
 RUNTIME_FUNCTION(Runtime_RegExpSplit) {
   HandleScope scope(isolate);
@@ -1774,7 +1774,10 @@ RUNTIME_FUNCTION(Runtime_RegExpSplit) {
 
   DirectHandle<String> u_str =
       factory->LookupSingleCharacterStringFromCode('u');
-  const bool unicode = (String::IndexOf(isolate, flags, u_str, 0) >= 0);
+  DirectHandle<String> v_str =
+      factory->LookupSingleCharacterStringFromCode('v');
+  const bool unicode = (String::IndexOf(isolate, flags, u_str, 0) >= 0 ||
+                        String::IndexOf(isolate, flags, v_str, 0) >= 0);
 
   DirectHandle<String> y_str =
       factory->LookupSingleCharacterStringFromCode('y');

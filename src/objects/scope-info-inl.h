@@ -24,8 +24,6 @@
 namespace v8 {
 namespace internal {
 
-bool ScopeInfo::IsAsmModule() const { return IsAsmModuleBit::decode(Flags()); }
-
 bool ScopeInfo::HasSimpleParameters() const {
   return HasSimpleParametersBit::decode(Flags());
 }

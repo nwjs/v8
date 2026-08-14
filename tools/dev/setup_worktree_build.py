@@ -132,12 +132,17 @@ def init_deps_cache(main_repo: Path, deps_worktree: Path,
       if target.exists() and not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-          shutil.copytree(
-              target,
-              dest,
-              symlinks=True,
-              copy_function=cow_copy,
-              dirs_exist_ok=True)
+          # shared_dirs can contain regular files (e.g. GEMINI.md), for which
+          # copytree raises NotADirectoryError.
+          if target.is_dir():
+            shutil.copytree(
+                target,
+                dest,
+                symlinks=True,
+                copy_function=cow_copy,
+                dirs_exist_ok=True)
+          else:
+            cow_copy(target, dest)
         except Exception as e:
           print(f"Warning during caching {d}: {e}", file=sys.stderr)
 

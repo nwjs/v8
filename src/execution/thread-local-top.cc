@@ -42,8 +42,6 @@ void ThreadLocalTop::Clear() {
   failed_access_check_callback_ = nullptr;
   central_stack_limit_ = kNullAddress;
   central_stack_sp_ = kNullAddress;
-  secondary_stack_sp_ = kNullAddress;
-  secondary_stack_limit_ = kNullAddress;
 }
 
 void ThreadLocalTop::Initialize(Isolate* isolate) {

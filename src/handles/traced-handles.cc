@@ -120,6 +120,12 @@ void TracedHandles::RefillUsableNodeBlocks() {
   DCHECK(!usable_blocks_.empty());
 }
 
+std::pair<TracedNodeBlock*, TracedNode*>
+TracedHandles::RefillAndAllocateNode() {
+  RefillUsableNodeBlocks();
+  return AllocateNodeUnchecked();
+}
+
 void TracedHandles::FreeNode(TracedNode* node, Address zap_value) {
   auto& block = TracedNodeBlock::From(*node);
   if (disable_block_handling_on_free_) {

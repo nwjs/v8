@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 #include "src/base/logging.h"
+#include "src/codegen/safepoint-table.h"
 #include "src/common/assert-scope.h"
 #include "src/common/simd128.h"
 #include "src/compiler/wasm-compiler.h"
@@ -52,42 +53,67 @@ Address FindNewPC(WasmFrame* frame, WasmCode* wasm_code, int byte_offset,
   WasmCode* old_code = frame->wasm_code();
   int pc_offset = static_cast<int>(frame->pc() - old_code->instruction_start());
   base::Vector<const uint8_t> old_pos_table = old_code->source_positions();
-  SourcePositionTableIterator old_it(old_pos_table);
   int call_offset = -1;
-  while (!old_it.done() && old_it.code_offset() < pc_offset) {
+  for (SourcePositionTableIterator old_it(old_pos_table);
+       !old_it.done() && old_it.code_offset() < pc_offset; old_it.Advance()) {
     call_offset = old_it.code_offset();
-    old_it.Advance();
   }
   DCHECK_LE(0, call_offset);
   int call_instruction_size = pc_offset - call_offset;
 
-  // If {return_location == kAfterBreakpoint} we search for the first code
-  // offset which is marked as instruction (i.e. not the breakpoint).
-  // If {return_location == kAfterWasmCall} we return the last code offset
-  // associated with the byte offset.
+  // If {return_location == kAfterBreakpoint}, we want to skip the breakpoint
+  // preamble/handler and resume at the first instruction representing the Wasm
+  // statement. Thus, we find the first code offset marked as a statement.
+  // If {return_location == kAfterWasmCall}, the frame is waiting for a call
+  // to return. The call instruction may be inline or inside Out-Of-Line (OOL)
+  // code (which is appended at the end of the function). In both cases, the
+  // call is the last instruction emitted for this bytecode offset. Thus, we
+  // want the last matching code offset.
   SourcePositionTableIterator it(new_pos_table);
   while (true) {
     CHECK(!it.done());
     if (it.source_position().ScriptOffset() == byte_offset) break;
     it.Advance();
   }
+  int code_offset;
   if (return_location == kAfterBreakpoint) {
     while (!it.is_statement()) {
       it.Advance();
       CHECK(!it.done());
     }
     DCHECK_EQ(byte_offset, it.source_position().ScriptOffset());
-    return wasm_code->instruction_start() + it.code_offset() +
-           call_instruction_size;
-  }
-
-  DCHECK_EQ(kAfterWasmCall, return_location);
-  int code_offset;
-  while (true) {
     code_offset = it.code_offset();
-    it.Advance();
-    if (it.done() || it.source_position().ScriptOffset() != byte_offset) break;
+  } else {
+    DCHECK_EQ(kAfterWasmCall, return_location);
+    // Find the last matching entry in the old code. If the old suspend point
+    // was the last match, we want the last match in the new code (e.g. for OOL
+    // trap). Otherwise we want the inline call (which is the last matching
+    // entry in the first contiguous run).
+    int last_old_match = -1;
+    for (SourcePositionTableIterator old_group_it(old_pos_table);
+         !old_group_it.done(); old_group_it.Advance()) {
+      if (old_group_it.source_position().ScriptOffset() == byte_offset) {
+        last_old_match = old_group_it.code_offset();
+      }
+    }
+    bool was_last_entry = (call_offset == last_old_match);
+
+    // Find the last match in the first contiguous run.
+    code_offset = it.code_offset();
+    for (; !it.done() && it.source_position().ScriptOffset() == byte_offset;
+         it.Advance()) {
+      code_offset = it.code_offset();
+    }
+    if (was_last_entry) {
+      // Find the absolute last match in the rest of the table (e.g., OOL trap).
+      for (; !it.done(); it.Advance()) {
+        if (it.source_position().ScriptOffset() == byte_offset) {
+          code_offset = it.code_offset();
+        }
+      }
+    }
   }
+  CHECK_NE(code_offset, -1);
   return wasm_code->instruction_start() + code_offset + call_instruction_size;
 }
 
@@ -253,11 +279,9 @@ class DebugInfoImpl {
     CompilationEnv env = CompilationEnv::ForModule(native_module_);
     const WasmFunction* function = &env.module->functions[func_index];
     base::Vector<const uint8_t> wire_bytes = native_module_->wire_bytes();
-    SharedFlag is_shared = env.module->type(function->sig_index).is_shared;
     FunctionBody body{function->sig, function->code.offset(),
                       wire_bytes.begin() + function->code.offset(),
-                      wire_bytes.begin() + function->code.end_offset(),
-                      is_shared};
+                      wire_bytes.begin() + function->code.end_offset()};
     std::unique_ptr<DebugSideTable> debug_sidetable;
 
     // Debug side tables for stepping are generated lazily.
@@ -274,7 +298,10 @@ class DebugInfoImpl {
                        .dead_breakpoint = dead_breakpoint});
     // Liftoff compilation failure is a FATAL error. We rely on complete Liftoff
     // support for debugging.
-    if (!result.succeeded()) FATAL("Liftoff compilation failed");
+    if (!result.succeeded()) {
+      FATAL("Liftoff compilation failed: %s",
+            LiftoffBailoutReasonToString(result.bailout_reason));
+    }
     DCHECK_EQ(generate_debug_sidetable, debug_sidetable != nullptr);
 
     DCHECK_NULL(result.assumptions);
@@ -414,7 +441,21 @@ class DebugInfoImpl {
     wasm::WasmCode* code = frame->wasm_code();
     if (!code->is_liftoff()) return false;  // Cannot step in TurboFan code.
     if (IsAtReturn(frame)) return false;    // Will return after this step.
-    FloodWithBreakpoints(frame, kAfterBreakpoint);
+    ReturnLocation return_location = kAfterBreakpoint;
+    // Check if the frame above is a WasmDebugTrap builtin call.
+    StackFrameIterator it(frame->isolate());
+    Builtin last_builtin = Builtin::kNoBuiltinId;
+    while (!it.done()) {
+      if (it.frame()->id() == frame->id()) break;
+      last_builtin = it.frame()->is_wasm_debug_break()
+                         ? it.frame()->LookupCode()->builtin_id()
+                         : Builtin::kNoBuiltinId;
+      it.Advance();
+    }
+    if (last_builtin == Builtin::kWasmDebugTrap) {
+      return_location = kAfterWasmCall;
+    }
+    FloodWithBreakpoints(frame, return_location);
     return true;
   }
 
@@ -636,6 +677,7 @@ class DebugInfoImpl {
     }
 
     if (value->is_register()) {
+      if (debug_break_fp == kNullAddress) return {};
       auto reg = LiftoffRegister::from_liftoff_code(value->reg_code);
       auto gp_addr = [debug_break_fp](Register reg) {
         return debug_break_fp +
@@ -727,8 +769,11 @@ class DebugInfoImpl {
                              StackFrameId stepping_frame) {
     StackFrameIterator it(isolate);
     for (; !it.done(); it.Advance()) {
-      bool at_breakpoint = it.frame()->is_wasm_debug_break();
-      if (at_breakpoint) {
+      bool at_debug_break = it.frame()->is_wasm_debug_break();
+      bool at_trap = false;
+      if (at_debug_break) {
+        at_trap =
+            it.frame()->LookupCode()->builtin_id() == Builtin::kWasmDebugTrap;
         it.Advance();
         CHECK(!it.done());
       }
@@ -741,8 +786,9 @@ class DebugInfoImpl {
       WasmCode* code = frame->wasm_code();
       if (!code->is_liftoff() || code->index() != new_code->index()) continue;
       if (frame->id() == stepping_frame) continue;
-      UpdateReturnAddress(frame, new_code,
-                          at_breakpoint ? kAfterBreakpoint : kAfterWasmCall);
+      ReturnLocation return_location =
+          at_debug_break && !at_trap ? kAfterBreakpoint : kAfterWasmCall;
+      UpdateReturnAddress(frame, new_code, return_location);
     }
   }
 
@@ -768,6 +814,28 @@ class DebugInfoImpl {
         FindNewPC(frame, new_code, summary.code_offset(), return_location);
 #ifdef DEBUG
     int old_position = summary.SourcePosition();
+#if !defined(V8_TARGET_ARCH_X64)
+    // On non-x64 architectures, we patch the return address of the currently
+    // executing builtin (e.g. kWasmDebugBreak) to jump directly into the new
+    // code. If the new code has a different safepoint entry than the physical
+    // frame state, a GC could miss live references or cause type confusion. On
+    // x64, we return to the old code first, which then performs a cooperative
+    // transition to the new code, so the safepoint information does not need to
+    // match exactly at the OSR target PC.
+    {
+      SafepointTable old_table(frame->wasm_code());
+      SafepointTable new_table(new_code);
+      const SafepointEntry& old_entry = old_table.FindEntry(frame->pc());
+      const SafepointEntry& new_entry = new_table.FindEntry(new_pc);
+      DCHECK_EQ(old_entry.tagged_slots().size(),
+                new_entry.tagged_slots().size());
+      DCHECK_EQ(old_entry.tagged_register_indexes(),
+                new_entry.tagged_register_indexes());
+      for (size_t i = 0; i < old_entry.tagged_slots().size(); ++i) {
+        DCHECK_EQ(old_entry.tagged_slots()[i], new_entry.tagged_slots()[i]);
+      }
+    }
+#endif
 #endif
 #if V8_TARGET_ARCH_X64
     base::Memory<Address>(frame->fp() - kOSRTargetOffset) = new_pc;
@@ -961,7 +1029,7 @@ void SetBreakOnEntryFlag(Tagged<Script> script, bool enabled) {
 // static
 bool WasmScript::SetBreakPoint(DirectHandle<Script> script, int* position,
                                DirectHandle<BreakPoint> break_point) {
-  DCHECK_NE(kOnEntryBreakpointPosition, *position);
+  if (*position < 0) return false;
 
   // Find the function for this breakpoint.
   Managed<wasm::NativeModule>::Ptr native_module = script->wasm_native_module();

@@ -161,6 +161,10 @@ class PropertyCallbackArguments final : public Relocatable {
                                      uint32_t start_index, uint32_t end_index,
                                      uint32_t* in_out_length);
 
+  // Pending exception handling should be done by the caller.
+  inline DirectHandle<JSAny> CallIndexedIterableToList(
+      Isolate* isolate, DirectHandle<InterceptorInfo> interceptor);
+
   // Accept potential JavaScript side effects that might occur during life
   // time of this object.
   inline void AcceptSideEffects() {

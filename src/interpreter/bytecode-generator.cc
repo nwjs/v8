@@ -5492,6 +5492,51 @@ Expression* BytecodeGenerator::GetDestructuringDefaultValue(
 void BytecodeGenerator::BuildDestructuringArrayAssignment(
     ArrayLiteral* pattern, Token::Value op,
     LookupHoistingMode lookup_hoisting_mode) {
+  // A pattern can use the fast destructuring bytecode if the feature flag is
+  // enabled and all targets are simple variable assignments without defaults,
+  // holes, spreads, or property assignments that could trigger observable side
+  // effects.
+  bool can_use_destructure_bytecode = v8_flags.array_destructure_bytecode;
+  if (can_use_destructure_bytecode) {
+    for (Expression* target : *pattern->values()) {
+      if (!target->IsVariableProxy()) {
+        can_use_destructure_bytecode = false;
+        break;
+      }
+    }
+  }
+
+  if (can_use_destructure_bytecode) {
+    RegisterAllocationScope allocation_scope(this);
+    Register rhs;
+    if (!execution_result()->IsEffect()) {
+      rhs = register_allocator()->NewRegister();
+      builder()->StoreAccumulatorInRegister(rhs);
+    }
+    int count = pattern->values()->length();
+    // TODO(leszeks): If all the targets are registers that all happen to be
+    // sequential (likely with sequential local variables like in `let [x,y] =
+    // a`), write into those directly instead of allocating a temporary
+    // RegisterList.
+    RegisterList outputs = register_allocator()->NewRegisterList(count);
+    if (count > 0) {
+      Expression* first_target = pattern->values()->at(0);
+      builder()->SetExpressionPosition(first_target);
+    }
+    builder()->ArrayDestructure(outputs, count);
+    for (int i = 0; i < count; ++i) {
+      Expression* target = pattern->values()->at(i);
+      builder()->SetExpressionPosition(target);
+      AssignmentLhsData lhs_data = PrepareAssignmentLhs(target);
+      builder()->LoadAccumulatorWithRegister(outputs[i]);
+      BuildAssignment(lhs_data, op, lookup_hoisting_mode);
+    }
+    if (!execution_result()->IsEffect()) {
+      builder()->LoadAccumulatorWithRegister(rhs);
+    }
+    return;
+  }
+
   RegisterAllocationScope scope(this);
 
   Register value = register_allocator()->NewRegister();
@@ -6079,10 +6124,9 @@ void BytecodeGenerator::VisitYield(Yield* expr) {
       RegisterAllocationScope register_scope(this);
       RegisterList args = register_allocator()->NewRegisterList(2);
       builder()
-          ->StoreAccumulatorInRegister(args[0])  // value
-          .LoadFalse()
-          .StoreAccumulatorInRegister(args[1])  // done
-          .CallRuntime(Runtime::kInlineCreateIterResultObject, args);
+          ->StoreAccumulatorInRegister(args[0])       // value
+          .MoveRegister(generator_object(), args[1])  // generator
+          .CallRuntime(Runtime::kInlineGeneratorYieldResult, args);
     }
   }
 

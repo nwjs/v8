@@ -315,6 +315,9 @@ TEST_F(RegExpTest, Parser) {
                "(: @b @b @b @b @B @B @B @B @b @b @b @b)");
   CheckParseEq("\\b\\B\\b", "(: @b @B @b)");
 
+  // Lookarounds are not simple Assertions and must not be merged.
+  CheckParseEq("(?=a)(?=a)", "(: (-> + 'a') (-> + 'a'))");
+
   // Unicode regexps
   CheckParseEq("\\u{12345}", "'\\ud808\\udf45'", true);
   CheckParseEq("\\u{12345}\\u{23456}", "(! '\\ud808\\udf45' '\\ud84d\\udc56')",
@@ -1739,6 +1742,60 @@ TEST_F(RegExpTest, CharacterRangeMerge) {
 }
 
 TEST_F(RegExpTest, Graph) { Execute("\\b\\w+\\b", false, true, true); }
+
+TEST_F(RegExpTest, AssertionMergingToNode) {
+  Zone zone(i_isolate()->allocator(), ZONE_NAME);
+
+  auto CountAllNodes = [](regexp::Node* root) {
+    std::set<regexp::Node*> visited;
+    std::vector<regexp::Node*> worklist = {root};
+    while (!worklist.empty()) {
+      regexp::Node* curr = worklist.back();
+      worklist.pop_back();
+      if (curr == nullptr || visited.count(curr)) continue;
+      visited.insert(curr);
+
+      if (regexp::ChoiceNode* choice = curr->AsChoiceNode();
+          choice != nullptr) {
+        for (const auto& alt : *choice->alternatives()) {
+          worklist.push_back(alt.node());
+        }
+      } else if (curr->AsSeqNode() != nullptr) {
+        worklist.push_back(curr->AsSeqNode()->on_success());
+      }
+    }
+    return static_cast<int>(visited.size());
+  };
+
+  regexp::Node* g1 = Compile("\\b", false, false, true, &zone);
+  regexp::Node* g2 = Compile("\\b\\b", false, false, true, &zone);
+  regexp::Node* g3 = Compile("\\b(?:\\b)", false, false, true, &zone);
+  regexp::Node* g4 = Compile("\\b(?i:\\b)", false, false, true, &zone);
+  regexp::Node* g5 = Compile("\\b(\\b)", false, false, true, &zone);
+  regexp::Node* g6 = Compile("\\b(?=\\b)", false, false, true, &zone);
+
+  ASSERT_NE(g1, nullptr);
+  ASSERT_NE(g2, nullptr);
+  ASSERT_NE(g3, nullptr);
+  ASSERT_NE(g4, nullptr);
+  ASSERT_NE(g5, nullptr);
+  ASSERT_NE(g6, nullptr);
+
+  int c1 = CountAllNodes(g1);
+  int c2 = CountAllNodes(g2);
+  int c3 = CountAllNodes(g3);
+
+  // Same-flag non-capturing groups are flattened and assertions folded during
+  // ToNode:
+  EXPECT_EQ(c1, c2);
+  EXPECT_EQ(c1, c3);
+
+  // Different-flag groups, capturing groups, and lookarounds preserve
+  // boundaries:
+  EXPECT_NE(c1, CountAllNodes(g4));
+  EXPECT_NE(c1, CountAllNodes(g5));
+  EXPECT_NE(c1, CountAllNodes(g6));
+}
 
 namespace {
 

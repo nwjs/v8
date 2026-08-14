@@ -12,9 +12,9 @@ function assertInvalid(fn, message) {
 
 assertInvalid(
   builder => builder.addLiteralStringRef("foo"),
-  /unexpected section <StringRef> \(enable with --experimental-wasm-stringref\)/);
+  /unexpected section <StringRef> \(enable with --wasm-stringref\)/);
 
-let enableMessage = 'enable with --experimental-wasm-stringref'
+let enableMessage = 'enable with --wasm-stringref'
 
 for (let [name, code] of [['string', kStringRefCode],
                           ['stringview_wtf8', kStringViewWtf8Code],

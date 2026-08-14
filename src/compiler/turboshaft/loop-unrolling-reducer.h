@@ -202,7 +202,7 @@ class V8_EXPORT_PRIVATE LoopUnrollingAnalyzer {
 
     auto iter_count = GetIterationCount(loop_header);
     return iter_count.IsExact() &&
-           iter_count.exact_count() < kMaxLoopIterationsForFullUnrolling;
+           iter_count.exact_count() <= kMaxLoopIterationsForFullUnrolling;
   }
 
   bool ShouldPartiallyUnrollLoop(const Block* loop_header) const {
@@ -337,23 +337,12 @@ class LoopStackCheckElisionReducer : public Next {
   }
 
 #if V8_ENABLE_WEBASSEMBLY
-  // Returns V<None> or V<WordPtr> or V<Tuple<WordPtr, WordPtr>> depending on
-  // inputs.
-  V<Any> REDUCE_INPUT_GRAPH(WasmStackCheck)(
+  V<None> REDUCE_INPUT_GRAPH(WasmStackCheck)(
       V<Any> ig_idx, const WasmStackCheckOp& stack_check) {
     if (skip_next_stack_check_ &&
         stack_check.kind == WasmStackCheckOp::Kind::kLoop) {
       skip_next_stack_check_ = false;
-      if (stack_check.has_memory_start && stack_check.has_memory_size) {
-        return __ MakeTuple(
-            __ MapToNewGraph(stack_check.memory_start().value()),
-            __ MapToNewGraph(stack_check.memory_size().value()));
-      } else if (stack_check.has_memory_start) {
-        return __ MapToNewGraph(stack_check.memory_start().value());
-      } else if (stack_check.has_memory_size) {
-        return __ MapToNewGraph(stack_check.memory_size().value());
-      }
-      return {};
+      return V<None>::Invalid();
     }
     return Next::ReduceInputGraphWasmStackCheck(ig_idx, stack_check);
   }
@@ -459,20 +448,10 @@ class LoopUnrollingReducer : public Next {
   }
 
 #if V8_ENABLE_WEBASSEMBLY
-  // Returns V<None> or V<WordPtr> or V<Tuple<WordPtr, WordPtr>> depending on
-  // inputs.
-  V<Any> REDUCE_INPUT_GRAPH(WasmStackCheck)(V<Any> ig_idx,
-                                            const WasmStackCheckOp& check) {
+  V<None> REDUCE_INPUT_GRAPH(WasmStackCheck)(V<Any> ig_idx,
+                                             const WasmStackCheckOp& check) {
     if (ShouldSkipOptimizationStep() || !skip_next_stack_check_) {
       return Next::ReduceInputGraphWasmStackCheck(ig_idx, check);
-    }
-    if (check.has_memory_start && check.has_memory_size) {
-      return __ MakeTuple(__ MapToNewGraph(check.memory_start().value()),
-                          __ MapToNewGraph(check.memory_size().value()));
-    } else if (check.has_memory_start) {
-      return __ MapToNewGraph(check.memory_start().value());
-    } else if (check.has_memory_size) {
-      return __ MapToNewGraph(check.memory_size().value());
     }
     return V<None>::Invalid();
   }

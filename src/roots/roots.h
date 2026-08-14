@@ -152,7 +152,6 @@ class RootVisitor;
   V(Map, swiss_name_dictionary_map, SwissNameDictionaryMap)                    \
   V(Map, synthetic_module_map, SyntheticModuleMap)                             \
   IF_WASM(V, Map, wasm_import_data_map, WasmImportDataMap)                     \
-  IF_WASM(V, Map, asm_wasm_data_map, AsmWasmDataMap)                           \
   IF_WASM(V, Map, wasm_capi_function_data_map, WasmCapiFunctionDataMap)        \
   IF_WASM(V, Map, wasm_dispatch_table_map, WasmDispatchTableMap)               \
   IF_WASM(V, Map, wasm_dispatch_table_for_imports_map,                         \
@@ -230,7 +229,6 @@ class RootVisitor;
   V(Map, js_atomics_mutex_map, JSAtomicsMutexMap)                              \
   V(Map, js_atomics_condition_map, JSAtomicsConditionMap)                      \
   V(Map, descriptor_array_map, DescriptorArrayMap)                             \
-  V(Map, strong_descriptor_array_map, StrongDescriptorArrayMap)                \
   V(Map, on_heap_basic_block_profiler_data_map,                                \
     OnHeapBasicBlockProfilerDataMap)                                           \
   V(Map, turbofan_bitset_type_map, TurbofanBitsetTypeMap)                      \

@@ -133,10 +133,9 @@ void ConstantExpressionInterface::RefFunc(FullDecoder* decoder,
   }
   if (!generate_value()) return;
   ModuleTypeIndex sig_index = module_->functions[function_index].sig_index;
-  SharedFlag function_is_shared = module_->type(sig_index).is_shared;
   CanonicalValueType type =
       CanonicalValueType::Ref(module_->canonical_type_id(sig_index),
-                              function_is_shared, RefTypeKind::kFunction);
+                              SharedFlag{false}, RefTypeKind::kFunction);
   // Imported functions can be subtypes of their static import type; for
   // non-imported or exactly imported functions we can return an exact type.
   if (decoder->enabled_.has_custom_descriptors() &&
@@ -146,10 +145,7 @@ void ConstantExpressionInterface::RefFunc(FullDecoder* decoder,
   }
   DirectHandle<WasmFuncRef> func_ref =
       WasmTrustedInstanceData::GetOrCreateFuncRef(
-          isolate_,
-          function_is_shared == SharedFlag::kYes ? shared_trusted_instance_data_
-                                                 : trusted_instance_data_,
-          function_index);
+          isolate_, trusted_instance_data_, function_index);
   result->runtime_value = WasmValue(func_ref, type);
 }
 
@@ -158,18 +154,18 @@ void ConstantExpressionInterface::GlobalGet(FullDecoder* decoder, Value* result,
   if (!generate_value()) return;
   const WasmGlobal& global = module_->globals[imm.index];
   DCHECK(!global.mutability);
-  DirectHandle<WasmTrustedInstanceData> data =
-      global.shared == SharedFlag::kYes ? shared_trusted_instance_data_
-                                        : trusted_instance_data_;
-  result->runtime_value = data->GetGlobalValue(isolate_, global);
+  result->runtime_value =
+      trusted_instance_data_->GetGlobalValue(isolate_, global);
 }
 
 DirectHandle<Map> ConstantExpressionInterface::GetRtt(
-    DirectHandle<WasmTrustedInstanceData> data, ModuleTypeIndex index,
-    const TypeDefinition& type, const Value& descriptor) {
+    ModuleTypeIndex index, const TypeDefinition& type,
+    const Value& descriptor) {
   if (!type.has_descriptor()) {
     return direct_handle(
-        Cast<Map>(data->managed_object_maps()->get(index.index)), isolate_);
+        Cast<Map>(
+            trusted_instance_data_->managed_object_maps()->get(index.index)),
+        isolate_);
   }
 
   DCHECK(type.has_descriptor());
@@ -196,31 +192,28 @@ void ConstantExpressionInterface::StructNew(FullDecoder* decoder,
   ends_with_struct_new_ = decoder->lookahead(offset_to_next_instr, kExprEnd);
 
   if (!generate_value()) return;
-  DirectHandle<WasmTrustedInstanceData> data =
-      GetTrustedInstanceDataForTypeIndex(imm.index);
   const TypeDefinition& type = module_->type(imm.index);
   const StructType* struct_type = type.struct_type;
   DCHECK_EQ(struct_type, imm.struct_type);
 
-  DirectHandle<Map> rtt = GetRtt(data, imm.index, type, descriptor);
+  DirectHandle<Map> rtt = GetRtt(imm.index, type, descriptor);
   if (rtt.is_null()) return;  // Trap (descriptor was null).
 
   DirectHandle<WasmStruct> obj;
   if (type.is_descriptor()) {
     // TODO(14616): Support shared custom descriptors.
-    if (type.is_shared == SharedFlag::kYes) UNIMPLEMENTED();
+    if (type.is_shared) UNIMPLEMENTED();
     DirectHandle<Object> first_field =
         struct_type->first_field_can_be_prototype()
             ? args[0].runtime_value.to_ref()
             : direct_handle(Smi::zero(), isolate_);
-    obj = WasmStruct::AllocateDescriptorUninitialized(isolate_, data, imm.index,
-                                                      rtt, first_field);
+    obj = WasmStruct::AllocateDescriptorUninitialized(
+        isolate_, trusted_instance_data_, imm.index, rtt, first_field);
   } else {
     // Pretenure, because we expect values in globals to be long-lived.
     obj = isolate_->factory()->NewWasmStructUninitialized(
         struct_type, rtt,
-        type.is_shared == SharedFlag::kYes ? AllocationType::kSharedOld
-                                           : AllocationType::kOld);
+        type.is_shared ? AllocationType::kSharedOld : AllocationType::kOld);
   }
   {
     DisallowGarbageCollection no_gc;  // Must initialize fields first.
@@ -306,28 +299,25 @@ void ConstantExpressionInterface::StructNewDefault(
   ends_with_struct_new_ = decoder->lookahead(offset_to_next_instr, kExprEnd);
 
   if (!generate_value()) return;
-  DirectHandle<WasmTrustedInstanceData> data =
-      GetTrustedInstanceDataForTypeIndex(imm.index);
   const TypeDefinition& type = module_->type(imm.index);
   const StructType* struct_type = type.struct_type;
   DCHECK_EQ(struct_type, imm.struct_type);
 
-  DirectHandle<Map> rtt = GetRtt(data, imm.index, type, descriptor);
+  DirectHandle<Map> rtt = GetRtt(imm.index, type, descriptor);
   if (rtt.is_null()) return;  // Trap (descriptor was null).
 
   DirectHandle<WasmStruct> obj;
   if (type.is_descriptor()) {
     // TODO(14616): Implement shared custom descriptors.
-    if (type.is_shared == SharedFlag::kYes) UNIMPLEMENTED();
+    if (type.is_shared) UNIMPLEMENTED();
     DirectHandle<Object> first_field(Smi::zero(), isolate_);
-    obj = WasmStruct::AllocateDescriptorUninitialized(isolate_, data, imm.index,
-                                                      rtt, first_field);
+    obj = WasmStruct::AllocateDescriptorUninitialized(
+        isolate_, trusted_instance_data_, imm.index, rtt, first_field);
   } else {
     // Pretenure, because we expect values in globals to be long-lived.
     obj = isolate_->factory()->NewWasmStructUninitialized(
         struct_type, rtt,
-        type.is_shared == SharedFlag::kYes ? AllocationType::kSharedOld
-                                           : AllocationType::kOld);
+        type.is_shared ? AllocationType::kSharedOld : AllocationType::kOld);
   }
 
   {
@@ -382,18 +372,17 @@ void ConstantExpressionInterface::ArrayNewDefault(
 void ConstantExpressionInterface::ArrayNewImpl(
     FullDecoder* decoder, const ArrayIndexImmediate& imm, const Value& length,
     const Value& initial_value, Value* result, WriteBarrierMode write_barrier) {
-  DirectHandle<WasmTrustedInstanceData> data =
-      GetTrustedInstanceDataForTypeIndex(imm.index);
   DirectHandle<Map> rtt{
-      Cast<Map>(data->managed_object_maps()->get(imm.index.index)), isolate_};
+      Cast<Map>(
+          trusted_instance_data_->managed_object_maps()->get(imm.index.index)),
+      isolate_};
   if (length.runtime_value.to_u32() >
       static_cast<uint32_t>(WasmArray::MaxLength(imm.array_type))) {
     error_ = MessageTemplate::kWasmTrapArrayTooLarge;
     return;
   }
-  AllocationType allocation = imm.shared == SharedFlag::kYes
-                                  ? AllocationType::kSharedOld
-                                  : AllocationType::kOld;
+  AllocationType allocation =
+      imm.shared ? AllocationType::kSharedOld : AllocationType::kOld;
   result->runtime_value = WasmValue(
       isolate_->factory()->NewWasmArray(
           imm.array_type->element_type(), length.runtime_value.to_u32(),
@@ -406,19 +395,17 @@ void ConstantExpressionInterface::ArrayNewFixed(
     FullDecoder* decoder, const ArrayIndexImmediate& array_imm,
     const IndexImmediate& length_imm, const Value elements[], Value* result) {
   if (!generate_value()) return;
-  DirectHandle<WasmTrustedInstanceData> data =
-      GetTrustedInstanceDataForTypeIndex(array_imm.index);
   DirectHandle<Map> rtt{
-      Cast<Map>(data->managed_object_maps()->get(array_imm.index.index)),
+      Cast<Map>(trusted_instance_data_->managed_object_maps()->get(
+          array_imm.index.index)),
       isolate_};
   base::Vector<WasmValue> element_values =
       decoder->zone_->AllocateVector<WasmValue>(length_imm.index);
   for (size_t i = 0; i < length_imm.index; i++) {
     element_values[i] = elements[i].runtime_value;
   }
-  AllocationType allocation = array_imm.shared == SharedFlag::kYes
-                                  ? AllocationType::kSharedOld
-                                  : AllocationType::kOld;
+  AllocationType allocation =
+      array_imm.shared ? AllocationType::kSharedOld : AllocationType::kOld;
   result->runtime_value =
       WasmValue(isolate_->factory()->NewWasmArrayFromElements(
                     array_imm.array_type, element_values, rtt, allocation),
@@ -436,11 +423,9 @@ void ConstantExpressionInterface::ArrayNewSegment(
     const Value& length_value, Value* result) {
   if (!generate_value()) return;
 
-  DirectHandle<WasmTrustedInstanceData> data =
-      GetTrustedInstanceDataForTypeIndex(array_imm.index);
-
   DirectHandle<Map> rtt{
-      Cast<Map>(data->managed_object_maps()->get(array_imm.index.index)),
+      Cast<Map>(trusted_instance_data_->managed_object_maps()->get(
+          array_imm.index.index)),
       isolate_};
   DCHECK_EQ(rtt->wasm_type_info()->type_index(),
             decoder->module_->canonical_type_id(array_imm.index));
@@ -455,13 +440,13 @@ void ConstantExpressionInterface::ArrayNewSegment(
   CanonicalValueType element_type = rtt->wasm_type_info()->element_type();
   CanonicalValueType result_type =
       rtt->wasm_type_info()->type().AsExactIfEnabled(decoder->enabled_);
-  AllocationType allocation = array_imm.shared == SharedFlag::kYes
-                                  ? AllocationType::kSharedOld
-                                  : AllocationType::kOld;
+  AllocationType allocation =
+      array_imm.shared ? AllocationType::kSharedOld : AllocationType::kOld;
   if (element_type.is_numeric()) {
     uint32_t length_in_bytes =
         length * array_imm.array_type->element_type().value_kind_size();
-    WireBytesRef segment_source = data->data_segments()->get(segment_imm.index);
+    WireBytesRef segment_source =
+        trusted_instance_data_->data_segments()->get(segment_imm.index);
     if (!base::IsInBounds<uint32_t>(offset, length_in_bytes,
                                     segment_source.length())) {
       error_ = MessageTemplate::kWasmTrapDataSegmentOutOfBounds;
@@ -469,7 +454,7 @@ void ConstantExpressionInterface::ArrayNewSegment(
     }
 
     base::Vector<const uint8_t> source =
-        data->native_module()->wire_bytes() + offset;
+        trusted_instance_data_->native_module()->wire_bytes() + offset;
     DirectHandle<WasmArray> array_value =
         isolate_->factory()->NewWasmArrayFromMemory(length, rtt, allocation,
                                                     element_type, source);
@@ -491,8 +476,8 @@ void ConstantExpressionInterface::ArrayNewSegment(
 
     DirectHandle<Object> array_object =
         isolate_->factory()->NewWasmArrayFromElementSegment(
-            trusted_instance_data_, shared_trusted_instance_data_,
-            segment_imm.index, offset, length, rtt, allocation, element_type);
+            trusted_instance_data_, segment_imm.index, offset, length, rtt,
+            allocation, element_type);
     if (IsSmi(*array_object)) {
       // A smi result stands for an error code.
       error_ = static_cast<MessageTemplate>(Cast<Smi>(*array_object).value());
@@ -543,14 +528,6 @@ void ConstantExpressionInterface::DoReturn(FullDecoder* decoder,
   if (generate_value()) {
     computed_value_ = decoder->stack_value(1)->runtime_value;
   }
-}
-
-DirectHandle<WasmTrustedInstanceData>
-ConstantExpressionInterface::GetTrustedInstanceDataForTypeIndex(
-    ModuleTypeIndex index) {
-  SharedFlag type_is_shared = module_->type(index).is_shared;
-  return type_is_shared == SharedFlag::kYes ? shared_trusted_instance_data_
-                                            : trusted_instance_data_;
 }
 
 }  // namespace wasm

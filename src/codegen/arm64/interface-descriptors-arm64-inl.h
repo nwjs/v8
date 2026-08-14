@@ -309,7 +309,17 @@ constexpr auto Compare_BaselineDescriptor::registers() {
 }
 
 #ifdef V8_ENABLE_SPARKPLUG_PLUS
+// static
 constexpr auto CompareAndTryPatchCodeDescriptor::registers() {
+  // x1: left operand
+  // x0: right operand
+  // x2: current feedback value
+  // x3: feedback offset
+  return RegisterArray(x1, x0, x2, x3);
+}
+
+// static
+constexpr auto BinaryOpAndTryPatchCodeDescriptor::registers() {
   // x1: left operand
   // x0: right operand
   // x2: current feedback value

@@ -13,6 +13,7 @@
 #include "src/compiler/turboshaft/index.h"
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/wasm-assembler-helpers.h"
+#include "src/execution/isolate.h"
 #include "src/handles/handles.h"
 #include "src/objects/shared-function-info.h"
 #include "src/wasm/turboshaft-graph-interface.h"
@@ -85,10 +86,10 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
         __ graph_zone(), Descriptor(), 0, CallDescriptor::kNoFlags, properties,
         StubCallMode::kCallBuiltinPointer);
     compiler::CanThrow can_throw = (properties & Operator::kNoThrow)
-                                       ? compiler::CanThrow::kNo
-                                       : compiler::CanThrow::kYes;
+                                       ? compiler::CanThrow{false}
+                                       : compiler::CanThrow{true};
     const TSCallDescriptor* ts_call_descriptor = TSCallDescriptor::Create(
-        call_descriptor, can_throw, compiler::LazyDeoptOnThrow::kNo,
+        call_descriptor, can_throw, compiler::LazyDeoptOnThrow{false},
         __ graph_zone());
     V<WordPtr> call_target = GetTargetForBuiltinCall(name);
     return __ Call(call_target, {args...}, ts_call_descriptor);
@@ -214,10 +215,6 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
               CallBuiltin<WasmTaggedToFloat64Descriptor>(
                   Builtin::kWasmTaggedToFloat64, Operator::kNoProperties, value,
                   context));
-          // The source position here is needed for asm.js, see the comment on
-          // the source position of the call to JavaScript in the wasm-to-js
-          // wrapper.
-          __ output_graph().source_positions()[result] = SourcePosition(1);
         }
       }
     }
@@ -250,10 +247,6 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
           result = CallBuiltin<WasmTaggedToFloat64Descriptor>(
               Builtin::kWasmTaggedToFloat64, Operator::kNoProperties, value,
               context);
-          // The source position here is needed for asm.js, see the comment on
-          // the source position of the call to JavaScript in the wasm-to-js
-          // wrapper.
-          __ output_graph().source_positions()[result] = SourcePosition(1);
         }
       }
     }
@@ -264,31 +257,28 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
       V<Object> value, V<Context> context,
       OptionalV<EagerFrameState> caller_frame_state) {
     DCHECK_EQ(is_inlining_into_js_, caller_frame_state.valid());
+    if (is_inlining_into_js_) {
+      // When inlining into JS, emit a "high-level" JS conversion to allow
+      // further optimizations. These are lowered in the MachineLoweringPhase
+      // in the JS pipeline.
+      // Also, this makes sure we eagerly deopt for values that are not Smi or
+      // HeapNumber to avoid calling conversion builtins that may throw
+      // (crbug.com/498709150).
+      return __ TruncateJSPrimitiveToWord32OrDeopt(
+          V<JSPrimitive>::Cast(value), caller_frame_state.value(),
+          TruncateJSPrimitiveToWord32OrDeoptOp::InputRequirement::kNumber,
+          FeedbackSource{});
+    }
+
     // We expect most integers at runtime to be Smis, so it is important for
     // wrapper performance that Smi conversion be inlined.
     ScopedVar<Word32> result(this, V<Word32>::Invalid());
     IF (LIKELY(__ IsSmi(value))) {
       result = __ UntagSmi(V<Smi>::Cast(value));
     } ELSE {
-      if (caller_frame_state.valid()) {
-        // When inlining JS-to-Wasm wrappers, eagerly deopt for values that
-        // are not Smi or HeapNumber to avoid calling conversion builtins
-        // that may throw (crbug.com/498709150).
-        V<Map> map = LoadMap(value);
-        __ DeoptimizeIfNot(__ IsHeapNumberMap(map), caller_frame_state.value(),
-                           DeoptimizeReason::kNotANumber,
-                           compiler::FeedbackSource{});
-        result = __ JSTruncateFloat64ToWord32(
-            HeapNumberToFloat64(V<HeapNumber>::Cast(value)));
-      } else {
-        result = CallBuiltin<WasmTaggedNonSmiToInt32Descriptor>(
-            Builtin::kWasmTaggedNonSmiToInt32, Operator::kNoProperties, value,
-            context);
-        // The source position here is needed for asm.js, see the comment on
-        // the source position of the call to JavaScript in the wasm-to-js
-        // wrapper.
-        __ output_graph().source_positions()[result] = SourcePosition(1);
-      }
+      result = CallBuiltin<WasmTaggedNonSmiToInt32Descriptor>(
+          Builtin::kWasmTaggedNonSmiToInt32, Operator::kNoProperties, value,
+          context);
     }
     return result;
   }
@@ -334,9 +324,9 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
         GetBigIntToI64CallDescriptor(/*needs_frame_state=*/false);
     const TSCallDescriptor* ts_call_descriptor = TSCallDescriptor::Create(
         call_descriptor,
-        caller_frame_state.valid() ? compiler::CanThrow::kNo
-                                   : compiler::CanThrow::kYes,
-        compiler::LazyDeoptOnThrow::kNo, __ graph_zone());
+        caller_frame_state.valid() ? compiler::CanThrow{false}
+                                   : compiler::CanThrow{true},
+        compiler::LazyDeoptOnThrow{false}, __ graph_zone());
     OpIndex call_args[] = {input, context};
     return __ Call(target, {}, base::VectorOf(call_args), ts_call_descriptor);
   }
@@ -395,7 +385,7 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
               __ Unreachable();
             }
           }
-          if (v8_flags.wasm_shared && type.is_shared() == SharedFlag::kYes) {
+          if (v8_flags.wasm_shared && type.is_shared()) {
             Label<Object> done(&Asm());
             IF (__ IsSmi(input)) {
               GOTO(done, input);
@@ -573,9 +563,27 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
         this->GetBuiltinPointerTarget(Builtin::kPerformPromiseThen);
     auto* then_call_desc =
         GetBuiltinCallDescriptor(Builtin::kPerformPromiseThen, __ graph_zone());
-    base::SmallVector<OpIndex, 16> args{
-        promise, on_fulfilled, on_rejected,
-        __ template LoadRoot<RootIndex::kUndefinedValue>(), native_context};
+    V<WordPtr> isolate = __ IsolateField(IsolateFieldId::kIsolateAddress);
+    V<Word32> promise_hook_flags = __ Load(
+        isolate, LoadOp::Kind::RawAligned().NotLoadEliminable(),
+        MemoryRepresentation::Uint32(), Isolate::promise_hook_flags_offset());
+    // LINT.IfChange(PromiseHookFlags)
+    constexpr uint32_t kHookMask =
+        Isolate::PromiseHookFields::HasIsolatePromiseHook::kMask |
+        Isolate::PromiseHookFields::HasAsyncEventDelegate::kMask |
+        Isolate::PromiseHookFields::IsDebugActive::kMask;
+    // LINT.ThenChange(../../codegen/code-stub-assembler.cc:PromiseHookFlags)
+    V<Word32> needs_hook = __ Word32BitwiseAnd(promise_hook_flags, kHookMask);
+
+    ScopedVar<Object> var_throwaway(this, __ UndefinedConstant());
+    IF (UNLIKELY(needs_hook)) {
+      var_throwaway =
+          __ WasmCallRuntime(__ graph_zone(), Runtime::kWasmSuspended,
+                             {promise, suspender}, native_context);
+    }
+
+    base::SmallVector<OpIndex, 16> args{promise, on_fulfilled, on_rejected,
+                                        var_throwaway, native_context};
     __ Call(promise_then, OpIndex::Invalid(), base::VectorOf(args),
             then_call_desc);
 

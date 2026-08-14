@@ -586,8 +586,7 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
     obj->set_map_after_allocation(isolate(), roots.descriptor_array_map(),
                                   SKIP_WRITE_BARRIER);
     Tagged<DescriptorArray> array = Cast<DescriptorArray>(obj);
-    array->Initialize(roots.empty_enum_cache(), roots.undefined_value(), 0, 0,
-                      DescriptorArrayMarkingState::kInitialGCState);
+    array->Initialize(roots.empty_enum_cache(), roots.undefined_value(), 0, 0);
     array->set_fast_iterable(DescriptorArray::FastIterableState::kJsonFast);
   }
   set_empty_descriptor_array(Cast<DescriptorArray>(obj));
@@ -737,7 +736,6 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
     }
 
     // The DescriptorArray map is pre-allocated and initialized above.
-    ALLOCATE_VARSIZE_MAP(STRONG_DESCRIPTOR_ARRAY_TYPE, strong_descriptor_array)
     ALLOCATE_VARSIZE_MAP(TURBOSHAFT_WORD32_SET_TYPE_TYPE,
                          turboshaft_word32set_type)
     ALLOCATE_VARSIZE_MAP(TURBOSHAFT_WORD64_SET_TYPE_TYPE,
@@ -814,8 +812,7 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
 
     IF_WASM(ALLOCATE_MAP, WASM_IMPORT_DATA_TYPE, WasmImportData::kSize,
             wasm_import_data)
-    IF_WASM(ALLOCATE_MAP, ASM_WASM_DATA_TYPE, sizeof(AsmWasmData),
-            asm_wasm_data)
+
     IF_WASM(ALLOCATE_MAP, WASM_CAPI_FUNCTION_DATA_TYPE,
             WasmCapiFunctionData::kSize, wasm_capi_function_data)
     IF_WASM(ALLOCATE_MAP, WASM_EXPORTED_FUNCTION_DATA_TYPE,
@@ -961,7 +958,7 @@ void Heap::StaticRootsEnsureAllocatedSize(DirectHandle<HeapObject> obj,
             filler_size, AllocationType::kReadOnly, AllocationOrigin::kRuntime,
             AllocationAlignment::kTaggedAligned);
     CreateFillerObjectAt(filler.address(), filler_size,
-                         ClearFreedMemoryMode::kClearFreedMemory);
+                         ClearFreedMemoryMode{true});
 
     CHECK_EQ(filler.address(), obj->address() + obj_size);
     CHECK_EQ(filler.address() + filler->Size(), obj->address() + required);
@@ -1447,7 +1444,7 @@ void Heap::CreateReadOnlyApiObjects() {
   // Make sure read only heap layout does not depend on the size of
   // ExternalPointer fields.
   constexpr int kMaxPossibleInterceptorInfoSize =
-      3 * kTaggedSize + 8 * kSystemPointerSize;
+      3 * kTaggedSize + 9 * kSystemPointerSize;
 
   auto info = isolate()->factory()->NewInterceptorInfo(
       InterceptorKind::kNamed, AllocationType::kReadOnly);
@@ -1775,8 +1772,8 @@ void Heap::CreateInitialMutableObjects() {
     set_empty_protected_weak_fixed_array(
         *ProtectedWeakFixedArray::New(isolate_, 0));
 #ifdef V8_ENABLE_WEBASSEMBLY
-    set_empty_wasm_dispatch_table(*isolate_->factory()->NewWasmDispatchTable(
-        0, wasm::kWasmFuncRef, SharedFlag::kNo));
+    set_empty_wasm_dispatch_table(
+        *isolate_->factory()->NewWasmDispatchTable(0, wasm::kWasmFuncRef));
 #endif
   }
 }

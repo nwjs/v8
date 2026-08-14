@@ -336,7 +336,10 @@ class V8_EXPORT_PRIVATE TracedHandles final {
 
  private:
   V8_INLINE std::pair<TracedNodeBlock*, TracedNode*> AllocateNode();
+  V8_INLINE std::pair<TracedNodeBlock*, TracedNode*> AllocateNodeUnchecked();
   V8_NOINLINE V8_PRESERVE_MOST void RefillUsableNodeBlocks();
+  V8_NOINLINE V8_PRESERVE_MOST std::pair<TracedNodeBlock*, TracedNode*>
+  RefillAndAllocateNode();
   void FreeNode(TracedNode* node, Address zap_value);
 
   V8_INLINE bool NeedsToBeRemembered(Tagged<Object> value, TracedNode* node,

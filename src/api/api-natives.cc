@@ -9,6 +9,7 @@
 #include "src/common/message-template.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/protectors-inl.h"
+#include "src/flags/flags.h"
 #include "src/heap/heap-inl.h"
 #include "src/logging/runtime-call-stats-scope.h"
 #include "src/objects/api-callbacks.h"
@@ -232,10 +233,18 @@ MaybeHandle<JSObject> ConfigureInstance(Isolate* isolate, Handle<JSObject> obj,
   if (IsUndefined(maybe_property_list)) return obj;
   DirectHandle<ArrayList> properties(Cast<ArrayList>(maybe_property_list),
                                      isolate);
-  if (properties->length() == 0) return obj;
 
-  int i = 0;
-  for (int c = 0; c < data->number_of_properties(); c++) {
+  // The properties list consists of tuples describing each property:
+  //  - <name, property details, property value> (data property),
+  //  - <name, property details, getter, setter> (accessor property),
+  //  - <name, intrinsic marker, property details, property value>
+  //    (intrinsic data property).
+  // See ApiNatives::AddDataProperty()/AddAccessorProperty() for details.
+  int properties_length = properties->length();
+  if (properties_length == 0) return obj;
+
+  int properties_count = 0;
+  for (int i = 0; i < properties_length;) {
     auto name = direct_handle(Cast<Name>(properties->get(i++)), isolate);
     Tagged<Object> bit = properties->get(i++);
     if (IsSmi(bit)) {
@@ -268,7 +277,10 @@ MaybeHandle<JSObject> ConfigureInstance(Isolate* isolate, Handle<JSObject> obj,
       RETURN_ON_EXCEPTION(isolate, DefineDataProperty(isolate, obj, name,
                                                       prop_data, attributes));
     }
+    DCHECK_LE(i, properties_length);
+    properties_count++;
   }
+  CHECK_EQ(properties_count, data->number_of_properties());
   return obj;
 }
 
@@ -545,6 +557,9 @@ void ApiNatives::AddDataProperty(Isolate* isolate,
                                  DirectHandle<Name> name,
                                  DirectHandle<Object> value,
                                  PropertyAttributes attributes) {
+  if (IsString(*name)) {
+    name = isolate->factory()->InternalizeString(Cast<String>(name));
+  }
   PropertyDetails details(PropertyKind::kData, attributes,
                           PropertyConstness::kMutable);
   DirectHandle<Object> data[] = {name, direct_handle(details.AsSmi(), isolate),
@@ -557,6 +572,9 @@ void ApiNatives::AddDataProperty(Isolate* isolate,
                                  DirectHandle<Name> name,
                                  v8::Intrinsic intrinsic,
                                  PropertyAttributes attributes) {
+  if (IsString(*name)) {
+    name = isolate->factory()->InternalizeString(Cast<String>(name));
+  }
   auto value = direct_handle(Smi::FromInt(intrinsic), isolate);
   auto intrinsic_marker = isolate->factory()->true_value();
   PropertyDetails details(PropertyKind::kData, attributes,
@@ -570,6 +588,9 @@ void ApiNatives::AddAccessorProperty(
     Isolate* isolate, DirectHandle<TemplateInfoWithProperties> info,
     DirectHandle<Name> name, DirectHandle<FunctionTemplateInfo> getter,
     DirectHandle<FunctionTemplateInfo> setter, PropertyAttributes attributes) {
+  if (IsString(*name)) {
+    name = isolate->factory()->InternalizeString(Cast<String>(name));
+  }
   if (!getter.is_null()) getter->set_published(true);
   if (!setter.is_null()) setter->set_published(true);
   PropertyDetails details(PropertyKind::kAccessor, attributes,
@@ -650,7 +671,7 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
       Cast<JSInterceptorMap>(isolate->factory()->NewContextfulMap(
           native_context, ExtendedMapKind::kJSInterceptorMap, type,
           instance_size, TERMINAL_FAST_ELEMENTS_KIND));
-  map->clear_extended_padding();
+  map->init_flags_and_clear_extended_padding();
 
   // Complete initialization of map's interceptor fields and set interceptor
   // related bits.
@@ -668,11 +689,20 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
     maybe_interceptor = obj->GetIndexedPropertyHandler();
     if (!IsUndefined(maybe_interceptor)) {
       map->set_has_indexed_interceptor(true);
-      map->set_indexed_interceptor(Cast<InterceptorInfo>(maybe_interceptor));
+      auto info = Cast<InterceptorInfo>(maybe_interceptor);
+      map->set_indexed_interceptor(info);
+      if (v8_flags.fast_api_iterable_to_list &&
+          info->has_indexed_iterable_to_list()) {
+        map->set_supports_fast_iterable_to_list(true);
+      }
     } else {
       map->set_indexed_interceptor(
           ReadOnlyRoots(isolate).noop_indexed_interceptor_info());
     }
+    // Initialize with invalidated cell, it'll be healed lazily upon the
+    // first usage.
+    map->set_fast_case_validity_cell(
+        ReadOnlyRoots(isolate).invalid_prototype_validity_cell());
   }
 
   // Mark as undetectable if needed.

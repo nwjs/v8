@@ -33,6 +33,7 @@ namespace v8 {
 namespace internal {
 namespace maglev {
 
+enum class EnsureTypeResult;
 struct MaglevCallSiteInfo;
 class MaglevGraphBuilder;
 template <typename BaseT>
@@ -144,6 +145,9 @@ class V8_NODISCARD MaybeReduceResult {
   // function, etc)
   bool IsDoneWithAbort() const { return kind() == kDoneWithAbort; }
 
+  // Done and not aborting.
+  bool IsDoneWithoutAbort() const { return IsDone() && !IsDoneWithAbort(); }
+
   Kind kind() const { return payload_.GetPayload(); }
 
   inline ReduceResult Checked();
@@ -173,7 +177,9 @@ class V8_NODISCARD ReduceResult : public MaybeReduceResult {
   static ReduceResult Done() { return ReduceResult(kDoneWithoutPayload); }
   static ReduceResult DoneWithAbort() { return ReduceResult(kDoneWithAbort); }
 
+  bool IsDone() const { return true; }
   bool IsFail() const { return false; }
+  bool IsDoneWithoutAbort() const { return !IsDoneWithAbort(); }
   ReduceResult Checked() { return *this; }
 
  protected:
@@ -232,6 +238,23 @@ inline ReduceResult MaybeReduceResult::Checked() { return ReduceResult(*this); }
     DCHECK(res.IsDoneWithValue());                                     \
     using T = std::remove_pointer_t<std::decay_t<decltype(variable)>>; \
     variable = res.value()->Cast<T>();                                 \
+  } while (false)
+
+#define GET_OPTVALUE_OR_ABORT(variable, result)            \
+  do {                                                     \
+    MaybeReduceResult res = (result);                      \
+    if (res.IsDoneWithAbort()) {                           \
+      return ReduceResult::DoneWithAbort();                \
+    }                                                      \
+    if (res.IsDoneWithValue()) {                           \
+      using OptT = std::decay_t<decltype(variable)>;       \
+      using ValT = typename OptT::value_type;              \
+      using T = std::remove_pointer_t<std::decay_t<ValT>>; \
+      variable = res.value()->Cast<T>();                   \
+    } else {                                               \
+      DCHECK(res.IsFail());                                \
+      variable = std::nullopt;                             \
+    }                                                      \
   } while (false)
 
 // TODO(dmercadier): .Cast the result to the type of variable to avoid requiring
@@ -326,6 +349,34 @@ enum class BranchResult {
   kAlwaysFalse,
   // Bailed out before evaluating the condition.
   kAbort,
+};
+
+enum class BranchType { kBranchIfTrue, kBranchIfFalse };
+enum class BranchSpecializationMode { kDefault, kAlwaysBoolean };
+
+inline BranchType NegateBranchType(BranchType jump_type) {
+  switch (jump_type) {
+    case BranchType::kBranchIfTrue:
+      return BranchType::kBranchIfFalse;
+    case BranchType::kBranchIfFalse:
+      return BranchType::kBranchIfTrue;
+  }
+  UNREACHABLE();
+}
+
+template <typename Derived>
+class BranchBuilderBase {
+ public:
+  BranchType GetCurrentBranchType() const { return jump_type_; }
+  void SwapTargets() { jump_type_ = NegateBranchType(jump_type_); }
+  BranchResult AlwaysTrue() const { return derived().FromBool(true); }
+  BranchResult AlwaysFalse() const { return derived().FromBool(false); }
+  static BranchResult Abort() { return BranchResult::kAbort; }
+
+ protected:
+  explicit BranchBuilderBase(BranchType jump_type) : jump_type_(jump_type) {}
+  const Derived& derived() const { return *static_cast<const Derived*>(this); }
+  BranchType jump_type_;
 };
 
 inline bool CompareInt32(int32_t lhs, int32_t rhs, Operation operation) {
@@ -749,9 +800,26 @@ class MaglevReducer {
   MaybeReduceResult TryBuildFastInstanceOfWithFeedback(
       ValueNode* context, ValueNode* object, ValueNode* callable,
       compiler::FeedbackSource feedback_source);
+  bool CanElideResolvePromiseThenLookup(ValueNode* value);
 
   ReduceResult BuildSmiUntag(ValueNode* node);
   ReduceResult BuildCheckSmi(ValueNode* object);
+  ReduceResult BuildCheckString(ValueNode* object);
+
+  ReduceResult BuildTaggedEqual(ValueNode* lhs, ValueNode* rhs);
+  ReduceResult BuildTaggedEqual(ValueNode* lhs, RootIndex rhs_index);
+
+  ReduceResult BuildSameValue(ValueNode* lhs, ValueNode* rhs);
+  ReduceResult BuildNumberSameValue(ValueNode* lhs, ValueNode* rhs);
+  bool IsNeitherNaNNorZero(ValueNode* node);
+
+  ReduceResult TryBuildCheckInt32Condition(ValueNode* lhs, ValueNode* rhs,
+                                           AssertCondition condition,
+                                           DeoptimizeReason reason);
+
+  compiler::OptionalObjectRef TryFoldLoadConstantDataField(
+      compiler::JSObjectRef holder,
+      compiler::PropertyAccessInfo const& access_info);
 
   ReduceResult BuildNumberOrOddballToFloat64OrHoleyFloat64(
       ValueNode* node, UseRepresentation use_rep, NodeType allowed_input_type);
@@ -843,7 +911,7 @@ class MaglevReducer {
   VirtualObject* CreateContext(compiler::MapRef map, int length,
                                compiler::ScopeInfoRef scope_info,
                                ValueNode* previous_context,
-                               std::optional<ValueNode*> extension = {});
+                               ValueNode* extension = nullptr);
   VirtualObject* CreateArgumentsObject(compiler::MapRef map, ValueNode* length,
                                        ValueNode* elements,
                                        std::optional<ValueNode*> callee = {});
@@ -872,10 +940,11 @@ class MaglevReducer {
   VirtualObject* CreateAsyncResumeTask(ValueNode* generator, ValueNode* value,
                                        ValueNode* kind);
 
-  ReduceResult BuildLoadTaggedField(ValueNode* object, uint32_t offset,
-                                    NodeType type = NodeType::kUnknown,
-                                    bool is_const = false,
-                                    PropertyKey key = PropertyKey::None());
+  ReduceResult BuildLoadTaggedField(
+      ValueNode* object, uint32_t offset, NodeType type = NodeType::kUnknown,
+      bool is_const = false, PropertyKey key = PropertyKey::None(),
+      IsArrayLength is_array_length = IsArrayLength::kNo,
+      compiler::OptionalMapRef stable_field_map = {});
 
   ReduceResult BuildLoadFixedDoubleArrayElement(ValueNode* elements,
                                                 ValueNode* index);
@@ -1048,6 +1117,8 @@ class MaglevReducer {
 #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
 #define MAGLEV_REDUCER_BUILTIN(V)              \
+  V(ArrayIndexOf)                              \
+  V(ArrayIncludes)                             \
   V(ArrayIsArray)                              \
   V(ArrayPrototypeAt)                          \
   V(ArrayPrototypeEntries)                     \
@@ -1069,6 +1140,7 @@ class MaglevReducer {
   V(DatePrototypeGetMonth)                     \
   V(DatePrototypeGetSeconds)                   \
   V(DatePrototypeGetTime)                      \
+  V(FunctionPrototypeHasInstance)              \
   V(MathAbs)                                   \
   V(MathCeil)                                  \
   V(MathClz32)                                 \
@@ -1078,8 +1150,14 @@ class MaglevReducer {
   V(MathMax)                                   \
   V(MathMin)                                   \
   V(MathRound)                                 \
+  V(MathSign)                                  \
   V(MathSqrt)                                  \
   V(MathTrunc)                                 \
+  V(ObjectIs)                                  \
+  V(ObjectPrototypeIsPrototypeOf)              \
+  V(PromisePrototypeThen)                      \
+  V(PromiseResolveTrampoline)                  \
+  V(RegExpPrototypeTest)                       \
   IEEE_754_UNARY_LIST(V)                       \
   IEEE_754_BINARY_LIST(V)                      \
   IF_INTL(V, StringPrototypeLocaleCompareIntl) \
@@ -1120,6 +1198,19 @@ class MaglevReducer {
   ReduceResult BuildLoadElements(
       ValueNode* object, std::optional<ElementsKind> kind = std::nullopt);
 
+  ReduceResult BuildLoadJSArrayLength(ValueNode* js_array,
+                                      NodeType length_type = NodeType::kSmi);
+
+  template <typename ReducerCb>
+  MaybeReduceResult TryWithFastArrayElements(const char* builtin_name,
+                                             CallArguments& args,
+                                             ReducerCb Reducer);
+
+  template <typename ReducerCb>
+  MaybeReduceResult TryWithArrayIterationArgs(const char* builtin_name,
+                                              CallArguments& args,
+                                              ReducerCb Reducer);
+
   ReduceResult BuildAssumeMapForElements(ValueNode* elements,
                                          ElementsKind kind);
 
@@ -1128,6 +1219,8 @@ class MaglevReducer {
   ReduceResult BuildCheckInstanceType(ValueNode* object, NodeType target_type,
                                       InstanceType first, InstanceType last);
   ReduceResult GetInt32ElementIndex(ValueNode* index_object);
+  MaybeReduceResult TryReuseKnownPropertyLoad(ValueNode* lookup_start_object,
+                                              compiler::NameRef name);
   void RecordKnownProperty(ValueNode* lookup_start_object, PropertyKey key,
                            ValueNode* value, bool is_const,
                            compiler::AccessMode access_mode);
@@ -1140,18 +1233,65 @@ class MaglevReducer {
 
   ReduceResult BuildInt32Max(ValueNode* a, ValueNode* b);
   ReduceResult BuildInt32Min(ValueNode* a, ValueNode* b);
+  ReduceResult BuildInt32Sign(ValueNode* value);
+  ReduceResult BuildFloat64Sign(ValueNode* value);
 
-  // TODO(victorgomes): Maybe it makes sense to port BranchBuilder.
-  template <typename Sub>
-  BranchResult BuildBranchIfInt32Compare(Sub& sg,
-                                         typename Sub::Label* false_target,
-                                         Operation op, ValueNode* lhs,
-                                         ValueNode* rhs);
-  template <typename Sub>
-  BranchResult BuildBranchIfUint32Compare(Sub& sg,
-                                          typename Sub::Label* false_target,
-                                          Operation op, ValueNode* lhs,
-                                          ValueNode* rhs);
+  class BranchBuilder : public BranchBuilderBase<BranchBuilder> {
+   public:
+    using Label = typename Subgraph<BaseT>::Label;
+
+    BranchBuilder(Subgraph<BaseT>* sub, BranchType jump_type, Label* label)
+        : BranchBuilderBase<BranchBuilder>(jump_type),
+          sub_(sub),
+          label_(label) {}
+
+    BranchResult FromBool(bool value) const {
+      return value ? BranchResult::kAlwaysTrue : BranchResult::kAlwaysFalse;
+    }
+
+    template <typename ControlNodeT, typename... Args>
+    BranchResult Build(std::initializer_list<ValueNode*> inputs,
+                       Args&&... args);
+
+    void SetBranchSpecializationMode(BranchSpecializationMode) {}
+    class PatchAccumulatorInBranchScope {
+     public:
+      PatchAccumulatorInBranchScope(BranchBuilder&, ValueNode*, RootIndex) {}
+    };
+
+   private:
+    Subgraph<BaseT>* sub_;
+    Label* label_;
+  };
+
+  BranchResult BuildBranchIfInt32Compare(BranchBuilder& b, Operation op,
+                                         ValueNode* lhs, ValueNode* rhs);
+  BranchResult BuildBranchIfUint32Compare(BranchBuilder& b, Operation op,
+                                          ValueNode* lhs, ValueNode* rhs);
+
+  template <typename BranchBuilderT>
+  BranchResult BuildBranchIfInt32ToBooleanTrue(BranchBuilderT& b,
+                                               ValueNode* node);
+  template <typename BranchBuilderT>
+  BranchResult BuildBranchIfIntPtrToBooleanTrue(BranchBuilderT& b,
+                                                ValueNode* node);
+  template <typename BranchBuilderT>
+  BranchResult BuildBranchIfFloat64ToBooleanTrue(BranchBuilderT& b,
+                                                 ValueNode* node);
+  template <typename BranchBuilderT>
+  BranchResult BuildBranchIfHoleyFloat64ToBooleanTrue(BranchBuilderT& b,
+                                                      ValueNode* node);
+  template <typename BranchBuilderT>
+  BranchResult BuildBranchIfFloat64IsHole(BranchBuilderT& b, ValueNode* node);
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+  template <typename BranchBuilderT>
+  BranchResult BuildBranchIfFloat64IsUndefinedOrHole(BranchBuilderT& b,
+                                                     ValueNode* node);
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
+  template <typename BranchBuilderT>
+  BranchResult BuildBranchIfJSReceiver(BranchBuilderT& b, ValueNode* value);
+  template <typename BranchBuilderT>
+  BranchResult BuildBranchIfUndefinedOrNull(BranchBuilderT& b, ValueNode* node);
 
   // TODO(victorgomes): Support DoneWithoutValue.
   template <typename CondFn>
@@ -1274,7 +1414,8 @@ class MaglevReducer {
                                   ConvertReceiverMode mode);
   bool CanInlineCall(const MaglevCompilationUnit* current_unit,
                      compiler::SharedFunctionInfoRef shared,
-                     float call_frequency);
+                     float call_frequency, base::Vector<ValueNode*> arguments,
+                     UseRepresentationSet use_repr_hints);
 
   ReduceResult BuildCheckedSmiSizedInt32(ValueNode* input);
 
@@ -1296,6 +1437,9 @@ class MaglevReducer {
                                                    ValueNode* left,
                                                    int32_t cst_right);
   bool TryFoldInt32CompareOperation(Operation op, int32_t left, int32_t right);
+
+  std::optional<bool> TryFoldInt32Condition(AssertCondition condition,
+                                            ValueNode* left, ValueNode* right);
 
   std::optional<bool> TryFoldUint32CompareOperation(Operation op,
                                                     ValueNode* left,
@@ -1336,6 +1480,9 @@ class MaglevReducer {
 
   MaybeReduceResult TryFoldLogicalNot(ValueNode* input);
 
+  MaybeReduceResult TryFoldTestTypeOf(
+      ValueNode* input, interpreter::TestTypeOfFlags::LiteralFlag literal);
+
   bool CheckType(ValueNode* node, NodeType type, NodeType* old = nullptr) {
     return known_node_aspects().CheckType(broker(), node, type, old);
   }
@@ -1343,45 +1490,54 @@ class MaglevReducer {
     return known_node_aspects().CheckTypes(broker(), node, types);
   }
 
-  V8_NODISCARD bool EnsureType(ValueNode* node, NodeType type,
-                               NodeType* old = nullptr) {
-    return known_node_aspects().EnsureType(broker(), node, type, old);
+  // Record type information for `node`. The caller needs to insert the
+  // corresponding Check node after this, if needed. If the resulting
+  // type is empty (i.e., it's impossible that `node` has the wanted type),
+  // insert an unconditional deopt.
+  MaybeReduceResult EnsureType(ValueNode* node, NodeType type,
+                               DeoptimizeReason reason,
+                               NodeType* old_type = nullptr) {
+    EnsureTypeResult ensure_res =
+        known_node_aspects().EnsureType(broker(), node, type, old_type);
+    if (ensure_res == EnsureTypeResult::kAlreadyHadType) {
+      return node;
+    }
+    if (ensure_res == EnsureTypeResult::kContradiction) {
+      return EmitUnconditionalDeopt(reason);
+    }
+    return {};
   }
 
-  void RecordType(ValueNode* node, NodeType type, NodeType* old = nullptr) {
+  // Record type information for `node`, when we already know it must have the
+  // given type. When the resulting type is empty (i.e., it's impossible that
+  // `node` has the wanted type), insert an Abort.
+  ReduceResult RecordType(ValueNode* node, NodeType type,
+                          NodeType* old = nullptr) {
+    DCHECK(!node->Is<VirtualObject>());
+
+    EnsureTypeResult ensure_res =
+        known_node_aspects().EnsureType(broker(), node, type, old);
+    if (ensure_res == EnsureTypeResult::kContradiction) {
+      return BuildAbort(AbortReason::kUnreachable);
+    }
     // For Turbolev, we insert an AssumeType node when recording a previously
     // not-known type so that the GraphOptimizer (and in particular the KNA
     // processor) can also be aware of this type when non-eagerly reoptimizing
     // the graph later.
-    if (const bool already_known = EnsureType(node, type, old);
-        already_known || !is_turbolev()) {
-      return;
-    }
-    if (const auto* virtual_object = node->TryCast<VirtualObject>()) {
-      if (!virtual_object->allocation()) {
-        return;
-      }
-      node = virtual_object->allocation();
+    if (ensure_res == EnsureTypeResult::kAlreadyHadType || !is_turbolev()) {
+      return ReduceResult::Done();
     }
 
-    switch (node->value_representation()) {
-      case ValueRepresentation::kTagged:
-        AddNewNodeNoInputConversion<AssumeTaggedType>({node}, type);
-        break;
-      case ValueRepresentation::kInt32:
-        AddNewNodeNoInputConversion<AssumeInt32Type>({node}, type);
-        break;
-      case ValueRepresentation::kUint32:
-        AddNewNodeNoInputConversion<AssumeUint32Type>({node}, type);
-        break;
-      case ValueRepresentation::kFloat64:
-        AddNewNodeNoInputConversion<AssumeFloat64Type>({node}, type);
-        break;
-      default:
-        // If you ever run into the UNREACHABLE below, you might need to add a
-        // new `Assume` operation.
-        UNREACHABLE();
-    }
+    auto* assume_node = NodeBase::New<AssumeType>(zone(), 1, type);
+    assume_node->set_input(0, node);
+    AttachExtraInfoAndAddToGraph(assume_node);
+    return ReduceResult::Done();
+  }
+
+  void RecordTypeNoAbort(ValueNode* node, NodeType type,
+                         NodeType* old = nullptr) {
+    ReduceResult result = RecordType(node, type, old);
+    CHECK(result.IsDoneWithoutAbort());
   }
 
   bool IsEmptyNodeType(NodeType type) {
@@ -1676,6 +1832,10 @@ class SubgraphBase {
   MaglevCompilationUnit* dummy_unit_;
   InterpreterFrameState variable_frame_;
 };
+
+bool IsSmallFunction(int bytecode_length, base::Vector<ValueNode*> arguments,
+                     UseRepresentationSet use_repr_hints,
+                     const CompilationFlags& flags);
 
 }  // namespace maglev
 }  // namespace internal

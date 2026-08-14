@@ -13,8 +13,6 @@ components.
 - `src/`: The main source folder providing the implementation of the virtual
   machine. Key subdirectories include:
   - `src/api/`: Implements the V8 public C++ API, as declared in `include/`.
-  - `src/asmjs/`: Contains V8's Asm.js pipeline, which compiles the Asm.js
-    subset of JavaScript into WebAssembly.
   - `src/ast/`: Defines the Abstract Syntax Tree (AST) used to represent parsed
     JavaScript, including nodes, scopes, and variables.
   - `src/base/`: Provides fundamental, low-level utilities, data structures, and

@@ -14,6 +14,7 @@
 namespace v8::internal::compiler {
 class Schedule;
 class SourcePositionTable;
+class TFPipelineData;
 }
 namespace v8::internal::compiler::turboshaft {
 class PipelineData;

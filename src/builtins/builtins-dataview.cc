@@ -76,7 +76,7 @@ BUILTIN(DataViewConstructor) {
   bool length_tracking = false;
   if (IsUndefined(*byte_length)) {
     view_byte_length = buffer_byte_length - view_byte_offset;
-    length_tracking = array_buffer->is_resizable_by_js();
+    length_tracking = array_buffer->is_resizable_by_js().value();
   } else {
     // 11. Else,
     //       a. Set byteLengthChecked be ? ToIndex(byteLength).

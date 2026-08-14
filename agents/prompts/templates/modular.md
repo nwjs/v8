@@ -40,33 +40,31 @@ Detailed information has been moved to specialized subagents in
 General guidance and reference information are available as skills or rules:
 
 - **Folder/Directory Structure**: Understand the layout of the V8 repository.
-  See [v8-structure](agents/skills/v8-structure/SKILL.md).
+  See [v8-structure](/agents/skills/v8-structure/SKILL.md).
 - **Key Commands**: Find commands for building and debugging. See
-  [v8-commands](agents/skills/v8-commands/SKILL.md).
+  [v8-commands](/agents/skills/v8-commands/SKILL.md).
 - **Testing**: Detailed guide for running and interpreting tests. See
-  [v8-testing](agents/skills/v8-testing/SKILL.md).
+  [v8-testing](/agents/skills/v8-testing/SKILL.md).
 - **Best Practices**: Common pitfalls and fix proposal guidelines. See
-  [v8_best_practices](agents/rules/v8_best_practices.md).
+  [v8_best_practices](/agents/rules/v8-best-practices.md).
 - **Setup**: Handles missing dependencies and configuration for V8 tools. See
-  [v8-setup](agents/skills/v8-setup/SKILL.md).
+  [v8-setup](/agents/skills/v8-setup/SKILL.md).
 - **Git CL Conventions**: Commit message format and usage. See
-  [git_cl](agents/rules/git_cl.md).
+  [git_cl](/agents/rules/git-cl.md).
 - **Torque**: Expert guidance for Torque. See
-  [torque](agents/skills/torque/SKILL.md).
+  [torque](/agents/skills/torque/SKILL.md).
 - **Debugging Workflow**: Guide for issue-based debugging. See
-  [workflow-debugging](agents/skills/workflow-debugging/SKILL.md).
+  [workflow-debugging](/agents/skills/workflow-debugging/SKILL.md).
 - **General Debugging Workflow**: Guide for general debugging. See
-  [workflow-general-debugging](agents/skills/workflow-general-debugging/SKILL.md).
+  [workflow-general-debugging](/agents/skills/workflow-general-debugging/SKILL.md).
 - **Performance Workflow**: Guide for performance evaluation. See
-  [workflow-perf](agents/skills/workflow-perf/SKILL.md).
-- **Porting Guide**: Guide for porting objects to HeapObjectLayout. See
-  [port-to-heapobjectlayout](agents/skills/port-to-heapobjectlayout/SKILL.md).
+  [workflow-perf](/agents/skills/workflow-perf/SKILL.md).
 - **Agent Evaluation**: Workflow for evaluating agents. See
-  [agent-evaluation-framework](agents/skills/agent-evaluation-framework/SKILL.md).
+  [agent-evaluation-framework](/agents/skills/agent-evaluation-framework/SKILL.md).
 - **Agent Self-Improvement**: Workflow for agent self-improvement. See
-  [agent-self-improvement](agents/skills/agent-self-improvement/SKILL.md).
+  [agent-self-improvement](/agents/skills/agent-self-improvement/SKILL.md).
 - **V8 Workflow**: General workflow for V8 development. See
-  [v8-workflow](agents/skills/v8-workflow/SKILL.md).
+  [v8-workflow](/agents/skills/v8-workflow/SKILL.md).
 
 ## Coding and Committing
 
@@ -74,9 +72,9 @@ General guidance and reference information are available as skills or rules:
 - Otherwise, follow
   [Chromium's C++ style guide](https://chromium.googlesource.com/chromium/src/+/main/styleguide/styleguide.md).
 - Use `git cl format` to automatically format your changes.
-- Follow [git_cl](agents/rules/git_cl.md) for commit conventions.
+- Follow [git_cl](/agents/rules/git-cl.md) for commit conventions.
 - For best practices and common pitfalls, see
-  [v8_best_practices](agents/rules/v8_best_practices.md).
+  [v8_best_practices](/agents/rules/v8-best-practices.md).
 
 ## Agent Framework
 

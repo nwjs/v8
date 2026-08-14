@@ -297,12 +297,6 @@ extern class WasmTagObject extends JSObject {
 type WasmExportedFunction extends JSFunction;
 
 @cppObjectLayoutDefinition
-extern class AsmWasmData extends ExposedTrustedObject {
-  managed_native_module: ProtectedPointer<TrustedManagedWasmNativeModule>;
-  uses_bitset: uint64;
-}
-
-@cppObjectLayoutDefinition
 extern class WasmTypeInfo extends HeapObject {
   canonical_type: uint32;
   canonical_element_type: uint32;  // Only for WasmArrays.

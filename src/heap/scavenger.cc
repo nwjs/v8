@@ -1630,7 +1630,6 @@ void ScavengerCollector::CollectGarbage() {
   // We also flip the young generation large object space. All large objects
   // will be in the from space.
   heap_->new_lo_space()->Flip();
-  heap_->new_lo_space()->ResetPendingObject();
 
   DCHECK(!heap_->allocator()->new_space_allocator()->IsLabValid());
 

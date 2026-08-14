@@ -233,6 +233,118 @@ class ChunkedStream {
   std::shared_ptr<std::vector<struct Chunk>> chunks_;
 };
 
+// A Char stream backed by multiple source-stream provided embedder-owned
+// chunks, which can be either 8-bit (ONE_BYTE) or 16-bit (TWO_BYTE)
+// dynamically.
+class FlexibleUnbufferedCharacterStream : public Utf16CharacterStream {
+ public:
+  FlexibleUnbufferedCharacterStream(
+      size_t pos, ScriptCompiler::FlexibleExternalSourceStream* source)
+      : source_(source),
+        chunks_(std::make_shared<std::vector<
+                    ScriptCompiler::FlexibleExternalSourceStream::Chunk>>()) {
+    buffer_pos_ = pos;
+  }
+
+  static const bool kCanBeCloned = true;
+  static const bool kCanAccessHeap = false;
+
+  bool can_access_heap() const final { return kCanAccessHeap; }
+
+  bool can_be_cloned() const final { return kCanBeCloned; }
+
+  std::unique_ptr<Utf16CharacterStream> Clone() const override {
+    return std::unique_ptr<Utf16CharacterStream>(
+        new FlexibleUnbufferedCharacterStream(*this));
+  }
+
+ protected:
+  bool ReadBlock(size_t position) final {
+    buffer_pos_ = position;
+
+    ScriptCompiler::FlexibleExternalSourceStream::Chunk chunk =
+        FindChunk(position, runtime_call_stats());
+    size_t offset = position - chunk.position;
+    if (offset >= chunk.length_in_characters) {
+      static const uint16_t empty_buffer[1] = {0};
+      buffer_start_ = empty_buffer;
+      buffer_end_ = empty_buffer;
+      buffer_cursor_ = empty_buffer;
+      return false;
+    }
+
+    if (chunk.encoding ==
+        ScriptCompiler::FlexibleExternalSourceStream::ChunkEncoding::kTwoByte) {
+      // Expose the raw 16-bit chunk memory directly
+      const uint16_t* data = reinterpret_cast<const uint16_t*>(chunk.data);
+
+      buffer_start_ = &data[offset];
+      buffer_end_ = &data[chunk.length_in_characters];
+      buffer_cursor_ = buffer_start_;
+    } else {
+      // Widen 8-bit characters into the local buffer
+      size_t to_read =
+          std::min(kLocalBufferSize, chunk.length_in_characters - offset);
+      i::CopyChars(local_buffer_, chunk.data + offset, to_read);
+
+      buffer_start_ = local_buffer_;
+      buffer_end_ = &local_buffer_[to_read];
+      buffer_cursor_ = buffer_start_;
+    }
+
+    DCHECK_LE(buffer_start_, buffer_end_);
+    return true;
+  }
+
+ private:
+  FlexibleUnbufferedCharacterStream(
+      const FlexibleUnbufferedCharacterStream& other) V8_NOEXCEPT
+      : Utf16CharacterStream(nullptr, nullptr, nullptr, other.pos()),
+        source_(other.source_),
+        chunks_(other.chunks_) {}
+
+  static constexpr size_t kLocalBufferSize = 512;
+  uint16_t local_buffer_[kLocalBufferSize];
+
+  ScriptCompiler::FlexibleExternalSourceStream::Chunk FindChunk(
+      size_t position, RuntimeCallStats* stats) {
+    if (V8_UNLIKELY(chunks_->empty())) FetchChunk(size_t{0}, stats);
+
+    // Walk forwards while the position is in front of the current chunk.
+    while (position >= chunks_->back().end_position() &&
+           chunks_->back().length_in_characters > 0) {
+      FetchChunk(chunks_->back().end_position(), stats);
+    }
+
+    // Walk backwards.
+    for (ScriptCompiler::FlexibleExternalSourceStream::Chunk& chunk :
+         base::Reversed(*chunks_)) {
+      if (chunk.position <= position) return chunk;
+    }
+
+    UNREACHABLE();
+  }
+
+  void FetchChunk(size_t position, RuntimeCallStats* stats) {
+    DCHECK_NOT_NULL(source_);
+    CHECK_LE(position, static_cast<size_t>(v8::String::kMaxLength));
+
+    {
+      RCS_SCOPE(stats, RuntimeCallCounterId::kGetMoreDataCallback);
+      ScriptCompiler::FlexibleExternalSourceStream::Chunk chunk =
+          source_->GetNextChunk();
+      CHECK_LE(chunk.length_in_characters,
+               static_cast<size_t>(v8::String::kMaxLength) - position);
+      chunks_->emplace_back(std::move(chunk));
+    }
+  }
+
+  ScriptCompiler::FlexibleExternalSourceStream* source_;
+  std::shared_ptr<
+      std::vector<ScriptCompiler::FlexibleExternalSourceStream::Chunk>>
+      chunks_;
+};
+
 // Provides a buffered utf-16 view on the bytes from the underlying ByteStream.
 // Chars are buffered if either the underlying stream isn't utf-16 or the
 // underlying utf-16 stream might move (is on-heap).
@@ -952,20 +1064,29 @@ std::unique_ptr<Utf16CharacterStream> ScannerStream::ForTesting(
 }
 
 Utf16CharacterStream* ScannerStream::For(
-    ScriptCompiler::ExternalSourceStream* source_stream,
+    ScriptCompiler::ExternalSourceStreamBase* source_stream,
     v8::ScriptCompiler::StreamedSource::Encoding encoding) {
   switch (encoding) {
     case v8::ScriptCompiler::StreamedSource::TWO_BYTE:
       return new UnbufferedCharacterStream<ChunkedStream>(
-          static_cast<size_t>(0), source_stream);
+          static_cast<size_t>(0),
+          static_cast<ScriptCompiler::ExternalSourceStream*>(source_stream));
     case v8::ScriptCompiler::StreamedSource::ONE_BYTE:
-      return new BufferedCharacterStream<ChunkedStream>(static_cast<size_t>(0),
-                                                        source_stream);
+      return new BufferedCharacterStream<ChunkedStream>(
+          static_cast<size_t>(0),
+          static_cast<ScriptCompiler::ExternalSourceStream*>(source_stream));
     case v8::ScriptCompiler::StreamedSource::WINDOWS_1252:
-      return new Windows1252CharacterStream(static_cast<size_t>(0),
-                                            source_stream);
+      return new Windows1252CharacterStream(
+          static_cast<size_t>(0),
+          static_cast<ScriptCompiler::ExternalSourceStream*>(source_stream));
     case v8::ScriptCompiler::StreamedSource::UTF8:
-      return new Utf8ExternalStreamingStream(source_stream);
+      return new Utf8ExternalStreamingStream(
+          static_cast<ScriptCompiler::ExternalSourceStream*>(source_stream));
+    case v8::ScriptCompiler::StreamedSource::FLEXIBLE_UTF16:
+      return new FlexibleUnbufferedCharacterStream(
+          static_cast<size_t>(0),
+          static_cast<ScriptCompiler::FlexibleExternalSourceStream*>(
+              source_stream));
   }
   UNREACHABLE();
 }

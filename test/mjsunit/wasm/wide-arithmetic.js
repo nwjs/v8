@@ -2,12 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-wide-arithmetic
+// Flags: --wasm-wide-arithmetic
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
-// TODO(ryandiaz): these tests are just placeholders for now, until we have
-// implemented the wide arithmetic instructions.
 let kSig_ll_llll = makeSig(
   [kWasmI64, kWasmI64, kWasmI64, kWasmI64],
   [kWasmI64, kWasmI64]

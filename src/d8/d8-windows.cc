@@ -52,13 +52,13 @@ void Shell::FileExists(const v8::FunctionCallbackInfo<v8::Value>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   Isolate* isolate = info.GetIsolate();
   if (info.Length() < 1) {
-    isolate->ThrowError("exists() takes one argument");
+    ThrowError(isolate, "exists() takes one argument");
     return;
   }
   String::Utf8Value file_name(isolate, info[0]);
   if (*file_name == nullptr) {
-    isolate->ThrowError(
-        "d8.file.exists(): String conversion of argument failed.");
+    ThrowError(isolate,
+               "d8.file.exists(): String conversion of argument failed.");
     return;
   }
 

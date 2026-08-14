@@ -72,6 +72,7 @@ class StackMemory {
   ~StackMemory();
   Address limit() const;
   void* jslimit() const;
+  void UpdateCentralStackLimit(Isolate* isolate);
   Address base() const {
     Address memory_limit = active_segment_
                                ? active_segment_->base()
@@ -96,14 +97,14 @@ class StackMemory {
   Tagged<WasmStackObject> stack_obj() { return stack_obj_; }
   bool IsValidContinuation(Tagged<WasmContinuationObject> cont);
   JumpBuffer* jmpbuf() { return &jmpbuf_; }
-  bool Contains(Address addr) {
+  bool Contains(Address addr) const {
     if (!owned_) {
-      return reinterpret_cast<Address>(jslimit()) <= addr && addr < base();
+      return reinterpret_cast<Address>(limit_) <= addr && addr <= base();
     }
     for (auto segment = first_segment_; segment;
          segment = segment->next_segment_) {
       if (reinterpret_cast<Address>(segment->limit_) <= addr &&
-          addr < segment->base()) {
+          addr <= segment->base()) {
         return true;
       }
       if (segment == active_segment_) break;
@@ -181,17 +182,9 @@ class StackMemory {
   Tagged<WasmFuncRef> func_ref() const { return func_ref_; }
   static int func_ref_offset() { return OFFSET_OF(StackMemory, func_ref_); }
 
-  static int JSCentralStackLimitMarginKB() {
-#if defined(DEBUG) || defined(V8_USE_ADDRESS_SANITIZER)
-    return 80;
-#else
-    return 40;
-#endif
-  }
-
   static int JSGrowableStackLimitMarginKB() {
     if (!v8_flags.wasm_growable_stacks) {
-      return JSCentralStackLimitMarginKB();
+      return V8_STACK_LIMIT_MARGIN_KB;
     }
     // The limiting factor for this margin is the stack space used by outgoing
     // stack parameters in wasm. They can take up to 16KB (1000 simd

@@ -80,9 +80,6 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<ConcreteVisitor> {
   {
   }
 
-  V8_INLINE size_t VisitDescriptorArrayStrongly(Tagged<Map> map,
-                                                Tagged<DescriptorArray> object,
-                                                MaybeObjectSize);
   V8_INLINE size_t VisitDescriptorArray(Tagged<Map> map,
                                         Tagged<DescriptorArray> object,
                                         MaybeObjectSize);
@@ -93,6 +90,9 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<ConcreteVisitor> {
                                    MaybeObjectSize);
   V8_INLINE size_t VisitJSFunction(Tagged<Map> map, Tagged<JSFunction> object,
                                    MaybeObjectSize);
+  V8_INLINE size_t VisitJSGlobalProxy(Tagged<Map> map,
+                                      Tagged<JSGlobalProxy> object,
+                                      MaybeObjectSize);
   V8_INLINE size_t VisitJSWeakRef(Tagged<Map> map, Tagged<JSWeakRef> object,
                                   MaybeObjectSize);
   V8_INLINE size_t VisitMap(Tagged<Map> map, Tagged<Map> object,
@@ -212,8 +212,6 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<ConcreteVisitor> {
 
   template <typename TSlot>
   V8_INLINE void VisitStrongPointerImpl(Tagged<HeapObject> host, TSlot slot);
-
-  V8_INLINE void VisitDescriptorsForMap(Tagged<Map> map);
 
   V8_INLINE size_t
   VisitFixedArrayWithProgressTracker(Tagged<Map> map, Tagged<FixedArray> object,

@@ -51,7 +51,6 @@ class MarkingBarrier {
   void Write(Tagged<InstructionStream> host, RelocInfo*,
              Tagged<HeapObject> value);
   void Write(Tagged<JSArrayBuffer> host, ArrayBufferExtension*);
-  void Write(Tagged<DescriptorArray>, int number_of_own_descriptors);
   // Only usable when there's no valid JS host object for this write, e.g., when
   // value is held alive from a global handle.
   void WriteWithoutHost(Tagged<HeapObject> value);

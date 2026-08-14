@@ -286,9 +286,10 @@ void DebugEvaluate::ContextBuilder::UpdateValues() {
   for (ContextChainElement& element : context_chain_) {
     if (!element.materialized_object.is_null()) {
       DirectHandle<FixedArray> keys =
-          KeyAccumulator::GetKeys(isolate_, element.materialized_object,
-                                  KeyCollectionMode::kOwnOnly,
-                                  ENUMERABLE_STRINGS)
+          KeyAccumulator::GetKeys(
+              isolate_, element.materialized_object,
+              KeyCollectionMode::kOwnOnly, ENUMERABLE_STRINGS,
+              GetKeysConversion::kConvertToString, false, true)
               .ToHandleChecked();
 
       uint32_t keys_len = keys->ulength().value();
@@ -444,6 +445,7 @@ bool BytecodeHasNoSideEffect(interpreter::Bytecode bytecode) {
     case Bytecode::kLdaGlobalInsideTypeof:
     case Bytecode::kLdaLookupSlotInsideTypeof:
     case Bytecode::kGetIterator:
+    case Bytecode::kArrayDestructure:
     // Arithmetics.
     case Bytecode::kAdd:
     case Bytecode::kAddSmi:

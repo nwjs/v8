@@ -263,13 +263,9 @@ Handle<ScopeInfo> ScopeInfo::Create(IsolateT* isolate, Zone* zone, Scope* scope,
     WriteBarrierModeScope mode = scope_info->GetWriteBarrierMode(no_gc);
 
     bool has_simple_parameters = false;
-    bool is_asm_module = false;
     if (scope->is_function_scope()) {
       DeclarationScope* function_scope = scope->AsDeclarationScope();
       has_simple_parameters = function_scope->has_simple_parameters();
-#if V8_ENABLE_WEBASSEMBLY
-      is_asm_module = function_scope->is_asm_module();
-#endif  // V8_ENABLE_WEBASSEMBLY
     }
 
     // Encode the flags.
@@ -284,7 +280,6 @@ Handle<ScopeInfo> ScopeInfo::Create(IsolateT* isolate, Zone* zone, Scope* scope,
         AllocatesArgumentsBit::encode(allocates_arguments) |
         FunctionVariableBits::encode(function_name_info) |
         HasInferredFunctionNameBit::encode(has_inferred_function_name) |
-        IsAsmModuleBit::encode(is_asm_module) |
         HasSimpleParametersBit::encode(has_simple_parameters) |
         FunctionKindBits::encode(closure_function_kind) |
         HasOuterScopeInfoBit::encode(has_outer_scope_info) |
@@ -521,25 +516,25 @@ DirectHandle<ScopeInfo> ScopeInfo::CreateForWithScope(
   DirectHandle<ScopeInfo> scope_info = factory->NewScopeInfo(length);
 
   // Encode the flags.
-  uint32_t flags =
-      ScopeTypeBits::encode(WITH_SCOPE) |
-      SloppyEvalCanExtendVarsBit::encode(false) |
-      LanguageModeBit::encode(LanguageMode::kSloppy) |
-      DeclarationScopeBit::encode(false) |
-      ReceiverVariableBits::encode(VariableAllocationInfo::NONE) |
-      ClassScopeHasPrivateBrandBit::encode(false) |
-      HasSavedClassVariableBit::encode(false) |
-      AllocatesArgumentsBit::encode(false) |
-      FunctionVariableBits::encode(VariableAllocationInfo::NONE) |
-      IsAsmModuleBit::encode(false) | HasSimpleParametersBit::encode(true) |
-      FunctionKindBits::encode(FunctionKind::kNormalFunction) |
-      HasOuterScopeInfoBit::encode(has_outer_scope_info) |
-      IsDebugEvaluateScopeBit::encode(false) |
-      ForceContextAllocationBit::encode(false) |
-      PrivateNameLookupSkipsOuterClassBit::encode(false) |
-      HasContextExtensionSlotBit::encode(true) | IsHiddenBit::encode(false) |
-      IsWrappedFunctionBit::encode(false) |
-      IsHoistedInContextBit::encode(false);
+  uint32_t flags = ScopeTypeBits::encode(WITH_SCOPE) |
+                   SloppyEvalCanExtendVarsBit::encode(false) |
+                   LanguageModeBit::encode(LanguageMode::kSloppy) |
+                   DeclarationScopeBit::encode(false) |
+                   ReceiverVariableBits::encode(VariableAllocationInfo::NONE) |
+                   ClassScopeHasPrivateBrandBit::encode(false) |
+                   HasSavedClassVariableBit::encode(false) |
+                   AllocatesArgumentsBit::encode(false) |
+                   FunctionVariableBits::encode(VariableAllocationInfo::NONE) |
+                   HasSimpleParametersBit::encode(true) |
+                   FunctionKindBits::encode(FunctionKind::kNormalFunction) |
+                   HasOuterScopeInfoBit::encode(has_outer_scope_info) |
+                   IsDebugEvaluateScopeBit::encode(false) |
+                   ForceContextAllocationBit::encode(false) |
+                   PrivateNameLookupSkipsOuterClassBit::encode(false) |
+                   HasContextExtensionSlotBit::encode(true) |
+                   IsHiddenBit::encode(false) |
+                   IsWrappedFunctionBit::encode(false) |
+                   IsHoistedInContextBit::encode(false);
   scope_info->set_flags(flags, kRelaxedStore);
 
   scope_info->set_parameter_count(0);
@@ -639,7 +634,7 @@ DirectHandle<ScopeInfo> ScopeInfo::CreateForBootstrapping(
                                        ? VariableAllocationInfo::UNUSED
                                        : VariableAllocationInfo::NONE) |
       HasInferredFunctionNameBit::encode(has_inferred_function_name) |
-      IsAsmModuleBit::encode(false) | HasSimpleParametersBit::encode(true) |
+      HasSimpleParametersBit::encode(true) |
       FunctionKindBits::encode(FunctionKind::kNormalFunction) |
       HasOuterScopeInfoBit::encode(false) |
       IsDebugEvaluateScopeBit::encode(false) |
@@ -789,7 +784,6 @@ int ScopeInfo::ContextLength() const {
       (scope_type() == BLOCK_SCOPE && SloppyEvalCanExtendVars() &&
        is_declaration_scope()) ||
       (scope_type() == FUNCTION_SCOPE && SloppyEvalCanExtendVars()) ||
-      (scope_type() == FUNCTION_SCOPE && IsAsmModule()) ||
       scope_type() == MODULE_SCOPE;
 
   if (!has_context) return 0;

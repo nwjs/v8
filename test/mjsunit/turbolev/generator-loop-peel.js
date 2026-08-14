@@ -4,6 +4,7 @@
 
 // Flags: --allow-natives-syntax --turbolev --turbofan
 // Flags: --turbolev-non-eager-loop-peeling --no-concurrent-osr
+// Flags: --no-turbolev-eager-loop-peeling-osr
 
 // Resumable generators (async functions and function*) build a generator
 // resume dispatch with irreducible control flow, so the MaglevLoopPeeler used

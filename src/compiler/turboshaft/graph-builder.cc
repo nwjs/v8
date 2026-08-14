@@ -13,6 +13,7 @@
 #include "src/base/logging.h"
 #include "src/base/numerics/safe_conversions.h"
 #include "src/base/small-vector.h"
+#include "src/base/strong-alias.h"
 #include "src/base/vector.h"
 #include "src/codegen/bailout-reason.h"
 #include "src/codegen/machine-type.h"
@@ -20,6 +21,7 @@
 #include "src/compiler/common-operator.h"
 #include "src/compiler/compiler-source-position-table.h"
 #include "src/compiler/fast-api-calls.h"
+#include "src/compiler/feedback-source.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/node-aux-data.h"
@@ -28,6 +30,7 @@
 #include "src/compiler/node-properties.h"
 #include "src/compiler/opcodes.h"
 #include "src/compiler/operator.h"
+#include "src/compiler/pipeline-data-inl.h"
 #include "src/compiler/schedule.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/compiler/state-values-utils.h"
@@ -230,6 +233,12 @@ struct GraphBuilder {
     }
   }
 
+  FeedbackSource GetLoopFeedback(BasicBlock* loop_header_block) {
+    Node* loop_node = loop_header_block->front();
+    DCHECK_EQ(loop_node->opcode(), IrOpcode::kLoop);
+    return OpParameter<FeedbackSource>(loop_node->op());
+  }
+
   std::tuple<OpIndex, MemoryRepresentation, WriteBarrierKind>
   TurnTaggedSignedInputIntoSmi(OpIndex value, MemoryRepresentation rep,
                                WriteBarrierKind write_barrier);
@@ -338,7 +347,16 @@ std::optional<BailoutReason> GraphBuilder::Run() {
     switch (block->control()) {
       case BasicBlock::kGoto: {
         DCHECK_EQ(block->SuccessorCount(), 1);
-        Block* destination = Map(block->SuccessorAt(0));
+        BasicBlock* successor_block = block->SuccessorAt(0);
+        Block* destination = Map(successor_block);
+        if (destination->IsLoop() &&
+            destination->index() > target_block->index() &&
+            dominating_frame_state.valid()) {
+          FeedbackSource feedback = GetLoopFeedback(successor_block);
+          if (feedback.IsValid()) {
+            __ PrepareForLoop(dominating_frame_state, feedback);
+          }
+        }
         __ Goto(destination);
         if (destination->IsBound()) {
           DCHECK(destination->IsLoop());
@@ -1520,10 +1538,10 @@ OpIndex GraphBuilder::Process(
 
     case IrOpcode::kCall: {
       const CallDescriptor* call_descriptor = CallDescriptorOf(op);
-      CanThrow can_throw =
-          op->HasProperty(Operator::kNoThrow) ? CanThrow::kNo : CanThrow::kYes;
+      CanThrow can_throw = op->HasProperty(Operator::kNoThrow) ? CanThrow{false}
+                                                               : CanThrow{true};
       const TSCallDescriptor* ts_descriptor = TSCallDescriptor::Create(
-          call_descriptor, can_throw, LazyDeoptOnThrow::kNo, graph_zone);
+          call_descriptor, can_throw, LazyDeoptOnThrow{false}, graph_zone);
 
       base::SmallVector<OpIndex, 16> arguments;
       // The input `0` is the callee, the following value inputs are the
@@ -1570,10 +1588,10 @@ OpIndex GraphBuilder::Process(
         arguments.emplace_back(Map(node->InputAt(i)));
       }
 
-      CanThrow can_throw =
-          op->HasProperty(Operator::kNoThrow) ? CanThrow::kNo : CanThrow::kYes;
+      CanThrow can_throw = op->HasProperty(Operator::kNoThrow) ? CanThrow{false}
+                                                               : CanThrow{true};
       const TSCallDescriptor* ts_descriptor = TSCallDescriptor::Create(
-          call_descriptor, can_throw, LazyDeoptOnThrow::kNo, graph_zone);
+          call_descriptor, can_throw, LazyDeoptOnThrow{false}, graph_zone);
 
       __ TailCall(callee, base::VectorOf(arguments), ts_descriptor);
       return OpIndex::Invalid();
@@ -1860,8 +1878,8 @@ OpIndex GraphBuilder::Process(
       auto const& p = LoadDictionaryFieldParametersOf(node->op());
       return __ LoadDictionaryField(
           Map(node->InputAt(0)), Map(node->InputAt(1)), Map(node->InputAt(2)),
-          p.dictionary_index().raw_value(), p.name(), p.feedback(),
-          LazyDeoptOnThrow::kNo);
+          Map(node->InputAt(3)), p.dictionary_index().raw_value(), p.name(),
+          p.feedback(), p.is_super(), LazyDeoptOnThrow{false});
     }
 
     case IrOpcode::kCheckedAdditiveSafeIntegerAdd: {
@@ -2027,7 +2045,7 @@ OpIndex GraphBuilder::Process(
       ThrowingScope throwing_scope(this, block, is_final_control);
       return __ StringLocaleCompareIntl(locale_compare_fn, left, right, locales,
                                         frame_state, context,
-                                        LazyDeoptOnThrow::kNo);
+                                        LazyDeoptOnThrow{false});
     }
 #else
     case IrOpcode::kStringToLowerCaseIntl:
@@ -2473,8 +2491,9 @@ OpIndex GraphBuilder::Process(
 
         V<Object> fallback_result = V<Object>::Cast(__ Call(
             slow_call_callee, frame_state, base::VectorOf(slow_call_arguments),
-            TSCallDescriptor::Create(params.descriptor(), CanThrow::kYes,
-                                     LazyDeoptOnThrow::kNo, __ graph_zone())));
+            TSCallDescriptor::Create(params.descriptor(), CanThrow{true},
+                                     LazyDeoptOnThrow{false},
+                                     __ graph_zone())));
 
         convert_fallback_return(
             result, parameters->c_signature()->GetInt64Representation(),

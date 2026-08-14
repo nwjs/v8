@@ -30,7 +30,7 @@ function g() { f(); }
 %OptimizeFunctionOnNextCall(g, 'concurrent');
 g();
 
-%WaitUntilBlocked('TurbofanEarlyGraphTrimming', 10000);
+assertTrue(%WaitUntilBlocked('TurbofanEarlyGraphTrimming', 10000));
 
 const aMod = Sandbox.getAddressOf(mod);
 const aInst = Sandbox.getAddressOf(inst);
@@ -55,6 +55,6 @@ junk = null;
 
 gc(); gc(); gc();
 
-%Resume('TurbofanEarlyGraphTrimming');
+assertTrue(%Resume('TurbofanEarlyGraphTrimming'));
 
 %WaitForBackgroundOptimization();

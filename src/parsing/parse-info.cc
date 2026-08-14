@@ -53,9 +53,6 @@ UnoptimizedCompileFlags UnoptimizedCompileFlags::ForFunctionCompile(
   flags.set_allow_lazy_parsing(true);
   flags.set_is_lazy_compile(true);
 
-#if V8_ENABLE_WEBASSEMBLY
-  flags.set_is_asm_wasm_broken(shared->is_asm_wasm_broken());
-#endif  // V8_ENABLE_WEBASSEMBLY
   flags.set_is_repl_mode(script->is_repl_mode());
 
   // Do not support re-parsing top-level function of a wrapped script.
@@ -206,9 +203,6 @@ ParseInfo::ParseInfo(const UnoptimizedCompileFlags flags,
       source_range_map_(nullptr),
       literal_(nullptr),
       allow_eval_cache_(false),
-#if V8_ENABLE_WEBASSEMBLY
-      contains_asm_module_(false),
-#endif  // V8_ENABLE_WEBASSEMBLY
       language_mode_(flags.outer_language_mode()),
       is_background_compilation_(false),
       is_streaming_compilation_(false),

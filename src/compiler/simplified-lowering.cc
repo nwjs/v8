@@ -4236,10 +4236,11 @@ class RepresentationSelector {
         return;
       }
       case IrOpcode::kLoadDictionaryField: {
-        ProcessInput<T>(node, 0, UseInfo::AnyTagged());  // receiver
-        ProcessInput<T>(node, 1, UseInfo::AnyTagged());  // context
-        ProcessInput<T>(node, 2, UseInfo::AnyTagged());  // frame_state
-        ProcessRemainingInputs<T>(node, 3);              // effect and control.
+        ProcessInput<T>(node, 0, UseInfo::AnyTagged());  // lookup start object
+        ProcessInput<T>(node, 1, UseInfo::AnyTagged());  // receiver
+        ProcessInput<T>(node, 2, UseInfo::AnyTagged());  // context
+        ProcessInput<T>(node, 3, UseInfo::AnyTagged());  // frame state
+        ProcessRemainingInputs<T>(node, 4);              // effect and control
         SetOutput<T>(node, MachineRepresentation::kTagged);
         return;
       }

@@ -108,10 +108,41 @@ class V8_EXPORT WasmModuleObject : public Object {
   CompiledWasmModule GetCompiledModule();
 
   /**
+   * Compile-time imports that influence how a Wasm module is compiled. These
+   * mirror the options accepted by the JS `WebAssembly.Module` constructor
+   * (`{ builtins, importedStringConstants }`).
+   */
+  struct CompileTimeImports {
+    // Builtin compile-time imports, mirroring the strings accepted in the
+    // `builtins` array of the JS `WebAssembly.Module` constructor options.
+    // Combine values with bitwise-or to enable multiple builtins.
+    struct Builtins {
+      enum {
+        kNone = 0,
+        kJsString = 1 << 0,  // "js-string"
+      };
+    };
+    // Bitwise-or of `Builtins` values to enable as compile-time imports.
+    int builtins = Builtins::kNone;
+    // If non-null, enable imported string constants from the named module
+    // (e.g. "wasm:js/string-constants"). The string must be null-terminated and
+    // remain valid for the duration of this call.
+    const char* imported_string_constants_module = nullptr;
+  };
+
+  /**
    * Compile a Wasm module from the provided uncompiled bytes.
    */
   static MaybeLocal<WasmModuleObject> Compile(
       Isolate* isolate, std::span<const uint8_t> wire_bytes);
+
+  /**
+   * Compile a Wasm module from the provided uncompiled bytes, applying the
+   * given compile-time imports.
+   */
+  static MaybeLocal<WasmModuleObject> Compile(
+      Isolate* isolate, std::span<const uint8_t> wire_bytes,
+      const CompileTimeImports& compile_imports);
 
   V8_INLINE static WasmModuleObject* Cast(Value* value) {
 #ifdef V8_ENABLE_CHECKS

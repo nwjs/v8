@@ -79,8 +79,7 @@ V8_OBJECT class ScopeInfo : public HeapObject {
   using FunctionVariableBits =
       AllocatesArgumentsBit::Next<VariableAllocationInfo, 2>;
   using HasInferredFunctionNameBit = FunctionVariableBits::Next<bool, 1>;
-  using IsAsmModuleBit = HasInferredFunctionNameBit::Next<bool, 1>;
-  using HasSimpleParametersBit = IsAsmModuleBit::Next<bool, 1>;
+  using HasSimpleParametersBit = HasInferredFunctionNameBit::Next<bool, 1>;
   using FunctionKindBits = HasSimpleParametersBit::Next<FunctionKind, 5>;
   using HasOuterScopeInfoBit = FunctionKindBits::Next<bool, 1>;
   using IsDebugEvaluateScopeBit = HasOuterScopeInfoBit::Next<bool, 1>;
@@ -177,9 +176,6 @@ V8_OBJECT class ScopeInfo : public HeapObject {
 
   // Return if contexts are allocated for this scope.
   bool HasContext() const;
-
-  // Return if this is a function scope with "use asm".
-  inline bool IsAsmModule() const;
 
   inline bool HasSimpleParameters() const;
 

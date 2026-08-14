@@ -35,7 +35,23 @@ void JSInterceptorMap::set_indexed_interceptor(
   indexed_interceptor_.store(this, interceptor_info, mode);
 }
 
-void JSInterceptorMap::clear_extended_padding() {
+Tagged<Cell> JSInterceptorMap::fast_case_validity_cell() const {
+  return fast_case_validity_cell_.load();
+}
+void JSInterceptorMap::set_fast_case_validity_cell(Tagged<Cell> cell,
+                                                   WriteBarrierMode mode) {
+  fast_case_validity_cell_.store(this, cell, mode);
+}
+
+bool JSInterceptorMap::supports_fast_iterable_to_list() const {
+  return SupportsFastIterableToListBit::decode(flags_);
+}
+void JSInterceptorMap::set_supports_fast_iterable_to_list(bool value) {
+  flags_ = SupportsFastIterableToListBit::update(flags_, value);
+}
+
+void JSInterceptorMap::init_flags_and_clear_extended_padding() {
+  flags_ = 0;
   memset(extended_padding_, 0, sizeof(extended_padding_));
 }
 

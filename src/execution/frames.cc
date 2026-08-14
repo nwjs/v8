@@ -12,6 +12,7 @@
 #include "src/api/api-arguments.h"
 #include "src/api/api-natives.h"
 #include "src/base/bits.h"
+#include "src/base/strong-alias.h"
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/linkage-location.h"
 #include "src/codegen/maglev-safepoint-table.h"
@@ -1324,7 +1325,7 @@ DirectHandle<JSFunction> ApiCallbackExitFrame::GetFunction(
   if (IsJSFunction(maybe_function)) {
     return DirectHandle<JSFunction>::FromSlot(target_slot().location());
   }
-  if (allow_allocation == AllowAllocation::kNo) {
+  if (!allow_allocation) {
     // Instantiation would allocate, return empty handle.
     return {};
   }
@@ -1629,7 +1630,19 @@ void VisitSpillSlot(Isolate* isolate, RootVisitor* v,
   // to use CodeTs instead of InstructionStream objects.
   Address value = *spill_slot.location();
   Tagged_t compressed_value = static_cast<Tagged_t>(value);
-  if (!HAS_SMI_TAG(compressed_value) && value <= 0xFFFF'FFFF) {
+#if V8_TARGET_ARCH_LOONG64
+  // On loong64, compressed pointers should be sign-extended. Consequently,
+  // the upper 32 bits may consist entirely of 1s (e.g., 0xFFFFFFFF8XXXXXXX).
+  // Therefore, `is_int32()` is used here to correctly identify these
+  // sign-extended compressed pointers.
+  // Retain the validation logic to handle potentially zero-extended
+  // compressed values.
+  bool is_compressed = is_int32(value) || (value <= 0xFFFF'FFFF);
+#else
+  bool is_compressed = (value <= 0xFFFF'FFFF);
+#endif
+
+  if (!HAS_SMI_TAG(compressed_value) && is_compressed) {
     Address decompressed =
         V8HeapCompressionScheme::DecompressTagged(compressed_value);
     FullObjectSlot local_slot(&decompressed);
@@ -2844,11 +2857,9 @@ FrameSummary::JavaScriptFrameSummary::CreateStackFrameInfo() const {
 #if V8_ENABLE_WEBASSEMBLY
 FrameSummary::WasmFrameSummary::WasmFrameSummary(
     Isolate* isolate, Handle<WasmTrustedInstanceData> instance_data,
-    wasm::WasmCode* code, int byte_offset, int function_index,
-    bool at_to_number_conversion)
+    wasm::WasmCode* code, int byte_offset, int function_index)
     : FrameSummaryBase(isolate, WASM),
       instance_data_(instance_data),
-      at_to_number_conversion_(at_to_number_conversion),
       code_(code),
       byte_offset_(byte_offset),
       function_index_(function_index) {}
@@ -2863,8 +2874,7 @@ uint32_t FrameSummary::WasmFrameSummary::function_index() const {
 
 int FrameSummary::WasmFrameSummary::SourcePosition() const {
   const wasm::WasmModule* module = wasm_trusted_instance_data()->module();
-  return GetSourcePosition(module, function_index(), code_offset(),
-                           at_to_number_conversion());
+  return GetSourcePosition(module, function_index(), code_offset());
 }
 
 Handle<Script> FrameSummary::WasmFrameSummary::script() const {
@@ -2917,7 +2927,7 @@ uint32_t FrameSummary::WasmInlinedFrameSummary::function_index() const {
 
 int FrameSummary::WasmInlinedFrameSummary::SourcePosition() const {
   const wasm::WasmModule* module = instance_data_->module();
-  return GetSourcePosition(module, function_index(), code_offset(), false);
+  return GetSourcePosition(module, function_index(), code_offset());
 }
 
 Handle<Script> FrameSummary::WasmInlinedFrameSummary::script() const {
@@ -2953,8 +2963,7 @@ Handle<Object> FrameSummary::WasmInterpretedFrameSummary::receiver() const {
 
 int FrameSummary::WasmInterpretedFrameSummary::SourcePosition() const {
   const wasm::WasmModule* module = instance_data()->module();
-  return GetSourcePosition(module, function_index(), byte_offset(),
-                           false /*at_to_number_conversion*/);
+  return GetSourcePosition(module, function_index(), byte_offset());
 }
 
 Handle<WasmTrustedInstanceData>
@@ -3110,7 +3119,7 @@ FrameSummaries OptimizedJSFrame::Summarize(
     // heap allocation site in Turbofan. Heap allocation sites do not have a
     // DeoptimizationEntry in general. Instead of crashing we simply report here
     // just one frame.
-    if (code->is_maglevved() || allow_allocation == AllowAllocation::kNo) {
+    if (code->is_maglevved() || !allow_allocation) {
       DirectHandle<AbstractCode> abstract_code(
           Cast<AbstractCode>(function()->shared()->GetBytecodeArray(isolate())),
           isolate());
@@ -3268,7 +3277,7 @@ FrameSummaries OptimizedJSFrame::SummarizeFull(
       Tagged<Object> receiver_obj = translated_values->GetRawValue();
       DirectHandle<Object> receiver;
       if (receiver_obj == ReadOnlyRoots(isolate()).arguments_marker() &&
-          allow_allocation == AllowAllocation::kNo) {
+          !allow_allocation) {
         // Calling GetValue() would definitely trigger allocation but with
         // `never_allocate` allocations are not allowed. Simply pick `undefined`
         // as receiver instead even though it is off. `never_allocate` is
@@ -3648,7 +3657,7 @@ WasmFrame::GetInnermostSourcePositionAndFunctionIndex() const {
 int WasmFrame::position() const {
   auto [pos, func_index] = GetInnermostSourcePositionAndFunctionIndex();
   return GetSourcePosition(trusted_instance_data()->module(), func_index,
-                           pos.ScriptOffset(), at_to_number_conversion());
+                           pos.ScriptOffset());
 }
 
 int WasmFrame::GetInnermostFunctionIndex() const {
@@ -3675,7 +3684,6 @@ FrameSummaries WasmFrame::Summarize(AllowAllocation allow_allocation) const {
                                                 isolate()};
   // Push regular non-inlined summary.
   SourcePosition pos = code->GetSourcePositionBefore(offset);
-  bool at_conversion = at_to_number_conversion();
   bool child_was_tail_call = false;
   // Add summaries for each inlined function at the current location.
   while (pos.isInlined()) {
@@ -3687,60 +3695,23 @@ FrameSummaries WasmFrame::Summarize(AllowAllocation allow_allocation) const {
         code->GetInliningPosition(pos.InliningId());
     if (!child_was_tail_call) {
       FrameSummary::WasmFrameSummary summary(isolate(), instance_data, code,
-                                             pos.ScriptOffset(), func_index,
-                                             at_conversion);
+                                             pos.ScriptOffset(), func_index);
       summaries.frames.push_back(summary);
     }
     pos = caller_pos;
-    at_conversion = false;
     child_was_tail_call = was_tail_call;
   }
 
   if (!child_was_tail_call) {
     int func_index = code->index();
     FrameSummary::WasmFrameSummary summary(isolate(), instance_data, code,
-                                           pos.ScriptOffset(), func_index,
-                                           at_conversion);
+                                           pos.ScriptOffset(), func_index);
     summaries.frames.push_back(summary);
   }
 
   // The caller has to be on top.
   std::reverse(summaries.frames.begin(), summaries.frames.end());
   return summaries;
-}
-
-bool WasmFrame::at_to_number_conversion() const {
-  if (callee_pc() == kNullAddress) return false;
-  // Check whether our callee is a WASM_TO_JS frame, and this frame is at the
-  // ToNumber conversion call.
-  wasm::WasmCode* wasm_code =
-      wasm::GetWasmCodeManager()->LookupCode(isolate(), callee_pc());
-
-  if (wasm_code) {
-    if (wasm_code->kind() != wasm::WasmCode::kWasmToJsWrapper) return false;
-    int offset = static_cast<int>(callee_pc() - wasm_code->instruction_start());
-    int pos = wasm_code->GetSourceOffsetBefore(offset);
-    // The imported call has position 0, ToNumber has position 1.
-    // If there is no source position available, this is also not a ToNumber
-    // call.
-    DCHECK(pos == wasm::kNoCodePosition || pos == 0 || pos == 1);
-    return pos == 1;
-  }
-
-  if (!IsWasmToJsWrapperCSA(callee_pc())) {
-    return false;
-  }
-
-  // The generic wasm-to-js wrapper maintains a slot on the stack to indicate
-  // its state. Initially this slot contains a pointer to the signature, so that
-  // incoming parameters can be scanned. After all parameters have been
-  // processed, this slot is reset to nullptr. After returning from JavaScript,
-  // -1 is stored in the slot to indicate that any call from now on is a
-  // ToNumber conversion.
-  Address maybe_sig =
-      Memory<Address>(callee_fp() + WasmToJSWrapperConstants::kSignatureOffset);
-
-  return static_cast<intptr_t>(maybe_sig) == -1;
 }
 
 int WasmFrame::LookupExceptionHandlerInTable() {
@@ -3907,8 +3878,7 @@ FrameSummaries WasmInterpreterEntryFrame::Summarize(
   FrameSummaries summaries;
   Handle<WasmInstanceObject> instance(wasm_instance(), isolate());
   std::vector<WasmInterpreterStackEntry> interpreted_stack =
-      WasmInterpreterObject::GetInterpretedStack(
-          trusted_instance_data()->interpreter_object(), fp());
+      WasmInterpreterObject::GetInterpretedStack(trusted_instance_data(), fp());
 
   for (auto& e : interpreted_stack) {
     FrameSummary::WasmInterpretedFrameSummary summary(
@@ -3933,19 +3903,14 @@ WasmInterpreterEntryFrame::trusted_instance_data() const {
   return wasm_instance()->trusted_data(isolate());
 }
 
-Tagged<Tuple2> WasmInterpreterEntryFrame::interpreter_object() const {
-  return trusted_instance_data()->interpreter_object();
-}
-
 Tagged<WasmModuleObject> WasmInterpreterEntryFrame::module_object() const {
   return trusted_instance_data()->module_object();
 }
 
 int WasmInterpreterEntryFrame::function_index(
     int inlined_function_index) const {
-  return WasmInterpreterObject::GetFunctionIndex(
-      trusted_instance_data()->interpreter_object(), fp(),
-      inlined_function_index);
+  return WasmInterpreterObject::GetFunctionIndex(trusted_instance_data(), fp(),
+                                                 inlined_function_index);
 }
 
 int WasmInterpreterEntryFrame::position() const {
@@ -4087,7 +4052,7 @@ void PrintFunctionSource(StringStream* accumulator,
 void JavaScriptFrame::Print(StringStream* accumulator, PrintMode mode,
                             int index, AllowAllocation allow_allocation) const {
   DirectHandle<SharedFunctionInfo> shared(function()->shared(), isolate());
-  if (allow_allocation != AllowAllocation::kNo) {
+  if (allow_allocation) {
     SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate(), shared);
   }
 

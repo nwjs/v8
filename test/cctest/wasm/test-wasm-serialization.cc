@@ -98,8 +98,7 @@ class WasmSerializationTest {
     DirectHandle<WasmInstanceObject> instance =
         GetWasmEngine()
             ->SyncInstantiate(CcTest::i_isolate(), &thrower, module_object,
-                              DirectHandle<JSReceiver>::null(),
-                              MaybeDirectHandle<JSArrayBuffer>())
+                              DirectHandle<JSReceiver>::null())
             .ToHandleChecked();
     DirectHandle<Object> params[] = {
         direct_handle(Smi::FromInt(41), CcTest::i_isolate())};
@@ -175,7 +174,7 @@ class WasmSerializationTest {
       DirectHandle<WasmInstanceObject> instance =
           GetWasmEngine()
               ->SyncInstantiate(serialization_isolate, &thrower, module_object,
-                                {}, {})
+                                {})
               .ToHandleChecked();
       CHECK_EQ(0, data_.size);
       while (data_.size == 0) {
@@ -512,9 +511,7 @@ TEST(DeserializeIndirectCallWithDifferentCanonicalId) {
     builder.AddExport(base::CStrVector("call_indirect"), f);
     // Add a function table.
     uint32_t table_id = builder.AddTable(kWasmFuncRef, 1);
-    builder.SetIndirectFunction(
-        table_id, 0, f->func_index(),
-        WasmModuleBuilder::WasmElemSegment::kRelativeToImports);
+    builder.SetIndirectFunction(table_id, 0, f->func_index());
     // Write the final module into {buffer}.
     builder.WriteTo(&zone_buffer);
   }
@@ -650,8 +647,7 @@ TEST(DeserializeIndirectCallWithDifferentCanonicalId) {
     DirectHandle<WasmInstanceObject> instance =
         GetWasmEngine()
             ->SyncInstantiate(i_isolate, &thrower, module_object,
-                              DirectHandle<JSReceiver>::null(),
-                              MaybeDirectHandle<JSArrayBuffer>())
+                              DirectHandle<JSReceiver>::null())
             .ToHandleChecked();
     DirectHandle<Object> params[] = {direct_handle(Smi::FromInt(1), i_isolate)};
     int32_t result = testing::CallWasmFunctionForTesting(
@@ -727,8 +723,7 @@ TEST(SerializeDetectedFeatures) {
       DirectHandle<WasmInstanceObject> instance =
           GetWasmEngine()
               ->SyncInstantiate(i_isolate, &thrower, module_object,
-                                DirectHandle<JSReceiver>::null(),
-                                MaybeDirectHandle<JSArrayBuffer>())
+                                DirectHandle<JSReceiver>::null())
               .ToHandleChecked();
 
       v8::Local<v8::WasmModuleObject> v8_module_object =
@@ -796,8 +791,7 @@ TEST(SerializeDetectedFeatures) {
     DirectHandle<WasmInstanceObject> instance =
         GetWasmEngine()
             ->SyncInstantiate(i_isolate, &thrower, module_object,
-                              DirectHandle<JSReceiver>::null(),
-                              MaybeDirectHandle<JSArrayBuffer>())
+                              DirectHandle<JSReceiver>::null())
             .ToHandleChecked();
     int32_t result =
         testing::CallWasmFunctionForTesting(i_isolate, instance, "b", {});

@@ -24,7 +24,6 @@
 #include "include/v8-value.h"
 #include "src/api/api-inl.h"
 #include "src/base/logging.h"
-#include "src/common/ptr-compr-inl.h"
 #include "src/objects/js-function.h"
 #include "src/objects/js-objects.h"
 #include "src/objects/map.h"
@@ -100,8 +99,12 @@ void CorruptObjectMapAndAbort(const v8::FunctionCallbackInfo<v8::Value>& info) {
   target_object->WriteField<uint16_t>(offsetof(i::Map, instance_type_),
                                       kInvalidInstanceType);
 
-  i::Tagged_t corrupted =
-      i::V8HeapCompressionScheme::CompressObject(target_object.ptr());
+  // Point the object's Map slot at the object itself, so reading the Map
+  // reads back the object, whose Map::instance_type_ slot we corrupted above.
+  // A plain truncating cast yields the compressed low 32 bits with pointer
+  // compression and the full pointer without it, which is what the Map slot
+  // stores in each build.
+  i::Tagged_t corrupted = static_cast<i::Tagged_t>(target_object.ptr());
   target_object->Relaxed_WriteField<i::Tagged_t>(offsetof(i::HeapObject, map_),
                                                  corrupted);
   abort();

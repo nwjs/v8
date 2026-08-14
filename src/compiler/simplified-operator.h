@@ -490,17 +490,22 @@ ZoneRefSet<Map> const& MapGuardMapsOf(Operator const*) V8_WARN_UNUSED_RESULT;
 class LoadDictionaryFieldParameters final {
  public:
   LoadDictionaryFieldParameters(InternalIndex dictionary_index, NameRef name,
-                                const FeedbackSource& feedback)
-      : dictionary_index_(dictionary_index), name_(name), feedback_(feedback) {}
+                                const FeedbackSource& feedback, bool is_super)
+      : dictionary_index_(dictionary_index),
+        name_(name),
+        feedback_(feedback),
+        is_super_(is_super) {}
 
   InternalIndex dictionary_index() const { return dictionary_index_; }
   NameRef name() const { return name_; }
   FeedbackSource const& feedback() const { return feedback_; }
+  bool is_super() const { return is_super_; }
 
  private:
   InternalIndex const dictionary_index_;
   NameRef const name_;
   FeedbackSource const feedback_;
+  bool const is_super_;
 };
 
 bool operator==(LoadDictionaryFieldParameters const&,
@@ -1244,7 +1249,8 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* LoadFieldByIndex();
   const Operator* LoadDictionaryField(InternalIndex dictionary_index,
                                       NameRef name,
-                                      const FeedbackSource& feedback);
+                                      const FeedbackSource& feedback,
+                                      bool is_super);
   const Operator* LoadField(FieldAccess const&);
   const Operator* StoreField(FieldAccess const&,
                              bool maybe_initializing_or_transitioning = true);

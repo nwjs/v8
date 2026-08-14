@@ -60,11 +60,6 @@ class Deserializer : public SerializerDeserializer {
   void LogScriptEvents(Tagged<Script> script);
   void LogNewMapEvents();
 
-  // Descriptor arrays are deserialized as "strong", so that there is no risk of
-  // them getting trimmed during a partial deserialization. This method makes
-  // them "weak" again after deserialization completes.
-  void WeakenDescriptorArrays();
-
   // This returns the address of an object that has been described in the
   // snapshot by object vector index.
   Handle<HeapObject> GetBackReferencedObject();
@@ -298,10 +293,6 @@ class Deserializer : public SerializerDeserializer {
   DirectHandleVector<FunctionTemplateInfo> function_template_infos_;
   DirectHandleVector<Script> new_scripts_;
   std::vector<std::shared_ptr<BackingStore>> backing_stores_;
-
-  // Roots vector as those arrays are passed to Heap, see
-  // WeakenDescriptorArrays().
-  GlobalHandleVector<DescriptorArray> new_descriptor_arrays_;
 
   // Vector of allocated objects that can be accessed by a backref, by index.
   std::vector<IndirectHandle<HeapObject>> back_refs_;

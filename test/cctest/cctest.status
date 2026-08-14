@@ -587,17 +587,18 @@
 ##############################################################################
 # TODO(v8:7777): Change this once wasm is supported in jitless mode.
 ['not has_webassembly or variant == jitless', {
+  'test-api-array-buffer/ArrayBuffer_NonDetachableWasDetached': [SKIP],
   'test-api/TurboAsmDisablesDetach': [SKIP],
   'test-api/Wasm*': [SKIP],
-  'test-api-array-buffer/ArrayBuffer_NonDetachableWasDetached': [SKIP],
   'test-backing-store/Run_WasmModule_Buffer_Externalized_Regression_UseAfterFree': [SKIP],
-  'test-c-wasm-entry/*': [SKIP],
   'test-compilation-cache/*': [SKIP],
-  'test-jump-table-assembler/*': [SKIP],
+  'test-c-wasm-entry/*': [SKIP],
+  'test-fuzzer-steps/*': [SKIP],
   'test-gc/*': [SKIP],
   'test-grow-memory/*': [SKIP],
   'test-heap-profiler/HeapSnapshotWithWasmInstance': [SKIP],
   'test-js-to-wasm/*': [SKIP],
+  'test-jump-table-assembler/*': [SKIP],
   'test-liftoff-for-fuzzing/*': [SKIP],
   'test-liftoff-inspection/*': [SKIP],
   'test-run-wasm*': [SKIP],
@@ -618,14 +619,14 @@
   # Skip tests that require Wasm experimental features not supported by the
   # Wasm interpreter.
 
-  # --experimental-wasm-memory64
+  # --wasm-memory64
   'test-run-wasm-memory64/*': [SKIP],
 
-  # --experimental-wasm-fp16
+  # --wasm-fp16
   'test-run-wasm-f16/*': [SKIP],
   'test-run-wasm/RunWasmInterpreter_Float32*': [SKIP],
 
-  # --experimental-wasm-wide-arithmetic
+  # --wasm-wide-arithmetic
   'test-run-wasm-64/RunWasmInterpreter_I64MulWideS': [SKIP],
   'test-run-wasm-64/RunWasmInterpreter_I64MulWideU': [SKIP],
 }],  # has_wasm_interpreter

@@ -742,11 +742,6 @@ namespace internal {
   T(WasmSuspendJSFrames, "trying to suspend JS frames")                        \
   T(WasmExceptionError, "wasm exception")                                      \
   T(WasmObjectsAreOpaque, "WebAssembly objects are opaque")                    \
-  /* Asm.js validation related */                                              \
-  T(AsmJsInvalid, "Invalid asm.js: %")                                         \
-  T(AsmJsCompiled, "Converted asm.js to WebAssembly: %")                       \
-  T(AsmJsInstantiated, "Instantiated asm.js: %")                               \
-  T(AsmJsLinkingFailed, "Linking failure in asm.js: %")                        \
   /* DataCloneError messages */                                                \
   T(DataCloneError, "% could not be cloned.")                                  \
   T(DataCloneErrorOutOfMemory, "Data cannot be cloned, out of memory.")        \

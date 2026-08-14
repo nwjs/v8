@@ -1551,10 +1551,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kLoong64Bstrins_w:
       if (instr->InputAt(1)->IsImmediate() && i.InputInt8(1) == 0) {
         __ bstrins_w(i.OutputRegister(), zero_reg,
-                     i.InputInt8(1) + i.InputInt8(2) - 1, i.InputInt8(1));
+                     i.InputInt8(2) + i.InputInt8(3) - 1, i.InputInt8(2));
       } else {
-        __ bstrins_w(i.OutputRegister(), i.InputRegister(0),
-                     i.InputInt8(1) + i.InputInt8(2) - 1, i.InputInt8(1));
+        __ bstrins_w(i.OutputRegister(), i.InputRegister(1),
+                     i.InputInt8(2) + i.InputInt8(3) - 1, i.InputInt8(2));
       }
       break;
     case kLoong64Bstrpick_d: {
@@ -1565,10 +1565,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kLoong64Bstrins_d:
       if (instr->InputAt(1)->IsImmediate() && i.InputInt8(1) == 0) {
         __ bstrins_d(i.OutputRegister(), zero_reg,
-                     i.InputInt8(1) + i.InputInt8(2) - 1, i.InputInt8(1));
+                     i.InputInt8(2) + i.InputInt8(3) - 1, i.InputInt8(2));
       } else {
-        __ bstrins_d(i.OutputRegister(), i.InputRegister(0),
-                     i.InputInt8(1) + i.InputInt8(2) - 1, i.InputInt8(1));
+        __ bstrins_d(i.OutputRegister(), i.InputRegister(1),
+                     i.InputInt8(2) + i.InputInt8(3) - 1, i.InputInt8(2));
       }
       break;
     case kLoong64Sll_d:
@@ -1615,6 +1615,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kLoong64Cmp64:
       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
       break;
+    case kLoong64CheckWord32ComparisonInputs: {
+      Register scratch = i.OutputRegister();
+      __ slli_w(scratch, i.InputRegister(0), 0);
+      __ Check(eq, AbortReason::kUnexpectedValue, scratch, i.InputRegister(0));
+      __ slli_w(scratch, i.InputRegister(1), 0);
+      __ Check(eq, AbortReason::kUnexpectedValue, scratch, i.InputRegister(1));
+      break;
+    }
     case kLoong64Mov:
       // TODO(LOONG_dev): Should we combine mov/li, or use separate instr?
       //    - Also see x64 ASSEMBLE_BINOP & RegisterOrOperandType
@@ -1957,10 +1965,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kLoong64Float64ExtractHighWord32:
       __ movfrh2gr_s(i.OutputRegister(), i.InputDoubleRegister(0));
-      break;
-    case kLoong64Float64FromWord32Pair:
-      __ movgr2fr_w(i.OutputDoubleRegister(), i.InputRegister(1));
-      __ movgr2frh_w(i.OutputDoubleRegister(), i.InputRegister(0));
       break;
     case kLoong64Float64InsertLowWord32:
       __ FmoveLow(i.OutputDoubleRegister(), i.InputRegister(1));
@@ -4461,31 +4465,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                  << "\"";                                                      \
   UNIMPLEMENTED();
 
-void SignExtend(MacroAssembler* masm, Instruction* instr, Register* left,
-                Operand* right, Register* temp0, Register* temp1) {
-  bool need_signed = false;
-  MachineRepresentation rep_left =
-      LocationOperand::cast(instr->InputAt(0))->representation();
-  need_signed = IsAnyTagged(rep_left) || IsAnyCompressed(rep_left) ||
-                rep_left == MachineRepresentation::kWord64;
-  if (need_signed) {
-    masm->slli_w(*temp0, *left, 0);
-    *left = *temp0;
-  }
-
-  if (instr->InputAt(1)->IsAnyLocationOperand()) {
-    MachineRepresentation rep_right =
-        LocationOperand::cast(instr->InputAt(1))->representation();
-    need_signed = IsAnyTagged(rep_right) || IsAnyCompressed(rep_right) ||
-                  rep_right == MachineRepresentation::kWord64;
-    if (need_signed && right->is_reg()) {
-      DCHECK(*temp1 != no_reg);
-      masm->slli_w(*temp1, right->rm(), 0);
-      *right = Operand(*temp1);
-    }
-  }
-}
-
 void AssembleBranchToLabels(CodeGenerator* gen, MacroAssembler* masm,
                             Instruction* instr, FlagsCondition condition,
                             Label* tlabel, Label* flabel, bool fallthru) {
@@ -4549,12 +4528,6 @@ void AssembleBranchToLabels(CodeGenerator* gen, MacroAssembler* masm,
     Condition cc = FlagsConditionToConditionCmp(condition);
     Register left = i.InputRegister(0);
     Operand right = i.InputOperand(1);
-    // Word32Compare has two temp registers.
-    if (COMPRESS_POINTERS_BOOL && (instr->arch_opcode() == kLoong64Cmp32)) {
-      Register temp0 = i.TempRegister(0);
-      Register temp1 = right.is_reg() ? i.TempRegister(1) : no_reg;
-      SignExtend(masm, instr, &left, &right, &temp0, &temp1);
-    }
     __ Branch(tlabel, cc, left, right);
   } else if (instr->arch_opcode() == kArchStackPointerGreaterThan) {
     Condition cc = FlagsConditionToConditionCmp(condition);
@@ -4672,11 +4645,6 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
     Condition cc = FlagsConditionToConditionCmp(condition);
     Register left = i.InputRegister(0);
     Operand right = i.InputOperand(1);
-    if (COMPRESS_POINTERS_BOOL && (instr->arch_opcode() == kLoong64Cmp32)) {
-      Register temp0 = i.TempRegister(0);
-      Register temp1 = right.is_reg() ? i.TempRegister(1) : no_reg;
-      SignExtend(masm(), instr, &left, &right, &temp0, &temp1);
-    }
     __ CompareWord(cc, result, left, right);
     return;
   } else if (instr->arch_opcode() == kLoong64Float64Cmp ||
@@ -4840,6 +4808,7 @@ void CodeGenerator::AssembleArchSelect(Instruction* instr,
       Register temp = v_true;
       v_true = v_false;
       v_false = temp;
+      cc = ne;
     }
     UseScratchRegisterScope temps(masm());
     Register scratch1 = temps.Acquire();

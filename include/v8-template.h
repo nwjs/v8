@@ -432,6 +432,12 @@ using IndexedPropertyIndexOfCallback =
                  uint32_t* out_length, const PropertyCallbackInfo<void>& info);
 
 /**
+ * Experimental API, do not use!
+ */
+using IndexedPropertyIterableToListCallback =
+    void (*)(const PropertyCallbackInfo<Value>& info);
+
+/**
  * Returns true if the given context should be allowed to access the given
  * object.
  */
@@ -997,6 +1003,8 @@ struct IndexedPropertyHandlerConfiguration {
              (std::is_same_v<TDefiner, std::nullptr_t> ||
               std::is_same_v<TDefiner, IndexedPropertyDefinerCallback> ||
               std::is_same_v<TDefiner, IndexedPropertyDefinerCallbackV2>))
+  V8_DEPRECATE_SOON(
+      "Use IndexedPropertyHandlerConfiguration with iterable_to_list")
   IndexedPropertyHandlerConfiguration(
       IndexedPropertyGetterCallback getter,          //
       TSetter setter,                                //
@@ -1016,6 +1024,41 @@ struct IndexedPropertyHandlerConfiguration {
         definer(ConvertDefiner(definer)),
         descriptor(descriptor),
         index_of(index_of),
+        iterable_to_list(nullptr),
+        data(data),
+        flags(flags) {}
+
+  // TODO(https://crbug.com/348660658): cleanup once migration to
+  // IndexedPropertySetterCallback/IndexedPropertyDefinerCallback is done.
+  template <typename TSetter = std::nullptr_t,
+            typename TDefiner = std::nullptr_t>
+    requires((std::is_same_v<TSetter, std::nullptr_t> ||
+              std::is_same_v<TSetter, IndexedPropertySetterCallback> ||
+              std::is_same_v<TSetter, IndexedPropertySetterCallbackV2>) &&
+             (std::is_same_v<TDefiner, std::nullptr_t> ||
+              std::is_same_v<TDefiner, IndexedPropertyDefinerCallback> ||
+              std::is_same_v<TDefiner, IndexedPropertyDefinerCallbackV2>))
+  IndexedPropertyHandlerConfiguration(
+      IndexedPropertyGetterCallback getter,          //
+      TSetter setter,                                //
+      IndexedPropertyQueryCallback query,            //
+      IndexedPropertyDeleterCallback deleter,        //
+      IndexedPropertyEnumeratorCallback enumerator,  //
+      TDefiner definer,                              //
+      IndexedPropertyDescriptorCallback descriptor,  //
+      IndexedPropertyIndexOfCallback index_of,       //
+      IndexedPropertyIterableToListCallback iterable_to_list,
+      Local<Value> data = Local<Value>(),
+      PropertyHandlerFlags flags = PropertyHandlerFlags::kNone)
+      : getter(getter),
+        setter(ConvertSetter(setter)),
+        query(query),
+        deleter(deleter),
+        enumerator(enumerator),
+        definer(ConvertDefiner(definer)),
+        descriptor(descriptor),
+        index_of(index_of),
+        iterable_to_list(iterable_to_list),
         data(data),
         flags(flags) {}
 
@@ -1027,6 +1070,7 @@ struct IndexedPropertyHandlerConfiguration {
   IndexedPropertyDefinerCallback definer;
   IndexedPropertyDescriptorCallback descriptor;
   IndexedPropertyIndexOfCallback index_of = nullptr;
+  IndexedPropertyIterableToListCallback iterable_to_list = nullptr;
   Local<Value> data;
   PropertyHandlerFlags flags;
 };

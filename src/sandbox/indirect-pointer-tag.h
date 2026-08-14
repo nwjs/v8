@@ -5,6 +5,7 @@
 #ifndef V8_SANDBOX_INDIRECT_POINTER_TAG_H_
 #define V8_SANDBOX_INDIRECT_POINTER_TAG_H_
 
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
 #include "src/objects/instance-type.h"
 
@@ -55,7 +56,6 @@ enum IndirectPointerTag : uint16_t {
   kWasmTrustedInstanceDataIndirectPointerTag = 4,
   kWasmDispatchTableIndirectPointerTag,
   kWasmSuspenderIndirectPointerTag,
-  kAsmWasmDataIndirectPointerTag,
   kWasmExportedFunctionDataIndirectPointerTag,
   kWasmCapiFunctionDataIndirectPointerTag,
   kRegExpDataIndirectPointerTag,
@@ -266,17 +266,13 @@ V8_INLINE IndirectPointerTag IndirectPointerTagFromInstanceType(
       return kRegExpDataIndirectPointerTag;
 #if V8_ENABLE_WEBASSEMBLY
     case WASM_DISPATCH_TABLE_TYPE:
-      return shared == SharedFlag::kYes
-                 ? kSharedWasmDispatchTableIndirectPointerTag
-                 : kWasmDispatchTableIndirectPointerTag;
+      return shared ? kSharedWasmDispatchTableIndirectPointerTag
+                    : kWasmDispatchTableIndirectPointerTag;
     case WASM_TRUSTED_INSTANCE_DATA_TYPE:
-      return shared == SharedFlag::kYes
-                 ? kSharedWasmTrustedInstanceDataIndirectPointerTag
-                 : kWasmTrustedInstanceDataIndirectPointerTag;
+      return shared ? kSharedWasmTrustedInstanceDataIndirectPointerTag
+                    : kWasmTrustedInstanceDataIndirectPointerTag;
     case WASM_INTERNAL_FUNCTION_TYPE:
       return kWasmInternalFunctionIndirectPointerTag;
-    case ASM_WASM_DATA_TYPE:
-      return kAsmWasmDataIndirectPointerTag;
     case WASM_SUSPENDER_OBJECT_TYPE:
       return kWasmSuspenderIndirectPointerTag;
     case WASM_FUNCTION_DATA_TYPE:

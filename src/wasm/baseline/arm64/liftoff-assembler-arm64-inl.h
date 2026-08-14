@@ -352,7 +352,14 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   PatchingAssembler patching_assembler(zone(), AssemblerOptions{},
                                        buffer_start_ + offset, 1);
 
-  if (V8_LIKELY(frame_size < 4 * KB)) {
+  int max_stack_space =
+      frame_size + max_pushed_argument_slots_ * kSystemPointerSize;
+
+  // The threshold here must match the DCHECK in {Isolate::StackOverflow}:
+  // we could use up this limit once for parameters in a caller, once for the
+  // fixed frame size in its callee, plus we must leave some space for the
+  // runtime call that leads to the DCHECK.
+  if (V8_LIKELY(max_stack_space < 3 * KB)) {
     // This is the standard case for small frames: just subtract from SP and be
     // done with it.
     DCHECK(IsImmAddSub(frame_size));
@@ -382,11 +389,11 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   // check in the condition code.
   RecordComment("OOL: stack check for large frame");
   Label continuation;
-  if (frame_size < v8_flags.stack_size * 1024) {
+  if (max_stack_space < v8_flags.stack_size * 1024) {
     UseScratchRegisterScope temps(this);
     Register stack_limit = temps.AcquireX();
     LoadStackLimit(stack_limit, StackLimitKind::kRealStackLimit);
-    Add(stack_limit, stack_limit, Operand(frame_size));
+    Add(stack_limit, stack_limit, Operand(max_stack_space));
     Cmp(sp, stack_limit);
     B(hs /* higher or same */, &continuation);
   }
@@ -398,7 +405,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
     for (auto reg : kGpParamRegisters) regs_to_save.set(reg);
     for (auto reg : kFpParamRegisters) regs_to_save.set(reg);
     PushRegisters(regs_to_save);
-    Mov(WasmHandleStackOverflowDescriptor::GapRegister(), frame_size);
+    Mov(WasmHandleStackOverflowDescriptor::GapRegister(), max_stack_space);
     Add(WasmHandleStackOverflowDescriptor::FrameBaseRegister(), fp,
         Operand(stack_param_slots * kSystemPointerSize +
                 CommonFrameConstants::kFixedFrameSizeAboveFp));
@@ -564,6 +571,13 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
     default:
       UNREACHABLE();
   }
+}
+
+void LiftoffAssembler::PrepareDebugTrap(MessageTemplate message) {
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.AcquireX();
+  Mov(scratch, Operand(Smi::FromInt(static_cast<int>(message))));
+  Push(scratch, xzr);
 }
 
 void LiftoffAssembler::LoadInstanceDataFromFrame(Register dst) {
@@ -4618,11 +4632,8 @@ void LiftoffAssembler::TailCallNativeWasmCode(Address addr) {
   Jump(addr, RelocInfo::WASM_CALL);
 }
 
-void LiftoffAssembler::CallIndirect(const ValueKindSig* sig,
-                                    compiler::CallDescriptor* call_descriptor,
+void LiftoffAssembler::CallIndirect(compiler::CallDescriptor* call_descriptor,
                                     Register target) {
-  // For Arm64, we have more cache registers than wasm parameters. That means
-  // that target will always be in a register.
   DCHECK(target.is_valid());
   CallWasmCodePointer(target, call_descriptor->signature_hash());
 }

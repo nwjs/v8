@@ -9,8 +9,10 @@
 #include "src/objects/foreign-inl.h"
 #include "src/objects/managed.h"
 #include "src/objects/maybe-object.h"
-#include "src/objects/object-macros.h"
+#include "src/objects/objects-inl.h"
 #include "src/objects/visitors.h"
+
+#include "src/objects/object-macros.h"
 
 namespace v8 {
 namespace internal {

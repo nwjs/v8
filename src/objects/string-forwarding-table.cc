@@ -4,6 +4,8 @@
 
 #include "src/objects/string-forwarding-table.h"
 
+#include <algorithm>
+
 #include "src/base/atomicops.h"
 #include "src/common/globals.h"
 #include "src/heap/heap-layout-inl.h"
@@ -22,8 +24,8 @@ StringForwardingTable::Block::Block(int capacity) : capacity_(capacity) {
   static_assert(sizeof(Record) % sizeof(Address) == 0);
   static_assert(offsetof(Record, original_string_) == 0);
   constexpr int kRecordPointerSize = sizeof(Record) / sizeof(Address);
-  Memset(reinterpret_cast<Address*>(&elements_[0]), 0,
-         capacity_ * kRecordPointerSize);
+  std::fill_n(reinterpret_cast<Address*>(&elements_[0]),
+              capacity_ * kRecordPointerSize, 0);
 }
 
 void* StringForwardingTable::Block::operator new(size_t size, int capacity) {

@@ -117,5 +117,11 @@ RUNTIME_FUNCTION(Runtime_GeneratorGetResumeMode) {
   UNREACHABLE();
 }
 
+RUNTIME_FUNCTION(Runtime_GeneratorYieldResult) {
+  // Runtime call is implemented in InterpreterIntrinsics and lowered in
+  // JSIntrinsicLowering
+  UNREACHABLE();
+}
+
 }  // namespace internal
 }  // namespace v8

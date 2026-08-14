@@ -734,6 +734,15 @@ ProcessedFeedback const& JSHeapBroker::ReadFeedbackForInstanceOf(
   return *zone()->New<InstanceOfFeedback>(optional_constructor, nexus.kind());
 }
 
+ProcessedFeedback const& JSHeapBroker::ReadFeedbackForJumpLoop(
+    FeedbackSource const& source) {
+  FeedbackNexus nexus(source.vector, source.slot, feedback_nexus_config());
+  if (nexus.IsUninitialized()) return NewInsufficientFeedback(nexus.kind());
+
+  SpeculationMode mode = nexus.GetSpeculationMode();
+  return *zone()->New<JumpLoopFeedback>(mode, nexus.kind());
+}
+
 ProcessedFeedback const& JSHeapBroker::ReadFeedbackForArrayOrObjectLiteral(
     FeedbackSource const& source) {
   FeedbackNexus nexus(source.vector, source.slot, feedback_nexus_config());
@@ -834,6 +843,13 @@ ForInHint JSHeapBroker::GetFeedbackForForIn(FeedbackSource const& source) {
                                    : feedback.AsForIn().value();
 }
 
+SpeculationMode JSHeapBroker::GetFeedbackForJumpLoop(
+    FeedbackSource const& source) {
+  ProcessedFeedback const& feedback = ProcessFeedbackForJumpLoop(source);
+  return feedback.IsInsufficient() ? SpeculationMode::kAllowSpeculation
+                                   : feedback.AsJumpLoop().value();
+}
+
 ProcessedFeedback const& JSHeapBroker::GetFeedbackForArrayOrObjectLiteral(
     FeedbackSource const& source) {
   if (HasFeedback(source)) return GetFeedback(source);
@@ -905,6 +921,14 @@ ProcessedFeedback const& JSHeapBroker::GetFeedbackForInstanceOf(
     FeedbackSource const& source) {
   if (HasFeedback(source)) return GetFeedback(source);
   ProcessedFeedback const& feedback = ReadFeedbackForInstanceOf(source);
+  SetFeedback(source, &feedback);
+  return feedback;
+}
+
+ProcessedFeedback const& JSHeapBroker::ProcessFeedbackForJumpLoop(
+    FeedbackSource const& source) {
+  if (HasFeedback(source)) return GetFeedback(source);
+  ProcessedFeedback const& feedback = ReadFeedbackForJumpLoop(source);
   SetFeedback(source, &feedback);
   return feedback;
 }
@@ -1093,6 +1117,11 @@ GlobalAccessFeedback const& ProcessedFeedback::AsGlobalAccess() const {
 InstanceOfFeedback const& ProcessedFeedback::AsInstanceOf() const {
   CHECK_EQ(kInstanceOf, kind());
   return *static_cast<InstanceOfFeedback const*>(this);
+}
+
+JumpLoopFeedback const& ProcessedFeedback::AsJumpLoop() const {
+  CHECK_EQ(kJumpLoop, kind());
+  return *static_cast<JumpLoopFeedback const*>(this);
 }
 
 NamedAccessFeedback const& ProcessedFeedback::AsNamedAccess() const {

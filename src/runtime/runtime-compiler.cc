@@ -4,7 +4,6 @@
 
 #include <optional>
 
-#include "src/asmjs/asm-js.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/compiler.h"
 #include "src/common/assert-scope.h"
@@ -49,56 +48,78 @@ void LogExecution(Isolate* isolate, DirectHandle<JSFunction> function) {
 }
 
 #ifdef V8_ENABLE_SPARKPLUG_PLUS
-Builtin GetTypedBinaryOpBuiltin(int hint, Builtin current_builtin) noexcept {
+Builtin GetTypedBuiltinForCompare(int hint, Builtin current_builtin) noexcept {
   Builtin target_builtin = Builtin::kNoBuiltinId;
 
-#define TYPED_BINARY_OP_CASE(hint_type, op_type, hint_value)        \
-  case static_cast<int>(hint_type::Type::k##hint_value):            \
-    target_builtin = Builtin::k##op_type##_##hint_value##_Baseline; \
+#define TYPED_COMPARE_DISPATCH_CASE(hint_value, op_type)                     \
+  case static_cast<int>(CompareOperationFeedback::TypeIndex::k##hint_value): \
+    target_builtin = Builtin::k##op_type##_##hint_value##_Baseline;          \
     break;
-#define TYPED_STRICTEQUAL_CASE(hint_value) \
-  TYPED_BINARY_OP_CASE(CompareOperationFeedback, StrictEqual, hint_value)
-#define TYPED_EQUAL_CASE(hint_value) \
-  TYPED_BINARY_OP_CASE(CompareOperationFeedback, Equal, hint_value)
-#define TYPED_LESSTHAN_CASE(hint_value) \
-  TYPED_BINARY_OP_CASE(CompareOperationFeedback, LessThan, hint_value)
-#define TYPED_GREATERTHAN_CASE(hint_value) \
-  TYPED_BINARY_OP_CASE(CompareOperationFeedback, GreaterThan, hint_value)
-#define TYPED_LESSTHANOREQUAL_CASE(hint_value) \
-  TYPED_BINARY_OP_CASE(CompareOperationFeedback, LessThanOrEqual, hint_value)
-#define TYPED_GREATERTHANOREQUAL_CASE(hint_value) \
-  TYPED_BINARY_OP_CASE(CompareOperationFeedback, GreaterThanOrEqual, hint_value)
 
-#define TYPED_BINARY_OP_SWITCH(type_list_name, op_name, op_type)         \
-  if (IsTyped##op_type##Builtin(current_builtin)) {                      \
-    switch (hint) {                                                      \
-      TYPED_##type_list_name##_STUB_LIST(TYPED_##op_name##_CASE) default \
-          : target_builtin = Builtin::k##op_type##_Generic_Baseline;     \
-      break;                                                             \
-    }                                                                    \
-  } else
+#define TYPED_COMPARE_FAMILY_SWITCH(stub_list, op_type)              \
+  if (IsTyped##op_type##Builtin(current_builtin)) {                  \
+    switch (hint) {                                                  \
+      stub_list(TYPED_COMPARE_DISPATCH_CASE, op_type) default        \
+          : target_builtin = Builtin::k##op_type##_Generic_Baseline; \
+      break;                                                         \
+    }                                                                \
+  } else /* NOLINT */
 
-#define TYPED_BINARY_OP_LIST(V)                           \
-  V(STRICTEQUAL, STRICTEQUAL, StrictEqual)                \
-  V(EQUAL, EQUAL, Equal)                                  \
-  V(RELATIONAL_COMPARE, LESSTHAN, LessThan)               \
-  V(RELATIONAL_COMPARE, GREATERTHAN, GreaterThan)         \
-  V(RELATIONAL_COMPARE, LESSTHANOREQUAL, LessThanOrEqual) \
-  V(RELATIONAL_COMPARE, GREATERTHANOREQUAL, GreaterThanOrEqual)
+#define TYPED_COMPARE_DISPATCH_LIST(V)                   \
+  V(TYPED_STRICTEQUAL_STUB_LIST, StrictEqual)            \
+  V(TYPED_EQUAL_STUB_LIST, Equal)                        \
+  V(TYPED_RELATIONAL_COMPARE_STUB_LIST, LessThan)        \
+  V(TYPED_RELATIONAL_COMPARE_STUB_LIST, GreaterThan)     \
+  V(TYPED_RELATIONAL_COMPARE_STUB_LIST, LessThanOrEqual) \
+  V(TYPED_RELATIONAL_COMPARE_STUB_LIST, GreaterThanOrEqual)
 
-  TYPED_BINARY_OP_LIST(TYPED_BINARY_OP_SWITCH)
+  TYPED_COMPARE_DISPATCH_LIST(TYPED_COMPARE_FAMILY_SWITCH)
   /* else */ {}
 
   return target_builtin;
-#undef TYPED_BINARY_OP_LIST
-#undef TYPED_BINARY_OP_SWITCH
-#undef TYPED_GREATERTHANOREQUAL_CASE
-#undef TYPED_LESSTHANOREQUAL_CASE
-#undef TYPED_GREATERTHAN_CASE
-#undef TYPED_LESSTHAN_CASE
-#undef TYPED_EQUAL_CASE
-#undef TYPED_STRICTEQUAL_CASE
-#undef TYPED_BINARY_OP_CASE
+#undef TYPED_COMPARE_DISPATCH_LIST
+#undef TYPED_COMPARE_FAMILY_SWITCH
+#undef TYPED_COMPARE_DISPATCH_CASE
+}
+
+Builtin GetTypedBuiltinForBinop(int hint, Builtin current_builtin) noexcept {
+  Builtin target_builtin = Builtin::kNoBuiltinId;
+
+#define TYPED_BINOP_DISPATCH_CASE(hint_value, op_type)                      \
+  case static_cast<int>(BinaryOperationFeedback::TypeIndex::k##hint_value): \
+    target_builtin = Builtin::k##op_type##_##hint_value##_Baseline;         \
+    break;
+
+#define TYPED_BINOP_FAMILY_SWITCH(stub_list, op_type)                \
+  if (IsTyped##op_type##Builtin(current_builtin)) {                  \
+    switch (hint) {                                                  \
+      stub_list(TYPED_BINOP_DISPATCH_CASE, op_type) default          \
+          : target_builtin = Builtin::k##op_type##_Generic_Baseline; \
+      break;                                                         \
+    }                                                                \
+  } else /* NOLINT */
+
+#define TYPED_BINOP_DISPATCH_LIST(V)           \
+  V(TYPED_ADD_STUB_LIST, Add)                  \
+  V(TYPED_BINOP_STUB_LIST, Subtract)           \
+  V(TYPED_BINOP_STUB_LIST, Multiply)           \
+  V(TYPED_BINOP_STUB_LIST, Divide)             \
+  V(TYPED_BINOP_STUB_LIST, Modulus)            \
+  V(TYPED_EXP_STUB_LIST, Exponentiate)         \
+  V(TYPED_BITWISE_BINOP_STUB_LIST, BitwiseOr)  \
+  V(TYPED_BITWISE_BINOP_STUB_LIST, BitwiseXor) \
+  V(TYPED_BITWISE_BINOP_STUB_LIST, BitwiseAnd) \
+  V(TYPED_BITWISE_BINOP_STUB_LIST, ShiftLeft)  \
+  V(TYPED_BITWISE_BINOP_STUB_LIST, ShiftRight) \
+  V(TYPED_BITWISE_BINOP_STUB_LIST, ShiftRightLogical)
+
+  TYPED_BINOP_DISPATCH_LIST(TYPED_BINOP_FAMILY_SWITCH)
+  /* else */ {}
+
+  return target_builtin;
+#undef TYPED_BINOP_DISPATCH_LIST
+#undef TYPED_BINOP_FAMILY_SWITCH
+#undef TYPED_BINOP_DISPATCH_CASE
 }
 
 V8_INLINE void UpdateEmbeddedFeedback(Tagged<BytecodeArray> bytecode_array,
@@ -108,7 +129,10 @@ V8_INLINE void UpdateEmbeddedFeedback(Tagged<BytecodeArray> bytecode_array,
   bytecode_array->set(feedback_offset, static_cast<uint8_t>(current_feedback));
 }
 
-V8_INLINE void TryPatchBaselineCode(Isolate* isolate, int current_feedback) {
+using GetTypedBuiltinFn = Builtin (*)(int, Builtin);
+
+V8_INLINE void TryPatchBaselineCodeImpl(Isolate* isolate, int current_feedback,
+                                        GetTypedBuiltinFn get_typed_builtin) {
   DisallowGarbageCollection no_gc;
   const Address entry = Isolate::c_entry_fp(isolate->thread_local_top());
   Address* pc_address =
@@ -119,10 +143,7 @@ V8_INLINE void TryPatchBaselineCode(Isolate* isolate, int current_feedback) {
   // TODO(chromium:429351411): Consider using a cache.
   Builtin current_builtin =
       OffHeapInstructionStream::TryLookupCode(isolate, current);
-  Builtin target_builtin = GetTypedBinaryOpBuiltin(
-      CompareOperationFeedback::DecodeTypeIndex(
-          static_cast<CompareOperationFeedback::TypeIndex>(current_feedback)),
-      current_builtin);
+  Builtin target_builtin = get_typed_builtin(current_feedback, current_builtin);
 
   if (target_builtin != Builtin::kNoBuiltinId) {
     Address target = Builtins::EntryOf(target_builtin, isolate);
@@ -132,6 +153,27 @@ V8_INLINE void TryPatchBaselineCode(Isolate* isolate, int current_feedback) {
     Assembler::set_target_address_at(pc, kNullAddress, target, &jit_allocation,
                                      FLUSH_ICACHE_IF_NEEDED);
   }
+}
+
+V8_INLINE void TryPatchCompareOpBaselineCode(Isolate* isolate,
+                                             int current_feedback) {
+  TryPatchBaselineCodeImpl(isolate, current_feedback,
+                           GetTypedBuiltinForCompare);
+}
+
+V8_INLINE void TryPatchBinaryOpBaselineCode(Isolate* isolate,
+                                            int current_feedback) {
+  TryPatchBaselineCodeImpl(isolate, current_feedback, GetTypedBuiltinForBinop);
+}
+
+V8_INLINE int UpdateEmbeddedFeedbackAndGetCurrent(RuntimeArguments args) {
+  int current_feedback = args.smi_value_at(0);
+  DCHECK_LE(current_feedback, std::numeric_limits<uint8_t>::max());
+  DCHECK_GE(current_feedback, 0);
+  UpdateEmbeddedFeedback(TrustedCast<BytecodeArray>(args[2]),
+                         static_cast<int>(args.number_value_at(3)),
+                         current_feedback);
+  return current_feedback;
 }
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
 }  // namespace
@@ -325,7 +367,7 @@ RUNTIME_FUNCTION(Runtime_MarkLazyDeoptimized) {
       // detect if any ICs need updating before re-optimization.
       function->raw_feedback_cell()->set_interrupt_budget(1);
     } else {
-      function->SetInterruptBudget(isolate, BudgetModification::kRaise,
+      function->SetInterruptBudget(isolate, BudgetModification::kReset,
                                    CodeKind::INTERPRETED_FUNCTION);
     }
   }
@@ -339,64 +381,6 @@ RUNTIME_FUNCTION(Runtime_FunctionLogNextExecution) {
   DCHECK(v8_flags.log_function_events);
   LogExecution(isolate, js_function);
   return js_function->code(isolate);
-}
-
-// The enum values need to match "AsmJsInstantiateResult" in
-// tools/metrics/histograms/enums.xml.
-enum AsmJsInstantiateResult {
-  kAsmJsInstantiateSuccess = 0,
-  kAsmJsInstantiateFail = 1,
-};
-
-RUNTIME_FUNCTION(Runtime_InstantiateAsmJs) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(args.length(), 4);
-  DirectHandle<JSFunction> function = args.at<JSFunction>(0);
-
-  DirectHandle<JSReceiver> stdlib;
-  if (IsJSReceiver(args[1])) {
-    stdlib = args.at<JSReceiver>(1);
-  }
-  DirectHandle<JSReceiver> foreign;
-  if (IsJSReceiver(args[2])) {
-    foreign = args.at<JSReceiver>(2);
-  }
-  DirectHandle<JSArrayBuffer> memory;
-  if (IsJSArrayBuffer(args[3])) {
-    memory = args.at<JSArrayBuffer>(3);
-  }
-  DirectHandle<SharedFunctionInfo> shared(function->shared(), isolate);
-#if V8_ENABLE_WEBASSEMBLY
-  if (shared->HasAsmWasmData()) {
-    DirectHandle<AsmWasmData> data(shared->asm_wasm_data(), isolate);
-    MaybeDirectHandle<Object> result = AsmJs::InstantiateAsmWasm(
-        isolate, shared, data, stdlib, foreign, memory);
-    if (!result.is_null()) {
-      isolate->counters()->asmjs_instantiate_result()->AddSample(
-          kAsmJsInstantiateSuccess);
-      return *result.ToHandleChecked();
-    }
-    if (isolate->has_exception()) {
-      // If instantiation fails, we do not propagate the exception but instead
-      // fall back to JS execution. The only exception (to that rule) is the
-      // termination exception.
-      DCHECK(isolate->is_execution_terminating());
-      return ReadOnlyRoots{isolate}.exception();
-    }
-    isolate->counters()->asmjs_instantiate_result()->AddSample(
-        kAsmJsInstantiateFail);
-
-    // Remove wasm data, mark as broken for asm->wasm, replace AsmWasmData on
-    // the SFI with UncompiledData and set entrypoint to CompileLazy builtin,
-    // and return a smi 0 to indicate failure.
-    SharedFunctionInfo::DiscardCompiled(isolate, shared);
-  }
-  shared->set_is_asm_wasm_broken(true);
-#endif
-  DCHECK_EQ(function->code(isolate), *BUILTIN_CODE(isolate, InstantiateAsmJs));
-  function->UpdateCode(isolate, *BUILTIN_CODE(isolate, CompileLazy));
-  DCHECK(!isolate->has_exception());
-  return Smi::zero();
 }
 
 namespace {
@@ -873,33 +857,47 @@ RUNTIME_FUNCTION(Runtime_ResolvePossiblyDirectEval) {
 }
 
 #ifdef V8_ENABLE_SPARKPLUG_PLUS
-RUNTIME_FUNCTION(Runtime_PatchBaselineCode) {
+RUNTIME_FUNCTION(Runtime_PatchCompareOpBaselineCode) {
   HandleScope scope(isolate);
   CHECK(v8_flags.sparkplug_plus);
   DCHECK_EQ(4, args.length());
 
   DirectHandle<Boolean> compare_result = args.at<Boolean>(1);
-  int current_feedback = args.smi_value_at(0);
-  DCHECK_LE(current_feedback, std::numeric_limits<uint8_t>::max());
-  UpdateEmbeddedFeedback(TrustedCast<BytecodeArray>(args[2]),
-                         static_cast<int>(args.number_value_at(3)),
-                         current_feedback);
-  TryPatchBaselineCode(isolate, current_feedback);
+  TryPatchCompareOpBaselineCode(isolate,
+                                UpdateEmbeddedFeedbackAndGetCurrent(args));
   return *compare_result;
 }
 
-RUNTIME_FUNCTION(Runtime_PatchBaselineCodeAndThrow) {
+RUNTIME_FUNCTION(Runtime_PatchCompareOpBaselineCodeAndThrow) {
   HandleScope scope(isolate);
   CHECK(v8_flags.sparkplug_plus);
   DCHECK_EQ(4, args.length());
 
   DirectHandle<Object> exception = args.at<Object>(1);
-  int current_feedback = args.smi_value_at(0);
-  DCHECK_LE(current_feedback, std::numeric_limits<uint8_t>::max());
-  UpdateEmbeddedFeedback(TrustedCast<BytecodeArray>(args[2]),
-                         static_cast<int>(args.number_value_at(3)),
-                         current_feedback);
-  TryPatchBaselineCode(isolate, current_feedback);
+  TryPatchCompareOpBaselineCode(isolate,
+                                UpdateEmbeddedFeedbackAndGetCurrent(args));
+  return isolate->ReThrow(*exception);
+}
+
+RUNTIME_FUNCTION(Runtime_PatchBinopBaselineCode) {
+  HandleScope scope(isolate);
+  CHECK(v8_flags.sparkplug_plus);
+  DCHECK_EQ(4, args.length());
+
+  DirectHandle<Object> result = args.at<Object>(1);
+  TryPatchBinaryOpBaselineCode(isolate,
+                               UpdateEmbeddedFeedbackAndGetCurrent(args));
+  return *result;
+}
+
+RUNTIME_FUNCTION(Runtime_PatchBinopBaselineCodeAndThrow) {
+  HandleScope scope(isolate);
+  CHECK(v8_flags.sparkplug_plus);
+  DCHECK_EQ(4, args.length());
+
+  DirectHandle<Object> exception = args.at<Object>(1);
+  TryPatchBinaryOpBaselineCode(isolate,
+                               UpdateEmbeddedFeedbackAndGetCurrent(args));
   return isolate->ReThrow(*exception);
 }
 #endif  // V8_ENABLE_SPARKPLUG_PLUS

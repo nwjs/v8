@@ -77,14 +77,14 @@ const char* SectionName(SectionCode code) {
 ModuleResult DecodeWasmModule(Isolate* isolate,
                               WasmEnabledFeatures enabled_features,
                               base::Vector<const uint8_t> wire_bytes,
-                              bool validate_functions, ModuleOrigin origin,
+                              bool validate_functions,
                               DecodingMethod decoding_method,
                               WasmDetectedFeatures* detected_features) {
   DelayedCounterUpdates delayed_counters;
   std::optional<v8::metrics::WasmModuleDecoded> metrics_event;
   ModuleResult result = DecodeWasmModule(
-      enabled_features, wire_bytes, validate_functions, origin,
-      &delayed_counters, &metrics_event, decoding_method, detected_features);
+      enabled_features, wire_bytes, validate_functions, &delayed_counters,
+      &metrics_event, decoding_method, detected_features);
 
   delayed_counters.Publish(isolate);
   isolate->metrics_recorder()->AddMainThreadEvent(
@@ -97,12 +97,10 @@ ModuleResult DecodeWasmModule(Isolate* isolate,
 ModuleResult DecodeWasmModule(
     WasmEnabledFeatures enabled_features,
     base::Vector<const uint8_t> wire_bytes, bool validate_functions,
-    ModuleOrigin origin, DelayedCounterUpdates* delayed_counters,
+    DelayedCounterUpdates* delayed_counters,
     std::optional<v8::metrics::WasmModuleDecoded>* metrics_event,
     DecodingMethod decoding_method, WasmDetectedFeatures* detected_features) {
-  auto module_size_histogram = origin == kWasmOrigin
-                                   ? &Counters::wasm_wasm_module_size_bytes
-                                   : &Counters::wasm_asm_module_size_bytes;
+  auto module_size_histogram = &Counters::wasm_wasm_module_size_bytes;
   static_assert(kV8MaxWasmModuleSize < kMaxInt);
   delayed_counters->AddSample(module_size_histogram,
                               static_cast<int>(wire_bytes.size()));
@@ -110,13 +108,10 @@ ModuleResult DecodeWasmModule(
   base::TimeTicks start;
   if (base::TimeTicks::IsHighResolution()) start = base::TimeTicks::Now();
 
-  ModuleResult result =
-      DecodeWasmModule(enabled_features, wire_bytes, validate_functions, origin,
-                       detected_features);
+  ModuleResult result = DecodeWasmModule(enabled_features, wire_bytes,
+                                         validate_functions, detected_features);
   if (result.ok()) {
-    auto histogram = origin == kWasmOrigin
-                         ? &Counters::wasm_functions_per_wasm_module
-                         : &Counters::wasm_functions_per_asm_module;
+    auto histogram = &Counters::wasm_functions_per_wasm_module;
     delayed_counters->AddSample(
         histogram, static_cast<int>(result.value()->num_declared_functions));
   }
@@ -142,12 +137,11 @@ ModuleResult DecodeWasmModule(
 
 ModuleResult DecodeWasmModule(WasmEnabledFeatures enabled_features,
                               base::Vector<const uint8_t> wire_bytes,
-                              bool validate_functions, ModuleOrigin origin,
+                              bool validate_functions,
                               WasmDetectedFeatures* detected_features) {
   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
               "wasm.DecodeWasmModule");
-  ModuleDecoderImpl decoder{enabled_features, wire_bytes, origin,
-                            detected_features};
+  ModuleDecoderImpl decoder{enabled_features, wire_bytes, detected_features};
   ModuleResult result = decoder.DecodeModule(validate_functions);
   return result;
 }
@@ -156,7 +150,7 @@ ModuleResult DecodeWasmModuleForDisassembler(
     base::Vector<const uint8_t> wire_bytes, ITracer* tracer) {
   constexpr bool kNoValidateFunctions = false;
   WasmDetectedFeatures unused_detected_features;
-  ModuleDecoderImpl decoder{WasmEnabledFeatures::All(), wire_bytes, kWasmOrigin,
+  ModuleDecoderImpl decoder{WasmEnabledFeatures::All(), wire_bytes,
                             &unused_detected_features, tracer};
   return decoder.DecodeModule(kNoValidateFunctions);
 }
@@ -164,8 +158,8 @@ ModuleResult DecodeWasmModuleForDisassembler(
 ModuleDecoder::ModuleDecoder(WasmEnabledFeatures enabled_features,
                              WasmDetectedFeatures* detected_features)
     : impl_(std::make_unique<ModuleDecoderImpl>(
-          enabled_features, base::Vector<const uint8_t>{}, kWasmOrigin,
-          detected_features)) {}
+          enabled_features, base::Vector<const uint8_t>{}, detected_features)) {
+}
 
 ModuleDecoder::~ModuleDecoder() = default;
 
@@ -216,68 +210,11 @@ Result<std::pair<WasmModuleSignatureStorage, const FunctionSig*>>
 DecodeWasmSignatureForTesting(WasmEnabledFeatures enabled_features,
                               base::Vector<const uint8_t> bytes) {
   WasmDetectedFeatures unused_detected_features;
-  ModuleDecoderImpl decoder{enabled_features, bytes, kWasmOrigin,
-                            &unused_detected_features};
+  ModuleDecoderImpl decoder{enabled_features, bytes, &unused_detected_features};
   const FunctionSig* sig =
       decoder.DecodeFunctionSignatureForTesting(bytes.begin());
   return decoder.toResult(std::make_pair(
       std::move(decoder.shared_module()->signature_storage), sig));
-}
-
-AsmJsOffsetsResult DecodeAsmJsOffsets(
-    base::Vector<const uint8_t> encoded_offsets) {
-  std::vector<AsmJsOffsetFunctionEntries> functions;
-
-  Decoder decoder(encoded_offsets);
-  uint32_t functions_count = decoder.consume_u32v("functions count");
-  // Consistency check.
-  DCHECK_GE(encoded_offsets.size(), functions_count);
-  functions.reserve(functions_count);
-
-  for (uint32_t i = 0; i < functions_count; ++i) {
-    uint32_t size = decoder.consume_u32v("table size");
-    if (size == 0) {
-      functions.emplace_back();
-      continue;
-    }
-    DCHECK(decoder.checkAvailable(size));
-    const uint8_t* table_end = decoder.pc() + size;
-    uint32_t locals_size = decoder.consume_u32v("locals size");
-    int function_start_position = decoder.consume_u32v("function start pos");
-    int function_end_position = function_start_position;
-    int last_byte_offset = locals_size;
-    int last_asm_position = function_start_position;
-    std::vector<AsmJsOffsetEntry> func_asm_offsets;
-    func_asm_offsets.reserve(size / 4);  // conservative estimation
-    // Add an entry for the stack check, associated with position 0.
-    func_asm_offsets.push_back(
-        {0, function_start_position, function_start_position});
-    while (decoder.pc() < table_end) {
-      DCHECK(decoder.ok());
-      last_byte_offset += decoder.consume_u32v("byte offset delta");
-      int call_position =
-          last_asm_position + decoder.consume_i32v("call position delta");
-      int to_number_position =
-          call_position + decoder.consume_i32v("to_number position delta");
-      last_asm_position = to_number_position;
-      if (decoder.pc() == table_end) {
-        // The last entry is the function end marker.
-        DCHECK_EQ(call_position, to_number_position);
-        function_end_position = call_position;
-      } else {
-        func_asm_offsets.push_back(
-            {last_byte_offset, call_position, to_number_position});
-      }
-    }
-    DCHECK_EQ(decoder.pc(), table_end);
-    functions.emplace_back(AsmJsOffsetFunctionEntries{
-        function_start_position, function_end_position,
-        std::move(func_asm_offsets)});
-  }
-  DCHECK(decoder.ok());
-  DCHECK(!decoder.more());
-
-  return decoder.toResult(AsmJsOffsets{std::move(functions)});
 }
 
 std::vector<CustomSectionOffset> DecodeCustomSections(
@@ -335,10 +272,12 @@ bool FindNameSection(Decoder* decoder) {
   return true;
 }
 
-enum class EmptyNames : bool { kAllow, kSkip };
+using EmptyNames = base::StrongAlias<struct EmptyNamesTag, bool>;
+constexpr EmptyNames kAllowNames{true};
+constexpr EmptyNames kSkipNames{false};
 
 void DecodeNameMapInternal(NameMap& target, Decoder& decoder,
-                           EmptyNames empty_names = EmptyNames::kSkip) {
+                           EmptyNames empty_names = kSkipNames) {
   uint32_t count = decoder.consume_u32v("names count");
   for (uint32_t i = 0; i < count; i++) {
     uint32_t index = decoder.consume_u32v("index");
@@ -346,7 +285,7 @@ void DecodeNameMapInternal(NameMap& target, Decoder& decoder,
         consume_string(&decoder, unibrow::Utf8Variant::kLossyUtf8, "name");
     if (!decoder.ok()) break;
     if (index > NameMap::kMaxKey) continue;
-    if (empty_names == EmptyNames::kSkip && name.is_empty()) continue;
+    if (empty_names == kSkipNames && name.is_empty()) continue;
     if (!validate_utf8(&decoder, name)) continue;
     target.Put(index, name);
   }
@@ -355,7 +294,7 @@ void DecodeNameMapInternal(NameMap& target, Decoder& decoder,
 
 void DecodeNameMap(NameMap& target, Decoder& decoder,
                    uint32_t subsection_payload_length,
-                   EmptyNames empty_names = EmptyNames::kSkip) {
+                   EmptyNames empty_names = kSkipNames) {
   if (target.is_set()) {
     decoder.consume_bytes(subsection_payload_length);
     return;
@@ -400,7 +339,7 @@ void DecodeFunctionNames(base::Vector<const uint8_t> wire_bytes,
       continue;
     }
     // We need to allow empty function names for spec-conformant stack traces.
-    DecodeNameMapInternal(names, decoder, EmptyNames::kAllow);
+    DecodeNameMapInternal(names, decoder, kAllowNames);
     // The spec allows only one occurrence of each subsection. We could be
     // more permissive and allow repeated subsections; in that case we'd
     // have to delay calling {target.FinishInitialization()} on the function
@@ -565,11 +504,9 @@ class ValidateFunctionsTask : public JobTask {
                         WasmDetectedFeatures* detected_features) {
     const WasmFunction& function = module_->functions[func_index];
     DCHECK_LT(0, function.code.offset());
-    SharedFlag is_shared = module_->type(function.sig_index).is_shared;
     FunctionBody body{function.sig, function.code.offset(),
                       wire_bytes_.begin() + function.code.offset(),
-                      wire_bytes_.begin() + function.code.end_offset(),
-                      is_shared};
+                      wire_bytes_.begin() + function.code.end_offset()};
     DecodeResult validation_result = ValidateFunctionBody(
         zone, enabled_features_, module_, detected_features, body);
     if (V8_UNLIKELY(validation_result.failed())) {
@@ -618,7 +555,6 @@ WasmError ValidateFunctions(const WasmModule* module,
   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
               "wasm.ValidateFunctions", "num_declared_functions",
               module->num_declared_functions);
-  DCHECK_EQ(kWasmOrigin, module->origin);
 
   class NeverYieldDelegate final : public JobDelegate {
    public:

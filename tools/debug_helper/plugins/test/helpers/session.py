@@ -9,7 +9,6 @@ import pty
 import re
 import select
 import subprocess
-import termios
 import time
 from collections.abc import Iterable
 
@@ -24,7 +23,8 @@ class DebuggerSession:
   _READ_CHUNK_BYTES = 4096
   # How much of the pending buffer to include in a read-timeout error.
   _ERROR_TAIL_BYTES = 512
-
+  _SYNC_RETRY_TIMEOUT = 2.0
+  _SYNC_MAX_ATTEMPTS = 5
   _STOP_BYTE_RE = None
 
   def __init__(self, config, target_binary, target_args="", core_path=None):
@@ -34,6 +34,8 @@ class DebuggerSession:
     self._core = core_path
     self._env = os.environ.copy()
     self._env["V8_DEBUG_HELPER_LIB_PATH"] = config.debug_helper_lib
+    # The tests match English debugger output.
+    self._env["LC_ALL"] = "C"
     self._proc = None
     self._fd = None
     self._buf = b""
@@ -52,26 +54,44 @@ class DebuggerSession:
 
   def __enter__(self):
     self._spawn()
-    for cmd in self._setup_commands():
-      self.send(cmd)
-    # Drain banner + setup output by syncing on a marker before tests begin.
-    token = self._next_marker()
-    self.send(self._make_marker_cmd(token))
-    self._read_until(re.escape(token.encode()))
+    try:
+      for cmd in self._setup_commands():
+        self.send(cmd)
+      # Drain banner + setup output by syncing on a marker before tests begin.
+      self._sync()
+    except Exception:
+      self.close()
+      raise
     return self
+
+  def _sync(self):
+    """Inject markers until one echoes back to ensure the debugger is reading
+    commands again.
+    """
+    for attempt in range(self._SYNC_MAX_ATTEMPTS):
+      token = self._next_marker()
+      self.send(self._make_marker_cmd(token))
+      timeout = (
+          self._DEFAULT_READ_TIMEOUT if attempt == self._SYNC_MAX_ATTEMPTS -
+          1 else self._SYNC_RETRY_TIMEOUT)
+      try:
+        self._read_until(re.escape(token.encode()), timeout=timeout)
+        return
+      except TimeoutError:
+        continue
+    raise TimeoutError(
+        f"debugger did not acknowledge {self._SYNC_MAX_ATTEMPTS} sync markers")
 
   def __exit__(self, *_exc):
     self.close()
 
   def _spawn(self):
     master, slave = pty.openpty()
-    # Disable local echo so our writes don't reappear in the captured stream.
-    attrs = termios.tcgetattr(slave)
-    attrs[3] &= ~termios.ECHO
-    termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    # Feed commands through a pipe to prevent the prompt redraws from
+    # racing against input written to the pty.
     self._proc = subprocess.Popen(
         self._spawn_argv(),
-        stdin=slave,
+        stdin=subprocess.PIPE,
         stdout=slave,
         stderr=slave,
         env=self._env,
@@ -86,6 +106,13 @@ class DebuggerSession:
       self.send("quit")
     except Exception:
       pass
+    # Closing the command pipe both releases it and sends EOF, which is a
+    # second quit signal in case `quit` was not processed.
+    if self._proc.stdin is not None:
+      try:
+        self._proc.stdin.close()
+      except OSError:
+        pass
     try:
       self._proc.wait(timeout=self._QUIT_GRACE_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -100,8 +127,9 @@ class DebuggerSession:
     self._proc = None
 
   def send(self, line):
-    assert self._fd is not None
-    os.write(self._fd, (line + "\n").encode())
+    assert self._proc is not None and self._proc.stdin is not None
+    self._proc.stdin.write((line + "\n").encode())
+    self._proc.stdin.flush()
 
   def _read_until(self, pattern_bytes, timeout=None):
     """Read until `pattern_bytes` appears in the buffer.
@@ -148,15 +176,16 @@ class DebuggerSession:
     self.send(cmd)
     self.send(self._make_marker_cmd(token))
     text = self._read_until(re.escape(token.encode()), timeout=timeout)
-    # Strip the debugger prompt that prefixes each command. ECHO is off so
-    # user input doesn't reappear, but the prompt itself still leaks into
-    # captured output (and breaks `^0x...` head-line regexes).
+    # Strip the debugger prompt that prefixes each command. Input arrives
+    # through a pipe so it is not echoed, but the prompt itself still leaks
+    # into captured output (and breaks `^0x...` head-line regexes).
     return re.sub(r"^\((?:gdb|lldb)\)\s?", "", text, flags=re.MULTILINE)
 
   def run_to_abort(self):
     """Send `run` and wait for the program to stop at a signal/breakpoint."""
     self.send("run")
     self._read_until(self._STOP_BYTE_RE, timeout=self._DEFAULT_READ_TIMEOUT)
+    self._sync()
 
   def v8_inspect(self, address):
     """Run `v8 inspect <address>` and return its captured output."""
@@ -201,13 +230,28 @@ class GdbSession(DebuggerSession):
   def _setup_commands(self):
     if self._core:
       yield f"core-file {self._core}"
-    elif self._target_args:
-      yield f"set args {self._target_args}"
+    else:
+      # Without the redirection the debuggee inherits the command pipe as
+      # its stdin and could consume queued debugger commands.
+      yield f"set args {self._target_args} </dev/null"
 
   def _make_marker_cmd(self, token):
     # gdb's `echo` prints its argument verbatim; \n produces the trailing
     # newline that lets us anchor the marker on its own line.
     return rf"echo {token}\n"
+
+  def select_thread(self, index):
+    """Select thread `index`. Returns False if the thread does not exist."""
+    output = self.run_command(f"thread {index}")
+    return "Switching to thread" in output
+
+  def select_frame(self, index):
+    """Select frame `index` on the selected thread."""
+    self.run_command(f"frame {index}")
+
+  def frame_variable(self, name):
+    """Print variable `name` in the selected frame, in hex."""
+    return self.run_command(f"print /x {name}")
 
 
 class LldbSession(DebuggerSession):
@@ -238,3 +282,22 @@ class LldbSession(DebuggerSession):
     # in the print output, not in the echoed command line.
     half = len(token) // 2
     return f'script print({token[:half]!r} + {token[half:]!r})'
+
+  def select_thread(self, index):
+    """Select thread `index`. Returns False if the thread does not exist."""
+    # Uses the script API rather than `thread select`, whose confirmation is
+    # printed asynchronously and would race the marker-based output capture.
+    output = self.run_command(
+        "script print(lldb.debugger.GetSelectedTarget().GetProcess()"
+        f".SetSelectedThreadByIndexID({index}))")
+    return "True" in output
+
+  def select_frame(self, index):
+    """Select frame `index` on the selected thread."""
+    self.run_command(f"frame select {index}")
+
+  def frame_variable(self, name):
+    """Print variable `name` in the selected frame, in hex."""
+    # Uses `frame variable` rather than the expression evaluator, which is
+    # more reliable for variables in optimized frames.
+    return self.run_command(f"frame variable -f hex {name}")

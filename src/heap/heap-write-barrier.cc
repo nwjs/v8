@@ -138,12 +138,6 @@ void WriteBarrier::MarkingSlow(Tagged<JSArrayBuffer> host,
   marking_barrier->Write(host, extension);
 }
 
-void WriteBarrier::MarkingSlow(Tagged<DescriptorArray> descriptor_array,
-                               int number_of_own_descriptors) {
-  MarkingBarrier* marking_barrier = CurrentMarkingBarrier(descriptor_array);
-  marking_barrier->Write(descriptor_array, number_of_own_descriptors);
-}
-
 void WriteBarrier::MarkingSlow(Tagged<HeapObject> host,
                                ExternalPointerSlot slot) {
 #ifdef V8_COMPRESS_POINTERS
@@ -197,7 +191,6 @@ void WriteBarrier::MarkingSlow(Tagged<HeapObject> host,
   // Mark both the table entry and its content.
   Isolate* isolate = Isolate::Current();
   JSDispatchTable& jdt = isolate->js_dispatch_table();
-  static_assert(JSDispatchTable::kWriteBarrierSetsEntryMarkBit);
 #ifdef DEBUG
   Heap* heap = isolate->heap();
   jdt.VerifyEntry(handle, heap->js_dispatch_table_space(),
@@ -580,42 +573,36 @@ void WriteBarrier::ForRange(Heap* heap, Tagged<HeapObject> object,
 #if V8_VERIFY_WRITE_BARRIERS
 
 // static
-bool WriteBarrier::VerifyDispatchHandleMarkingState(Tagged<HeapObject> host,
+void WriteBarrier::VerifyDispatchHandleWriteBarrier(Tagged<HeapObject> host,
                                                     JSDispatchHandle handle,
                                                     WriteBarrierMode mode) {
   JSDispatchTable& jdt = Isolate::Current()->js_dispatch_table();
   Tagged<Code> value = jdt.GetCode(handle);
 
   if (mode == SKIP_WRITE_BARRIER) {
+    // Builtins do not need write barriers, neither do their JSDispatch handles
+    // as the handles don't move and are immortal. This additional check is
+    // needed since in some configurations and cctests the builtins Code objects
+    // are not in R/O space.
     if (value->is_builtin()) {
-      // Builtins are immortal and immovable, so no write barrier needed.
-      BasePage* page = BasePage::FromHeapObject(value);
-      DCHECK(page->never_evacuate());
-      return true;
+      static_assert(!JSDispatchTable::kSupportsCompaction);
+      return;
     }
 
-    if (WriteBarrier::IsRequired(host, value)) {
-      return false;
+    // First check the barrier for the value
+    VerifySkipWriteBarrier(host, value, mode);
+
+    // Now check the barrier for the handle itself
+    if (jdt.InReadOnlySegment(handle)) {
+      return;
     }
+    if (IsMostRecentYoungAllocation(host->address())) {
+      return;
+    }
+    UNREACHABLE();
+  } else {
+    DCHECK_EQ(mode, UPDATE_WRITE_BARRIER);
   }
-
-  if (CurrentMarkingBarrier(host)->is_not_major()) return true;
-
-  // Ensure we don't have a black -> white -> black edge. This could happen when
-  // skipping a write barrier while concurrently the dispatch entry is marked
-  // from another JSFunction.
-  if (ReadOnlyHeap::Contains(host) ||
-      (IsMarking(host) && mode != SKIP_WRITE_BARRIER) ||
-      !CurrentMarkingBarrier(host)->IsMarked(host)) {
-    return true;
-  }
-  if (jdt.IsMarked(handle)) {
-    return true;
-  }
-  if (ReadOnlyHeap::Contains(value)) {
-    return true;
-  }
-  return !CurrentMarkingBarrier(host)->IsMarked(value);
 }
 
 #endif  // V8_VERIFY_WRITE_BARRIERS

@@ -4,6 +4,7 @@
 
 #include "src/snapshot/code-serializer.h"
 
+#include <algorithm>
 #include <memory>
 
 #include "src/base/fpu.h"
@@ -65,11 +66,6 @@ ScriptCompiler::CachedData* CodeSerializer::Serialize(
     ShortPrint(script->name());
     PrintF("]\n");
   }
-#if V8_ENABLE_WEBASSEMBLY
-  // TODO(7110): Enable serialization of Asm modules once the AsmWasmData is
-  // context independent.
-  if (script->ContainsAsmModule()) return nullptr;
-#endif  // V8_ENABLE_WEBASSEMBLY
 
   // Serialize code object.
   DirectHandle<String> source(Cast<String>(script->source()), isolate);
@@ -175,11 +171,6 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
       DisallowGarbageCollection no_gc;
       Tagged<SharedFunctionInfo> sfi = Cast<SharedFunctionInfo>(*obj);
       DCHECK(!sfi->IsApiFunction());
-#if V8_ENABLE_WEBASSEMBLY
-      // TODO(7110): Enable serializing of Asm modules once the AsmWasmData
-      // is context independent.
-      DCHECK(!sfi->HasAsmWasmData());
-#endif  // V8_ENABLE_WEBASSEMBLY
 
       if (auto maybe_debug_info = sfi->TryGetDebugInfo(isolate())) {
         debug_info = direct_handle(maybe_debug_info.value(), isolate());
@@ -745,7 +736,7 @@ SerializedCodeData::SerializedCodeData(const std::vector<uint8_t>* payload,
   AllocateData(size);
 
   // Zero out pre-payload data. Part of that is only used for padding.
-  Memset(data_, 0, kHeaderSize);
+  std::fill_n(data_, kHeaderSize, 0);
 
   // Set header values.
   SetMagicNumber();
@@ -758,7 +749,8 @@ SerializedCodeData::SerializedCodeData(const std::vector<uint8_t>* payload,
   SetHeaderValue(kPayloadLengthOffset, static_cast<uint32_t>(payload->size()));
 
   // Zero out any padding in the header.
-  Memset(data_ + kUnalignedHeaderSize, 0, kHeaderSize - kUnalignedHeaderSize);
+  std::fill_n(data_ + kUnalignedHeaderSize, kHeaderSize - kUnalignedHeaderSize,
+              0);
 
   // Copy serialized data.
   CopyBytes(data_ + kHeaderSize, payload->data(),

@@ -18,7 +18,7 @@ namespace v8 {
 using reg_value_type = unsigned long long;  // NOLINT(runtime/int)
 
 struct MemoryAccessInformation {
-  enum Kind { kRead, kWrite, kCmp, kCmpxchg };
+  enum Kind { kRead, kWrite, kCmp, kCmpxchg, kRepMovs };
   enum Extension { kZeroExtend, kSignExtend, kNoExtend };
 
   Kind kind;
@@ -29,8 +29,13 @@ struct MemoryAccessInformation {
   reg_value_type* result_reg = nullptr;
   // Index of the XMM register (0-15) if it's an XMM register.
   int xmm_reg_index = -1;
+  // Index of the mask register (0-7) if it's an AVX-512 mask register.
+  int k_reg_index = -1;
 
   int access_width = 8;
+  // Width of the destination register. Differs from access_width only for
+  // sign/zero-extending moves (e.g. movsxbl: byte source, 32-bit destination).
+  int dest_width = 8;
   Extension extension = kNoExtend;
 };
 

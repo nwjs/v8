@@ -786,10 +786,7 @@ class Graph {
     return NewBlock(Block::Kind::kMerge, origin);
   }
 
-  V8_INLINE Block* NewBlock(Block::Kind kind, const Block* origin = nullptr) {
-    if (V8_UNLIKELY(next_block_ == all_blocks_.size())) {
-      AllocateNewBlocks();
-    }
+  V8_INLINE Block* NewBlockUnchecked(Block::Kind kind, const Block* origin) {
     Block* result = all_blocks_[next_block_++];
     new (result) Block(kind);
 #ifdef DEBUG
@@ -802,6 +799,13 @@ class Graph {
 #endif
     result->SetOrigin(origin);
     return result;
+  }
+
+  V8_INLINE Block* NewBlock(Block::Kind kind, const Block* origin = nullptr) {
+    if (V8_UNLIKELY(next_block_ == all_blocks_.size())) {
+      return GrowAndNewBlock(kind, origin);
+    }
+    return NewBlockUnchecked(kind, origin);
   }
 
   V8_INLINE bool Add(Block* block) {
@@ -1222,6 +1226,12 @@ class Graph {
     // Eventually most new blocks will be bound anyway, so pre-allocate as well.
     DCHECK_LE(bound_blocks_.size(), all_blocks_.size());
     bound_blocks_.reserve(all_blocks_.size());
+  }
+
+  V8_NOINLINE V8_PRESERVE_MOST Block* GrowAndNewBlock(Block::Kind kind,
+                                                      const Block* origin) {
+    AllocateNewBlocks();
+    return NewBlockUnchecked(kind, origin);
   }
 
   Origin origin_ = Origin::kInvalid;

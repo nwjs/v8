@@ -25,6 +25,7 @@ inline Address WasmInterpreterRuntime::EffectiveAddress(uint32_t memory_index,
                                                         uint64_t index) const {
   DirectHandle<WasmTrustedInstanceData> trusted_data =
       wasm_trusted_instance_data();
+  SBXCHECK_LT(memory_index, module_->memories.size());
   DCHECK_GE(std::numeric_limits<uintptr_t>::max(),
             trusted_data->memory_size(memory_index));
   DCHECK_GE(trusted_data->memory_size(memory_index), index);
@@ -39,6 +40,7 @@ inline bool WasmInterpreterRuntime::BoundsCheckMemRange(
     Address* out_address) const {
   DirectHandle<WasmTrustedInstanceData> trusted_data =
       wasm_trusted_instance_data();
+  SBXCHECK_LT(memory_index, module_->memories.size());
   DCHECK_GE(std::numeric_limits<uintptr_t>::max(),
             trusted_data->memory_size(memory_index));
   if (!base::ClampToBounds<uint64_t>(index, size,
@@ -94,19 +96,27 @@ inline void WasmInterpreterRuntime::SetGlobalRef(
 }
 
 inline void WasmInterpreterRuntime::InitMemoryAddresses() {
+  DirectHandle<WasmTrustedInstanceData> trusted_data =
+      wasm_trusted_instance_data();
   DCHECK_LE(module_->memories.size(), kV8MaxWasmMemories);
-  memory_start_ = wasm_trusted_instance_data()->memory0_start();
-  memory_starts_.resize(module_->memories.size());
-  is_memory64_.resize(module_->memories.size());
-  for (size_t i = 0; i < module_->memories.size(); ++i) {
-    memory_starts_[i] =
-        wasm_trusted_instance_data()->memory_base(static_cast<uint32_t>(i));
+  const uint32_t bases_and_sizes_length =
+      trusted_data->memory_bases_and_sizes()->length().value();
+  SBXCHECK_EQ(bases_and_sizes_length % 2u, 0u);
+  const size_t trusted_memory_count =
+      static_cast<size_t>(bases_and_sizes_length / 2u);
+  SBXCHECK_EQ(trusted_memory_count, module_->memories.size());
+  memory_start_ = trusted_data->memory0_start();
+  memory_starts_.resize(trusted_memory_count);
+  is_memory64_.resize(trusted_memory_count);
+  for (size_t i = 0; i < trusted_memory_count; ++i) {
+    memory_starts_[i] = trusted_data->memory_base(static_cast<uint32_t>(i));
     is_memory64_[i] = module_->memories[i].is_memory64();
   }
 }
 
 inline uint8_t* WasmInterpreterRuntime::GetMemoryStart(
     uint32_t memory_index) const {
+  SBXCHECK_LT(memory_index, memory_starts_.size());
   return memory_starts_[memory_index];
 }
 
@@ -116,16 +126,19 @@ inline uint8_t* WasmInterpreterRuntime::GetMemoryStart() const {
 
 inline uint64_t WasmInterpreterRuntime::MemorySize(
     uint32_t memory_index) const {
+  SBXCHECK_LT(memory_index, module_->memories.size());
   return wasm_trusted_instance_data()->memory_size(memory_index) /
          kWasmPageSize;
 }
 
 inline bool WasmInterpreterRuntime::IsMemory64(uint32_t memory_index) const {
+  SBXCHECK_LT(memory_index, is_memory64_.size());
   return is_memory64_[memory_index];
 }
 
 inline size_t WasmInterpreterRuntime::GetMemorySize(
     uint32_t memory_index) const {
+  SBXCHECK_LT(memory_index, module_->memories.size());
   return wasm_trusted_instance_data()->memory_size(memory_index);
 }
 
@@ -235,10 +248,14 @@ inline bool WasmInterpreterRuntime::WasmStackCheck(
 
 inline DirectHandle<WasmTrustedInstanceData>
 WasmInterpreterRuntime::wasm_trusted_instance_data() const {
-  // Must be called from within a WasmInterpreterRuntime::InstanceScope so that
-  // the GC keeps the instance object alive for this access.
-  DCHECK(!current_instance_.is_null());
-  return direct_handle(current_instance_->trusted_data(isolate_), isolate_);
+  // Must be called from within a WasmInterpreterRuntime::InstanceScope, which
+  // publishes the (already trusted) {current_trusted_data_} at scope entry. We
+  // deliberately return that stored, off-cage value rather than re-loading an
+  // in-cage WasmInstanceObject::trusted_data_ handle on every call: re-reading
+  // that handle is a sandbox hole (a Wasm-to-JS callback can same-tag swap it
+  // mid-execution).
+  DCHECK(!current_trusted_data_.is_null());
+  return current_trusted_data_;
 }
 
 inline WasmInterpreterThread::State InterpreterHandle::ContinueExecution(

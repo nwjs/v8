@@ -1075,6 +1075,11 @@ void MaglevAssembler::Float64SilenceNan(DoubleRegister value) {
   Subsd(value, kScratchDoubleReg);
 }
 
+void MaglevAssembler::Float64ExtractHighWord32(Register dst,
+                                               DoubleRegister src) {
+  Pextrd(dst, src, 1);
+}
+
 #ifdef V8_ENABLE_UNDEFINED_DOUBLE
 void MaglevAssembler::JumpIfUndefinedNan(DoubleRegister value, Register scratch,
                                          Label* target,

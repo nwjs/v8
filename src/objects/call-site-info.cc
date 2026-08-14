@@ -147,9 +147,7 @@ bool CallSiteInfo::IsToplevel() const {
 int CallSiteInfo::GetLineNumber(DirectHandle<CallSiteInfo> info) {
   Isolate* isolate = Isolate::Current();
 #if V8_ENABLE_WEBASSEMBLY
-  if (info->IsWasm() && !info->IsAsmJsWasm()) {
-    return 1;
-  }
+  if (info->IsWasm()) return 1;
 #endif  // V8_ENABLE_WEBASSEMBLY
   DirectHandle<Script> script;
   if (GetScript(isolate, info).ToHandle(&script)) {
@@ -168,9 +166,7 @@ int CallSiteInfo::GetColumnNumber(DirectHandle<CallSiteInfo> callsite_info) {
   Isolate* isolate = Isolate::Current();
   int position = GetSourcePosition(callsite_info);
 #if V8_ENABLE_WEBASSEMBLY
-  if (callsite_info->IsWasm() && !callsite_info->IsAsmJsWasm()) {
-    return position + 1;
-  }
+  if (callsite_info->IsWasm()) return position + 1;
 #endif  // V8_ENABLE_WEBASSEMBLY
   DirectHandle<Script> script;
   if (GetScript(isolate, callsite_info).ToHandle(&script)) {
@@ -190,24 +186,12 @@ int CallSiteInfo::GetColumnNumber(DirectHandle<CallSiteInfo> callsite_info) {
 int CallSiteInfo::GetEnclosingLineNumber(DirectHandle<CallSiteInfo> info) {
   Isolate* isolate = Isolate::Current();
 #if V8_ENABLE_WEBASSEMBLY
-  if (info->IsWasm() && !info->IsAsmJsWasm()) {
-    return 1;
-  }
+  if (info->IsWasm()) return 1;
 #endif  // V8_ENABLE_WEBASSEMBLY
   DirectHandle<Script> script;
   if (!GetScript(isolate, info).ToHandle(&script)) {
     return Message::kNoLineNumberInfo;
   }
-#if V8_ENABLE_WEBASSEMBLY
-  if (info->IsAsmJsWasm()) {
-    // TODO(clemensb): This can load the wrong module via in-sandbox corruption.
-    auto* module = info->GetWasmInstance()->trusted_data(isolate)->module();
-    auto func_index = info->GetWasmFunctionIndex();
-    int position = wasm::GetSourcePosition(module, func_index, 0,
-                                           info->IsAsmJsAtNumberConversion());
-    return Script::GetLineNumber(script, position) + 1;
-  }
-#endif  // V8_ENABLE_WEBASSEMBLY
   int position = info->GetSharedFunctionInfo()->function_token_position();
   return Script::GetLineNumber(script, position) + 1;
 }
@@ -216,7 +200,7 @@ int CallSiteInfo::GetEnclosingLineNumber(DirectHandle<CallSiteInfo> info) {
 int CallSiteInfo::GetEnclosingColumnNumber(DirectHandle<CallSiteInfo> info) {
   Isolate* isolate = Isolate::Current();
 #if V8_ENABLE_WEBASSEMBLY
-  if (info->IsWasm() && !info->IsAsmJsWasm()) {
+  if (info->IsWasm()) {
     // TODO(clemensb): This can load the wrong module via in-sandbox corruption.
     auto* module = info->GetWasmInstance()->trusted_data(isolate)->module();
     auto func_index = info->GetWasmFunctionIndex();
@@ -227,16 +211,6 @@ int CallSiteInfo::GetEnclosingColumnNumber(DirectHandle<CallSiteInfo> info) {
   if (!GetScript(isolate, info).ToHandle(&script)) {
     return Message::kNoColumnInfo;
   }
-#if V8_ENABLE_WEBASSEMBLY
-  if (info->IsAsmJsWasm()) {
-    // TODO(clemensb): This can load the wrong module via in-sandbox corruption.
-    auto* module = info->GetWasmInstance()->trusted_data(isolate)->module();
-    auto func_index = info->GetWasmFunctionIndex();
-    int position = wasm::GetSourcePosition(module, func_index, 0,
-                                           info->IsAsmJsAtNumberConversion());
-    return Script::GetColumnNumber(script, position) + 1;
-  }
-#endif  // V8_ENABLE_WEBASSEMBLY
   int position = info->GetSharedFunctionInfo()->function_token_position();
   return Script::GetColumnNumber(script, position) + 1;
 }
@@ -701,15 +675,13 @@ int CallSiteInfo::ComputeSourcePosition(DirectHandle<CallSiteInfo> info,
     // TODO(clemensb): This can load the wrong module via in-sandbox corruption.
     auto module = info->GetWasmInstance()->trusted_data(isolate)->module();
     uint32_t func_index = info->GetWasmFunctionIndex();
-    return wasm::GetSourcePosition(module, func_index, offset,
-                                   info->IsAsmJsAtNumberConversion());
+    return wasm::GetSourcePosition(module, func_index, offset);
   } else {
 #endif  // V8_ENABLE_DRUMBRAKE
     if (info->IsWasm()) {
       auto module = info->GetWasmInstance()->trusted_data(isolate)->module();
       uint32_t func_index = info->GetWasmFunctionIndex();
-      return wasm::GetSourcePosition(module, func_index, offset,
-                                     info->IsAsmJsAtNumberConversion());
+      return wasm::GetSourcePosition(module, func_index, offset);
     }
 #if V8_ENABLE_DRUMBRAKE
   }
@@ -961,7 +933,7 @@ void SerializeBuiltinStackFrame(Isolate* isolate,
 void SerializeCallSiteInfo(Isolate* isolate, DirectHandle<CallSiteInfo> frame,
                            IncrementalStringBuilder* builder) {
 #if V8_ENABLE_WEBASSEMBLY
-  if (frame->IsWasm() && !frame->IsAsmJsWasm()) {
+  if (frame->IsWasm()) {
     SerializeWasmStackFrame(isolate, frame, builder);
     return;
   }

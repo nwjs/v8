@@ -268,6 +268,9 @@ class V8_EXPORT_PRIVATE GCTracer {
     // Bytes marked incrementally for INCREMENTAL_MARK_COMPACTOR
     size_t incremental_marking_bytes = 0;
 
+    // Number of JSGlobalProxy objects found during full GC.
+    size_t found_js_global_proxies = 0;
+
     // Approximate number of threads that contributed in garbage collection.
     size_t concurrency_estimate = 1;
 
@@ -399,6 +402,8 @@ class V8_EXPORT_PRIVATE GCTracer {
 
   // Log an incremental marking step.
   void AddIncrementalSweepingStep(double duration);
+
+  void IncrementJSGlobalProxyCount();
 
   // Compute the average incremental marking speed in bytes/millisecond.
   // Returns a conservative value if no events have been recorded.

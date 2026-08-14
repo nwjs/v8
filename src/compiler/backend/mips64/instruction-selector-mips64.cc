@@ -1992,10 +1992,11 @@ void InstructionSelector::VisitStackPointerGreaterThan(
   // are only applied to the first stack check. If applying an offset, we must
   // ensure the input and temp registers do not alias, thus kUniqueRegister.
   InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
-  const int temp_count = (kind == StackCheckKind::kJSFunctionEntry ? 2 : 1);
-  const auto register_mode = (kind == StackCheckKind::kJSFunctionEntry)
-                                 ? OperandGenerator::kUniqueRegister
-                                 : OperandGenerator::kRegister;
+  const bool has_offset =
+      kind == StackCheckKind::kJSFunctionEntry || kind == StackCheckKind::kWasm;
+  const int temp_count = (has_offset ? 2 : 1);
+  const auto register_mode = has_offset ? OperandGenerator::kUniqueRegister
+                                        : OperandGenerator::kRegister;
 
   InstructionOperand inputs[] = {g.UseRegisterWithMode(value, register_mode)};
   static constexpr int input_count = arraysize(inputs);
@@ -2324,9 +2325,10 @@ void InstructionSelector::VisitBitcastWord32PairToFloat64(OpIndex node) {
   OpIndex hi = bitcast.high_word32();
   OpIndex lo = bitcast.low_word32();
 
-  InstructionOperand temps[] = {g.TempRegister()};
-  Emit(kMips64Float64FromWord32Pair, g.DefineAsRegister(node), g.Use(hi),
-       g.Use(lo), arraysize(temps), temps);
+  int vreg = g.AllocateVirtualRegister();
+  Emit(kMips64Dins, g.DefineSameAsFirstForVreg(vreg), g.UseRegister(lo),
+       g.UseRegister(hi), g.TempImmediate(32), g.TempImmediate(32));
+  Emit(kMips64BitcastLD, g.DefineAsRegister(node), g.UseRegisterForVreg(vreg));
 }
 
 void InstructionSelector::VisitMemoryBarrier(OpIndex node) {

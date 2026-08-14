@@ -1,7 +1,5 @@
 include_rules = [
   "+src",
-  "-src/asmjs",
-  "+src/asmjs/asm-js.h",
   "-src/baseline",
   "+src/baseline/baseline.h",
   "+src/baseline/baseline-batch-compiler.h",
@@ -100,6 +98,7 @@ specific_include_rules = {
     "+include/libplatform/v8-tracing.h",
     "+perfetto/tracing/track_event.h",
     "+perfetto/tracing/track_event_legacy.h",
+    "+third_party/partition_alloc/src/partition_alloc/partition_alloc.h",
     "+third_party/partition_alloc/src/partition_alloc/partition_root.h",
     "+third_party/partition_alloc/src/partition_alloc/shim/allocator_shim_default_dispatch_to_partition_alloc.h"
   ],
@@ -121,9 +120,6 @@ specific_include_rules = {
   ],
   "external-pointer-table\.cc": [
     "+src/heap/read-only-spaces.h",
-  ],
-  "isolate-group\.cc": [
-    "+third_party/partition_alloc/src/partition_alloc/partition_alloc.h"
   ],
   # keep the includes to a minimum since this header will be included via write barriers.
   "memory-chunk-header\.h": [
@@ -154,5 +150,11 @@ specific_include_rules = {
   "heap-snapshot-generator\.cc": [
     "+src/heap/cppgc-js/cpp-heap.h",
     "+src/heap/cppgc-js/cpp-snapshot.h",
+  ],
+  "generated-code-validator-arm64\.cc": [
+    "+third_party/disarm/src/disarm64.h",
+  ],
+  "generated-code-validator-x64\.cc": [
+    "+third_party/fadec/src/fadec.h",
   ],
 }

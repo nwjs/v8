@@ -796,6 +796,7 @@ Reduction TypedOptimization::ReduceTypedArrayLength(Node* node) {
     if (!IsRabGsabTypedArrayElementsKind(elements_kind)) {
       Node* value = jsgraph()->ConstantNoHole(
           byte_length >> ElementsKindToShiftSize(elements_kind));
+      ReplaceWithValue(node, value);
       return Replace(value);
     }
   }

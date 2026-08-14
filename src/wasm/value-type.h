@@ -254,7 +254,7 @@ static constexpr uint32_t kGenericKindMask =
 static constexpr uint32_t kNumericKindMask =
     kGenericKindMask | IsSharedField::kMask;
 static constexpr uint32_t kNumericExtraBits =
-    IsSharedField::encode(SharedFlag::kYes);
+    IsSharedField::encode(SharedFlag{true});
 
 #define COUNT(...) +1
 static constexpr uint32_t kNumberOfGenericKinds = 0 FOREACH_GENERIC_TYPE(COUNT);
@@ -352,7 +352,7 @@ class ValueTypeBase {
   static const uint32_t kIndexShift = value_type_impl::PayloadField::kShift;
 
   constexpr ValueTypeBase()
-      : ValueTypeBase(GenericKind::kVoid, kNonNullable, SharedFlag::kNo) {}
+      : ValueTypeBase(GenericKind::kVoid, kNonNullable, SharedFlag{false}) {}
 
   // This is specifically for the needs of the decoder: sometimes we need to
   // create the ValueType instance when we still only know the type index.
@@ -551,11 +551,11 @@ class ValueTypeBase {
   constexpr bool encoding_needs_heap_type() const {
     if (has_index()) return true;
     if (!is_abstract_ref()) return false;
-    return !is_nullable() || is_shared() == SharedFlag::kYes;
+    return !is_nullable() || is_shared();
   }
 
   constexpr bool encoding_needs_shared() const {
-    return is_abstract_ref() && is_shared() == SharedFlag::kYes;
+    return is_abstract_ref() && is_shared();
   }
 
   constexpr bool encoding_needs_exact() const { return is_exact(); }
@@ -635,7 +635,8 @@ class ValueTypeBase {
       case kF16:
         return ValueTypeBase(NumericKind::kF16);
       case kVoid:
-        return ValueTypeBase(GenericKind::kVoid, kNonNullable, SharedFlag::kNo);
+        return ValueTypeBase(GenericKind::kVoid, kNonNullable,
+                             SharedFlag{false});
       case kRef:
       case kRefNull:
       case kTop:
@@ -746,7 +747,7 @@ class HeapType : public ValueTypeBase {
     constexpr uint8_t kFirst = ValueTypeCode::kFirstHeapTypeCode;
     constexpr uint8_t kLast = ValueTypeCode::kLastHeapTypeCode;
     if (code < kFirst || code > kLast) {
-      return Generic(GenericKind::kBottom, SharedFlag::kNo);
+      return Generic(GenericKind::kBottom, SharedFlag{false});
     }
     constexpr size_t kNumCases = kLast - kFirst + 1;
     constexpr std::array<GenericKind, kNumCases> kLookupTable =
@@ -875,7 +876,7 @@ class ValueType : public ValueTypeBase {
   constexpr ValueType AsNonShared() const {
     if (!is_ref()) return *this;
     return ValueType{ValueTypeBase(value_type_impl::IsSharedField::update(
-        raw_bit_field(), SharedFlag::kNo))};
+        raw_bit_field(), SharedFlag{false}))};
   }
 
   constexpr ValueType Unpacked() const {
@@ -909,7 +910,7 @@ class ValueType : public ValueTypeBase {
       case MachineRepresentation::kFloat64:
         return Primitive(NumericKind::kF64);
       case MachineRepresentation::kTaggedPointer:
-        return Generic(GenericKind::kAny, kNullable, SharedFlag::kNo);
+        return Generic(GenericKind::kAny, kNullable, SharedFlag{false});
       case MachineRepresentation::kSimd128:
         return Primitive(NumericKind::kS128);
       default:
@@ -1041,7 +1042,7 @@ class IndependentHeapType : public IndependentValueType {
  public:
   explicit constexpr IndependentHeapType(GenericKind kind,
                                          Nullability nullable = kNullable,
-                                         SharedFlag shared = SharedFlag::kNo)
+                                         SharedFlag shared = SharedFlag{false})
       : IndependentValueType(kind, nullable, shared) {}
 
   constexpr IndependentHeapType AsNonNull() const {
@@ -1156,15 +1157,15 @@ constexpr IndependentHeapType kWasmBottom{GenericKind::kBottom, kNonNullable};
 constexpr IndependentHeapType kWasmFuncRef{GenericKind::kFunc};
 constexpr IndependentHeapType kWasmAnyRef{GenericKind::kAny};
 constexpr IndependentHeapType kWasmSharedAnyRef{GenericKind::kAny, kNullable,
-                                                SharedFlag::kYes};
+                                                SharedFlag{true}};
 constexpr IndependentHeapType kWasmExternRef{GenericKind::kExtern};
 constexpr IndependentHeapType kWasmRefExtern{GenericKind::kExtern,
                                              kNonNullable};
 constexpr IndependentHeapType kWasmSharedExternRef{GenericKind::kExtern,
-                                                   kNullable, SharedFlag::kYes};
+                                                   kNullable, SharedFlag{true}};
 constexpr IndependentHeapType kWasmExnRef{GenericKind::kExn};
 constexpr IndependentHeapType kWasmSharedExnRef{GenericKind::kExn, kNullable,
-                                                SharedFlag::kYes};
+                                                SharedFlag{true}};
 constexpr IndependentHeapType kWasmEqRef{GenericKind::kEq};
 constexpr IndependentHeapType kWasmI31Ref{GenericKind::kI31};
 constexpr IndependentHeapType kWasmRefI31{GenericKind::kI31, kNonNullable};
@@ -1173,9 +1174,9 @@ constexpr IndependentHeapType kWasmArrayRef{GenericKind::kArray};
 // Exceptionally, the default waitqueue type is shared, because unshared
 // waitqueues do not exist.
 constexpr IndependentHeapType kWasmWaitqueueRef{GenericKind::kWaitqueue,
-                                                kNullable, SharedFlag::kYes};
+                                                kNullable, SharedFlag{true}};
 constexpr IndependentHeapType kWasmNullWaitqueueRef{
-    GenericKind::kNoWaitqueue, kNullable, SharedFlag::kYes};
+    GenericKind::kNoWaitqueue, kNullable, SharedFlag{true}};
 constexpr IndependentHeapType kWasmStringRef{GenericKind::kString};
 constexpr IndependentHeapType kWasmRefString{GenericKind::kString,
                                              kNonNullable};
@@ -1184,9 +1185,9 @@ constexpr IndependentHeapType kWasmRefNullExternString{
 constexpr IndependentHeapType kWasmRefExternString{GenericKind::kExternString,
                                                    kNonNullable};
 constexpr IndependentHeapType kWasmRefNullSharedExternString{
-    GenericKind::kExternString, kNullable, SharedFlag::kYes};
+    GenericKind::kExternString, kNullable, SharedFlag{true}};
 constexpr IndependentHeapType kWasmRefSharedExternString{
-    GenericKind::kExternString, kNonNullable, SharedFlag::kYes};
+    GenericKind::kExternString, kNonNullable, SharedFlag{true}};
 
 constexpr IndependentHeapType kWasmStringViewWtf8{GenericKind::kStringViewWtf8,
                                                   kNonNullable};
@@ -1196,7 +1197,7 @@ constexpr IndependentHeapType kWasmStringViewIter{GenericKind::kStringViewIter,
                                                   kNonNullable};
 constexpr IndependentHeapType kWasmNullRef{GenericKind::kNone};
 constexpr IndependentHeapType kWasmSharedNullRef{GenericKind::kNone, kNullable,
-                                                 SharedFlag::kYes};
+                                                 SharedFlag{true}};
 constexpr IndependentHeapType kWasmRefNone{GenericKind::kNone, kNonNullable};
 constexpr IndependentHeapType kWasmNullExternRef{GenericKind::kNoExtern};
 constexpr IndependentHeapType kWasmNullExnRef{GenericKind::kNoExn};

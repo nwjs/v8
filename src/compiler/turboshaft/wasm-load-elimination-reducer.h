@@ -206,6 +206,30 @@ class WasmMemoryContentTable
     }
   }
 
+  void InvalidateMutableSharedBase() {
+    for (auto& base_keys : base_keys_) {
+      for (auto it = base_keys.second.with_offsets.begin();
+           it != base_keys.second.with_offsets.end();) {
+        Key key = *it;
+        if (!key.data().mem.mutability ||
+            // As long as we do not have indirect strings in shared space,
+            // shared string shape cannot change and it is safe to keep
+            // kStringPrepareForGetCodeunitIndex (which is the only mutable
+            // loadlike type).
+            key.data().mem.type_index == kLoadLikeType ||
+            !module_->type(key.data().mem.type_index).is_shared) {
+          ++it;
+          continue;
+        }
+        // It's important to remove with RemoveAt before Setting the key to
+        // invalid, otherwise OnKeyChange will remove {key} from {base_keys},
+        // which will invalidate {it}.
+        it = base_keys.second.with_offsets.RemoveAt(it);
+        Set(key, OpIndex::Invalid());
+      }
+    }
+  }
+
   // TODO(jkummerow): Move this to the WasmStruct class?
   int field_offset(const wasm::StructType* type, int field_index) {
     return WasmStruct::kHeaderSize + type->field_offset(field_index);
@@ -395,7 +419,7 @@ class WasmMemoryContentTable
 
 }  // namespace wle
 
-class WasmLoadEliminationAnalyzer {
+class V8_EXPORT_PRIVATE WasmLoadEliminationAnalyzer {
  public:
   using AliasTable = SparseOpIndexSnapshotTable<bool>;
   using AliasKey = AliasTable::Key;
@@ -425,6 +449,8 @@ class WasmLoadEliminationAnalyzer {
   void ProcessStructGet(OpIndex op_idx, const StructGetOp& op);
   void ProcessStructSet(OpIndex op_idx, const StructSetOp& op);
   void ProcessArrayLength(OpIndex op_idx, const ArrayLengthOp& op);
+  void ProcessArrayGet(OpIndex op_idx, const ArrayGetOp& op);
+  void ProcessArraySet(OpIndex op_idx, const ArraySetOp& op);
   void ProcessWasmAllocateArray(OpIndex op_idx, const WasmAllocateArrayOp& op);
   void ProcessStringAsWtf16(OpIndex op_idx, const StringAsWtf16Op& op);
   void ProcessStringPrepareForGetCodeUnit(
@@ -436,9 +462,10 @@ class WasmLoadEliminationAnalyzer {
   void ProcessPhi(OpIndex op_idx, const PhiOp& op);
   OpIndex MaybeReplacePhi(const PhiOp& phi);
 
-#if V8_ENABLE_WEBASSEMBLY
-  void ProcessAtomicRMW(OpIndex op_idx, const StructAtomicRMWOp& op);
-#endif
+  void ProcessStructAtomicRMW(OpIndex op_idx, const StructAtomicRMWOp& op);
+  void ProcessArrayAtomicRMW(OpIndex op_idx, const ArrayAtomicRMWOp& op);
+  void ProcessLoad(OpIndex op_idx, const LoadOp& op);
+  void ProcessStore(OpIndex op_idx, const StoreOp& op);
 
   void DcheckWordBinop(OpIndex op_idx, const WordBinopOp& binop);
 
@@ -489,7 +516,7 @@ class WasmLoadEliminationAnalyzer {
 };
 
 template <class Next>
-class WasmLoadEliminationReducer : public Next {
+class V8_EXPORT_PRIVATE WasmLoadEliminationReducer : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE(WasmLoadElimination)
 
@@ -551,8 +578,6 @@ class WasmLoadEliminationReducer : public Next {
   WasmLoadEliminationAnalyzer analyzer_{
       Asm().data(), Asm().modifiable_input_graph(), Asm().phase_zone()};
 };
-
-
 
 #include "src/compiler/turboshaft/undef-assembler-macros.inc"
 

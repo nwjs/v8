@@ -8,9 +8,8 @@
 #include "src/objects/script.h"
 // Include the non-inl header before the rest of the headers.
 
+#include "src/objects/heap-object-inl.h"
 #include "src/objects/managed.h"
-#include "src/objects/objects-inl.h"
-#include "src/objects/shared-function-info.h"
 #include "src/objects/smi-inl.h"
 #include "src/objects/string-inl.h"
 #include "src/objects/struct-inl.h"
@@ -116,17 +115,6 @@ bool Script::is_wrapped() const {
 
 bool Script::has_eval_from_shared() const {
   return IsSharedFunctionInfo(eval_from_shared_or_wrapped_arguments());
-}
-
-void Script::set_eval_from_shared(Tagged<SharedFunctionInfo> shared,
-                                  WriteBarrierMode mode) {
-  DCHECK(!is_wrapped());
-  set_eval_from_shared_or_wrapped_arguments(shared, mode);
-}
-
-Tagged<SharedFunctionInfo> Script::eval_from_shared() const {
-  DCHECK(has_eval_from_shared());
-  return Cast<SharedFunctionInfo>(eval_from_shared_or_wrapped_arguments());
 }
 
 void Script::set_wrapped_arguments(Tagged<FixedArray> value,
@@ -358,18 +346,6 @@ bool Script::IsMaybeUnfinalized(Isolate* isolate) const {
   // TODO(v8:12051): A more robust detection, e.g. with a dedicated sentinel
   // value.
   return IsUndefined(source()) || Cast<String>(source())->length() == 0;
-}
-
-Tagged<Script> Script::GetEvalOrigin() {
-  DisallowGarbageCollection no_gc;
-  Tagged<Script> origin_script = this;
-  while (origin_script->has_eval_from_shared()) {
-    Tagged<HeapObject> maybe_script =
-        origin_script->eval_from_shared()->script();
-    CHECK(IsScript(maybe_script));
-    origin_script = Cast<Script>(maybe_script);
-  }
-  return origin_script;
 }
 
 }  // namespace internal

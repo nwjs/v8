@@ -11,6 +11,7 @@
 
 #include "src/base/functional/function-ref.h"
 #include "src/base/macros.h"
+#include "src/base/strong-alias.h"
 #include "src/codegen/bailout-reason.h"
 #include "src/codegen/heap-object-list.h"
 #include "src/codegen/tnode.h"
@@ -460,6 +461,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                             Label* if_overflow);
   TNode<Smi> TrySmiAdd(TNode<Smi> a, TNode<Smi> b, Label* if_overflow);
   TNode<Smi> TrySmiSub(TNode<Smi> a, TNode<Smi> b, Label* if_overflow);
+  TNode<Smi> TrySmiMul(TNode<Smi> lhs, TNode<Smi> rhs, Label* bailout);
   TNode<Smi> TrySmiAbs(TNode<Smi> a, Label* if_overflow);
 
   TNode<Smi> UnsignedSmiShl(TNode<Smi> a, int shift) {
@@ -922,6 +924,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void BranchIfJSReceiver(TNode<Object> object, Label* if_true,
                           Label* if_false);
 
+  TNode<BoolT> HasIndexedInterceptor(TNode<Map> map);
+
+  // Checks if given iterable is an indexed interceptor that supports fast
+  // iterable-to-list conversion. In case one of the required checks fail
+  // it also resets the supports-fast-iterable-to-list bit in the
+  // interceptor's map.
+  void BranchIfFastIterableToListInterceptor(TNode<JSAnyNotSmi> iterable,
+                                             Label* if_true, Label* if_false);
+
   // Branches to {if_true} when --force-slow-path flag has been passed.
   // It's used for testing to ensure that slow path implementation behave
   // equivalent to corresponding fast paths (where applicable).
@@ -1003,6 +1014,21 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                     TNode<IntPtrT> offset,
                                     TNode<RawPtrT> pointer,
                                     ExternalPointerTag tag);
+
+  //
+  // CppHeapPointerT-related functionality.
+  //
+
+  // Load a CppHeap pointer value from an object.
+  TNode<RawPtrT> LoadCppHeapPointerFromObject(TNode<HeapObject> object,
+                                              int offset,
+                                              CppHeapPointerTag tag) {
+    return LoadCppHeapPointerFromObject(object, IntPtrConstant(offset), tag);
+  }
+
+  TNode<RawPtrT> LoadCppHeapPointerFromObject(TNode<HeapObject> object,
+                                              TNode<IntPtrT> offset,
+                                              CppHeapPointerTag tag);
 
   // Load a trusted pointer field.
   // When the sandbox is enabled, these are indirect pointers using the trusted
@@ -2388,18 +2414,18 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                       TNode<IntPtrT> from_index,
                                       TNode<IntPtrT> to_index);
 
-  enum class DestroySource { kNo, kYes };
+  using DestroySource = base::StrongAlias<struct DestroySourceTag, bool>;
 
   // Increment the call count for a CALL_IC or construct call.
   // The call count is located at feedback_vector[slot_id + 1].
   void IncrementCallCount(TNode<FeedbackVector> feedback_vector,
                           TNode<UintPtrT> slot_id);
 
-  // Specify DestroySource::kYes if {from_array} is being supplanted by
+  // Specify DestroySource{true} if {from_array} is being supplanted by
   // {to_array}. This offers a slight performance benefit by simply copying the
   // array word by word. The source may be destroyed at the end of this macro.
   //
-  // Otherwise, specify DestroySource::kNo for operations where an Object is
+  // Otherwise, specify DestroySource{false} for operations where an Object is
   // being cloned, to ensure that mutable HeapNumbers are unique between the
   // source and cloned object.
   void CopyPropertyArrayValues(TNode<HeapObject> from_array,
@@ -4033,7 +4059,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   enum class IndexAdvanceMode { kPre, kPost };
   enum class IndexAdvanceDirection { kUp, kDown };
-  enum class LoopUnrollingMode { kNo, kYes };
+  using LoopUnrollingMode =
+      base::StrongAlias<struct LoopUnrollingModeTag, bool>;
+  static constexpr LoopUnrollingMode kNoLoopUnrolling{false};
+  static constexpr LoopUnrollingMode kLoopUnrolling{true};
 
   template <typename TIndex>
   using FastLoopBody = std::function<void(TNode<TIndex> index)>;
@@ -4236,6 +4265,35 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                        TNode<Object> rhs,
                                        TNode<UintPtrT> feedback_offset,
                                        Builtin fallback_builtin);
+
+  void GenerateSmiBinaryOp(Operation op, TNode<Object> lhs, TNode<Object> rhs,
+                           TNode<UintPtrT> feedback_offset,
+                           Builtin fallback_builtin);
+
+  void TailCallPatchBinopToNumberHandler(TNode<Number> result,
+                                         TNode<UintPtrT> feedback_offset);
+
+  void GenerateTrySmiBinaryOpAndWiden(Operation op, TNode<Smi> lhs_smi,
+                                      TNode<Smi> rhs_smi,
+                                      TNode<UintPtrT> feedback_offset);
+
+  void GenerateSmiToNumberBinaryOpAndMaybeWiden(
+      Operation op, TNode<Smi> lhs_smi, TNode<Smi> rhs_smi,
+      TNode<UintPtrT> feedback_offset);
+
+  void GenerateNumberBinaryOp(Operation op, TNode<Object> lhs,
+                              TNode<Object> rhs,
+                              TNode<UintPtrT> feedback_offset,
+                              Builtin fallback_builtin);
+
+  void GenerateStringAdd(TNode<Object> lhs, TNode<Object> rhs,
+                         TNode<UintPtrT> feedback_offset,
+                         Builtin fallback_builtin);
+
+  void GenerateBinaryOpAndTryPatchCode(Operation op, TNode<Object> lhs,
+                                       TNode<Object> rhs,
+                                       TNode<Int32T> current_type_feedback,
+                                       TNode<UintPtrT> feedback_offset);
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
 
   TNode<Boolean> Equal(TNode<Object> lhs, TNode<Object> rhs,
@@ -5013,7 +5071,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<Context> context, TNode<HeapObject> input, Object::Conversion mode,
       BigIntHandling bigint_handling = BigIntHandling::kThrow);
 
-  enum IsKnownTaggedPointer { kNo, kYes };
+  using IsKnownTaggedPointer =
+      base::StrongAlias<struct IsKnownTaggedPointerTag, bool>;
   template <Object::Conversion conversion>
   void TaggedToWord32OrBigIntImpl(
       TNode<Context> context, TNode<Object> value, Label* if_number,

@@ -22,13 +22,13 @@ class Graph;
 class MaglevGraphVerifier {
  public:
   explicit MaglevGraphVerifier(MaglevCompilationInfo* compilation_info,
-                               bool verify_sweepable_dead_nodes = true)
+                               MaglevPhase phase)
       : seen_(compilation_info->zone()),
         defined_(compilation_info->zone()),
         def_block_(compilation_info->zone()),
         idom_(compilation_info->zone()),
         rpo_number_(compilation_info->zone()),
-        verify_sweepable_dead_nodes_(verify_sweepable_dead_nodes) {
+        verify_sweepable_dead_nodes_(phase != MaglevPhase::kAnyUseMarking) {
     if (compilation_info->has_graph_labeller()) {
       graph_labeller_ = compilation_info->graph_labeller();
     }
@@ -43,7 +43,9 @@ class MaglevGraphVerifier {
     }
   }
   void PostProcessGraph(Graph* graph) {}
-  void PostProcessBasicBlock(BasicBlock* block) {}
+  BlockProcessResult PostProcessBasicBlock(BasicBlock* block) {
+    return BlockProcessResult::kContinue;
+  }
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     // Check Ids are unique.
     CHECK(!seen_[block->id()]);

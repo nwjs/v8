@@ -379,8 +379,7 @@ class WasmInJsInliningInterface {
       // - call a builtin,
       // - need the instance,
       // - require later Int64Lowering (which is currently only compatible with
-      //   the Wasm pipeline),
-      // - are actually asm.js opcodes and not spec'ed in Wasm.
+      //   the Wasm pipeline).
       case wasm::kExprI32ConvertI64:
       case wasm::kExprI64SConvertI32:
       case wasm::kExprI64UConvertI32:
@@ -425,30 +424,6 @@ class WasmInJsInliningInterface {
       case wasm::kExprF64UConvertI64:
         // Not supported, but we are aware of it. Bailout below.
         break;
-
-      // asm.js:
-      case wasm::kExprF64Acos:
-      case wasm::kExprF64Asin:
-      case wasm::kExprF64Atan:
-      case wasm::kExprF64Cos:
-      case wasm::kExprF64Sin:
-      case wasm::kExprF64Tan:
-      case wasm::kExprF64Exp:
-      case wasm::kExprF64Log:
-      case wasm::kExprI32AsmjsLoadMem8S:
-      case wasm::kExprI32AsmjsLoadMem8U:
-      case wasm::kExprI32AsmjsLoadMem16S:
-      case wasm::kExprI32AsmjsLoadMem16U:
-      case wasm::kExprI32AsmjsLoadMem:
-      case wasm::kExprF32AsmjsLoadMem:
-      case wasm::kExprF64AsmjsLoadMem:
-      case wasm::kExprI32AsmjsSConvertF32:
-      case wasm::kExprI32AsmjsUConvertF32:
-      case wasm::kExprI32AsmjsSConvertF64:
-      case wasm::kExprI32AsmjsUConvertF64:
-        // We already bailout for asm.js modules earlier, so we should never
-        // see these operations.
-        UNREACHABLE();
 
       default:
         // Fuzzers should alert us when we forget ops, but it's not security
@@ -577,8 +552,7 @@ class WasmInJsInliningInterface {
       // - call a builtin,
       // - need the instance,
       // - require later Int64Lowering (which is currently only compatible with
-      //   the Wasm pipeline),
-      // - are actually asm.js opcodes and not spec'ed in Wasm.
+      //   the Wasm pipeline).
       case wasm::kExprI64Add:
       case wasm::kExprI64Sub:
       case wasm::kExprI64Mul:
@@ -613,23 +587,6 @@ class WasmInJsInliningInterface {
       case wasm::kExprI64RemU:
         // Not supported, but we are aware of it. Bailout below.
         break;
-
-      // asm.js:
-      case wasm::kExprF64Atan2:
-      case wasm::kExprF64Pow:
-      case wasm::kExprF64Mod:
-      case wasm::kExprI32AsmjsDivS:
-      case wasm::kExprI32AsmjsDivU:
-      case wasm::kExprI32AsmjsRemS:
-      case wasm::kExprI32AsmjsRemU:
-      case wasm::kExprI32AsmjsStoreMem8:
-      case wasm::kExprI32AsmjsStoreMem16:
-      case wasm::kExprI32AsmjsStoreMem:
-      case wasm::kExprF32AsmjsStoreMem:
-      case wasm::kExprF64AsmjsStoreMem:
-        // We already bailout for asm.js modules earlier, so we should never
-        // see these operations.
-        UNREACHABLE();
 
       default:
         // Fuzzers should alert us when we forget ops, but it's not security
@@ -690,7 +647,7 @@ class WasmInJsInliningInterface {
   void GlobalGet(FullDecoder* decoder, Value* result,
                  const wasm::GlobalIndexImmediate& imm) {
     SharedFlag shared = decoder->module_->globals[imm.index].shared;
-    if (shared == SharedFlag::kYes) {
+    if (shared) {
       return Bailout(decoder);
     }
     result->op = __ GlobalGet(trusted_instance_data_, imm.global);
@@ -699,7 +656,7 @@ class WasmInJsInliningInterface {
   void GlobalSet(FullDecoder* decoder, const Value& value,
                  const wasm::GlobalIndexImmediate& imm) {
     SharedFlag shared = decoder->module_->globals[imm.index].shared;
-    if (shared == SharedFlag::kYes) {
+    if (shared) {
       return Bailout(decoder);
     }
     __ GlobalSet(trusted_instance_data_, value.op, imm.global);
@@ -818,7 +775,7 @@ class WasmInJsInliningInterface {
   // new, common reducer.
   void RefCast(FullDecoder* decoder, const Value& object, Value* result) {
     ValueType target = result->type;
-    if (target.is_shared() == SharedFlag::kYes) {
+    if (target.is_shared()) {
       return Bailout(decoder);
     }
     if (v8_flags.wasm_assume_ref_cast_succeeds) {
@@ -1070,11 +1027,6 @@ WasmBodyInliningResult WasmInJSInliningReducer<Next>::TryInlineWasmBody(
     return WasmBodyInliningResult::Failed();
   }
 
-  if (wasm::is_asmjs_module(module)) {
-    TRACE("- not inlining: asm.js-in-JS inlining is not supported");
-    return WasmBodyInliningResult::Failed();
-  }
-
   if (func_idx < module->num_imported_functions) {
     TRACE("- not inlining: call to an imported function");
     return WasmBodyInliningResult::Failed();
@@ -1082,22 +1034,14 @@ WasmBodyInliningResult WasmInJSInliningReducer<Next>::TryInlineWasmBody(
   DCHECK_LT(func_idx - module->num_imported_functions,
             module->num_declared_functions);
 
-  // TODO(42204563): Support shared-everything proposal (at some point, or
-  // possibly never).
-  SharedFlag is_shared = module->type(func.sig_index).is_shared;
-  if (is_shared == SharedFlag::kYes) {
-    TRACE("- not inlining: shared everything is not supported");
-    return WasmBodyInliningResult::Failed();
-  }
-
   const bool has_current_catch_block = __ current_catch_block();
-  if (lazy_deopt_on_throw == LazyDeoptOnThrow::kYes) {
+  if (lazy_deopt_on_throw) {
     // Maglev either emits a catch block or uses lazy deopt on throw, but never
     // both.
     DCHECK(!has_current_catch_block);
     // TODO(mliedtke,dlehmann): Support lazy deopts in Wasm in order to allow
-    // inlining calls that have LazyDeoptOnThrow::kYes.
-    TRACE("- not inlining: call marked with LazyDeoptOnThrow::kYes");
+    // inlining calls that have LazyDeoptOnThrow{true}.
+    TRACE("- not inlining: call marked with LazyDeoptOnThrow{true}");
     return WasmBodyInliningResult::Failed();
   }
 
@@ -1114,8 +1058,7 @@ WasmBodyInliningResult WasmInJSInliningReducer<Next>::TryInlineWasmBody(
   const uint8_t* start = module_bytes.begin() + func.code.offset();
   const uint8_t* end = module_bytes.begin() + func.code.end_offset();
 
-  wasm::FunctionBody func_body{func.sig, func.code.offset(), start, end,
-                               is_shared};
+  wasm::FunctionBody func_body{func.sig, func.code.offset(), start, end};
 
   auto env = wasm::CompilationEnv::ForModule(native_module);
   wasm::WasmDetectedFeatures detected{};

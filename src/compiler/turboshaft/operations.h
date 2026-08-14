@@ -19,6 +19,7 @@
 #include "src/base/platform/mutex.h"
 #include "src/base/small-vector.h"
 #include "src/base/string-format.h"
+#include "src/base/strong-alias.h"
 #include "src/base/template-utils.h"
 #include "src/base/vector.h"
 #include "src/codegen/external-reference.h"
@@ -291,7 +292,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(DebugPrint)                                 \
   V(CheckTurboshaftTypeOf)                      \
   V(CheckMaglevType)                            \
-  V(TypeHint)
+  V(PrepareForLoop)
 
 // These Operations are the lowest level handled by Turboshaft, and are
 // supported by the InstructionSelector.
@@ -1362,6 +1363,7 @@ struct FixedArityOperationT : OperationT<Derived> {
   V(word64_reverse_bits, Word64ReverseBits)                \
   V(float32_select, Float32Select)                         \
   V(float64_select, Float64Select)                         \
+  V(float64_min_max, Float64MinMax)                        \
   V(int32_abs_with_overflow, Int32AbsWithOverflow)         \
   V(int64_abs_with_overflow, Int64AbsWithOverflow)         \
   V(word32_rol, Word32Rol)                                 \
@@ -1587,51 +1589,6 @@ struct ToNumberOrNumericOp : FixedArityOperationT<3, ToNumberOrNumericOp> {
 
   auto options() const { return std::tuple{kind, lazy_deopt_on_throw}; }
 };
-
-// TypeHint is a type-hint used during Maglev->Turboshaft
-// translation to avoid having multiple values being used as different types
-// (typically both as Int32/Uint32 or Float64/HoleyFloat64). Eventually,
-// TypeHint is just a nop in Turboshaft, since as far as Machine level
-// graph is concerned, both Int32 and Uint32 are just Word32 registers, and
-// Float64/HoleyFloat64 are just Float64 registers.
-struct TypeHintOp : FixedArityOperationT<1, TypeHintOp> {
-  enum class Type : uint8_t { kInt32, kUint32, kFloat64, kHoleyFloat64 };
-  Type type;
-
-  static constexpr OpEffects effects = OpEffects();
-  base::Vector<const RegisterRepresentation> outputs_rep() const {
-    switch (type) {
-      case Type::kInt32:
-      case Type::kUint32:
-        return RepVector<RegisterRepresentation::Word32()>();
-      case Type::kFloat64:
-      case Type::kHoleyFloat64:
-        return RepVector<RegisterRepresentation::Float64()>();
-    }
-    UNREACHABLE();
-  }
-
-  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
-      ZoneVector<MaybeRegisterRepresentation>& storage) const {
-    switch (type) {
-      case Type::kInt32:
-      case Type::kUint32:
-        return MaybeRepVector<MaybeRegisterRepresentation::Word32()>();
-      case Type::kFloat64:
-      case Type::kHoleyFloat64:
-        return MaybeRepVector<MaybeRegisterRepresentation::Float64()>();
-    }
-    UNREACHABLE();
-  }
-
-  V<Float64OrWord32> input() const { return Base::input<Float64OrWord32>(0); }
-
-  TypeHintOp(V<Float64OrWord32> input, Type type) : Base(input), type(type) {}
-
-  auto options() const { return std::tuple{type}; }
-};
-V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
-                                           TypeHintOp::Type type);
 
 struct WordBinopOp : FixedArityOperationT<2, WordBinopOp> {
   enum class Kind : uint8_t {
@@ -4163,19 +4120,36 @@ struct DeoptimizeIfOp : FixedArityOperationT<2, DeoptimizeIfOp> {
   auto options() const { return std::tuple{negated, parameters}; }
   void PrintOptions(std::ostream& os) const;
 };
+struct PrepareForLoopOp : FixedArityOperationT<1, PrepareForLoopOp> {
+  FeedbackSource feedback;
+
+  static constexpr OpEffects effects = OpEffects().RequiredWhenUnused();
+  base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return {};
+  }
+
+  V<EagerFrameState> frame_state() const { return input<EagerFrameState>(0); }
+
+  PrepareForLoopOp(V<EagerFrameState> frame_state, FeedbackSource feedback)
+      : Base(frame_state), feedback(feedback) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(Get(graph, frame_state()).Is<FrameStateOp>());
+  }
+  auto options() const { return std::tuple{feedback}; }
+};
 
 #if V8_ENABLE_WEBASSEMBLY
 
-// Supports fine-grained optional inputs/outputs.
+// A WebAssembly stack check operation.
 // If input_count > 0:
-// - input(0) is always trusted_instance_data
-// - input(1) is memory_start if has_memory_start
-// - input(1 + has_memory_start) is memory_size if has_memory_size
+// - input(0) is trusted_instance_data
 struct WasmStackCheckOp : OperationT<WasmStackCheckOp> {
   using Kind = JSStackCheckOp::Kind;
   Kind kind;
-  bool has_memory_start;
-  bool has_memory_size;
 
   OpEffects Effects() const {
     switch (kind) {
@@ -4185,7 +4159,7 @@ struct WasmStackCheckOp : OperationT<WasmStackCheckOp> {
         return OpEffects()
             .RequiredWhenUnused()
             .CanReadMemory()
-            .CanWriteHeapMemory()
+            .CanWriteMemory()
             .CanAllocate();
       case Kind::kFunctionEntry:
         // For function entry stack checks, we could model their side effects
@@ -4201,63 +4175,28 @@ struct WasmStackCheckOp : OperationT<WasmStackCheckOp> {
     return input_count > 0 ? input<WasmTrustedInstanceData>(0)
                            : V<WasmTrustedInstanceData>::Invalid();
   }
-  OptionalV<WordPtr> memory_start() const {
-    if (!has_memory_start) return V<WordPtr>::Invalid();
-    return input<WordPtr>(1);
-  }
-  OptionalV<WordPtr> memory_size() const {
-    if (!has_memory_size) return V<WordPtr>::Invalid();
-    return input<WordPtr>(1 + has_memory_start);
-  }
 
   WasmStackCheckOp(OptionalV<WasmTrustedInstanceData> trusted_instance_data,
-                   OptionalV<WordPtr> memory_start,
-                   OptionalV<WordPtr> memory_size, Kind kind)
-      : Base(trusted_instance_data.valid()
-                 ? 1 + memory_start.valid() + memory_size.valid()
-                 : 0),
-        kind(kind),
-        has_memory_start(trusted_instance_data.valid() && memory_start.valid()),
-        has_memory_size(trusted_instance_data.valid() && memory_size.valid()) {
+                   Kind kind)
+      : Base(trusted_instance_data.valid() ? 1 : 0), kind(kind) {
     if (trusted_instance_data.valid()) {
       input(0) = trusted_instance_data.value();
-      int next_idx = 1;
-      if (memory_start.valid()) {
-        input(next_idx++) = memory_start.value();
-      }
-      if (memory_size.valid()) {
-        input(next_idx++) = memory_size.value();
-      }
     }
   }
 
   static WasmStackCheckOp& New(
       Graph* graph, OptionalV<WasmTrustedInstanceData> trusted_instance_data,
-      OptionalV<WordPtr> memory_start, OptionalV<WordPtr> memory_size,
       Kind kind) {
-    size_t input_count = trusted_instance_data.valid()
-                             ? 1 + memory_start.valid() + memory_size.valid()
-                             : 0;
-    return Base::New(graph, input_count, trusted_instance_data, memory_start,
-                     memory_size, kind);
+    size_t input_count = trusted_instance_data.valid() ? 1 : 0;
+    return Base::New(graph, input_count, trusted_instance_data, kind);
   }
 
   template <typename Fn, typename Mapper>
   V8_INLINE auto Explode(Fn fn, Mapper& mapper) const {
-    return fn(mapper.Map(trusted_instance_data()), mapper.Map(memory_start()),
-              mapper.Map(memory_size()), kind);
+    return fn(mapper.Map(trusted_instance_data()), kind);
   }
 
-  base::Vector<const RegisterRepresentation> outputs_rep() const {
-    if (input_count == 0) {
-      return {};
-    }
-    if (has_memory_start && has_memory_size) {
-      return RepVector<RegisterRepresentation::WordPtr(),
-                       RegisterRepresentation::WordPtr()>();
-    }
-    return RepVector<RegisterRepresentation::WordPtr()>();
-  }
+  base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
 
   base::Vector<const MaybeRegisterRepresentation> inputs_rep(
       ZoneVector<MaybeRegisterRepresentation>& storage) const {
@@ -4266,9 +4205,6 @@ struct WasmStackCheckOp : OperationT<WasmStackCheckOp> {
     }
     storage.resize(input_count);
     storage[0] = MaybeRegisterRepresentation::Tagged();
-    for (int i = 1; i < input_count; ++i) {
-      storage[i] = MaybeRegisterRepresentation::WordPtr();
-    }
     return base::VectorOf(storage);
   }
 
@@ -4276,22 +4212,17 @@ struct WasmStackCheckOp : OperationT<WasmStackCheckOp> {
     if (kind == Kind::kFunctionEntry) {
       DCHECK_EQ(input_count, 0);
       DCHECK(!trusted_instance_data().valid());
-      DCHECK(!memory_start().valid());
-      DCHECK(!memory_size().valid());
     } else if (kind == Kind::kLoop) {
-      DCHECK_LE(input_count, 3);
+      DCHECK_LE(input_count, 1);
       if (input_count > 0) {
         DCHECK(trusted_instance_data().valid());
-        DCHECK_EQ(input_count, 1 + has_memory_start + has_memory_size);
       }
     } else {
       UNREACHABLE();
     }
   }
 
-  auto options() const {
-    return std::tuple{kind, has_memory_start, has_memory_size};
-  }
+  auto options() const { return std::tuple{kind}; }
 };
 
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
@@ -4577,8 +4508,7 @@ struct TSCallDescriptor : public NON_EXPORTED_BASE(ZoneObject) {
       const CallDescriptor* descriptor, CanThrow can_throw,
       LazyDeoptOnThrow lazy_deopt_on_throw, Zone* graph_zone,
       const JSWasmCallParameters* js_wasm_call_parameters = nullptr) {
-    DCHECK_IMPLIES(can_throw == CanThrow::kNo,
-                   lazy_deopt_on_throw == LazyDeoptOnThrow::kNo);
+    DCHECK_IMPLIES(!can_throw, !lazy_deopt_on_throw);
     base::Vector<RegisterRepresentation> in_reps =
         graph_zone->AllocateVector<RegisterRepresentation>(
             descriptor->ParameterCount());
@@ -5926,10 +5856,11 @@ struct LoadFieldByIndexOp : FixedArityOperationT<2, LoadFieldByIndexOp> {
   auto options() const { return std::tuple{}; }
 };
 
-struct LoadDictionaryFieldOp : FixedArityOperationT<3, LoadDictionaryFieldOp> {
+struct LoadDictionaryFieldOp : FixedArityOperationT<4, LoadDictionaryFieldOp> {
   InternalIndex index;
   compiler::NameRef name;
   FeedbackSource feedback;
+  bool is_super;
 
   THROWING_OP_BOILERPLATE(RegisterRepresentation::Tagged())
   static constexpr OpEffects effects =
@@ -5937,28 +5868,32 @@ struct LoadDictionaryFieldOp : FixedArityOperationT<3, LoadDictionaryFieldOp> {
 
   base::Vector<const MaybeRegisterRepresentation> inputs_rep(
       ZoneVector<MaybeRegisterRepresentation>& storage) const {
-    return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged(),
+                          MaybeRegisterRepresentation::Tagged()>();
   }
 
   V<JSReceiver> object() const { return Base::input<JSReceiver>(0); }
-  V<Context> context() const { return Base::input<Context>(1); }
+  V<Object> receiver() const { return Base::input<Object>(1); }
+  V<Context> context() const { return Base::input<Context>(2); }
   V<LazyFrameState> frame_state() const {
-    return Base::input<LazyFrameState>(2);
+    return Base::input<LazyFrameState>(3);
   }
 
-  LoadDictionaryFieldOp(V<JSReceiver> object, V<Context> context,
-                        V<LazyFrameState> frame_state, size_t index,
-                        compiler::NameRef name, const FeedbackSource& feedback,
+  LoadDictionaryFieldOp(V<JSReceiver> object, V<Object> receiver,
+                        V<Context> context, V<LazyFrameState> frame_state,
+                        size_t index, compiler::NameRef name,
+                        const FeedbackSource& feedback, bool is_super,
                         LazyDeoptOnThrow lazy_deopt_on_throw)
-      : Base(object, context, frame_state),
+      : Base(object, receiver, context, frame_state),
         index(InternalIndex(index)),
         name(name),
         feedback(feedback),
+        is_super(is_super),
         lazy_deopt_on_throw(lazy_deopt_on_throw) {}
 
-  // 3. Add lazy_deopt_on_throw to options()
   auto options() const {
-    return std::tuple{index.raw_value(), name, feedback, lazy_deopt_on_throw};
+    return std::tuple{index.raw_value(), name, feedback, is_super,
+                      lazy_deopt_on_throw};
   }
 };
 
@@ -6308,7 +6243,8 @@ struct TypedArrayLengthOp : FixedArityOperationT<1, TypedArrayLengthOp> {
       // it's pure.
       OpEffects()
           // We rely on the input being a JSTypedArray.
-          .CanDependOnChecks();
+          .CanDependOnChecks()
+          .CanReadMemory();
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     return RepVector<RegisterRepresentation::WordPtr()>();
   }
@@ -7315,7 +7251,7 @@ struct FastApiCallOp : OperationT<FastApiCallOp> {
       : Base(kNumNonParamInputs + arguments.size()),
         parameters(parameters),
         out_reps(out_reps),
-        lazy_deopt_on_throw(LazyDeoptOnThrow::kNo) {
+        lazy_deopt_on_throw(LazyDeoptOnThrow{false}) {
     base::Vector<OpIndex> inputs = this->inputs();
     inputs[0] = frame_state;
     inputs[1] = data_argument;
@@ -7994,8 +7930,8 @@ struct AnyConvertExternOp : FixedArityOperationT<1, AnyConvertExternOp> {
       : Base(object), is_shared(is_shared), is_nullable(is_nullable) {}
 
   void PrintOptions(std::ostream& os) const {
-    os << "[" << (is_shared == SharedFlag::kYes ? "shared" : "non-shared")
-       << ", " << (is_nullable ? "nullable" : "non-nullable") << "]";
+    os << "[" << is_shared << ", "
+       << (is_nullable ? "nullable" : "non-nullable") << "]";
   }
 
   V<Object> object() const { return Base::input<Object>(0); }
@@ -8870,7 +8806,8 @@ struct Simd128ConstantOp : FixedArityOperationT<0, Simd128ConstantOp> {
   V(F16x8Ne)                                       \
   V(F16x8Lt)                                       \
   V(F16x8Le)                                       \
-  V(I32x4AddPairwise)
+  V(I32x4AddPairwise)                              \
+  V(I32x4DotI8x16S)
 
 #define FOREACH_SIMD_128_BINARY_OPCODE(V)     \
   FOREACH_SIMD_128_BINARY_MANDATORY_OPCODE(V) \
@@ -10677,7 +10614,7 @@ constexpr size_t input_count() { return 0; }
 template <typename T>
 constexpr size_t input_count(T)
   requires(std::is_enum_v<T> || std::is_integral_v<T> ||
-           std::is_floating_point_v<T>)
+           std::is_floating_point_v<T> || base::is_strong_alias_v<T>)
 {
   return 0;
 }

@@ -62,7 +62,7 @@ void WriteBarrier::CombinedWriteBarrierInternal(Tagged<HeapObject> host,
   MemoryChunk* host_chunk = MemoryChunk::FromHeapObject(host);
   // Fast path: Marking is off and the host objects is either in the young
   // generation or shared space, for which we don't require remembered sets.
-  if (V8_LIKELY(!host_chunk->PointersFromHereAreInteresting())) {
+  if (!host_chunk->PointersFromHereAreInteresting()) [[likely]] {
     return;
   }
 
@@ -295,7 +295,7 @@ void WriteBarrier::ForJSDispatchHandle(Tagged<HeapObject> host,
                                        WriteBarrierMode mode) {
 #if V8_VERIFY_WRITE_BARRIERS
   if (v8_flags.verify_write_barriers) {
-    CHECK(WriteBarrier::VerifyDispatchHandleMarkingState(host, handle, mode));
+    WriteBarrier::VerifyDispatchHandleWriteBarrier(host, handle, mode);
   }
 #endif  // V8_VERIFY_WRITE_BARRIERS
   if (mode == SKIP_WRITE_BARRIER) {
@@ -391,7 +391,7 @@ void WriteBarrier::Marking(Tagged<HeapObject> host, MaybeObjectSlot slot,
 
 void WriteBarrier::Marking(Tagged<HeapObject> host, HeapObjectSlot slot,
                            Tagged<HeapObject> value) {
-  if (V8_LIKELY(!IsMarking(host))) {
+  if (!IsMarking(host)) [[likely]] {
     return;
   }
   MarkingSlow(host, slot, value);
@@ -400,7 +400,7 @@ void WriteBarrier::Marking(Tagged<HeapObject> host, HeapObjectSlot slot,
 void WriteBarrier::MarkingForRelocInfo(Tagged<InstructionStream> host,
                                        RelocInfo* reloc_info,
                                        Tagged<HeapObject> value) {
-  if (V8_LIKELY(!IsMarking(host))) {
+  if (!IsMarking(host)) [[likely]] {
     return;
   }
   MarkingSlow(host, reloc_info, value);
@@ -424,23 +424,15 @@ void WriteBarrier::ForArrayBufferExtension(Tagged<JSArrayBuffer> host,
   MarkingSlow(host, extension);
 }
 
-void WriteBarrier::ForDescriptorArray(Tagged<DescriptorArray> descriptor_array,
-                                      int number_of_own_descriptors) {
-  if (V8_LIKELY(!IsMarking(descriptor_array))) {
-    return;
-  }
-  MarkingSlow(descriptor_array, number_of_own_descriptors);
-}
-
 void WriteBarrier::Marking(Tagged<HeapObject> host, ExternalPointerSlot slot) {
-  if (V8_LIKELY(!IsMarking(host))) {
+  if (!IsMarking(host)) [[likely]] {
     return;
   }
   MarkingSlow(host, slot);
 }
 
 void WriteBarrier::Marking(Tagged<HeapObject> host, IndirectPointerSlot slot) {
-  if (V8_LIKELY(!IsMarking(host))) {
+  if (!IsMarking(host)) [[likely]] {
     return;
   }
   MarkingSlow(host, slot);
@@ -449,14 +441,14 @@ void WriteBarrier::Marking(Tagged<HeapObject> host, IndirectPointerSlot slot) {
 void WriteBarrier::Marking(Tagged<TrustedObject> host,
                            ProtectedPointerSlot slot,
                            Tagged<TrustedObject> value) {
-  if (V8_LIKELY(!IsMarking(host))) {
+  if (!IsMarking(host)) [[likely]] {
     return;
   }
   MarkingSlow(host, slot, value);
 }
 
 void WriteBarrier::Marking(Tagged<HeapObject> host, JSDispatchHandle handle) {
-  if (V8_LIKELY(!IsMarking(host))) {
+  if (!IsMarking(host)) [[likely]] {
     return;
   }
   MarkingSlow(host, handle);
@@ -476,7 +468,7 @@ void WriteBarrier::ForCppHeapPointer(Tagged<CppHeapPointerWrapperObjectT> host,
   // Note: this is currently a combined barrier for marking both the
   // CppHeapPointerTable entry and the referenced object.
 
-  if (V8_LIKELY(!IsMarking(host))) {
+  if (!IsMarking(host)) [[likely]] {
 #if defined(CPPGC_YOUNG_GENERATION)
     // There is no young-gen CppHeapPointerTable space so we should not mark
     // the table entry in this case.

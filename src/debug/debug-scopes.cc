@@ -321,9 +321,10 @@ void ScopeIterator::TryParseAndRetrieveScopes(ReparseStrategy strategy) {
     parse_result =
       flags.is_toplevel()
           ? parsing::ParseProgram(info_.get(), script, maybe_outer_scope,
-                                  isolate_, parsing::ReportStatisticsMode::kNo)
+                                  isolate_,
+                                  parsing::ReportStatisticsMode{false})
           : parsing::ParseFunction(info_.get(), shared_info, isolate_,
-                                   parsing::ReportStatisticsMode::kNo);
+                                   parsing::ReportStatisticsMode{false});
 
   if (parse_result) {
     DeclarationScope* literal_scope = info_->literal()->scope();
@@ -1100,7 +1101,9 @@ void ScopeIterator::VisitLocalScope(const Visitor& visitor, Mode mode,
     DirectHandle<JSObject> extension(context_->extension_object(), isolate_);
     DirectHandle<FixedArray> keys =
         KeyAccumulator::GetKeys(isolate_, extension,
-                                KeyCollectionMode::kOwnOnly, ENUMERABLE_STRINGS)
+                                KeyCollectionMode::kOwnOnly, ENUMERABLE_STRINGS,
+                                GetKeysConversion::kConvertToString, false,
+                                true)
             .ToHandleChecked();
 
     uint32_t keys_len = keys->ulength().value();

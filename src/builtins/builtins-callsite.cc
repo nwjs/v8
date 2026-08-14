@@ -190,18 +190,6 @@ BUILTIN(CallSitePrototypeGetThis) {
     // not exist outside the ShadowRealm.
     CHECK_SHADOW_REALM_BOUNDARY_OR_RETURN_FAILURE(
         isolate, current_native_context, creation_context, method_name);
-
-#if V8_ENABLE_WEBASSEMBLY
-    if (frame->IsAsmJsWasm()) {
-      // For asm.js frames we are supposed to return global proxy as a receiver
-      // instead of the Wasm instance.
-      DCHECK_EQ(frame->GetWasmInstance(), this_obj);
-      DCHECK_EQ(
-          frame->GetWasmInstance()->trusted_data(isolate)->native_context(),
-          creation_context);
-      return creation_context->global_proxy();
-    }
-#endif  // V8_ENABLE_WEBASSEMBLY
   }
   return this_obj;
 }

@@ -4,7 +4,7 @@
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
-// Flags: --experimental-wasm-fp16
+// Flags: --wasm-fp16
 
 const builder = new WasmModuleBuilder();
 builder.addMemory(1, 1, false);

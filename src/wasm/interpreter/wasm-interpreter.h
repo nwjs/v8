@@ -56,6 +56,7 @@ namespace internal {
 class Cell;
 class FixedArray;
 class WasmInstanceObject;
+class WasmTrustedInstanceData;
 
 namespace wasm {
 
@@ -182,7 +183,7 @@ static_assert(sizeof(WasmRef) == kSystemPointerSize);
 class WasmBytecode {
  public:
   WasmBytecode(int func_index, const uint8_t* code_data, size_t code_length,
-               uint32_t stack_frame_size, const FunctionSig* signature,
+               size_t stack_frame_size, const FunctionSig* signature,
                const CanonicalSig* canonical_signature,
                const InterpreterCode* interpreter_code, size_t blocks_count,
                const uint8_t* const_slots_data, size_t const_slots_length,
@@ -228,7 +229,7 @@ class WasmBytecode {
     return ref_slots_count_ - ref_rets_count_ - ref_args_count_;
   }
 
-  inline uint32_t frame_size() { return total_frame_size_in_bytes_; }
+  inline size_t frame_size() { return total_frame_size_in_bytes_; }
 
   static inline uint32_t ArgsSizeInSlots(const FunctionSig* sig);
   static inline uint32_t RetsSizeInSlots(const FunctionSig* sig);
@@ -272,7 +273,7 @@ class WasmBytecode {
   uint32_t rets_slots_size_;
   uint32_t locals_count_;
   uint32_t locals_slots_size_;
-  uint32_t total_frame_size_in_bytes_;
+  size_t total_frame_size_in_bytes_;
   uint32_t ref_args_count_;
   uint32_t ref_rets_count_;
   uint32_t ref_locals_count_;
@@ -522,9 +523,11 @@ class V8_EXPORT_PRIVATE WasmInterpreterThread {
       current_frame_state_ = frame_state;
       // The thread's copy is a non-owning bookmark used for stack traces and
       // frame restoration on reentrant calls.  It must never hold a
-      // caught_exceptions_ GlobalHandle because the caller's live
-      // current_frame_ is the sole owner; a stale copy here would lead to a
-      // double-free if the frame is restored and then unwound.
+      // caught_exceptions_ GlobalHandle: a reentrant activation saves and
+      // restores this bookmark, and the interpreter requires that no suspended
+      // frame carries caught_exceptions_. ExecuteImportedFunction preserves the
+      // caller's caught_exceptions_ across the JS call on the C++ stack
+      // instead.
       current_frame_state_.caught_exceptions_ = Handle<FixedArray>::null();
     }
     const FrameState& GetCurrentFrame() const { return current_frame_state_; }
@@ -839,7 +842,7 @@ class V8_EXPORT_PRIVATE WasmInterpreter {
 
   WasmInterpreter(Isolate* isolate, const WasmModule* module,
                   const ModuleWireBytes& wire_bytes,
-                  DirectHandle<WasmInstanceObject> instance);
+                  DirectHandle<WasmTrustedInstanceData> trusted_data);
 
   static void InitializeOncePerProcess();
   static void GlobalTearDown();
@@ -1601,7 +1604,9 @@ class WasmBytecodeGenerator {
     return rets_slots_size_ + args_slots_size_;
   }
 
-  inline uint32_t GetStackFrameSize() const { return slot_offset_; }
+  inline uint32_t GetStackFrameSize() const {
+    return static_cast<uint32_t>(slot_offset_);
+  }
 
   uint32_t CurrentCodePos() const {
     return static_cast<uint32_t>(code_.size());
@@ -1871,13 +1876,14 @@ class WasmBytecodeGenerator {
       return CreateWasmRefSlot(value_type);
     }
     uint32_t slot_index = static_cast<uint32_t>(slots_.size());
-    slots_.push_back({value_type, slot_offset_, 0});
+    slots_.push_back({value_type, static_cast<uint32_t>(slot_offset_), 0});
     slot_offset_ += sizeof(T) / kSlotSize;
     return slot_index;
   }
   inline uint32_t CreateWasmRefSlot(ValueType value_type) {
     uint32_t slot_index = static_cast<uint32_t>(slots_.size());
-    slots_.push_back({value_type, slot_offset_, ref_slots_count_});
+    slots_.push_back(
+        {value_type, static_cast<uint32_t>(slot_offset_), ref_slots_count_});
     slot_offset_ += sizeof(WasmRef) / kSlotSize;
     ref_slots_count_++;
     return slot_index;
@@ -2093,7 +2099,12 @@ class WasmBytecodeGenerator {
   absl::flat_hash_map<Simd128, uint32_t, Simd128Hash> s128_const_cache_;
 
   std::vector<Simd128> simd_immediates_;
-  uint32_t slot_offset_;  // TODO(paolosev@microsoft.com): manage holes
+  // 64-bit so the running frame size cannot wrap for a pathologically large
+  // frame; such a frame then traps as a stack overflow at invocation (see
+  // WasmBytecode::InitializeSlots).
+  //
+  // TODO(paolosev@microsoft.com): manage holes
+  size_t slot_offset_;
 
   class RollbackStack {
    public:

@@ -56,7 +56,7 @@ class MapInference {
   }
 
   bool all_maps_are_stable() const {
-    return HaveMaps() && !node_info_->any_map_or_node_type_is_unstable();
+    return HaveMaps() && !node_info_->any_map_is_unstable();
   }
 
   ReduceResult InsertMapChecks(Zone* zone) {
@@ -68,7 +68,7 @@ class MapInference {
     if (!node_info_->maps_are_stale()) return ReduceResult::Done();
 
     // maps_are_stale implies the presence of unstable maps.
-    DCHECK(node_info_->any_map_or_node_type_is_unstable());
+    DCHECK(node_info_->any_map_is_unstable());
 
     // We've recorded stale unstable maps. Insert map checks.
     const PossibleMaps& maps = node_info_->possible_maps();

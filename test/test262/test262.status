@@ -1151,4 +1151,47 @@
 }],
 # End roll-watcher patch
 ####
+
+####
+# Roll-watcher patch
+[ALWAYS, {
+  'built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/invokes-return': [SKIP],
+  'built-ins/Promise/allKeyed/capability-resolve-throws-reject': [SKIP],
+  'built-ins/Promise/allKeyed/get-value-not-called-for-non-enumerable': [SKIP],
+  'built-ins/Promise/allKeyed/get-value-throws-reject': [SKIP],
+  'built-ins/Promise/allKeyed/invoke-resolve-custom': [SKIP],
+  'built-ins/Promise/allKeyed/invoke-resolve-get-once': [SKIP],
+  'built-ins/Promise/allKeyed/invoke-resolve-return': [SKIP],
+  'built-ins/Promise/allKeyed/invoke-then-not-callable-reject': [SKIP],
+  'built-ins/Promise/allKeyed/non-enumerable-properties-only': [SKIP],
+  'built-ins/Promise/allKeyed/reject-first': [SKIP],
+  'built-ins/Promise/allKeyed/resolve-element-function-properties': [SKIP],
+  'built-ins/Promise/allKeyed/resolve-from-same-thenable': [SKIP],
+  'built-ins/Promise/allKeyed/resolve-missing-reject-with-typeerror': [SKIP],
+  'built-ins/Promise/allKeyed/result-property-descriptors': [SKIP],
+  'built-ins/Promise/allSettledKeyed/capability-resolve-throws-reject': [SKIP],
+  'built-ins/Promise/allSettledKeyed/element-function-properties': [SKIP],
+  'built-ins/Promise/allSettledKeyed/get-value-not-called-for-non-enumerable': [SKIP],
+  'built-ins/Promise/allSettledKeyed/get-value-throws-reject': [SKIP],
+  'built-ins/Promise/allSettledKeyed/invoke-resolve-custom': [SKIP],
+  'built-ins/Promise/allSettledKeyed/invoke-resolve-get-once': [SKIP],
+  'built-ins/Promise/allSettledKeyed/invoke-resolve-return': [SKIP],
+  'built-ins/Promise/allSettledKeyed/invoke-then-not-callable-reject': [SKIP],
+  'built-ins/Promise/allSettledKeyed/non-enumerable-properties-only': [SKIP],
+  'built-ins/Promise/allSettledKeyed/reject-from-same-thenable': [SKIP],
+  'built-ins/Promise/allSettledKeyed/resolve-from-same-thenable': [SKIP],
+  'built-ins/Promise/allSettledKeyed/resolve-missing-reject-with-typeerror': [SKIP],
+  'built-ins/Promise/allSettledKeyed/result-property-descriptors': [SKIP],
+}],
+# End roll-watcher patch
+####
+
+####
+# Roll-watcher patch
+[ALWAYS, {
+  'intl402/Locale/prototype/getHourCycles/region-priority': [SKIP],
+  'intl402/Locale/prototype/getHourCycles/subdivision-region': [SKIP],
+}],
+# End roll-watcher patch
+####
 ]

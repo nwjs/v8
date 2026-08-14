@@ -252,6 +252,8 @@
       'cpu': 'arm64-64-Google_Tamar_GCE',
     },
     'tests': [
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
       {'name': 'v8testing', 'variant': 'default'},
     ],
   },
@@ -380,6 +382,9 @@
       # Jit fuzzing.
       {'name': 'mjsunit', 'variant': 'jit_fuzzing'},
       {'name': 'mjsunit', 'variant': 'jit_fuzzing_maglev'},
+      # Validate generated code.
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'v8_linux64_dict_tracking_dbg': {
@@ -847,6 +852,8 @@
         'test_args': ['--extra-flags', '--sim-arm64-optional-features="all"'],
         'shards': 4,
       },
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'v8_linux_arm64_gc_stress_dbg': {
@@ -976,6 +983,8 @@
       {'name': 'v8testing', 'variant': 'minor_ms'},
       {'name': 'v8testing', 'variant': 'conservative_stack_scanning'},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode'},
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'v8_win64_drumbrake_dbg': {
@@ -1042,6 +1051,8 @@
       {'name': 'v8testing', 'variant': 'minor_ms', 'shards': 2},
       {'name': 'v8testing', 'variant': 'conservative_stack_scanning', 'shards': 2},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode'},
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'v8_mac_arm64_gc_stress_dbg': {
@@ -1117,6 +1128,8 @@
       {'name': 'v8testing', 'variant': 'minor_ms'},
       {'name': 'v8testing', 'variant': 'conservative_stack_scanning'},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode'},
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'v8_mac_arm64_full_dbg': {
@@ -1481,6 +1494,9 @@
       # Jit fuzzing.
       {'name': 'mjsunit', 'variant': 'jit_fuzzing'},
       {'name': 'mjsunit', 'variant': 'jit_fuzzing_maglev'},
+      # Validate generated code.
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'V8 Linux64 - dumpling': {
@@ -1938,6 +1954,8 @@
       {'name': 'v8testing', 'variant': 'minor_ms', 'shards': 2},
       {'name': 'v8testing', 'variant': 'conservative_stack_scanning', 'shards': 2},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode', 'shards': 2},
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'V8 Mac64 ASAN': {
@@ -2022,6 +2040,8 @@
       {'name': 'v8testing', 'variant': 'minor_ms'},
       {'name': 'v8testing', 'variant': 'conservative_stack_scanning'},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode'},
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'V8 Mac - arm64 - no pointer compression debug': {
@@ -2100,6 +2120,8 @@
       {'name': 'v8testing', 'variant': 'minor_ms'},
       {'name': 'v8testing', 'variant': 'conservative_stack_scanning'},
       {'name': 'v8testing', 'variant': 'scavenger_chaos_mode'},
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'V8 Win64 - drumbrake - debug': {
@@ -2307,6 +2329,8 @@
         'test_args': ['--extra-flags', '--sim-arm64-optional-features="all"'],
         'shards': 4,
       },
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
     ],
   },
   'V8 Linux - arm64 - sim - gc stress': {
@@ -2442,6 +2466,8 @@
       'cpu': 'arm64-64-Google_Tamar_GCE',
     },
     'tests': [
+      {'name': 'benchmarks', 'variant': 'validate_generated_code', 'shards': 2},
+      {'name': 'd8testing', 'variant': 'validate_generated_code', 'shards': 2},
       {'name': 'v8testing', 'variant': 'default'},
     ],
   },

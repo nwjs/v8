@@ -12,6 +12,7 @@
 #include "src/base/logging.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/string-format.h"
+#include "src/base/strong-alias.h"
 #include "src/builtins/builtins.h"
 #include "src/codegen/bailout-reason.h"
 #include "src/codegen/machine-type.h"
@@ -183,20 +184,6 @@ std::ostream& operator<<(std::ostream& os, GenericUnopOp::Kind kind) {
     return os << #Name;
     GENERIC_UNOP_LIST(PRINT_KIND)
 #undef PRINT_KIND
-  }
-  UNREACHABLE();
-}
-
-std::ostream& operator<<(std::ostream& os, TypeHintOp::Type type) {
-  switch (type) {
-    case TypeHintOp::Type::kInt32:
-      return os << "Int32";
-    case TypeHintOp::Type::kUint32:
-      return os << "Uint32";
-    case TypeHintOp::Type::kFloat64:
-      return os << "Float64";
-    case TypeHintOp::Type::kHoleyFloat64:
-      return os << "HoleyFloat64";
   }
   UNREACHABLE();
 }
@@ -2185,9 +2172,7 @@ std::ostream& operator<<(std::ostream& os, Simd256UnpackOp::Kind kind) {
 #if V8_ENABLE_WEBASSEMBLY
 
 void WasmAllocateArrayOp::PrintOptions(std::ostream& os) const {
-  os << '[' << array_type->element_type()
-     << ", is_shared: " << (is_shared == SharedFlag::kYes ? "true" : "false")
-     << "]";
+  os << '[' << array_type->element_type() << ", " << is_shared << ']';
 }
 
 void WasmAllocateStructOp::PrintOptions(std::ostream& os) const {

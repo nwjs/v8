@@ -267,7 +267,7 @@ class TurbolevEarlyLoweringReducer : public Next {
     }
   }
 
-  V<Boolean> HasInPrototypeChain(V<Object> object, HeapObjectRef prototype,
+  V<Boolean> HasInPrototypeChain(V<Object> object, V<Object> target_proto,
                                  V<LazyFrameState> frame_state,
                                  V<NativeContext> native_context,
                                  LazyDeoptOnThrow lazy_deopt_on_throw) {
@@ -275,7 +275,6 @@ class TurbolevEarlyLoweringReducer : public Next {
 
     V<Boolean> true_bool = __ HeapConstant(factory_->true_value());
     V<Boolean> false_bool = __ HeapConstant(factory_->false_value());
-    V<HeapObject> target_proto = __ HeapConstant(prototype.object());
 
     GOTO_IF(__ IsSmi(object), done, false_bool);
 

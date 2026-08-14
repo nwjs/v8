@@ -219,6 +219,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   CompareOperationHint GetFeedbackForCompareOperation(
       FeedbackSource const& source);
   ForInHint GetFeedbackForForIn(FeedbackSource const& source);
+  SpeculationMode GetFeedbackForJumpLoop(FeedbackSource const& source);
 
   ProcessedFeedback const& GetFeedbackForCall(FeedbackSource const& source);
   ProcessedFeedback const& GetFeedbackForGlobalAccess(
@@ -241,6 +242,8 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   ProcessedFeedback const& ProcessFeedbackForCompareOperation(
       FeedbackSource const& source);
   ProcessedFeedback const& ProcessFeedbackForForIn(
+      FeedbackSource const& source);
+  ProcessedFeedback const& ProcessFeedbackForJumpLoop(
       FeedbackSource const& source);
   ProcessedFeedback const& ProcessFeedbackForTypeOf(
       FeedbackSource const& source);
@@ -417,6 +420,8 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   ProcessedFeedback const& ReadFeedbackForGlobalAccess(
       JSHeapBroker* broker, FeedbackSource const& source);
   ProcessedFeedback const& ReadFeedbackForInstanceOf(
+      FeedbackSource const& source);
+  ProcessedFeedback const& ReadFeedbackForJumpLoop(
       FeedbackSource const& source);
   ProcessedFeedback const& ReadFeedbackForPropertyAccess(
       FeedbackSource const& source, AccessMode mode,

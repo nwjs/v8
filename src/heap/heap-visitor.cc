@@ -9,6 +9,7 @@
 #include "src/heap/mark-compact-inl.h"
 #include "src/objects/allocation-site.h"
 #include "src/objects/casting-inl.h"
+#include "src/objects/heap-object-field-inl.h"
 #include "src/objects/js-weak-refs.h"
 
 namespace v8 {

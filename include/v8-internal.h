@@ -420,6 +420,9 @@ constexpr CppHeapPointerHandle kNullCppHeapPointerHandle = 0;
 constexpr uint64_t kCppHeapPointerMarkBit = 1ULL;
 constexpr uint64_t kCppHeapPointerTagShift = 1;
 constexpr uint64_t kCppHeapPointerPayloadShift = 16;
+constexpr uint64_t kCppHeapPointerTagMask =
+    ((1ULL << (kCppHeapPointerPayloadShift - kCppHeapPointerTagShift)) - 1)
+    << kCppHeapPointerTagShift;
 
 #ifdef V8_COMPRESS_POINTERS
 // CppHeapPointers use a dedicated pointer table. These constants control the
@@ -581,7 +584,6 @@ struct TagRange {
   V(WasmFuncDataTag)                 \
   V(WasmManagedDataTag)              \
   V(WasmNativeModuleTag)             \
-  V(WasmInterpreterHandleTag)        \
   V(BackingStoreTag)                 \
   V(IcuBreakIteratorTag)             \
   V(IcuListFormatterTag)             \
@@ -719,8 +721,9 @@ enum ExternalPointerTag : uint16_t {
   kApiIndexedPropertyDeleterCallbackTag,
   kApiIndexedPropertyEnumeratorCallbackTag,
   kApiIndexedPropertyIndexOfCallbackTag,
+  kApiIndexedPropertyIterableToListCallbackTag,
   kLastInterceptorInfoExternalPointerTag =
-      kApiIndexedPropertyIndexOfCallbackTag,
+      kApiIndexedPropertyIterableToListCallbackTag,
 
   kLastMaybeReadOnlyExternalPointerTag = kLastInterceptorInfoExternalPointerTag,
 
@@ -1019,13 +1022,14 @@ class Internals {
   static const int kBuiltinTier0EntryTableSize = 7 * kApiSystemPointerSize;
   static const int kBuiltinTier0TableSize = 7 * kApiSystemPointerSize;
   static const int kLinearAllocationAreaSize = 3 * kApiSystemPointerSize;
-  static const int kThreadLocalTopSize = 30 * kApiSystemPointerSize;
+  static const int kThreadLocalTopSize = 28 * kApiSystemPointerSize;
   static const int kHandleScopeDataSize =
       2 * kApiSystemPointerSize + 2 * kApiInt32Size;
   static const int kHandleScopeImplementerSize =
       11 * kApiSystemPointerSize + kHandleScopeDataSize;
 
-  // ExternalPointerTable and TrustedPointerTable layout guarantees.
+  // ExternalPointerTable, CppHeapPointerTable and TrustedPointerTable layout
+  // guarantees.
   static const int kExternalEntityTableBasePointerOffset = 0;
   static const int kSegmentedTableSegmentPoolSize = 4;
   static const int kExternalEntityTableSize =

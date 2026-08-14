@@ -103,6 +103,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void AllocateStackSpace(Register bytes) { sub(sp, sp, bytes); }
 
+  // TODO(johnyan): Remove scratch parameter once all callers use
+  // UseScratchRegisterScope consistently.
+  void PushLR(Register scratch = no_reg);
+  void PopLR(Register scratch = no_reg);
+
   // Push a fixed frame, consisting of lr, fp, constant pool.
   void PushCommonFrame(Register marker_reg = no_reg);
 
@@ -1492,11 +1497,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // Enter exit frame.
   // stack_space - extra stack space, used for parameters before call to C.
-  void EnterExitFrame(Register scratch, int stack_space,
-                      StackFrame::Type frame_type);
+  void EnterExitFrame(int stack_space, StackFrame::Type frame_type);
 
   // Leave the current exit frame.
-  void LeaveExitFrame(Register scratch);
+  void LeaveExitFrame();
 
   // Load the global proxy from the current context.
   void LoadGlobalProxy(Register dst) {
@@ -1589,7 +1593,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   template <bool use_unsigned_cmp = false>
   void CompareObjectType(Register heap_object, Register map, Register type_reg,
                          InstanceType type) {
-    const Register temp = type_reg == no_reg ? r0 : type_reg;
+    UseScratchRegisterScope temps(this);
+    const Register temp = type_reg == no_reg ? temps.Acquire() : type_reg;
 
     LoadMap(map, heap_object);
     CompareInstanceType<use_unsigned_cmp>(map, temp, type);
@@ -1600,8 +1605,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   //
   // Always use unsigned comparisons: ls for a positive result.
   void CompareObjectTypeRange(Register heap_object, Register map,
-                              Register type_reg, Register scratch,
-                              InstanceType lower_limit,
+                              Register type_reg, InstanceType lower_limit,
                               InstanceType higher_limit);
 
   // Variant of the above, which only guarantees to set the correct eq/ne flag.
@@ -1614,7 +1618,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   //
   // Always use unsigned comparisons: ls for a positive result.
   void CompareInstanceTypeRange(Register map, Register type_reg,
-                                Register scratch, InstanceType lower_limit,
+                                InstanceType lower_limit,
                                 InstanceType higher_limit);
 
   // Compare the object in a register to a value from the root list.
@@ -1641,9 +1645,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // Checks if value is in range [lower_limit, higher_limit] using a single
   // comparison.
-  void CompareRange(Register value, Register scratch, unsigned lower_limit,
+  void CompareRange(Register value, unsigned lower_limit,
                     unsigned higher_limit);
-  void JumpIfIsInRange(Register value, Register scratch, unsigned lower_limit,
+  void JumpIfIsInRange(Register value, unsigned lower_limit,
                        unsigned higher_limit, Label* on_in_range);
 
   // Tiering support.
@@ -1708,8 +1712,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // ---------------------------------------------------------------------------
   // Stack limit utilities
 
-  void StackOverflowCheck(Register num_args, Register scratch,
-                          Label* stack_overflow);
+  void StackOverflowCheck(Register num_args, Label* stack_overflow);
   void LoadStackLimit(Register destination, StackLimitKind kind);
 
   // ---------------------------------------------------------------------------
@@ -1753,10 +1756,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // Abort execution if argument is not undefined or an AllocationSite, enabled
   // via --debug-code.
-  void AssertUndefinedOrAllocationSite(Register object,
-                                       Register scratch) NOOP_UNLESS_DEBUG_CODE;
+  void AssertUndefinedOrAllocationSite(Register object) NOOP_UNLESS_DEBUG_CODE;
 
-  void AssertJSAny(Register object, Register map_tmp, Register tmp,
+  void AssertJSAny(Register object,
                    AbortReason abort_reason) NOOP_UNLESS_DEBUG_CODE;
   // ---------------------------------------------------------------------------
   // Patching helpers.

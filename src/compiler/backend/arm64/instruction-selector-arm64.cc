@@ -2407,10 +2407,11 @@ void InstructionSelector::VisitStackPointerGreaterThan(
   // are only applied to the first stack check. If applying an offset, we must
   // ensure the input and temp registers do not alias, thus kUniqueRegister.
   InstructionOperand temps[] = {g.TempRegister()};
-  const int temp_count = (kind == StackCheckKind::kJSFunctionEntry) ? 1 : 0;
-  const auto register_mode = (kind == StackCheckKind::kJSFunctionEntry)
-                                 ? OperandGenerator::kUniqueRegister
-                                 : OperandGenerator::kRegister;
+  const bool has_offset =
+      kind == StackCheckKind::kJSFunctionEntry || kind == StackCheckKind::kWasm;
+  const int temp_count = has_offset ? 1 : 0;
+  const auto register_mode = has_offset ? OperandGenerator::kUniqueRegister
+                                        : OperandGenerator::kRegister;
 
   InstructionOperand inputs[] = {g.UseRegisterWithMode(value, register_mode)};
   static constexpr int input_count = arraysize(inputs);
@@ -2917,7 +2918,7 @@ void VisitWideAddSub(InstructionSelector* selector, OpIndex node, bool is_add) {
   InstructionCode opcode_no_high = is_add ? kArm64Add : kArm64Sub;
 
   if (!out_high.valid() || !selector->IsUsed(out_high.value())) {
-    if (out_low.valid()) {
+    if (out_low.valid() && selector->IsUsed(out_low.value())) {
       InstructionOperand b_low_op =
           g.UseOperand(op.right_low(), kArithmeticImm);
       selector->Emit(opcode_no_high, g.DefineAsRegister(out_low.value()),
@@ -5525,6 +5526,18 @@ void InstructionSelector::VisitI32x4DotI8x16I7x16AddS(OpIndex node) {
   }
 }
 
+void InstructionSelector::VisitI32x4DotI8x16S(OpIndex node) {
+  DCHECK(CpuFeatures::IsSupported(DOTPROD));
+  Arm64OperandGenerator g(this);
+  const Simd128BinopOp& op = Cast<Simd128BinopOp>(node);
+  InstructionOperand left = g.UseUniqueRegister(op.left());
+  InstructionOperand right = g.UseUniqueRegister(op.right());
+  InstructionOperand acc = g.TempSimd128Register();
+  Emit(kArm64S128Const, acc, g.UseImmediate(0), g.UseImmediate(0),
+       g.UseImmediate(0), g.UseImmediate(0));
+  Emit(kArm64I32x4DotI8x16AddS, g.DefineSameAsInput(node, 2), left, right, acc);
+}
+
 void VisitDot(InstructionSelector* selector, OpIndex node, int lane_size) {
   Arm64OperandGenerator g(selector);
   const Simd128BinopOp& op = selector->Cast<Simd128BinopOp>(node);
@@ -6148,6 +6161,32 @@ void InstructionSelector::VisitI32x4Add(OpIndex node) {
                  this, node, LaneSize::kL32)) {
     return;
   } else {
+    Arm64OperandGenerator g(this);
+    const Simd128BinopOp& binop = Get(node).Cast<Simd128BinopOp>();
+    if (CanCover(node, binop.left())) {
+      if (auto dot = Get(binop.left()).TryCast<Simd128BinopOp>()) {
+        if (dot->kind == Simd128BinopOp::Kind::kI32x4DotI8x16S) {
+          InstructionOperand left = g.UseRegister(dot->left());
+          InstructionOperand right = g.UseRegister(dot->right());
+          InstructionOperand acc = g.UseRegister(binop.right());
+          Emit(kArm64I32x4DotI8x16AddS, g.DefineSameAsInput(node, 2), left,
+               right, acc);
+          return;
+        }
+      }
+    }
+    if (CanCover(node, binop.right())) {
+      if (auto dot = Get(binop.right()).TryCast<Simd128BinopOp>()) {
+        if (dot->kind == Simd128BinopOp::Kind::kI32x4DotI8x16S) {
+          InstructionOperand left = g.UseRegister(dot->left());
+          InstructionOperand right = g.UseRegister(dot->right());
+          InstructionOperand acc = g.UseRegister(binop.left());
+          Emit(kArm64I32x4DotI8x16AddS, g.DefineSameAsInput(node, 2), left,
+               right, acc);
+          return;
+        }
+      }
+    }
     VISIT_SIMD_ADD(I32x4, I16x8, LaneSize::kL32)
   }
 }
@@ -7212,6 +7251,7 @@ InstructionSelector::SupportedMachineOperatorFlags() {
                MachineOperatorBuilder::kSatConversionIsSafe |
                MachineOperatorBuilder::kFloat32Select |
                MachineOperatorBuilder::kFloat64Select |
+               MachineOperatorBuilder::kFloat64MinMax |
                MachineOperatorBuilder::kWord32Select |
                MachineOperatorBuilder::kWord64Select |
                MachineOperatorBuilder::kLoadStorePairs;

@@ -34,6 +34,14 @@ CORRUPTION_CORE ?= $(CORE_DIR)/$(basename $(notdir $(CORRUPTION_SCRIPT))).core
 CORRUPTION_CORE_CASES := invalid-script-source invalid-shared-function-info corrupted-map
 CORRUPTION_CORES := $(foreach case,$(CORRUPTION_CORE_CASES),$(CORE_DIR)/$(case).core)
 
+# Without pointer compression d8 remaps the embedded builtins to a second,
+# file-backed mapping of the binary at a high address. Those pages are clean and
+# file-backed, so the default coredump_filter (0x33) leaves them out of the core
+# (they are recorded only as an NT_FILE note), and lldb cannot read them back to
+# unwind the JS frames running in those builtins. Adding bit 2 (file-backed
+# private, 0x3f = 0x33 | file-backed) allows gdb to capture those
+# pages. The value is read when the core is written, so setting it on the
+# stopped inferior after `run` and before `generate-core-file` is enough.
 define generate_core_gdb
 	mkdir -p "$(dir $(3))"
 	rm -f "$(3)"
@@ -42,6 +50,7 @@ define generate_core_gdb
 		-iex 'set debuginfod enabled off' \
 		-ex 'file "$(1)"' \
 		-ex 'run $(2)' \
+		-ex 'python open("/proc/%d/coredump_filter" % gdb.selected_inferior().pid, "w").write("0x3f")' \
 		-ex 'generate-core-file $(3)' \
 		-ex 'quit'
 endef

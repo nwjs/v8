@@ -36,8 +36,7 @@ T* SandboxAlloc() {
   size_t size = sizeof(T);
 
 #ifdef V8_ENABLE_SANDBOX
-  auto allocator =
-      IsolateGroup::GetDefault()->GetSandboxedArrayBufferAllocator();
+  auto* allocator = IsolateGroup::current()->GetInSandboxAllocator();
   void* raw_memory = allocator->Allocate(size);
 #else
   void* raw_memory = base::Malloc(size);
@@ -60,8 +59,7 @@ T* SandboxAllocArray(size_t num_elements) {
   size_t size = base::CheckMul(num_elements, sizeof(T)).ValueOrDie();
 
 #ifdef V8_ENABLE_SANDBOX
-  auto allocator =
-      IsolateGroup::GetDefault()->GetSandboxedArrayBufferAllocator();
+  auto* allocator = IsolateGroup::current()->GetInSandboxAllocator();
   void* raw_memory = allocator->Allocate(size);
 #else
   void* raw_memory = base::Malloc(size);
@@ -73,8 +71,7 @@ T* SandboxAllocArray(size_t num_elements) {
 
 inline void SandboxFree(void* ptr) {
 #ifdef V8_ENABLE_SANDBOX
-  auto allocator =
-      IsolateGroup::GetDefault()->GetSandboxedArrayBufferAllocator();
+  auto* allocator = IsolateGroup::current()->GetInSandboxAllocator();
   allocator->Free(ptr);
 #else
   return base::Free(ptr);

@@ -985,6 +985,8 @@ int InspectorTestMain(int argc, char* argv[]) {
   v8::V8::SetFlagsFromCommandLine(&argc, argv, true);
   v8::V8::InitializeExternalStartupData(argv[0]);
   v8::V8::Initialize();
+  // Enable the WebAssembly trap handler in inspector-test to match d8/Chrome.
+  v8::V8::EnableWebAssemblyTrapHandler(true);
   i::DisableEmbeddedBlobRefcounting();
 
   base::Semaphore ready_semaphore(0);

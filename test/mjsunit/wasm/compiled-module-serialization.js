@@ -4,7 +4,7 @@
 
 // Force TurboFan code for serialization.
 // Flags: --expose-gc --no-liftoff --no-wasm-lazy-compilation
-// Flags: --experimental-wasm-wasmfx
+// Flags: --wasm-wasmfx
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 

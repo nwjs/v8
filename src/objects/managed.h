@@ -72,7 +72,7 @@ struct ManagedPtrDestructor
   ManagedPtrDestructor* next_ = nullptr;
   void* shared_ptr_ptr_ = nullptr;
   void (*destructor_)(void* shared_ptr) = nullptr;
-  SharedFlag shared_ = SharedFlag::kNo;
+  SharedFlag shared_ = SharedFlag{false};
   Address* global_handle_location_ = nullptr;
   V8_NO_UNIQUE_ADDRESS ExternalMemoryAccounter external_memory_accounter_;
 
@@ -240,7 +240,7 @@ class TrustedManaged : public TrustedForeign {
   // {std::unique_ptr} (which will implicitly convert to {std::shared_ptr}).
   static DirectHandle<TrustedManaged<CppType>> From(
       Isolate* isolate, size_t estimated_size,
-      std::shared_ptr<CppType> shared_ptr, SharedFlag shared);
+      std::shared_ptr<CppType> shared_ptr);
 
  private:
   friend class Tagged<TrustedManaged>;

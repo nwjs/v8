@@ -102,7 +102,7 @@ RegExpMacroAssemblerX64::RegExpMacroAssemblerX64(Isolate* isolate, Zone* zone,
                                                  Mode mode,
                                                  int registers_to_save)
     : NativeRegExpMacroAssembler(isolate, zone, mode),
-      masm_(isolate, CodeObjectRequired::kYes,
+      masm_(isolate, CodeObjectRequired{true},
             NewAssemblerBuffer(kRegExpCodeSize)),
       no_root_array_scope_(&masm_),
       code_relative_fixup_positions_(zone),
@@ -146,6 +146,15 @@ void RegExpMacroAssemblerX64::AdvanceRegister(int reg, int by) {
 }
 
 void RegExpMacroAssemblerX64::Backtrack() {
+  // Defer to the shared backtrack block bound in GetCode: only there, with
+  // the body fully emitted, is it known whether anything was ever pushed.
+  // If nothing was, the only value a pop could yield is the fail label,
+  // so the block reduces to Fail() and the backtrack stack (including the
+  // fail label itself) is elided entirely.
+  __ jmp(&backtrack_label_);
+}
+
+void RegExpMacroAssemblerX64::EmitBacktrack() {
   CheckPreemption();
   if (has_backtrack_limit()) {
     Label next;
@@ -206,11 +215,12 @@ void RegExpMacroAssemblerX64::CheckCharacterLT(base::uc16 limit,
 }
 
 void RegExpMacroAssemblerX64::CheckFixedLengthLoop(Label* on_equal) {
+  set_backtrack_stack_used();
   Label fallthrough;
   __ cmpl(rdi, Operand(backtrack_stackpointer(), 0));
   __ j(not_equal, &fallthrough, Label::kNear);
   Drop();
-  BranchOrBacktrack(on_equal);
+  GoTo(on_equal);
   __ bind(&fallthrough);
 }
 
@@ -879,6 +889,113 @@ void RegExpMacroAssemblerX64::SplatCharactersToXMM(XMMRegister dst,
   SplatToXMM(dst, val64, scratch);
 }
 
+bool RegExpMacroAssemblerX64::SkipUntilCharUseSimd(int advance_by) {
+  return v8_flags.regexp_simd && advance_by == 1;
+}
+
+void RegExpMacroAssemblerX64::SkipUntilCharSimd(int cp_offset, int advance_by,
+                                                unsigned character,
+                                                int bounds_check_offset,
+                                                Label* on_match,
+                                                Label* on_no_match) {
+  Label scalar, simd_loop, found;
+  static constexpr int kVectorSize = 16;
+  const int kCharsPerVector = kVectorSize / char_size();
+
+  static constexpr int kCheckPositionOffset = -1;
+  const int check_offset =
+      bounds_check_offset + kCharsPerVector + kCheckPositionOffset;
+  DCHECK_GE(check_offset, 0);
+  CheckPosition(check_offset, &scalar);
+
+  XMMRegister char_vec = xmm0;
+  SplatCharactersToXMM(char_vec, character, 1, r11);
+
+  __ bind(&simd_loop);
+  XMMRegister input_vec = xmm1;
+  __ Movdqu(input_vec, Operand(rsi, rdi, times_1, cp_offset * char_size()));
+  Pcmpeq(masm(), input_vec, input_vec, char_vec, char_size());
+
+  __ Pmovmskb(rax, input_vec);
+  __ testl(rax, rax);
+  __ j(not_zero, &found, Label::kNear);
+
+  AdvanceCurrentPosition(kCharsPerVector);
+  __ cmpl(rdi, Immediate(-check_offset * char_size()));
+  __ j(less, &simd_loop, Label::kNear);
+
+  __ jmp(&scalar, Label::kNear);
+
+  __ bind(&found);
+  __ bsfl(rax, rax);
+  __ addq(rdi, rax);
+  LoadCurrentCharacterUnchecked(cp_offset, 1);
+  __ jmp(on_match);
+
+  __ bind(&scalar);
+}
+
+bool RegExpMacroAssemblerX64::SkipUntilCharOrCharUseSimd(int advance_by) {
+  return v8_flags.regexp_simd && advance_by == 1;
+}
+
+void RegExpMacroAssemblerX64::SkipUntilCharOrCharSimd(
+    int cp_offset, int advance_by, unsigned char1, unsigned char2,
+    int bounds_check_offset, Label* on_match, Label* on_no_match) {
+  Label scalar, simd_loop, found;
+  static constexpr int kVectorSize = 16;
+  const int kCharsPerVector = kVectorSize / char_size();
+
+  static constexpr int kCheckPositionOffset = -1;
+  const int check_offset =
+      bounds_check_offset + kCharsPerVector + kCheckPositionOffset;
+  CheckPosition(check_offset, &scalar);
+
+  XMMRegister char1_vec = xmm0;
+  XMMRegister char2_vec = xmm1;
+
+  SplatCharactersToXMM(char1_vec, char1, 1, r11);
+  SplatCharactersToXMM(char2_vec, char2, 1, r11);
+
+  __ bind(&simd_loop);
+  XMMRegister input_vec = xmm2;
+  __ Movdqu(input_vec, Operand(rsi, rdi, times_1, cp_offset * char_size()));
+
+  XMMRegister eq1 = xmm4;
+  XMMRegister eq2 = xmm3;
+
+  if (CpuFeatures::IsSupported(AVX)) {
+    CpuFeatureScope avx_scope(masm(), AVX);
+    Pcmpeq(masm(), eq1, input_vec, char1_vec, char_size());
+    Pcmpeq(masm(), eq2, input_vec, char2_vec, char_size());
+    __ Orps(eq1, eq1, eq2);
+  } else {
+    __ Movdqa(eq1, input_vec);
+    __ Movdqa(eq2, input_vec);
+    Pcmpeq(masm(), eq1, eq1, char1_vec, char_size());
+    Pcmpeq(masm(), eq2, eq2, char2_vec, char_size());
+    __ Por(eq1, eq2);
+  }
+
+  __ Pmovmskb(rax, eq1);
+  __ testl(rax, rax);
+  __ j(not_zero, &found, Label::kNear);
+
+  AdvanceCurrentPosition(kCharsPerVector);
+  __ cmpl(rdi, Immediate(-check_offset * char_size()));
+  __ j(less, &simd_loop, Label::kNear);
+
+  __ jmp(&scalar, Label::kNear);
+
+  __ bind(&found);
+  __ bsfl(rax, rax);
+  __ addq(rdi, rax);
+  LoadCurrentCharacterUnchecked(cp_offset, 1);
+  __ jmp(on_match);
+
+  __ bind(&scalar);
+}
+
 void RegExpMacroAssemblerX64::SkipUntilOneOfMasked(
     int cp_offset, int advance_by, unsigned both_chars, unsigned both_mask,
     int max_offset, unsigned chars1, unsigned mask1, unsigned chars2,
@@ -1312,6 +1429,50 @@ void RegExpMacroAssemblerX64::BindJumpTarget(Label* label) {
   // more thought how to avoid perf regressions.
 }
 
+bool RegExpMacroAssemblerX64::CanTableSwitchOnBits() { return true; }
+
+void RegExpMacroAssemblerX64::TableSwitchOnBits(int shift, int table_size,
+                                                Label* table) {
+  DCHECK(base::bits::IsPowerOfTwo(table_size));
+  __ movl(rax, current_character());
+  if (shift > 0) __ shrl(rax, Immediate(shift));
+  __ andl(rax, Immediate(table_size - 1));
+  // The entries are table-relative (target minus the table's own position, as
+  // written by WriteBuiltinJumpTableEntry), so the target is reconstructed by
+  // adding the table's runtime address rather than the InstructionStream base.
+  __ leaq(rcx, Operand(table, 0));
+  __ movsxlq(rax, Operand(rcx, rax, times_4, 0));
+  __ addq(rcx, rax);
+  // TODO(sroettger): This jump needs an endbr64 instruction but the code is
+  // performance sensitive. Needs more thought how to do this in a fast way.
+  __ jmp(rcx, /*notrack=*/true);
+}
+
+void RegExpMacroAssemblerX64::EmitTableSwitchTable(
+    Label* table, base::Vector<Label* const> targets) {
+  // The table is emitted straight into the instruction stream; the caller
+  // guarantees the preceding code ends with an unconditional control
+  // transfer and that every target is already bound.
+  //
+  // The entries are raw offset words, not instructions. Bracket them with
+  // traps so that a stray fall-through or a jump into the data (rather than
+  // through the indirect dispatch) faults instead of executing the offsets
+  // as code. The entry trap precedes the alignment so the table itself
+  // stays aligned for the indexed load.
+  __ int3();
+  __ Align(kIntSize);
+  __ bind(table);
+  // WriteBuiltinJumpTableEntry emits each table-relative offset and records it
+  // in the jump table info, which lets the generated-code validator skip the
+  // data instead of decoding it as instructions.
+  const int table_pos = table->pos();
+  for (Label* target : targets) {
+    DCHECK(target->is_bound());
+    __ WriteBuiltinJumpTableEntry(target, table_pos);
+  }
+  __ int3();
+}
+
 void RegExpMacroAssemblerX64::Fail() {
   static_assert(FAILURE == 0);  // Return value for failure is zero.
   if (!global()) {
@@ -1422,38 +1583,70 @@ DirectHandle<HeapObject> RegExpMacroAssemblerX64::GetCode(
   static_assert(kStringStartMinusOneOffset ==
                 kSuccessfulCapturesOffset - kSystemPointerSize);
   __ Push(Immediate(0));  // Make room for "string start - 1" constant.
+  // The body has been fully emitted, so backtrack_stack_used() is now final: it
+  // is true iff some op pushed, popped, or transferred the backtrack stack
+  // pointer. Patterns that never do skip the backtrack stack setup, the fail
+  // label, and the teardown below. Either way these two slots follow "string
+  // start - 1": the branch pushes them, the else reserves them.
   static_assert(kBacktrackCountOffset ==
                 kStringStartMinusOneOffset - kSystemPointerSize);
-  __ Push(Immediate(0));  // The backtrack counter.
   static_assert(kRegExpStackBasePointerOffset ==
                 kBacktrackCountOffset - kSystemPointerSize);
-  __ Push(Immediate(0));  // The regexp stack base ptr.
+  if (backtrack_stack_used()) {
+    __ Push(Immediate(0));  // The backtrack counter.
+    __ Push(Immediate(0));  // The regexp stack base ptr.
 
-  // Initialize backtrack stack pointer. It must not be clobbered from here on.
-  // Note the backtrack_stackpointer is callee-saved.
-  static_assert(backtrack_stackpointer() == rbx);
-  LoadRegExpStackPointerFromMemory(backtrack_stackpointer());
+    // Initialize backtrack stack pointer. It must not be clobbered from here
+    // on. Note the backtrack_stackpointer is callee-saved.
+    static_assert(backtrack_stackpointer() == rbx);
+    LoadRegExpStackPointerFromMemory(backtrack_stackpointer());
 
-  // Store the regexp base pointer - we'll later restore it / write it to
-  // memory when returning from this irregexp code object.
-  PushRegExpBasePointer(backtrack_stackpointer(), kScratchRegister);
+    // Store the regexp base pointer - we'll later restore it / write it to
+    // memory when returning from this irregexp code object. Captured with an
+    // empty stack (delta 0), before the fail label is pushed below, so the
+    // teardown on exit and between global iterations restores to the same
+    // point (regexp::StackScope verifies this delta is unchanged).
+    PushRegExpBasePointer(backtrack_stackpointer(), kScratchRegister);
+  } else {
+    // Reserve the two frame slots. Nothing reads them without a backtrack
+    // stack; poison them in debug so an erroneous read traps loudly.
+#ifdef DEBUG
+    __ Move(kScratchRegister, kZapValue);
+    __ Push(kScratchRegister);
+    __ Push(kScratchRegister);
+#else
+    __ subq(rsp, Immediate(2 * kSystemPointerSize));
+#endif
+  }
 
-  {
+  // Skip the JS stack guard check for patterns whose register file fits within
+  // the stack limit's guaranteed slack: allocating it then can never push the
+  // stack past the point the check would catch, so the check is pure overhead
+  // on every match. This is the same slack that lets optimized JS elide the
+  // entry stack check for small leaf frames (see the static_assert and
+  // CodeGenerator::ShouldApplyOffsetToStackCheck).
+  static constexpr int kMaxRegistersWithoutStackCheck = 32;
+  static_assert(kMaxRegistersWithoutStackCheck * kSystemPointerSize <=
+                kStackLimitSlackForDeoptimizationInBytes);
+  if (num_registers_ > kMaxRegistersWithoutStackCheck) {
     // Check if we have space on the stack for registers.
     Label stack_limit_hit, stack_ok;
 
     ExternalReference stack_limit =
         ExternalReference::address_of_jslimit(isolate());
-    __ movq(r9, rsp);
+    // Use rax as scratch here to keep the parameter registers (input_end is
+    // r9 under the Windows ABI) live for the input position setup after
+    // stack_ok.
+    __ movq(rax, rsp);
     __ Move(kScratchRegister, stack_limit);
-    __ subq(r9, Operand(kScratchRegister, 0));
+    __ subq(rax, Operand(kScratchRegister, 0));
     Immediate extra_space_for_variables(num_registers_ * kSystemPointerSize);
 
     // Handle it if the stack pointer is already below the stack limit.
     __ j(below_equal, &stack_limit_hit, Label::kNear);
     // Check if there is room for the variable number of registers above
     // the stack limit.
-    __ cmpq(r9, extra_space_for_variables);
+    __ cmpq(rax, extra_space_for_variables);
     __ j(above_equal, &stack_ok);
     // Exit with OutOfMemory exception. There is not enough space on the stack
     // for our working registers.
@@ -1462,44 +1655,81 @@ DirectHandle<HeapObject> RegExpMacroAssemblerX64::GetCode(
 
     __ bind(&stack_limit_hit);
     __ Move(code_object_pointer(), masm_.CodeObject());
-    StoreRegExpStackPointerToMemory(backtrack_stackpointer(), kScratchRegister);
+    // Without a backtrack stack, backtrack_stackpointer() was never
+    // initialized above; storing it would corrupt the saved stack pointer
+    // (regexp::StackScope verifies it is unchanged across the exec call).
+    if (backtrack_stack_used()) {
+      StoreRegExpStackPointerToMemory(backtrack_stackpointer(),
+                                      kScratchRegister);
+    }
     // CallCheckStackGuardState preserves no registers beside rbp and rsp.
     CallCheckStackGuardState(extra_space_for_variables);
     __ testq(rax, rax);
     // If returned value is non-zero, we exit with the returned value as result.
     __ j(not_zero, &return_rax);
-    LoadRegExpStackPointerFromMemory(backtrack_stackpointer());
+    if (backtrack_stack_used()) {
+      LoadRegExpStackPointerFromMemory(backtrack_stackpointer());
+    }
+
+    // The stack guard call clobbered all registers. Reload the parameter
+    // registers used below for the input position setup.
+    __ movq(kCArgRegs[1], Operand(rbp, kStartIndexOffset));
+    __ movq(kCArgRegs[2], Operand(rbp, kInputStartOffset));
+    __ movq(kCArgRegs[3], Operand(rbp, kInputEndOffset));
 
     __ bind(&stack_ok);
   }
 
   // Allocate space on stack for registers.
   __ AllocateStackSpace(num_registers_ * kSystemPointerSize);
-  // Load string length.
-  __ movq(rsi, Operand(rbp, kInputEndOffset));
-  // Load input position.
-  __ movq(rdi, Operand(rbp, kInputStartOffset));
-  // Set up rdi to be negative offset from string end.
+
+  // Set up the input positions. start_index/input_start/input_end are still in
+  // their entry parameter registers (nothing in the prologue above clobbers
+  // them, and the stack-guard slow path reloads them), so shuffle them directly
+  // into their target registers instead of reloading from the frame.
+  // kCArgRegs: [1]=start_index, [2]=input_start, [3]=input_end.
+  // Target: rsi=input_end, rdi=input_start - input_end.
+#ifdef DEBUG
+  // The shuffle depends on that liveness; a future prologue edit that clobbered
+  // one of these registers would silently corrupt the match base. Verify each
+  // against the frame slot it was spilled to at entry and trap on mismatch.
+  {
+    Label live_ok, live_bad;
+    __ cmpq(kCArgRegs[1], Operand(rbp, kStartIndexOffset));
+    __ j(not_equal, &live_bad, Label::kNear);
+    __ cmpq(kCArgRegs[2], Operand(rbp, kInputStartOffset));
+    __ j(not_equal, &live_bad, Label::kNear);
+    __ cmpq(kCArgRegs[3], Operand(rbp, kInputEndOffset));
+    __ j(equal, &live_ok, Label::kNear);
+    __ bind(&live_bad);
+    __ int3();
+    __ bind(&live_ok);
+  }
+#endif
+  __ movq(rax, kCArgRegs[1]);
+  __ movq(rsi, kCArgRegs[3]);
+  __ movq(rdi, kCArgRegs[2]);
   __ subq(rdi, rsi);
-  // Set rax to address of char before start of the string
-  // (effectively string position -1).
-  __ movq(rcx, Operand(rbp, kStartIndexOffset));
-  __ negq(rcx);
-  __ leaq(rax, Operand(rdi, rcx, CharSizeScaleFactor(), -char_size()));
+  // Initialize the code object pointer here, ahead of the flag-sensitive region
+  // below: Move may expand to more than a single flag-neutral instruction.
+  __ Move(code_object_pointer(), masm_.CodeObject());
+  // Set rax to the address of the char before the start of the string
+  // (effectively string position -1). negq also sets ZF iff start_index == 0.
+  // Only leaq and movq follow before the at-start branch consumes ZF, and both
+  // are flag-neutral on x86-64, so the flag survives.
+  __ negq(rax);
+  __ leaq(rax, Operand(rdi, rax, CharSizeScaleFactor(), -char_size()));
   // Store this value in a local variable, for use when clearing
   // position registers.
   __ movq(Operand(rbp, kStringStartMinusOneOffset), rax);
-
-  // Initialize code object pointer.
-  __ Move(code_object_pointer(), masm_.CodeObject());
 
   Label load_char_start_regexp;  // Execution restarts here for global regexps.
   {
     Label start_regexp;
 
     // Load newline if index is at start, previous character otherwise.
-    __ cmpl(Operand(rbp, kStartIndexOffset), Immediate(0));
-    __ j(not_equal, &load_char_start_regexp, Label::kNear);
+    // ZF is still set from the negq of start_index above.
+    __ j(not_zero, &load_char_start_regexp, Label::kNear);
     __ Move(current_character(), '\n');
     __ jmp(&start_regexp, Label::kNear);
 
@@ -1542,6 +1772,13 @@ DirectHandle<HeapObject> RegExpMacroAssemblerX64::GetCode(
         __ movq(register_location(i), rax);
       }
     }
+  }
+
+  if (backtrack_stack_used() && fail_label() != nullptr) {
+    // Push the fail label (see set_fail_label / prologue_pushes_fail_label).
+    // Global matches re-enter here per iteration, each having restored the
+    // stack to base via PopRegExpBasePointer first, so it is refreshed.
+    PushBacktrack(fail_label());
   }
 
   __ jmp(&start_label_);
@@ -1592,9 +1829,11 @@ DirectHandle<HeapObject> RegExpMacroAssemblerX64::GetCode(
       __ addq(Operand(rbp, kRegisterOutputOffset),
               Immediate(num_saved_registers_ * kIntSize));
 
-      // Restore the original regexp stack pointer value (effectively, pop the
-      // stored base pointer).
-      PopRegExpBasePointer(backtrack_stackpointer(), kScratchRegister);
+      if (backtrack_stack_used()) {
+        // Restore the original regexp stack pointer value (effectively, pop the
+        // stored base pointer).
+        PopRegExpBasePointer(backtrack_stackpointer(), kScratchRegister);
+      }
 
       Label reload_string_start_minus_one;
 
@@ -1636,9 +1875,11 @@ DirectHandle<HeapObject> RegExpMacroAssemblerX64::GetCode(
   }
 
   __ bind(&return_rax);
-  // Restore the original regexp stack pointer value (effectively, pop the
-  // stored base pointer).
-  PopRegExpBasePointer(backtrack_stackpointer(), kScratchRegister);
+  if (backtrack_stack_used()) {
+    // Restore the original regexp stack pointer value (effectively, pop the
+    // stored base pointer).
+    PopRegExpBasePointer(backtrack_stackpointer(), kScratchRegister);
+  }
 
 #ifdef V8_TARGET_OS_WIN
   // Restore callee save registers.
@@ -1665,7 +1906,15 @@ DirectHandle<HeapObject> RegExpMacroAssemblerX64::GetCode(
   // Backtrack code (branch target for conditional backtracks).
   if (backtrack_label_.is_linked()) {
     __ bind(&backtrack_label_);
-    Backtrack();
+    if (backtrack_stack_used()) {
+      EmitBacktrack();
+    } else {
+      // Nothing was pushed, so the only possible backtrack target is the fail
+      // label. Fail directly instead of popping a stack that was never set
+      // up. Reached e.g. by the bounds check of a single character class like
+      // /[abc]/.
+      Fail();
+    }
   }
 
   Label exit_with_exception;
@@ -1673,6 +1922,11 @@ DirectHandle<HeapObject> RegExpMacroAssemblerX64::GetCode(
   // Preempt-code.
   if (check_preempt_label_.is_linked()) {
     SafeCallTarget(&check_preempt_label_);
+
+    // Only EmitBacktrack() (which pops the backtrack stack) links this label,
+    // so a linked preempt target implies the backtrack stack is live and its
+    // pointer is initialized for the store/reload below.
+    DCHECK(backtrack_stack_used());
 
     __ pushq(rdi);
 
@@ -1752,7 +2006,9 @@ DirectHandle<HeapObject> RegExpMacroAssemblerX64::GetCode(
   return Cast<HeapObject>(code);
 }
 
-void RegExpMacroAssemblerX64::GoTo(Label* to) { BranchOrBacktrack(to); }
+void RegExpMacroAssemblerX64::GoTo(Label* to) {
+  __ jmp(to ? to : &backtrack_label_);
+}
 
 void RegExpMacroAssemblerX64::IfRegisterGE(int reg, int comparand,
                                            Label* if_ge) {
@@ -1815,6 +2071,7 @@ void RegExpMacroAssemblerX64::ReadPositionFromRegister(Register dst, int reg) {
 // Preserves a position-independent representation of the stack pointer in reg:
 // reg = top - sp.
 void RegExpMacroAssemblerX64::WriteStackPointerToRegister(int reg) {
+  set_backtrack_stack_used();
   ExternalReference stack_top_address =
       ExternalReference::address_of_regexp_stack_memory_top_address(isolate());
   __ movq(rax, __ ExternalReferenceAsOperand(stack_top_address, rax));
@@ -1823,6 +2080,7 @@ void RegExpMacroAssemblerX64::WriteStackPointerToRegister(int reg) {
 }
 
 void RegExpMacroAssemblerX64::ReadStackPointerFromRegister(int reg) {
+  set_backtrack_stack_used();
   ExternalReference stack_top_address =
       ExternalReference::address_of_regexp_stack_memory_top_address(isolate());
   __ movq(backtrack_stackpointer(),
@@ -1964,14 +2222,6 @@ void RegExpMacroAssemblerX64::CheckPosition(int cp_offset,
   }
 }
 
-void RegExpMacroAssemblerX64::BranchOrBacktrack(Label* to) {
-  if (to == nullptr) {
-    Backtrack();
-    return;
-  }
-  __ jmp(to);
-}
-
 void RegExpMacroAssemblerX64::BranchOrBacktrack(Condition condition,
                                                 Label* to) {
   __ j(condition, to ? to : &backtrack_label_);
@@ -1991,12 +2241,14 @@ void RegExpMacroAssemblerX64::SafeReturn() {
 
 void RegExpMacroAssemblerX64::Push(Register source) {
   DCHECK(source != backtrack_stackpointer());
+  set_backtrack_stack_used();
   // Notice: This updates flags, unlike normal Push.
   __ subq(backtrack_stackpointer(), Immediate(kIntSize));
   __ movl(Operand(backtrack_stackpointer(), 0), source);
 }
 
 void RegExpMacroAssemblerX64::Push(Immediate value) {
+  set_backtrack_stack_used();
   // Notice: This updates flags, unlike normal Push.
   __ subq(backtrack_stackpointer(), Immediate(kIntSize));
   __ movl(Operand(backtrack_stackpointer(), 0), value);
@@ -2017,6 +2269,7 @@ void RegExpMacroAssemblerX64::FixupCodeRelativePositions() {
 }
 
 void RegExpMacroAssemblerX64::Push(Label* backtrack_target) {
+  set_backtrack_stack_used();
   __ subq(backtrack_stackpointer(), Immediate(kIntSize));
   __ movl(Operand(backtrack_stackpointer(), 0), backtrack_target);
   MarkPositionForCodeRelativeFixup();
@@ -2024,12 +2277,14 @@ void RegExpMacroAssemblerX64::Push(Label* backtrack_target) {
 
 void RegExpMacroAssemblerX64::Pop(Register target) {
   DCHECK(target != backtrack_stackpointer());
+  set_backtrack_stack_used();
   __ movsxlq(target, Operand(backtrack_stackpointer(), 0));
   // Notice: This updates flags, unlike normal Pop.
   __ addq(backtrack_stackpointer(), Immediate(kIntSize));
 }
 
 void RegExpMacroAssemblerX64::Drop() {
+  set_backtrack_stack_used();
   __ addq(backtrack_stackpointer(), Immediate(kIntSize));
 }
 

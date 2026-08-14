@@ -696,7 +696,7 @@ MaybeDirectHandle<JSObject> CreateLiteral(Isolate* isolate,
   }
   auto vector = Cast<FeedbackVector>(maybe_vector);
   FeedbackSlot literals_slot(FeedbackVector::ToSlot(literals_index));
-  CHECK(literals_slot.ToInt() < vector->length());
+  CHECK_LT(literals_slot.ToInt(), vector->length().value());
   Handle<Object> literal_site(Cast<Object>(vector->Get(literals_slot)),
                               isolate);
   Handle<AllocationSite> site;
@@ -1037,6 +1037,10 @@ RUNTIME_FUNCTION(Runtime_SetPrototypeProperties) {
           DirectHandle<AccessorInfo> accessor_info =
               isolate->factory()->lazy_closure_accessor();
 
+          // Unlike SetDataProperty/TransitionAndWriteDataProperty, SetAccessor
+          // doesn't invalidate protectors, so do it here for e.g. `then` or
+          // `next` added to a watched prototype.
+          it.UpdateProtector();
           JSObject::SetAccessor(js_proto, Cast<Name>(key), accessor_info,
                                 PropertyAttributes::NONE)
               .Check();

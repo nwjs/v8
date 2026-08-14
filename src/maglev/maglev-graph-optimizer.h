@@ -32,7 +32,7 @@ class MaglevGraphOptimizer {
   void PreProcessGraph(Graph* graph) {}
   void PostProcessGraph(Graph* graph) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block);
-  void PostProcessBasicBlock(BasicBlock* block);
+  BlockProcessResult PostProcessBasicBlock(BasicBlock* block);
   void PostPhiProcessing() {}
 
 #define DECLARE_PROCESS(NodeT)                                        \
@@ -73,10 +73,27 @@ class MaglevGraphOptimizer {
 
   void AttachExceptionHandlerInfo(NodeBase* node);
 
+  // Called by the reducer for every node emitted while lowering. Such nodes
+  // (e.g. the specific call a generic call is reduced to) bypass
+  // PostProcessNode, so mirror its allocation-folding barrier here: a
+  // side-effecting node must stop folding into the current allocation block.
+  template <typename NodeT>
+  void MarkPossibleSideEffect(NodeT* node) {
+    if constexpr (Node::opcode_of<NodeT> != Opcode::kAllocationBlock &&
+                  (NodeT::kProperties.can_allocate() ||
+                   NodeT::kProperties.can_deopt() ||
+                   NodeT::kProperties.can_throw())) {
+      reducer_.ClearCurrentAllocationBlock();
+    }
+  }
+
   ProcessResult DeoptAndTruncate(DeoptimizeReason reason) {
     ReduceResult result = reducer_.EmitUnconditionalDeopt(reason);
     CHECK(result.IsDoneWithAbort());
     return ProcessResult::kTruncateBlock;
+  }
+  ProcessResult RemoveCheckOrDeopt(bool passed, DeoptimizeReason reason) {
+    return passed ? RemoveCurrentNode() : DeoptAndTruncate(reason);
   }
   ProcessResult ThrowAndTruncate(Throw::Function function,
                                  ValueNode* input = nullptr) {
@@ -96,6 +113,11 @@ class MaglevGraphOptimizer {
   NodeRanges* ranges_;
   int loop_depth_ = 0;
 
+  // Range analysis doesn't support changing/updating a range in the middle of
+  // the block, it only records entry/exit block ranges. We use a separate map
+  // for refinements done in the middle of the block.
+  ZoneMap<ValueNode*, Range> block_range_refinements_;
+
   NodeBase* current_node_;
 
   NodeBase* current_node() const {
@@ -107,6 +129,8 @@ class MaglevGraphOptimizer {
 
   std::optional<Range> GetRange(ValueNode* node);
   bool IsRangeLessEqual(ValueNode* lhs, ValueNode* rhs);
+  void RecordBoundsCheckRefinement(AssertCondition condition, ValueNode* index,
+                                   ValueNode* length);
 
   void UnwrapInputs();
 
@@ -123,6 +147,11 @@ class MaglevGraphOptimizer {
       ValueNode* node, UseRepresentation repr,
       std::optional<TaggedToFloat64ConversionType> conversion_type);
 
+  // Records the untagged input of a tagging conversion as the matching
+  // untagged alternative of `tagged`, so a later untagging use can reuse it.
+  template <ValueRepresentation kRepresentation>
+  void RegisterUntaggedAlternative(ValueNode* tagged);
+
   void PreProcessNode(Node*, const ProcessingState& state);
   void PostProcessNode(Node*);
 
@@ -137,6 +166,9 @@ class MaglevGraphOptimizer {
 
   Jump* FoldBranch(BasicBlock* current, BranchControlNode* branch_node,
                    bool if_true);
+
+  template <typename FixedArrayT, typename NodeT>
+  MaybeReduceResult AbortIfInvalidFixedArrayIndex(NodeT* node);
 
   ProcessResult ReplaceWith(ValueNode* node);
 

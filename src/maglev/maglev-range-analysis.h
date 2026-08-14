@@ -212,7 +212,7 @@ class RangeProcessor {
     ranges_.EnsureMapExistsFor(block);
     return BlockProcessResult::kContinue;
   }
-  void PostProcessBasicBlock(BasicBlock* block) {
+  BlockProcessResult PostProcessBasicBlock(BasicBlock* block) {
     if (JumpLoop* control = block->control_node()->TryCast<JumpLoop>()) {
       if (!ProcessLoopPhisBackedge(control->target(), block)) {
         // We didn't reach a fixpoint for this loop, try this loop header
@@ -234,6 +234,7 @@ class RangeProcessor {
         ProcessNodeBase(block->control_node(), succ);
       });
     }
+    return BlockProcessResult::kContinue;
   }
 
   void PostPhiProcessing() {}
@@ -356,9 +357,32 @@ class RangeProcessor {
                                                      Get(node->input_node(1))));
     return ProcessResult::kContinue;
   }
+  ProcessResult Process(BuiltinStringPrototypeCharCodeOrCodePointAt* node,
+                        const ProcessingState&) {
+    UnionUpdateInt32(
+        node,
+        node->mode() == BuiltinStringPrototypeCharCodeOrCodePointAt::kCharCodeAt
+            ? Range(0, String::kMaxUtf16CodeUnit)
+            : Range(0, String::kMaxCodePoint));
+    return ProcessResult::kContinue;
+  }
+  ProcessResult Process(LoadUnsignedIntTypedArrayElement* node,
+                        const ProcessingState&) {
+    UnionUpdateUint32(node,
+                      UnsignedTypedArrayElementRange(node->elements_kind()));
+    return ProcessResult::kContinue;
+  }
+  ProcessResult Process(LoadUnsignedIntConstantTypedArrayElement* node,
+                        const ProcessingState&) {
+    UnionUpdateUint32(node,
+                      UnsignedTypedArrayElementRange(node->elements_kind()));
+    return ProcessResult::kContinue;
+  }
   ProcessResult Process(LoadTaggedField* node, const ProcessingState&) {
     if (node->type() == NodeType::kSmi) {
-      UnionUpdate(node, Range::Smi());
+      UnionUpdate(node, node->is_array_length() == IsArrayLength::kYes
+                            ? Range::NonNegativeSmi()
+                            : Range::Smi());
     }
     return ProcessResult::kContinue;
   }
@@ -477,6 +501,18 @@ class RangeProcessor {
     DCHECK_NOT_NULL(current_block_);
     ranges_.UnionUpdate(current_block_, node,
                         range.IsInt32() ? range : Range::Int32());
+  }
+
+  static Range UnsignedTypedArrayElementRange(ElementsKind kind) {
+    switch (kind) {
+      case UINT8_ELEMENTS:
+      case UINT8_CLAMPED_ELEMENTS:
+        return Range(0, kMaxUInt8);
+      case UINT16_ELEMENTS:
+        return Range(0, kMaxUInt16);
+      default:
+        return Range::Uint32();
+    }
   }
 
   void UnionUpdateUint32(ValueNode* node, Range range) {

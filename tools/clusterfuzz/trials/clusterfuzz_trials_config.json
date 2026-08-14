@@ -76,12 +76,13 @@
     {"app_args": "--conservative-stack-scanning", "app_name": "d8", "probability": 0.1},
     {"app_args": "--precise-object-pinning", "app_name": "d8", "probability": 0.1},
     {"app_args": "--ephemeron-fixpoint-iterations=0", "app_name": "d8", "probability": 0.1},
-    {"app_args": "--experimental-wasm-revectorize", "app_name": "d8", "probability": 0.25},
+    {"app_args": "--wasm-revectorize", "app_name": "d8", "probability": 0.25},
     {"app_args": "--no-memory-pool", "app_name": "d8", "probability": 0.1},
     {"app_args": "--proto-assign-seq-lazy-func-opt --proto-assign-seq-opt-count=1", "app_name": "d8", "probability": 0.5},
     {"app_args": "--scavenger-chaos-mode", "app_name": "d8", "probability": 0.1},
     {"app_args": "--private-field-bytecodes", "app_name": "d8", "probability": 0.5},
     {"app_args": "--stress-branch-hinting", "app_name": "d8", "probability": 0.1},
     {"app_args": "--verify-bytecode-full", "app_name": "d8", "probability": 0.4, "contradicts": ["--verify-bytecode-light"]},
-    {"app_args": "--verify-bytecode-light", "app_name": "d8", "probability": 0.4, "contradicts": ["--verify-bytecode-full"]}
+    {"app_args": "--verify-bytecode-light", "app_name": "d8", "probability": 0.4, "contradicts": ["--verify-bytecode-full"]},
+    {"app_args": "--stress-descriptor-array-trimming", "app_name": "d8", "probability": 0.1}
 ]

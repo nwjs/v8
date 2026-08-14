@@ -3065,11 +3065,16 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
   __ Jump(t0);
 }
 
-void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
+namespace {
+enum class DebugBreakKind { kBreak, kTrap };
+
+void Generate_WasmDebugBreakOrTrap(MacroAssembler* masm, DebugBreakKind kind) {
   HardAbortScope hard_abort(masm);  // Avoid calls to Abort.
   {
     FrameScope scope(masm, StackFrame::WASM_DEBUG_BREAK);
 
+    UseScratchRegisterScope temps(masm);
+    Register scratch = temps.Acquire();
     // Save all parameter registers. They might hold live values, we restore
     // them after the runtime call.
     __ MultiPush(WasmDebugBreakFrameConstants::kPushedGpRegs);
@@ -3077,11 +3082,9 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
       // Check if machine has simd enabled, if so push vector registers. If not
       // then only push double registers.
       Label no_simd, done;
-      UseScratchRegisterScope temps(masm);
-      Register scratch = temps.Acquire();
 
       __ li(scratch, ExternalReference::supports_simd_128_address());
-      // If > 0 then simd is available.
+      // If == 0 then simd is unavailable.
       __ Ld_bu(scratch, MemOperand(scratch, 0));
       __ Branch(&no_simd, eq, scratch, Operand(zero_reg));
 
@@ -3101,40 +3104,65 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
       __ bind(&done);
     }
 
-    // Initialize the JavaScript context with 0. CEntry will use it to
-    // set the current context on the isolate.
-    __ Move(cp, Smi::zero());
-    __ CallRuntime(Runtime::kWasmDebugBreak, 0);
-
-    // Restore registers.
+    // Load instance data from the caller's frame.
     {
-      // Check if machine has simd enabled, if so push vector registers. If not
-      // then only push double registers.
-      Label no_simd, done;
-      UseScratchRegisterScope temps(masm);
-      Register scratch = temps.Acquire();
-
-      __ li(scratch, ExternalReference::supports_simd_128_address());
-      // If > 0 then simd is available.
-      __ Ld_bu(scratch, MemOperand(scratch, 0));
-      __ Branch(&no_simd, eq, scratch, Operand(zero_reg));
-
-      {
-        CpuFeatureScope lsx_scope(
-            masm, LSX, CpuFeatureScope::CheckPolicy::kDontCheckSupported);
-        __ MultiPopLSX(WasmDebugBreakFrameConstants::kPushedFpRegs);
-      }
-      __ Branch(&done);
-
-      __ bind(&no_simd);
-      __ MultiPopFPUWideStride(WasmDebugBreakFrameConstants::kPushedFpRegs);
-
-      __ bind(&done);
+      __ Ld_d(scratch, MemOperand(fp, 0));
+      __ Ld_d(kWasmImplicitArgRegister,
+              MemOperand(scratch, WasmFrameConstants::kWasmInstanceDataOffset));
+      __ LoadTaggedField(
+          cp, FieldMemOperand(kWasmImplicitArgRegister,
+                              WasmTrustedInstanceData::kNativeContextOffset));
     }
 
-    __ MultiPop(WasmDebugBreakFrameConstants::kPushedGpRegs);
+    if (kind == DebugBreakKind::kTrap) {
+      // The reason was pushed before the frame.
+      // EnterFrame(WASM_DEBUG_BREAK) pushes ra, fp, type.
+      // So [fp+8]=saved ra, [fp+0]=saved fp, [fp-8]=type,
+      // [fp+16]=reason.
+      __ Ld_d(scratch, MemOperand(fp, 2 * kSystemPointerSize));
+      __ Push(scratch);
+      __ CallRuntime(Runtime::kThrowWasmError, 1);
+      __ break_(0xCC);
+    } else {
+      __ CallRuntime(Runtime::kWasmDebugBreak, 0);
+
+      // Restore registers.
+      {
+        // Check if machine has simd enabled, if so push vector registers. If
+        // not then only push double registers.
+        Label no_simd, done;
+
+        __ li(scratch, ExternalReference::supports_simd_128_address());
+        // If == 0 then simd is unavailable.
+        __ Ld_bu(scratch, MemOperand(scratch, 0));
+        __ Branch(&no_simd, eq, scratch, Operand(zero_reg));
+
+        {
+          CpuFeatureScope lsx_scope(
+              masm, LSX, CpuFeatureScope::CheckPolicy::kDontCheckSupported);
+          __ MultiPopLSX(WasmDebugBreakFrameConstants::kPushedFpRegs);
+        }
+        __ Branch(&done);
+
+        __ bind(&no_simd);
+        __ MultiPopFPUWideStride(WasmDebugBreakFrameConstants::kPushedFpRegs);
+
+        __ bind(&done);
+      }
+
+      __ MultiPop(WasmDebugBreakFrameConstants::kPushedGpRegs);
+    }
   }
-  __ Ret();
+  if (kind == DebugBreakKind::kBreak) __ Ret();
+}
+}  // namespace
+
+void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
+  Generate_WasmDebugBreakOrTrap(masm, DebugBreakKind::kBreak);
+}
+
+void Builtins::Generate_WasmDebugTrap(MacroAssembler* masm) {
+  Generate_WasmDebugBreakOrTrap(masm, DebugBreakKind::kTrap);
 }
 
 namespace {

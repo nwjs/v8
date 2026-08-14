@@ -46,6 +46,7 @@ when you print a backtrace via `bt`, and adds a `v8` command. Currently, `v8` su
 
 ```
 v8 inspect <addr> [--type T] [--depth N] [--array-length N]
+v8 isolate
 ```
 
 #### Frame annotations
@@ -96,6 +97,18 @@ Options:
 
 When the object's Map can't be read (e.g. due to memory corruption), the renderer adds
 a `could be one of ...` footer with ready-to-paste `--type` suggestions.
+
+#### `v8 isolate`
+
+Prints the current Isolate address of the selected thread.
+
+```
+(gdb) v8 isolate
+isolate = 0x7f1efd3c8000
+```
+
+If the selected thread has not entered an isolate (e.g. an idle worker
+thread), it prints `isolate = <none>`.
 
 #### Examples
 

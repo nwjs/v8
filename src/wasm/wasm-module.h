@@ -14,6 +14,7 @@
 #include <optional>
 
 #include "src/base/platform/mutex.h"
+#include "src/base/strong-alias.h"
 #include "src/base/vector.h"
 #include "src/common/globals.h"
 #include "src/handles/handles.h"
@@ -31,7 +32,6 @@ namespace v8::internal::wasm {
 
 using WasmName = base::Vector<const char>;
 
-struct AsmJsOffsets;
 class ErrorThrower;
 #if V8_ENABLE_DRUMBRAKE
 class WasmInterpreterRuntime;
@@ -102,7 +102,7 @@ struct WasmGlobal {
     // `tagged_globals_buffer` or `untagged_globals_buffer`.
     uint32_t index_in_buffer;
   };
-  SharedFlag shared = SharedFlag::kNo;
+  SharedFlag shared = SharedFlag{false};
   bool imported = false;
   bool exported = false;
   bool initializer_ends_with_struct_new = false;
@@ -120,12 +120,6 @@ struct WasmTag {
 
   const WasmTagSig* sig;  // type signature of the tag.
   ModuleTypeIndex sig_index;
-};
-
-enum ModuleOrigin : uint8_t {
-  kWasmOrigin,
-  kAsmJsSloppyOrigin,
-  kAsmJsStrictOrigin
 };
 
 enum BoundsCheckStrategy : int8_t {
@@ -146,7 +140,7 @@ struct WasmMemory {
   // Maximum declared size of the memory in 64k pages. The actual memory size at
   // runtime is capped at {kV8MaxWasmMemory32Pages} / {kV8MaxWasmMemory64Pages}.
   uint64_t maximum_pages = 0;
-  SharedFlag is_shared = SharedFlag::kNo;
+  SharedFlag is_shared = SharedFlag{false};
   bool has_maximum_pages = false;
   AddressType address_type = AddressType::kI32;
   bool imported = false;
@@ -168,13 +162,11 @@ struct WasmMemory {
     // Memories that can't grow have no reason to move.
     // Trap handler enabled memories never move.
     // Shared memories can only be grown in-place.
-    return can_grow() && bounds_checks != kTrapHandler &&
-           is_shared == SharedFlag::kNo;
+    return can_grow() && bounds_checks != kTrapHandler && !is_shared;
   }
 };
 
-V8_EXPORT void UpdateComputedInformation(WasmMemory* memory,
-                                         ModuleOrigin origin);
+V8_EXPORT void UpdateComputedInformation(WasmMemory* memory);
 
 // Static representation of a wasm literal stringref.
 struct WasmStringRefLiteral {
@@ -194,11 +186,11 @@ struct WasmDataSegment {
         source(source) {}
 
   static WasmDataSegment PassiveForTesting() {
-    return WasmDataSegment{false, SharedFlag::kNo, 0, {}, {}};
+    return WasmDataSegment{false, SharedFlag{false}, 0, {}, {}};
   }
 
   bool active = true;     // true if copied automatically during instantiation.
-  SharedFlag shared = SharedFlag::kNo;
+  SharedFlag shared = SharedFlag{false};
   uint32_t memory_index;  // memory index (if active).
   ConstantExpression dest_addr;  // destination memory address (if active).
   WireBytesRef source;           // start offset in the module bytes.
@@ -244,7 +236,7 @@ struct WasmElemSegment {
   // Default constructor. Constucts an invalid segment.
   WasmElemSegment()
       : status(kStatusActive),
-        shared(SharedFlag::kNo),
+        shared(SharedFlag{false}),
         type(kWasmBottom),
         table_index(0),
         element_type(kFunctionIndexElements),
@@ -281,9 +273,6 @@ struct WasmExport {
   uint32_t index = 0;         // index into the respective space.
 };
 
-#define SELECT_WASM_COUNTER(counters, origin, prefix, suffix)     \
-  ((origin) == kWasmOrigin ? (counters)->prefix##_wasm_##suffix() \
-                           : (counters)->prefix##_asm_##suffix())
 
 // Uses a map as backing storage when sparsely, or a vector when densely
 // populated. Requires {Value} to implement `bool is_set()` to identify
@@ -383,34 +372,6 @@ class V8_EXPORT_PRIVATE LazilyGeneratedNames {
   NameMap function_names_;
 };
 
-class V8_EXPORT_PRIVATE AsmJsOffsetInformation {
- public:
-  explicit AsmJsOffsetInformation(base::Vector<const uint8_t> encoded_offsets);
-
-  // Destructor defined in wasm-module.cc, where the definition of
-  // {AsmJsOffsets} is available.
-  ~AsmJsOffsetInformation();
-
-  int GetSourcePosition(int func_index, int byte_offset,
-                        bool is_at_number_conversion);
-
-  std::pair<int, int> GetFunctionOffsets(int func_index);
-
- private:
-  void EnsureDecodedOffsets();
-
-  // The offset information table is decoded lazily, hence needs to be
-  // protected against concurrent accesses.
-  // Exactly one of the two fields below will be set at a time.
-  mutable base::Mutex mutex_;
-
-  // Holds the encoded offset table bytes.
-  base::OwnedVector<const uint8_t> encoded_offsets_;
-
-  // Holds the decoded offset table.
-  std::unique_ptr<AsmJsOffsets> decoded_offsets_;
-};
-
 struct TypeDefinition {
   enum Kind : int8_t {
     kFunction = static_cast<int8_t>(RefTypeKind::kFunction),
@@ -467,7 +428,7 @@ struct TypeDefinition {
   ModuleTypeIndex describes{kNoType};
   Kind kind = kFunction;
   bool is_final = false;
-  SharedFlag is_shared = SharedFlag::kNo;
+  SharedFlag is_shared = SharedFlag{false};
   uint8_t subtyping_depth = 0;
 };
 
@@ -653,7 +614,7 @@ struct WasmTable {
   uint64_t maximum_size = 0;
   bool has_maximum_size = false;
   AddressType address_type = AddressType::kI32;
-  SharedFlag shared = SharedFlag::kNo;
+  SharedFlag shared = SharedFlag{false};
   bool imported = false;
   bool exported = false;
   ConstantExpression initial_value = {};
@@ -708,20 +669,25 @@ class WasmModuleSignatureStorage {
 
   uint8_t* Allocate(size_t length, size_t align = 1) {
     DCHECK(base::bits::IsPowerOfTwo(align));
-    if (V8_UNLIKELY(storage_.empty())) AllocateMoreStorage(length + align - 1);
+    if (V8_UNLIKELY(storage_.empty())) {
+      return ExpandAndAllocate(length, align);
+    }
 
     std::vector<uint8_t>* last = &storage_.back();
     size_t last_size = last->size();
     uint8_t* ptr = last->data() + last_size;
     size_t padding = (-reinterpret_cast<intptr_t>(ptr)) & (align - 1);
     if (V8_UNLIKELY(last->capacity() - last_size < length + padding)) {
-      AllocateMoreStorage(length + align - 1);
-      // Redo calculations from before:
-      last = &storage_.back();
-      last_size = last->size();
-      ptr = last->data() + last_size;
-      padding = (-reinterpret_cast<intptr_t>(ptr)) & (align - 1);
+      return ExpandAndAllocate(length, align);
     }
+    return AllocateUnchecked(length, align);
+  }
+
+  V8_INLINE uint8_t* AllocateUnchecked(size_t length, size_t align) {
+    std::vector<uint8_t>* last = &storage_.back();
+    size_t last_size = last->size();
+    uint8_t* ptr = last->data() + last_size;
+    size_t padding = (-reinterpret_cast<intptr_t>(ptr)) & (align - 1);
     DCHECK_LE(last_size + length + padding, last->capacity());
     last->resize(last_size + length + padding);
     DCHECK_EQ(0, reinterpret_cast<intptr_t>(ptr + padding) & (align - 1));
@@ -749,6 +715,12 @@ class WasmModuleSignatureStorage {
   }
 
  private:
+  V8_NOINLINE V8_PRESERVE_MOST uint8_t* ExpandAndAllocate(size_t length,
+                                                          size_t align) {
+    AllocateMoreStorage(length + align - 1);
+    return AllocateUnchecked(length, align);
+  }
+
   V8_NOINLINE V8_PRESERVE_MOST void AllocateMoreStorage(size_t min_length) {
     size_t new_length =
         std::max(min_length, storage_.empty() ? 4 * (sizeof(FunctionSig) + 4)
@@ -845,17 +817,12 @@ struct V8_EXPORT_PRIVATE WasmModule {
   // TODO(jkummerow): Rename.
   mutable TypeFeedbackStorage type_feedback;
 
-  const ModuleOrigin origin;
   mutable LazilyGeneratedNames lazily_generated_names;
   std::array<WasmDebugSymbols, WasmDebugSymbols::kNumTypes> debug_symbols{};
   WireBytesRef build_id;
 
-  // Asm.js source position information. Only available for modules compiled
-  // from asm.js.
-  std::unique_ptr<AsmJsOffsetInformation> asm_js_offset_information;
-
   // ================ Constructors =============================================
-  explicit WasmModule(ModuleOrigin = kWasmOrigin);
+  WasmModule();
   WasmModule(const WasmModule&) = delete;
   WasmModule& operator=(const WasmModule&) = delete;
 
@@ -1001,10 +968,6 @@ struct V8_EXPORT_PRIVATE WasmModule {
                              isorecursive_canonical_type_ids.end());
   }
 
-  SharedFlag function_is_shared(int func_index) const {
-    return type(functions[func_index].sig_index).is_shared;
-  }
-
   base::Vector<const WasmFunction> declared_functions() const {
     return base::VectorOf(functions) + num_imported_functions;
   }
@@ -1029,10 +992,6 @@ struct V8_EXPORT_PRIVATE WasmModule {
   size_t EstimateStoredSize() const;                // No tracing.
   size_t EstimateCurrentMemoryConsumption() const;  // With tracing.
 };
-
-inline bool is_asmjs_module(const WasmModule* module) {
-  return module->origin != kWasmOrigin;
-}
 
 // Return the byte offset of the function identified by the given index.
 // The offset will be relative to the start of the module bytes.
@@ -1130,8 +1089,8 @@ DirectHandle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
                                        uint32_t min_size,
                                        std::optional<uint64_t> max_size,
                                        AddressType address_type);
-DirectHandle<JSArray> GetImports(Isolate* isolate,
-                                 DirectHandle<WasmModuleObject> module);
+V8_EXPORT_PRIVATE DirectHandle<JSArray> GetImports(
+    Isolate* isolate, DirectHandle<WasmModuleObject> module);
 DirectHandle<JSArray> GetExports(Isolate* isolate,
                                  DirectHandle<WasmModuleObject> module);
 DirectHandle<JSArray> GetCustomSections(Isolate* isolate,
@@ -1139,10 +1098,9 @@ DirectHandle<JSArray> GetCustomSections(Isolate* isolate,
                                         DirectHandle<String> name,
                                         ErrorThrower* thrower);
 
-// Get the source position from a given function index and byte offset,
-// for either asm.js or pure Wasm modules.
+// Get the source position from a given function index and byte offset.
 int GetSourcePosition(const WasmModule*, uint32_t func_index,
-                      uint32_t byte_offset, bool is_at_number_conversion);
+                      uint32_t byte_offset);
 
 // Translate function index to the index relative to the first declared (i.e.
 // non-imported) function.

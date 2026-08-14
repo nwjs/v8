@@ -38,6 +38,7 @@
 #include "src/heap/mutable-page.h"
 #include "src/heap/new-spaces.h"
 #include "src/heap/object-stats.h"
+#include "src/heap/pending-allocations.h"
 #include "src/heap/pretenuring-handler.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/read-only-spaces.h"
@@ -427,8 +428,6 @@ void MinorMarkSweepCollector::CollectGarbage() {
   } else {
     DCHECK(sweeper()->IsSweepingDoneForSpace(NEW_SPACE));
   }
-
-  heap_->new_lo_space()->ResetPendingObject();
 
   is_in_atomic_pause_.store(true, std::memory_order_relaxed);
 
@@ -1010,7 +1009,6 @@ bool MinorMarkSweepCollector::SweepNewLargeSpace() {
   TRACE_GC(heap_->tracer(), GCTracer::Scope::MINOR_MS_SWEEP_NEW_LO);
   NewLargeObjectSpace* new_lo_space = heap_->new_lo_space();
   DCHECK_NOT_NULL(new_lo_space);
-  DCHECK_EQ(kNullAddress, heap_->new_lo_space()->pending_object());
 
   bool has_promoted_pages = false;
 

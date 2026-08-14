@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Flags: --allow-natives-syntax --turbolev-future --turbofan
-// Flags: --no-concurrent-osr
+// Flags: --no-concurrent-osr --no-turbolev-eager-loop-peeling-osr
 
 // The OSR loop header is the peel candidate. The MaglevLoopPeeler must strip the
 // %AssertPeeled() marker; if it survives to the Turbolev backend the compile

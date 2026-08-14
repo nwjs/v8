@@ -37,8 +37,6 @@ class ReadOnlyArtifacts;
  *    algorithm overview for more details about these entries.
  */
 struct ExternalPointerTableEntry {
-  enum class EvacuateMarkMode { kTransferMark, kLeaveUnmarked, kClearMark };
-
   // Make this entry an external pointer entry containing the given pointer
   // tagged with the given tag.
   inline void MakeExternalPointerEntry(Address value, ExternalPointerTag tag,
@@ -108,6 +106,9 @@ struct ExternalPointerTableEntry {
   static constexpr bool IsWriteProtected = false;
 
  private:
+  friend struct ExternalEntityTableCompactionTraits<ExternalPointerTableEntry>;
+  friend class CompactibleExternalEntityTable<
+      ExternalPointerTableEntry, kExternalPointerTableReservationSize>;
   friend class ExternalPointerTable;
   friend class ExternalPointerTableEntryPrinter;
 
@@ -167,6 +168,23 @@ static_assert(sizeof(ExternalPointerTableEntry) == 16);
 //  We expect ExternalPointerTable entries to consist of a single 64-bit word.
 static_assert(sizeof(ExternalPointerTableEntry) == 8);
 #endif
+
+/**
+ * Trait used to implement table compaction for ExternalPointerTableEntry.
+ */
+template <>
+struct ExternalEntityTableCompactionTraits<ExternalPointerTableEntry> {
+  using Handle = ExternalPointerHandle;
+  static constexpr Handle kNullHandle = kNullExternalPointerHandle;
+  static bool IsValidHandle(Handle handle);
+  static uint32_t HandleToIndex(Handle handle);
+  static Handle IndexToHandle(uint32_t index);
+  template <typename Table>
+  static void FreeEntry(Table* base_table, uint32_t index);
+  template <typename Table>
+  static void RelocateAuxiliaryEntryData(Table* base_table, uint32_t old_index,
+                                         uint32_t new_index);
+};
 
 /**
  * A table storing pointers to objects outside the V8 heap.
@@ -243,15 +261,13 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
 
 #if defined(LEAK_SANITIZER)
   //  When LSan is active, we use "fat" entries, see above.
-  static_assert(kMaxExternalPointers == kMaxCapacity * 2);
+  static_assert(kMaxExternalPointers == Base::kMaxCapacity * 2);
 #else
-  static_assert(kMaxExternalPointers == kMaxCapacity);
+  static_assert(kMaxExternalPointers == Base::kMaxCapacity);
 #endif
-  static_assert(kSupportsCompaction);
+  static_assert(Base::kSupportsCompaction);
 
  public:
-  using EvacuateMarkMode = ExternalPointerTableEntry::EvacuateMarkMode;
-
   ExternalPointerTable() = default;
   ExternalPointerTable(const ExternalPointerTable&) = delete;
   ExternalPointerTable& operator=(const ExternalPointerTable&) = delete;
@@ -401,6 +417,10 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
   };
 
  private:
+  friend struct ExternalEntityTableCompactionTraits<ExternalPointerTableEntry>;
+  friend class CompactibleExternalEntityTable<
+      ExternalPointerTableEntry, kExternalPointerTableReservationSize>;
+
   static inline bool IsValidHandle(ExternalPointerHandle handle);
   static inline uint32_t HandleToIndex(ExternalPointerHandle handle);
   static inline ExternalPointerHandle IndexToHandle(uint32_t index);
@@ -408,10 +428,8 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
   inline void TakeOwnershipOfManagedResourceIfNecessary(
       Address value, ExternalPointerHandle handle, ExternalPointerTag tag);
   inline void FreeManagedResourceIfPresent(uint32_t entry_index);
-
-  void ResolveEvacuationEntryDuringSweeping(
-      uint32_t index, ExternalPointerHandle* handle_location,
-      uint32_t start_of_evacuation_area);
+  inline void RelocateManagedResourceIfPresent(uint32_t old_index,
+                                               uint32_t new_index);
 };
 
 #ifdef OBJECT_PRINT

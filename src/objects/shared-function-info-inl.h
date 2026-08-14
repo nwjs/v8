@@ -12,6 +12,7 @@
 
 #include "src/base/macros.h"
 #include "src/base/platform/mutex.h"
+#include "src/base/strong-alias.h"
 #include "src/builtins/builtins.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/common/globals.h"
@@ -434,9 +435,8 @@ SharedFunctionInfo::Inlineability SharedFunctionInfo::GetInlineability(
 
   if (!IsUserJavaScript()) return kIsNotUserCode;
 
-  // If there is no bytecode array, it is either not compiled or it is compiled
-  // with WebAssembly for the asm.js pipeline. In either case we don't want to
-  // inline.
+  // If there is no bytecode array, the function is not compiled, so we don't
+  // want to inline.
   if (!HasBytecodeArray()) return kHasNoBytecode;
 
   if (GetBytecodeArray(isolate)->length() >
@@ -484,10 +484,6 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, has_duplicate_parameters,
 
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, native,
                     SharedFunctionInfo::IsNativeBit)
-#if V8_ENABLE_WEBASSEMBLY
-BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, is_asm_wasm_broken,
-                    SharedFunctionInfo::IsAsmWasmBrokenBit)
-#endif  // V8_ENABLE_WEBASSEMBLY
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags,
                     requires_instance_members_initializer,
                     SharedFunctionInfo::RequiresInstanceMembersInitializerBit)
@@ -1024,10 +1020,6 @@ void SharedFunctionInfo::FlushBaselineCode() {
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-bool SharedFunctionInfo::HasAsmWasmData() const {
-  return IsAsmWasmData(GetTrustedData(GetCurrentIsolateForSandbox()));
-}
-
 bool SharedFunctionInfo::HasWasmFunctionData(IsolateForSandbox isolate) const {
   return IsWasmFunctionData(GetTrustedData(isolate));
 }
@@ -1044,19 +1036,6 @@ bool SharedFunctionInfo::HasWasmCapiFunctionData(
 
 bool SharedFunctionInfo::HasWasmResumeData() const {
   return IsWasmResumeData(GetUntrustedData());
-}
-
-DEF_GETTER(SharedFunctionInfo, asm_wasm_data, Tagged<AsmWasmData>) {
-  DCHECK(HasAsmWasmData());
-  return GetTrustedData<AsmWasmData, kAsmWasmDataIndirectPointerTag>(
-      GetCurrentIsolateForSandbox());
-}
-
-void SharedFunctionInfo::set_asm_wasm_data(Tagged<AsmWasmData> data,
-                                           WriteBarrierMode mode) {
-  DCHECK(GetUntrustedData() == Smi::FromEnum(Builtin::kCompileLazy) ||
-         HasUncompiledData(GetCurrentIsolateForSandbox()) || HasAsmWasmData());
-  SetTrustedData(data, mode);
 }
 
 DEF_GETTER(SharedFunctionInfo, wasm_function_data, Tagged<WasmFunctionData>) {
@@ -1169,8 +1148,8 @@ void SharedFunctionInfo::ClearPreparseData(IsolateForSandbox isolate) {
 
   // We are basically trimming that object to its supertype, so recorded slots
   // within the object don't need to be invalidated.
-  heap->NotifyObjectLayoutChange(data, no_gc, InvalidateRecordedSlots::kNo,
-                                 InvalidateExternalPointerSlots::kNo);
+  heap->NotifyObjectLayoutChange(data, no_gc, InvalidateRecordedSlots{false},
+                                 InvalidateExternalPointerSlots{false});
   static_assert(sizeof(UncompiledDataWithoutPreparseData) <
                 sizeof(UncompiledDataWithPreparseData));
   static_assert(sizeof(UncompiledDataWithoutPreparseData) ==
@@ -1181,7 +1160,7 @@ void SharedFunctionInfo::ClearPreparseData(IsolateForSandbox isolate) {
   DCHECK_LE(sizeof(UncompiledDataWithPreparseData), old_size);
   heap->NotifyObjectSizeChange(data, old_size,
                                sizeof(UncompiledDataWithoutPreparseData),
-                               ClearRecordedSlots::kYes);
+                               ClearRecordedSlots{true});
 
   // Swap the map.
   data->set_map(heap->isolate(),
@@ -1245,7 +1224,6 @@ bool SharedFunctionInfo::IsUserJavaScript() const {
 
 bool SharedFunctionInfo::IsSubjectToDebugging() const {
 #if V8_ENABLE_WEBASSEMBLY
-  if (HasAsmWasmData()) return false;
   if (HasWasmExportedFunctionData(GetCurrentIsolateForSandbox())) return false;
 #endif  // V8_ENABLE_WEBASSEMBLY
   return IsUserJavaScript();

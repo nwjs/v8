@@ -11,6 +11,7 @@
 #include "src/heap/read-only-heap.h"
 #include "src/logging/counters-scopes.h"
 #include "src/numbers/hash-seed.h"
+#include "src/objects/heap-object-field-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/slots.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"

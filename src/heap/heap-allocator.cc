@@ -6,6 +6,7 @@
 
 #include "src/base/functional/function-ref.h"
 #include "src/base/logging.h"
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
 #include "src/execution/isolate.h"
 #include "src/heap/allocation-result.h"
@@ -16,6 +17,7 @@
 #include "src/heap/large-spaces.h"
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/normal-page.h"
+#include "src/heap/pending-allocations.h"
 #include "src/logging/counters.h"
 #include "src/objects/heap-object.h"
 #include "src/utils/utils.h"
@@ -39,12 +41,13 @@ void HeapAllocator::Setup() {
       local_heap_->is_main_thread()) {
     LinearAllocationArea* const new_allocation_info =
         &heap_->isolate()->isolate_data()->new_allocation_info();
+    young_pending_allocations_ = heap_->young_pending_allocations();
     new_space_allocator_.emplace(
         local_heap_,
         v8_flags.sticky_mark_bits
             ? static_cast<SpaceWithLinearArea*>(heap_->sticky_space())
             : static_cast<SpaceWithLinearArea*>(heap_->new_space()),
-        MainAllocator::IsNewGeneration::kYes, new_allocation_info);
+        MainAllocator::kNewGeneration, new_allocation_info);
   }
 
   if (local_heap_->is_main_thread()) {
@@ -60,23 +63,23 @@ void HeapAllocator::Setup() {
           ? &heap_->isolate()->isolate_data()->old_allocation_info()
           : nullptr;
   old_space_allocator_.emplace(local_heap_, heap_->old_space(),
-                               MainAllocator::IsNewGeneration::kNo,
+                               MainAllocator::kOldGeneration,
                                old_allocation_info);
 
   trusted_space_allocator_.emplace(local_heap_, heap_->trusted_space(),
-                                   MainAllocator::IsNewGeneration::kNo);
+                                   MainAllocator::kOldGeneration);
   code_space_allocator_.emplace(local_heap_, heap_->code_space(),
-                                MainAllocator::IsNewGeneration::kNo);
+                                MainAllocator::kOldGeneration);
 
   if (heap_->isolate()->has_shared_space()) {
     shared_space_allocator_.emplace(local_heap_,
                                     heap_->shared_allocation_space(),
-                                    MainAllocator::IsNewGeneration::kNo);
+                                    MainAllocator::kOldGeneration);
     shared_lo_space_ = heap_->shared_lo_allocation_space();
 
     shared_trusted_space_allocator_.emplace(
         local_heap_, heap_->shared_trusted_allocation_space(),
-        MainAllocator::IsNewGeneration::kNo);
+        MainAllocator::kOldGeneration);
     shared_trusted_lo_space_ = heap_->shared_trusted_lo_allocation_space();
   }
 }
@@ -123,8 +126,25 @@ AllocationResult HeapAllocator::AllocateRawLargeInternal(
   if (!allocation_result.IsFailure()) {
     int allocated_size = ALIGN_TO_ALLOCATION_ALIGNMENT(size_in_bytes);
     heap_->AddTotalAllocatedBytes(allocated_size);
+    UpdatePendingLargeObject(allocation_result.ToObject(), allocation);
   }
   return allocation_result;
+}
+
+void HeapAllocator::UpdatePendingLargeObject(Tagged<HeapObject> object,
+                                             AllocationType allocation) {
+  Address addr = object.address();
+  pending_large_object_.store(addr, std::memory_order_release);
+  if (allocation == AllocationType::kYoung && young_pending_allocations_) {
+    young_pending_allocations_->UpdateLargeObject(addr);
+  }
+}
+
+void HeapAllocator::ResetPendingLargeObject() {
+  pending_large_object_.store(kNullAddress, std::memory_order_release);
+  if (young_pending_allocations_) {
+    young_pending_allocations_->RemoveLargeObject();
+  }
 }
 
 namespace {
@@ -349,6 +369,7 @@ void HeapAllocator::FreeLinearAllocationAreas() {
   if (shared_trusted_space_allocator_) {
     shared_trusted_space_allocator_->FreeLinearAllocationArea();
   }
+  ResetPendingLargeObject();
 }
 
 void HeapAllocator::PublishPendingAllocations() {
@@ -360,10 +381,7 @@ void HeapAllocator::PublishPendingAllocations() {
   trusted_space_allocator_->MoveOriginalTopForward();
   code_space_allocator_->MoveOriginalTopForward();
 
-  lo_space()->ResetPendingObject();
-  if (new_lo_space()) new_lo_space()->ResetPendingObject();
-  code_lo_space()->ResetPendingObject();
-  trusted_lo_space()->ResetPendingObject();
+  ResetPendingLargeObject();
 }
 
 void HeapAllocator::AddAllocationObserver(
@@ -450,8 +468,9 @@ void HeapAllocator::SetAllocationTimeout(int allocation_timeout) {
 
 void HeapAllocator::UpdateAllocationTimeout() {
   if (v8_flags.random_gc_interval > 0) {
-    const int new_timeout = heap_->isolate()->fuzzer_rng()->NextInt(
-        v8_flags.random_gc_interval + 1);
+    const int new_timeout =
+        heap_->isolate()->fuzzer_rng()->NextInt(v8_flags.random_gc_interval) +
+        1;
     // Reset the allocation timeout, but make sure to allow at least a few
     // allocations after a collection. The reason for this is that we have a lot
     // of allocation sequences and we assume that a garbage collection will
@@ -538,8 +557,8 @@ bool HeapAllocator::CollectGarbageAndRetryAllocation(
     CustomAllocationFunction allocate, AllocationType allocation,
     GarbageCollectionReason gc_reason) {
   const auto perform_heap_limit_check = v8_flags.late_heap_limit_check
-                                            ? PerformHeapLimitCheck::kNo
-                                            : PerformHeapLimitCheck::kYes;
+                                            ? PerformHeapLimitCheck{false}
+                                            : PerformHeapLimitCheck{true};
 
   for (int i = 0; i < 2; i++) {
     if (allocation != AllocationType::kYoung &&

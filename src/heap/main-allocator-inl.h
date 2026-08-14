@@ -30,8 +30,10 @@ AllocationResult MainAllocator::AllocateRaw(SafeHeapObjectSize size_in_bytes,
     result = AllocateFastUnaligned(size_in_bytes, origin);
   }
 
-  return result.IsFailure() ? AllocateRawSlow(size_in_bytes, alignment, origin)
-                            : result;
+  if (result.IsFailure()) [[unlikely]] {
+    return AllocateRawSlow(size_in_bytes, alignment, origin);
+  }
+  return result;
 }
 
 AllocationResult MainAllocator::AllocateFastUnaligned(
@@ -56,7 +58,7 @@ AllocationResult MainAllocator::AllocateFastAligned(
     SafeHeapObjectSize* result_aligned_size_in_bytes,
     AllocationAlignment alignment, AllocationOrigin origin) {
   Address top = allocation_info().top();
-  int filler_size = Heap::GetFillToAlign(top, alignment);
+  int filler_size = GetFillToAlign(top, alignment);
   SafeHeapObjectSize aligned_size_in_bytes = SafeHeapObjectSize(
       size_in_bytes.value() + static_cast<uint32_t>(filler_size));
 
@@ -87,6 +89,19 @@ bool MainAllocator::TryFreeLast(Address object_address, int object_size) {
                                                     object_size);
   }
   return false;
+}
+
+// static
+int MainAllocator::GetFillToAlign(Address address,
+                                  AllocationAlignment alignment) {
+  if (V8_COMPRESS_POINTERS_8GB_BOOL) return 0;
+  if (alignment == kDoubleAligned && (address & kDoubleAlignmentMask) != 0) {
+    return kTaggedSize;
+  }
+  if (alignment == kDoubleUnaligned && (address & kDoubleAlignmentMask) == 0) {
+    return kDoubleSize - kTaggedSize;
+  }
+  return 0;
 }
 
 }  // namespace internal

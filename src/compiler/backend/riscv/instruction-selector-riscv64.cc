@@ -1097,12 +1097,13 @@ void VisitWideAddSub(InstructionSelector* selector, OpIndex node, bool is_add) {
   OptionalOpIndex out_low = selector->FindProjection(node, 0);
   OptionalOpIndex out_high = selector->FindProjection(node, 1);
 
-  DCHECK(out_low.valid());
-
   if (!out_high.valid() || !selector->IsUsed(out_high.value())) {
-    InstructionOperand b_low_op = g.UseOperand(op.right_low(), opcode_no_high);
-    selector->Emit(opcode_no_high, g.DefineAsRegister(out_low.value()),
-                   g.UseRegister(op.left_low()), b_low_op);
+    if (out_low.valid()) {
+      InstructionOperand b_low_op =
+          g.UseOperand(op.right_low(), opcode_no_high);
+      selector->Emit(opcode_no_high, g.DefineAsRegister(out_low.value()),
+                     g.UseRegister(op.left_low()), b_low_op);
+    }
     return;
   }
 
@@ -1117,7 +1118,8 @@ void VisitWideAddSub(InstructionSelector* selector, OpIndex node, bool is_add) {
   inputs[input_count++] = g.UseUniqueRegister(op.left_high());
   inputs[input_count++] = g.UseUniqueRegister(op.right_high());
 
-  outputs[output_count++] = g.DefineAsRegister(out_low.value());
+  outputs[output_count++] =
+      g.DefineAsRegister(out_low.valid() ? out_low.value() : node);
   outputs[output_count++] = g.DefineAsRegister(out_high.value());
 
   selector->Emit(opcode, output_count, outputs, input_count, inputs);
@@ -2074,10 +2076,11 @@ void InstructionSelector::VisitStackPointerGreaterThan(
   // are only applied to the first stack check. If applying an offset, we must
   // ensure the input and temp registers do not alias, thus kUniqueRegister.
   InstructionOperand temps[] = {g.TempRegister()};
-  const int temp_count = (kind == StackCheckKind::kJSFunctionEntry ? 1 : 0);
-  const auto register_mode = (kind == StackCheckKind::kJSFunctionEntry)
-                                 ? OperandGenerator::kUniqueRegister
-                                 : OperandGenerator::kRegister;
+  const bool has_offset =
+      kind == StackCheckKind::kJSFunctionEntry || kind == StackCheckKind::kWasm;
+  const int temp_count = (has_offset ? 1 : 0);
+  const auto register_mode = has_offset ? OperandGenerator::kUniqueRegister
+                                        : OperandGenerator::kRegister;
 
   InstructionOperand inputs[] = {g.UseRegisterWithMode(value, register_mode)};
   static constexpr int input_count = arraysize(inputs);

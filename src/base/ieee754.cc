@@ -164,13 +164,7 @@ double asinh(double x) {
 double atan(double x) { return LIBC_NAMESPACE::shared::atan(x); }
 double atan2(double y, double x) { return LIBC_NAMESPACE::shared::atan2(y, x); }
 
-#if defined(V8_USE_LIBM_TRIG_FUNCTIONS)
-double fdlibm_cos(double x) {
-#else
-double cos(double x) {
-#endif
-  return LIBC_NAMESPACE::shared::cos(x);
-}
+double cos(double x) { return LIBC_NAMESPACE::shared::cos(x); }
 
 double exp(double x) { return LIBC_NAMESPACE::shared::exp(x); }
 
@@ -232,13 +226,7 @@ double expm1(double x) { return LIBC_NAMESPACE::shared::expm1(x); }
 
 double cbrt(double x) { return LIBC_NAMESPACE::shared::cbrt(x); }
 
-#if defined(V8_USE_LIBM_TRIG_FUNCTIONS)
-double fdlibm_sin(double x) {
-#else
-double sin(double x) {
-#endif
-  return LIBC_NAMESPACE::shared::sin(x);
-}
+double sin(double x) { return LIBC_NAMESPACE::shared::sin(x); }
 
 double tan(double x) { return LIBC_NAMESPACE::shared::tan(x); }
 
@@ -371,11 +359,6 @@ double sinh(double x) {
 #undef SET_LOW_WORD
 
 double tanh(double x) { return std::tanh(x); }
-
-#if defined(V8_USE_LIBM_TRIG_FUNCTIONS) && defined(BUILDING_V8_BASE_SHARED)
-double libm_sin(double x) { return glibc_sin(x); }
-double libm_cos(double x) { return glibc_cos(x); }
-#endif
 
 }  // namespace ieee754
 }  // namespace base

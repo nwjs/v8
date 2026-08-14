@@ -64,7 +64,7 @@ class NewIsolateScope {
             .ToHandleChecked();
     ErrorThrower thrower(isolate(), "ImportInstance");
     MaybeDirectHandle<WasmInstanceObject> instance =
-        GetWasmEngine()->SyncInstantiate(isolate(), &thrower, module_object, {},
+        GetWasmEngine()->SyncInstantiate(isolate(), &thrower, module_object,
                                          {});
     return instance.ToHandleChecked();
   }

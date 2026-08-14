@@ -56,9 +56,8 @@ int MacroAssembler::RequiredStackSizeForCallerSaved(SaveFPRegsMode fp_mode,
 
   if (fp_mode == SaveFPRegsMode::kSave) {
 #if V8_ENABLE_SIMD128
-    bool generating_builtins =
-        isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
-    if (generating_builtins || CpuFeatures::SupportsSimd128()) {
+    if (options().generating_embedded_builtin ||
+        CpuFeatures::SupportsSimd128()) {
       bytes += kCallerSavedWR.Count() * kSimd128Size;
     } else {
       bytes += kCallerSavedFPU.Count() * kDoubleSize;
@@ -82,9 +81,7 @@ int MacroAssembler::PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
 
   if (fp_mode == SaveFPRegsMode::kSave) {
 #if V8_ENABLE_SIMD128
-    bool generating_builtins =
-        isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
-    if (generating_builtins) {
+    if (options().generating_embedded_builtin) {
       Label no_simd, done;
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
@@ -128,9 +125,7 @@ int MacroAssembler::PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
   int bytes = 0;
   if (fp_mode == SaveFPRegsMode::kSave) {
 #if V8_ENABLE_SIMD128
-    bool generating_builtins =
-        isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
-    if (generating_builtins) {
+    if (options().generating_embedded_builtin) {
       Label no_simd, done;
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
@@ -2669,9 +2664,6 @@ void MacroAssembler::RoundDouble(FPURegister dst, FPURegister src,
     ctc1(scratch, FCSR);
   } else {
     Label done;
-    if (!IsDoubleZeroRegSet()) {
-      Move(kDoubleRegZero, 0.0);
-    }
     mfhc1(scratch, src);
     Ext(at, scratch, HeapNumber::kExponentShift, HeapNumber::kExponentBits);
     Branch(USE_DELAY_SLOT, &done, hs, at,
@@ -2733,9 +2725,6 @@ void MacroAssembler::RoundFloat(FPURegister dst, FPURegister src,
     int32_t kFloat32MantissaBits = 23;
     int32_t kFloat32ExponentBits = 8;
     Label done;
-    if (!IsDoubleZeroRegSet()) {
-      Move(kDoubleRegZero, 0.0);
-    }
     mfc1(scratch, src);
     Ext(at, scratch, kFloat32MantissaBits, kFloat32ExponentBits);
     Branch(USE_DELAY_SLOT, &done, hs, at,
@@ -2847,8 +2836,8 @@ void MacroAssembler::StoreLane(MSASize sz, MSARegister src, uint8_t laneidx,
   case type:                                                  \
     xor_v(kSimd128RegZero, kSimd128RegZero, kSimd128RegZero); \
     ilv_instr(kSimd128ScratchReg, kSimd128RegZero, src1);     \
-    ilv_instr(kSimd128RegZero, kSimd128RegZero, src2);        \
-    dotp_instr(dst, kSimd128ScratchReg, kSimd128RegZero);     \
+    ilv_instr(kSimd128ScratchReg1, kSimd128RegZero, src2);    \
+    dotp_instr(dst, kSimd128ScratchReg, kSimd128ScratchReg1); \
     break;
 
 void MacroAssembler::ExtMulLow(MSADataType type, MSARegister dst,
@@ -3162,11 +3151,8 @@ void MacroAssembler::Move(FPURegister dst, uint32_t src) {
 
 void MacroAssembler::Move(FPURegister dst, uint64_t src) {
   // Handle special values first.
-  if (src == base::bit_cast<uint64_t>(0.0) && has_double_zero_reg_set_) {
-    mov_d(dst, kDoubleRegZero);
-  } else if (src == base::bit_cast<uint64_t>(-0.0) &&
-             has_double_zero_reg_set_) {
-    Neg_d(dst, kDoubleRegZero);
+  if (src == base::bit_cast<uint64_t>(0.0)) {
+    dmtc1(zero_reg, dst);
   } else {
     uint32_t lo = src & 0xFFFFFFFF;
     uint32_t hi = src >> 32;
@@ -3190,7 +3176,6 @@ void MacroAssembler::Move(FPURegister dst, uint64_t src) {
     } else {
       mthc1(zero_reg, dst);
     }
-    if (dst == kDoubleRegZero) has_double_zero_reg_set_ = true;
   }
 }
 

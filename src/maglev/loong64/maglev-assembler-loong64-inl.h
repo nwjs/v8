@@ -1358,6 +1358,11 @@ void MaglevAssembler::Float64SilenceNan(DoubleRegister value) {
   FPUCanonicalizeNaN(value, value);
 }
 
+void MaglevAssembler::Float64ExtractHighWord32(Register dst,
+                                               DoubleRegister src) {
+  movfrh2gr_s(dst, src);
+}
+
 #ifdef V8_ENABLE_UNDEFINED_DOUBLE
 void MaglevAssembler::JumpIfUndefinedNan(DoubleRegister value, Register scratch,
                                          Label* target,

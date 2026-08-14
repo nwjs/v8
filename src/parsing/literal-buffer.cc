@@ -45,6 +45,11 @@ void LiteralBuffer::ExpandBuffer() {
   backing_store_ = new_store;
 }
 
+void LiteralBuffer::ExpandBufferAndAddOneByteChar(uint8_t one_byte_char) {
+  ExpandBuffer();
+  AddOneByteCharUnchecked(one_byte_char);
+}
+
 void LiteralBuffer::ExpandBufferTo(size_t min_size) {
   // Round up the min_size to the next even number. This prevents the buffer
   // from acquiring an odd capacity, which can lead to a heap-buffer-overflow

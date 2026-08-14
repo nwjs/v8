@@ -64,6 +64,49 @@ Handle<Code> CreateDummyCode(Isolate* isolate) {
 
 }  // namespace
 
+TEST_F(DisasmX64Test, AVX512) {
+  uint8_t buffer[128];
+  // vpcmpeqb (%rdi),%ymm16,%k0          -> 62 f3 7d 20 3f 07 00
+  // kmovd  %k0,%eax                    -> c5 fb 93 c0
+  // kmovd  %k0,%eax (malformed vex ~R) -> c5 7b 93 c0
+  // vpcmpeqb %ymm17,%ymm16,%k0          -> 62 fb 7d 20 3f c1 00
+  memcpy(buffer,
+         "\x62\xf3\x7d\x20\x3f\x07\x00"
+         "\xc5\xfb\x93\xc0"
+         "\xc5\x7b\x93\xc0"
+         "\x62\xfb\x7d\x20\x3f\xc1\x00",
+         22);
+
+  disasm::NameConverter converter;
+  disasm::Disassembler d(converter);
+  v8::base::EmbeddedVector<char, 128> out_buffer;
+
+  uint8_t* pc = buffer;
+  int len = d.InstructionDecode(out_buffer, pc);
+  EXPECT_EQ(len, 7);
+  EXPECT_STREQ(out_buffer.begin(),
+               "62f37d203f0700       vpcmpeqb k0,xmm16,[rdi],0x0");
+
+  pc += len;
+  len = d.InstructionDecode(out_buffer, pc);
+  EXPECT_EQ(len, 4);
+  EXPECT_STREQ(out_buffer.begin(), "c5fb93c0             kmovd rax,k0");
+
+  // Verify resilient decoding of malformed vex prefix (prevent out of bounds
+  // read).
+  pc += len;
+  len = d.InstructionDecode(out_buffer, pc);
+  EXPECT_EQ(len, 4);
+  EXPECT_STREQ(out_buffer.begin(), "c57b93c0             kmovd rax,k0");
+
+  // Verify decoding of upper EVEX AVX-512 register (xmm17 / ymm17).
+  pc += len;
+  len = d.InstructionDecode(out_buffer, pc);
+  EXPECT_EQ(len, 7);
+  EXPECT_STREQ(out_buffer.begin(),
+               "62fb7d203fc100       vpcmpeqb k0,xmm16,xmm17,0x0");
+}
+
 TEST_F(DisasmX64Test, DisasmX64) {
   HandleScope handle_scope(isolate());
   uint8_t buffer[8192];

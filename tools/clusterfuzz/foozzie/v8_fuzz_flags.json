@@ -53,12 +53,13 @@
   [0.1, "--conservative-stack-scanning"],
   [0.1, "--precise-object-pinning"],
   [0.1, "--ephemeron-fixpoint-iterations=0"],
-  [0.25, "--experimental-wasm-revectorize"],
+  [0.25, "--wasm-revectorize"],
   [0.1, "--no-additive-safe-int-feedback"],
   [0.1, "--hashes-collide"],
   [0.5, "--proto-assign-seq-lazy-func-opt --proto-assign-seq-opt-count=1"],
   [0.5, "--private-field-bytecodes"],
   [0.1, "--scavenger-chaos-mode"],
   [0.1, "--stress-branch-hinting"],
-  [0.2, "--wasm-random-rescheduling"]
+  [0.2, "--wasm-random-rescheduling"],
+  [0.1, "--stress-descriptor-array-trimming"]
 ]

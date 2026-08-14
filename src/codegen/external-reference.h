@@ -139,9 +139,6 @@ enum class IsolateFieldId : uint8_t;
   V(delete_handle_scope_extensions, "HandleScope::DeleteExtensions")           \
   V(ephemeron_key_write_barrier_function,                                      \
     "Heap::EphemeronKeyWriteBarrierFromCode")                                  \
-  V(f64_acos_wrapper_function, "f64_acos_wrapper")                             \
-  V(f64_asin_wrapper_function, "f64_asin_wrapper")                             \
-  V(f64_mod_wrapper_function, "f64_mod_wrapper")                               \
   V(get_date_field_function, "JSDate::GetField")                               \
   V(get_or_create_hash_raw, "get_or_create_hash_raw")                          \
   V(gsab_byte_length, "GsabByteLength")                                        \

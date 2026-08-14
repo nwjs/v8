@@ -11,6 +11,7 @@
 #include "src/base/build_config.h"
 #include "src/base/logging.h"
 #include "src/base/numerics/safe_conversions.h"
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
 #include "src/common/ptr-compr-inl.h"
 #include "src/execution/isolate.h"
@@ -19,6 +20,7 @@
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-verifier.h"
 #include "src/heap/heap.h"
+#include "src/heap/main-allocator-inl.h"
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/read-only-heap.h"
@@ -425,7 +427,7 @@ AllocationResult ReadOnlySpace::AllocateRawUnmappableAllocation(
   int filler_size = base::checked_cast<int>(allocation_start - top_);
   Address filler_address = AllocateRawUnaligned(filler_size).ToAddress();
   heap()->CreateFillerObjectAt(filler_address, filler_size,
-                               ClearFreedMemoryMode::kClearFreedMemory);
+                               ClearFreedMemoryMode{true});
 
   CHECK_EQ(allocation_start, top_);
   CHECK_LE(
@@ -445,7 +447,7 @@ Tagged<HeapObject> ReadOnlySpace::TryAllocateLinearlyAligned(
     int size_in_bytes, AllocationAlignment alignment) {
   size_in_bytes = ALIGN_TO_ALLOCATION_ALIGNMENT(size_in_bytes);
   Address current_top = top_;
-  int filler_size = Heap::GetFillToAlign(current_top, alignment);
+  int filler_size = MainAllocator::GetFillToAlign(current_top, alignment);
 
   Address new_top = current_top + filler_size + size_in_bytes;
   if (new_top > limit_) return {};
@@ -477,7 +479,7 @@ AllocationResult ReadOnlySpace::AllocateRawAligned(
     // We don't know exactly how much filler we need to align until space is
     // allocated, so assume the worst case.
     EnsureSpaceForAllocation(allocation_size +
-                             Heap::GetMaximumFillToAlign(alignment));
+                             MainAllocator::GetMaximumFillToAlign(alignment));
     allocation_size = size_in_bytes;
     object = TryAllocateLinearlyAligned(size_in_bytes, alignment);
     CHECK(!object.is_null());

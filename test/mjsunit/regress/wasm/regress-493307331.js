@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-memory-control
+// Flags: --wasm-memory-control
 
 let desc = new WebAssembly.MemoryMapDescriptor(1024);
 assertThrows(() => desc.unmap());

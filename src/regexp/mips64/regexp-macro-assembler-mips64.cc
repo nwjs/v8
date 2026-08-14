@@ -127,7 +127,7 @@ RegExpMacroAssemblerMIPS::RegExpMacroAssemblerMIPS(Isolate* isolate, Zone* zone,
                                                    int registers_to_save)
     : NativeRegExpMacroAssembler(isolate, zone, mode),
       masm_(std::make_unique<MacroAssembler>(
-          isolate, CodeObjectRequired::kYes,
+          isolate, CodeObjectRequired{true},
           NewAssemblerBuffer(kInitialBufferSize))),
       no_root_array_scope_(masm_.get()),
       num_registers_(registers_to_save),
@@ -754,7 +754,16 @@ DirectHandle<HeapObject> RegExpMacroAssemblerMIPS::GetCode(
     // memory when returning from this irregexp code object.
     PushRegExpBasePointer(backtrack_stackpointer(), a1);
 
-    {
+    // Skip the JS stack guard check for patterns whose register file fits
+    // within the stack limit's guaranteed slack: allocating it then can never
+    // push the stack past the point the check would catch, so the check is pure
+    // overhead on every match. This is the same slack that lets optimized JS
+    // elide the entry stack check for small leaf frames (see the static_assert
+    // and CodeGenerator::ShouldApplyOffsetToStackCheck).
+    static constexpr int kMaxRegistersWithoutStackCheck = 32;
+    static_assert(kMaxRegistersWithoutStackCheck * kSystemPointerSize <=
+                  kStackLimitSlackForDeoptimizationInBytes);
+    if (num_registers_ > kMaxRegistersWithoutStackCheck) {
       // Check if we have space on the stack for registers.
       Label stack_limit_hit, stack_ok;
 
@@ -1385,15 +1394,25 @@ void RegExpMacroAssemblerMIPS::LoadCurrentCharacterUnchecked(int cp_offset,
     __ Daddu(t3, current_input_offset(), Operand(cp_offset * char_size()));
     offset = t3;
   }
-  // We assume that we cannot do unaligned loads on MIPS, so this function
-  // must only be used to load a single character at a time.
-  DCHECK_EQ(1, characters);
+
   __ Daddu(t1, end_of_input_address(), Operand(offset));
   if (mode() == LATIN1) {
-    __ Lbu(current_character(), MemOperand(t1, 0));
+    if (characters == 4) {
+      __ Ulwu(current_character(), MemOperand(t1, 0));
+    } else if (characters == 2) {
+      __ Ulhu(current_character(), MemOperand(t1, 0));
+    } else {
+      DCHECK_EQ(1, characters);
+      __ Lbu(current_character(), MemOperand(t1, 0));
+    }
   } else {
     DCHECK(mode() == UC16);
-    __ Lhu(current_character(), MemOperand(t1, 0));
+    if (characters == 2) {
+      __ Ulwu(current_character(), MemOperand(t1, 0));
+    } else {
+      DCHECK_EQ(1, characters);
+      __ Lhu(current_character(), MemOperand(t1, 0));
+    }
   }
 }
 

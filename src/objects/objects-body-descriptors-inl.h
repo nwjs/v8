@@ -191,6 +191,23 @@ class JSAPIObjectWithEmbedderSlots::BodyDescriptor
   }
 };
 
+class JSGlobalProxy::BodyDescriptor
+    : public JSAPIObjectWithEmbedderSlotsOrJSSpecialObjectBodyDescriptor {
+ public:
+  template <typename ObjectVisitor>
+  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
+                                 int object_size, ObjectVisitor* v) {
+    IterateJSAPIObjectWithEmbedderSlotsHeader(map, obj, object_size, v);
+    IterateJSAPIObjectWithEmbedderSlotsTail<
+        JSAPIObjectWithEmbedderSlotsOrJSSpecialObjectBodyDescriptor>(
+        map, obj, object_size, v);
+  }
+
+  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
+    return map->instance_size();
+  }
+};
+
 class CppHeapExternalObject::BodyDescriptor final : public BodyDescriptorBase {
  public:
   template <typename ObjectVisitor>
@@ -643,7 +660,7 @@ class FeedbackVector::BodyDescriptor final : public BodyDescriptorBase {
 
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> obj) {
     return FeedbackVector::SizeFor(
-        UncheckedCast<FeedbackVector>(obj)->length());
+        UncheckedCast<FeedbackVector>(obj)->length().value());
   }
 };
 
@@ -1404,20 +1421,7 @@ class WasmImportData::BodyDescriptor final : public BodyDescriptorBase {
   }
 };
 
-class AsmWasmData::BodyDescriptor final : public BodyDescriptorBase {
- public:
-  template <typename ObjectVisitor>
-  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
-                                 int object_size, ObjectVisitor* v) {
-    IterateSelfIndirectPointer(obj, kAsmWasmDataIndirectPointerTag, v);
-    IterateProtectedPointer(obj, offsetof(AsmWasmData, managed_native_module_),
-                            v);
-  }
 
-  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
-    return sizeof(AsmWasmData);
-  }
-};
 
 class WasmInternalFunction::BodyDescriptor final : public BodyDescriptorBase {
  public:
@@ -1823,9 +1827,14 @@ class NativeContext::BodyDescriptor final : public BodyDescriptorBase {
                     NativeContext::kEndOfStrongFieldsOffset, v);
     IterateCustomWeakPointers(obj, NativeContext::kStartOfWeakFieldsOffset,
                               NativeContext::kEndOfWeakFieldsOffset, v);
+#ifdef V8_CPPGC_MICROTASK_QUEUE
+    v->VisitCppHeapPointer(obj,
+                           obj->RawCppHeapPointerField(kMicrotaskQueueOffset));
+#else
     v->VisitExternalPointer(
         obj, obj->RawExternalPointerField(kMicrotaskQueueOffset,
                                           kNativeContextMicrotaskQueueTag));
+#endif  // V8_CPPGC_MICROTASK_QUEUE
   }
 
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
@@ -1974,7 +1983,9 @@ class InterceptorInfo::BodyDescriptor final : public BodyDescriptorBase {
                 offsetof(InterceptorInfo, definer_));
   static_assert(offsetof(InterceptorInfo, definer_) <
                 offsetof(InterceptorInfo, index_of_));
-  static_assert(InterceptorInfo::kIndexOfOffsetEnd + 1 ==
+  static_assert(offsetof(InterceptorInfo, index_of_) <
+                offsetof(InterceptorInfo, iterable_to_list_));
+  static_assert(InterceptorInfo::kIterableToListOffsetEnd + 1 ==
                 InterceptorInfo::kSize);
 
   template <typename ObjectVisitor>

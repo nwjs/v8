@@ -73,7 +73,7 @@ CodeGenerator::CodeGenerator(Zone* codegen_zone, Frame* frame, Linkage* linkage,
       current_block_(RpoNumber::Invalid()),
       start_source_position_(start_source_position),
       current_source_position_(SourcePosition::Unknown()),
-      masm_(isolate, codegen_zone, options, CodeObjectRequired::kNo,
+      masm_(isolate, codegen_zone, options, CodeObjectRequired{false},
             std::unique_ptr<AssemblerBuffer>{}),
       resolver_(this),
       safepoints_(codegen_zone),
@@ -132,7 +132,10 @@ bool CodeGenerator::ShouldApplyOffsetToStackCheck(Instruction* instr,
 
   StackCheckKind kind =
       static_cast<StackCheckKind>(StackCheckField::decode(instr->opcode()));
-  if (kind != StackCheckKind::kJSFunctionEntry) return false;
+  if (kind != StackCheckKind::kJSFunctionEntry &&
+      kind != StackCheckKind::kWasm) {
+    return false;
+  }
 
   uint32_t stack_check_offset = *offset = GetStackCheckOffset();
   return stack_check_offset > kStackLimitSlackForDeoptimizationInBytes;
@@ -156,7 +159,7 @@ uint32_t CodeGenerator::GetStackCheckOffset() {
       static_cast<int32_t>(max_unoptimized_frame_height_);
 
   // The offset is either the delta between the optimized frames and the
-  // interpreted frame, or the maximal number of bytes pushed to the stack
+  // unoptimized frame, or the maximal number of bytes pushed to the stack
   // while preparing for function calls, whichever is bigger.
   uint32_t frame_height_delta = static_cast<uint32_t>(std::max(
       signed_max_unoptimized_frame_height - optimized_frame_height, 0));

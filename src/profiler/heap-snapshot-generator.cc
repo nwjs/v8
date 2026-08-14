@@ -31,6 +31,7 @@
 #include "src/objects/fixed-array-base-inl.h"
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/hash-table-inl.h"
+#include "src/objects/heap-object-field-inl.h"
 #include "src/objects/heap-object-inl.h"
 #include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type-inl.h"
@@ -68,6 +69,20 @@
 namespace v8::internal {
 
 #ifdef V8_ENABLE_HEAP_SNAPSHOT_VERIFY
+bool ShouldVerifyReferenceTo(Isolate* isolate, Tagged<HeapObject> obj) {
+  // We can't verify pointers into read-only space, because marking visitors
+  // might not mark those. For example, every Map has a pointer to the MetaMap,
+  // but marking visitors don't bother with following that link.
+  if (MemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) return false;
+  // For client isolates we cannot verify references into the shared heap
+  // because the marking visitor doesn't follow such references.
+  if (isolate->has_shared_space() && !isolate->is_shared_space_isolate() &&
+      MemoryChunk::FromHeapObject(obj)->InWritableSharedSpace()) {
+    return false;
+  }
+  return true;
+}
+
 class HeapEntryVerifier {
  public:
   HeapEntryVerifier(HeapSnapshotGenerator* generator, Tagged<HeapObject> obj)
@@ -142,17 +157,15 @@ class HeapEntryVerifier {
   // This ensures that there aren't retaining relationships found by the marking
   // visitor which were omitted from the heap snapshot.
   void CheckAllReferencesWereChecked() {
-    // Both loops below skip pointers to read-only objects, because the heap
-    // snapshot deliberately omits many of those (see IsEssentialObject).
-    // Read-only objects can't ever retain normal read-write objects, so these
-    // are fine to skip.
+    Isolate* isolate = generator_->heap()->isolate();
+
     for (Tagged<HeapObject> obj : reference_summary_.strong_references()) {
-      if (!MemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
+      if (ShouldVerifyReferenceTo(isolate, obj)) {
         CHECK_NE(checked_objects_.find(obj), checked_objects_.end());
       }
     }
     for (Tagged<HeapObject> obj : reference_summary_.weak_references()) {
-      if (!MemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
+      if (ShouldVerifyReferenceTo(isolate, obj)) {
         CHECK_NE(checked_objects_.find(obj), checked_objects_.end());
       }
     }
@@ -329,17 +342,10 @@ void HeapEntry::VerifyReference(HeapGraphEdge::Type type, HeapEntry* entry,
   }
   Tagged<HeapObject> from_obj = Cast<HeapObject>(Tagged<Object>(from_address));
   Tagged<HeapObject> to_obj = Cast<HeapObject>(Tagged<Object>(to_address));
-  if (MemoryChunk::FromHeapObject(to_obj)->InReadOnlySpace() ||
-      (!isolate()->is_shared_space_isolate() &&
-       MemoryChunk::FromHeapObject(to_obj)->InWritableSharedSpace())) {
+  if (!ShouldVerifyReferenceTo(isolate(), to_obj)) {
     // We can't verify pointers into read-only space or shared space (for client
-    // isolates), because marking visitors might not mark those. For example,
-    // every Map has a pointer to the MetaMap, but marking visitors don't bother
-    // with following that link. Read-only and shared objects are immortal (or
-    // managed externally) and can never point to things outside of their
-    // respective spaces, so ignoring these objects is safe from the perspective
-    // of ensuring accurate retaining paths for normal read-write objects.
-    // Therefore, do nothing.
+    // isolates), because marking visitors might not mark those. See
+    // ShouldVerifyReferenceTo for more details. Therefore, do nothing.
   } else if (verification == kEphemeron) {
     // Ephemerons can't be verified because they aren't marked directly by the
     // marking visitor.
@@ -2410,7 +2416,7 @@ void V8HeapExplorer::ExtractScopeInfoReferences(HeapEntry* entry,
 
 void V8HeapExplorer::ExtractFeedbackVectorReferences(
     HeapEntry* entry, Tagged<FeedbackVector> feedback_vector) {
-  for (int i = 0; i < feedback_vector->length(); ++i) {
+  for (uint32_t i = 0; i < feedback_vector->length().value(); ++i) {
     Tagged<MaybeObject> maybe_entry = *(feedback_vector->slots_start() + i);
     Tagged<HeapObject> entry_obj;
     if (maybe_entry.GetHeapObjectIfStrong(&entry_obj) &&

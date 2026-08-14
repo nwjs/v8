@@ -280,7 +280,7 @@ void Assembler::deserialization_set_target_internal_reference_at(
     set_target_address_at(pc, kNullAddress, target, &jit_allocation,
                           SKIP_ICACHE_FLUSH);
   } else {
-    jit_allocation.WriteUnalignedValue<Address>(pc, target);
+    jit_allocation.WriteValue<Address>(pc, target);
   }
 }
 

@@ -19,6 +19,20 @@ class ReschedulingReducer : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE(Rescheduling)
 
+  enum class OpState {
+    kPending,  // This operation is not yet emitted and not yet ready to do so.
+    kReady,    // This operation is not yet emitted but is ready to be emitted.
+    kFixed,    // This operation has a fixed location and will be handled
+               // specially (e.g. block terminators and Phis).
+    kScheduled,  // This operation has been emitted.
+  };
+
+  template <class... Args>
+  explicit ReschedulingReducer(Args... args)
+      : Next(args...),
+        op_states_(Asm().input_graph().op_id_count(), OpState::kPending,
+                   Asm().phase_zone(), &Asm().input_graph()) {}
+
   V<None> AssembleOutputGraphCheckException(const CheckExceptionOp& op) {
     std::optional<CatchScope> catch_scope;
     if (op.catch_block != nullptr) {
@@ -59,6 +73,7 @@ class ReschedulingReducer : public Next {
       __ clear_effect_handlers();
       return V<None>::Invalid();
     }
+    op_states_[*it] = OpState::kScheduled;
     __ clear_effect_handlers();
 
     Block* successor_block = this->MapToNewGraph(op.didnt_throw_block);
@@ -84,24 +99,16 @@ class ReschedulingReducer : public Next {
  public:
   const Graph& graph_ = Asm().input_graph();
   bool trace_scheduling_ = false;
+  FixedOpIndexSidetable<OpState> op_states_;
 };
 
 class RandomRescheduler : public Assembler<ReschedulingReducer, GraphVisitor> {
   using Base = Assembler<ReschedulingReducer, GraphVisitor>;
-  enum class OpState {
-    kPending,  // This operation is not yet emitted and not yet ready to do so.
-    kReady,    // This operation is not yet emitted but is ready to be emitted.
-    kFixed,    // This operation has a fixed location and will be handled
-               // specially (e.g. block terminators and Phis).
-    kScheduled,  // This operation has been emitted.
-  };
 
  public:
   RandomRescheduler(PipelineData* data, Graph& input_graph, Graph& output_graph,
                     Zone* phase_zone)
       : Base(data, input_graph, output_graph, phase_zone),
-        op_states_(input_graph.op_id_count(), OpState::kPending, phase_zone,
-                   &input_graph),
         ready_ops_(phase_zone),
         rng_(v8_flags.random_seed ^ input_graph.op_id_count()) {}
 
@@ -357,7 +364,7 @@ class RandomRescheduler : public Assembler<ReschedulingReducer, GraphVisitor> {
     }
   }
 
-  FixedOpIndexSidetable<OpState> op_states_;
+ private:
   ZoneAbslFlatHashSet<OpIndex> ready_ops_;
   base::RandomNumberGenerator rng_;
 };

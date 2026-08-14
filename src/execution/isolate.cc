@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -33,6 +34,7 @@
 #include "src/base/platform/mutex.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/wrappers.h"
+#include "src/base/strong-alias.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/baseline/baseline-batch-compiler.h"
 #include "src/bigint/bigint.h"
@@ -903,20 +905,32 @@ bool IsBuiltinAsyncRejectHandler(Isolate* isolate, Tagged<HeapObject> object) {
 // rethrows the exception instead of catching it.
 bool IsBuiltinForwardingRejectHandler(Isolate* isolate,
                                       Tagged<HeapObject> object) {
-  return IsBuiltinFunction(isolate, object, Builtin::kPromiseCatchFinally) ||
-         IsBuiltinFunction(isolate, object,
-                           Builtin::kAsyncFromSyncIteratorCloseSyncAndRethrow);
+  if (IsBuiltinFunction(isolate, object, Builtin::kPromiseCatchFinally) ||
+      IsBuiltinFunction(isolate, object,
+                        Builtin::kAsyncFromSyncIteratorCloseSyncAndRethrow)) {
+    return true;
+  }
+#if V8_ENABLE_WEBASSEMBLY
+  if (IsBuiltinFunction(isolate, object, Builtin::kWasmReject)) {
+    return true;
+  }
+#endif
+  return false;
 }
 
 MaybeHandle<JSGeneratorObject> TryGetAsyncGenerator(
     Isolate* isolate, DirectHandle<PromiseReaction> reaction) {
+  DisallowGarbageCollection no_gc;
+  Tagged<HeapObject> fulfill_handler = reaction->fulfill_handler();
+  if (IsJSGeneratorObject(fulfill_handler)) {
+    return handle(Cast<JSGeneratorObject>(fulfill_handler), isolate);
+  }
   // Check if the {reaction} has one of the known async function or
   // async generator continuations as its fulfill handler.
-  if (IsBuiltinAsyncFulfillHandler(isolate, reaction->fulfill_handler())) {
+  if (IsBuiltinAsyncFulfillHandler(isolate, fulfill_handler)) {
     // Now peek into the handlers' AwaitContext to get to
     // the JSGeneratorObject for the async function.
-    DirectHandle<Context> context(
-        Cast<JSFunction>(reaction->fulfill_handler())->context(), isolate);
+    Tagged<Context> context = Cast<JSFunction>(fulfill_handler)->context();
     Handle<JSGeneratorObject> generator_object(
         Cast<JSGeneratorObject>(context->extension()), isolate);
     return generator_object;
@@ -1076,12 +1090,6 @@ class CallSiteBuilder {
     if (summary.code()->kind() != wasm::WasmCode::kWasmFunction) return;
     DirectHandle<WasmInstanceObject> instance = summary.wasm_instance();
     int flags = CallSiteInfo::kIsWasm;
-    if (wasm::is_asmjs_module(summary.wasm_trusted_instance_data()->module())) {
-      flags |= CallSiteInfo::kIsAsmJsWasm;
-      if (summary.at_to_number_conversion()) {
-        flags |= CallSiteInfo::kIsAsmJsAtNumberConversion;
-      }
-    }
 
     DirectHandle<Undefined> code = isolate_->factory()->undefined_value();
     AppendFrame(instance,
@@ -1094,7 +1102,6 @@ class CallSiteBuilder {
       FrameSummary::WasmInterpretedFrameSummary const& summary) {
     Handle<WasmInstanceObject> instance = summary.wasm_instance();
     int flags = CallSiteInfo::kIsWasm | CallSiteInfo::kIsWasmInterpretedFrame;
-    DCHECK(!wasm::is_asmjs_module(summary.instance_data()->module()));
     // We don't have any code object in the interpreter, so we pass 'undefined'.
     auto code = isolate_->factory()->undefined_value();
     AppendFrame(instance,
@@ -1385,6 +1392,32 @@ void CaptureAsyncStackTrace(Isolate* isolate, DirectHandle<JSPromise> promise,
         DCHECK(IsUndefined(promise_or_undefined));
         return;
       }
+#if V8_ENABLE_WEBASSEMBLY
+    } else if (DirectHandle<WasmSuspenderObject> suspender;
+               TryGetWasmSuspender(isolate, reaction->fulfill_handler())
+                   .ToHandle(&suspender)) {
+      DCHECK_NOT_NULL(suspender->stack());
+      for (StackFrameIterator it(isolate, suspender->stack()); !it.done();
+           it.Advance()) {
+        StackFrame* frame = it.frame();
+        if (frame->is_wasm()) {
+          FrameSummaries summaries = CommonFrame::cast(frame)->Summarize();
+          for (auto& summary : base::Reversed(summaries.frames)) {
+            if (!summary.native_context()->HasSameSecurityTokenAs(
+                    isolate->raw_native_context())) {
+              continue;
+            }
+            if (!builder->Visit(summary)) return;
+          }
+        }
+      }
+      Tagged<Object> promise_obj = suspender->promise();
+      if (IsJSPromise(promise_obj)) {
+        promise = direct_handle(Cast<JSPromise>(promise_obj), isolate);
+      } else {
+        return;
+      }
+#endif  // V8_ENABLE_WEBASSEMBLY
     } else {
       // We have some generic promise chain here, so try to
       // continue with the chained promise on the reaction
@@ -1408,25 +1441,30 @@ void CaptureAsyncStackTrace(Isolate* isolate, DirectHandle<JSPromise> promise,
 }
 
 MaybeDirectHandle<JSPromise> TryGetCurrentTaskPromise(Isolate* isolate) {
+  DisallowGarbageCollection no_gc;
   Handle<Object> current_microtask = isolate->factory()->current_microtask();
   if (IsPromiseReactionJobTask(*current_microtask)) {
     auto promise_reaction_job_task =
         Cast<PromiseReactionJobTask>(current_microtask);
     // Check if the {reaction} has one of the known async function or
     // async generator continuations as its fulfill handler.
-    if (IsBuiltinAsyncFulfillHandler(isolate,
-                                     promise_reaction_job_task->handler()) ||
-        IsBuiltinAsyncRejectHandler(isolate,
-                                    promise_reaction_job_task->handler())) {
+    Tagged<JSGeneratorObject> generator_object;
+    if (IsJSGeneratorObject(promise_reaction_job_task->handler())) {
+      generator_object =
+          Cast<JSGeneratorObject>(promise_reaction_job_task->handler());
+    } else if (IsBuiltinAsyncFulfillHandler(
+                   isolate, promise_reaction_job_task->handler()) ||
+               IsBuiltinAsyncRejectHandler(
+                   isolate, promise_reaction_job_task->handler())) {
       // Now peek into the handlers' AwaitContext to get to
       // the JSGeneratorObject for the async function.
-      DirectHandle<Context> context(
-          Cast<JSFunction>(promise_reaction_job_task->handler())->context(),
-          isolate);
-      Handle<JSGeneratorObject> generator_object(
-          Cast<JSGeneratorObject>(context->extension()), isolate);
+      Tagged<Context> context =
+          Cast<JSFunction>(promise_reaction_job_task->handler())->context();
+      generator_object = Cast<JSGeneratorObject>(context->extension());
+    }
+    if (!generator_object.is_null()) {
       if (generator_object->is_executing()) {
-        if (IsJSAsyncFunctionObject(*generator_object)) {
+        if (IsJSAsyncFunctionObject(generator_object)) {
           auto async_function_object =
               Cast<JSAsyncFunctionObject>(generator_object);
           DirectHandle<JSPromise> promise(async_function_object->promise(),
@@ -1435,8 +1473,8 @@ MaybeDirectHandle<JSPromise> TryGetCurrentTaskPromise(Isolate* isolate) {
         } else {
           auto async_generator_object =
               Cast<JSAsyncGeneratorObject>(generator_object);
-          DirectHandle<Object> queue(async_generator_object->queue(), isolate);
-          if (!IsUndefined(*queue)) {
+          Tagged<Object> queue = async_generator_object->queue();
+          if (!IsUndefined(queue)) {
             auto async_generator_request = Cast<AsyncGeneratorRequest>(queue);
             DirectHandle<JSPromise> promise(
                 Cast<JSPromise>(async_generator_request->promise()), isolate);
@@ -1474,12 +1512,11 @@ MaybeDirectHandle<JSPromise> TryGetCurrentTaskPromise(Isolate* isolate) {
     return promise;
   } else if (IsAsyncResumeTask(*current_microtask)) {
     auto async_resume_task = Cast<AsyncResumeTask>(current_microtask);
-    Handle<JSGeneratorObject> generator_object(async_resume_task->generator(),
-                                               isolate);
+    Tagged<JSGeneratorObject> generator_object = async_resume_task->generator();
     if (generator_object->is_executing()) {
       int kind = async_resume_task->kind();
       if (kind == AsyncResumeTask::kAsyncFunctionAwait) {
-        DCHECK(IsJSAsyncFunctionObject(*generator_object));
+        DCHECK(IsJSAsyncFunctionObject(generator_object));
         auto async_function_object =
             Cast<JSAsyncFunctionObject>(generator_object);
         DirectHandle<JSPromise> promise(async_function_object->promise(),
@@ -1487,10 +1524,10 @@ MaybeDirectHandle<JSPromise> TryGetCurrentTaskPromise(Isolate* isolate) {
         return promise;
       } else {
         DCHECK_EQ(kind, AsyncResumeTask::kYield);
-        DCHECK(IsJSAsyncGeneratorObject(*generator_object));
+        DCHECK(IsJSAsyncGeneratorObject(generator_object));
         auto async_generator_object =
             Cast<JSAsyncGeneratorObject>(generator_object);
-        DirectHandle<Object> queue(async_generator_object->queue(), isolate);
+        Tagged<Object> queue = async_generator_object->queue();
         // The queue may legitimately be empty here. The kYield dispatch calls
         // AsyncGeneratorResolve (which pops the yield request) followed by
         // AsyncGeneratorResumeNext, which may immediately resume the generator
@@ -1499,7 +1536,7 @@ MaybeDirectHandle<JSPromise> TryGetCurrentTaskPromise(Isolate* isolate) {
         // triggers this stack capture. V8 has no separate ~draining-queue~
         // state (spec sec-asyncgeneratorstart), so is_executing() remains true
         // throughout; the empty queue is the tell that we're in that phase.
-        if (IsUndefined(*queue)) return MaybeDirectHandle<JSPromise>();
+        if (IsUndefined(queue)) return MaybeDirectHandle<JSPromise>();
         auto async_generator_request = Cast<AsyncGeneratorRequest>(queue);
         DirectHandle<JSPromise> promise(
             Cast<JSPromise>(async_generator_request->promise()), isolate);
@@ -1521,7 +1558,7 @@ void CaptureAsyncStackTrace(Isolate* isolate, CallSiteBuilder* builder) {
 template <typename Visitor>
 void VisitStack(Isolate* isolate, Visitor* visitor,
                 StackTrace::StackTraceOptions options = StackTrace::kDetailed,
-                AllowAllocation allow_allocation = AllowAllocation::kYes) {
+                AllowAllocation allow_allocation = AllowAllocation{true}) {
   DisallowJavascriptExecution no_js(isolate);
   for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
     StackFrame* frame = it.frame();
@@ -2141,7 +2178,7 @@ size_t Isolate::CurrentScriptData(
 
   CurrentScriptDataStackVisitor visitor(this, frame_data);
   // CurrentScriptData should only expose frames from the same origin.
-  VisitStack(this, &visitor, StackTrace::kDetailed, AllowAllocation::kNo);
+  VisitStack(this, &visitor, StackTrace::kDetailed, AllowAllocation{false});
   return visitor.FrameCount();
 }
 
@@ -2201,9 +2238,10 @@ void Isolate::PrintStack(FILE* out, PrintStackMode mode,
   }
 }
 
-static void PrintFrames(
-    Isolate* isolate, StringStream* accumulator, StackFrame::PrintMode mode,
-    AllowAllocation allow_allocation = AllowAllocation::kYes) {
+static void PrintFrames(Isolate* isolate, StringStream* accumulator,
+                        StackFrame::PrintMode mode,
+                        AllowAllocation allow_allocation = AllowAllocation{
+                            true}) {
   StackFrameIterator it(isolate);
   for (int i = 0; !it.done(); it.Advance()) {
     it.frame()->Print(accumulator, mode, i++, allow_allocation);
@@ -2342,7 +2380,7 @@ std::string Isolate::BuildMinimalStack(size_t max_length) {
           v8::StackTrace::kExposeFramesAcrossSecurityOrigins);
 
   MinimalStackPrinter printer(max_length);
-  VisitStack(this, &printer, stackTraceOptions, AllowAllocation::kNo);
+  VisitStack(this, &printer, stackTraceOptions, AllowAllocation{false});
   return printer.Build();
 }
 
@@ -2551,6 +2589,19 @@ void Isolate::RequestInterrupt(InterruptCallback callback, void* data) {
 
 void Isolate::InvokeApiInterruptCallbacks() {
   RCS_SCOPE(this, RuntimeCallCounterId::kInvokeApiInterruptCallbacks);
+  struct ApiInterruptScope {
+    explicit ApiInterruptScope(Isolate* isolate) : isolate_(isolate) {
+      DCHECK_LE(0, isolate_->api_interrupt_depth_);
+      DCHECK_LT(isolate_->api_interrupt_depth_,
+                std::numeric_limits<int>::max());
+      isolate_->api_interrupt_depth_++;
+    }
+    ~ApiInterruptScope() {
+      DCHECK_LT(0, isolate_->api_interrupt_depth_);
+      isolate_->api_interrupt_depth_--;
+    }
+    Isolate* const isolate_;
+  } scope{this};
   // Note: callback below should be called outside of execution access lock.
   while (true) {
     InterruptEntry entry;
@@ -2877,15 +2928,11 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
           reinterpret_cast<uintptr_t>(iter.wasm_stack()->jslimit());
       stack_guard()->SetStackLimitForStackSwitching(limit);
       iter.wasm_stack()->clear_stack_switch_info();
-#if V8_TARGET_OS_WIN
+#if V8_OS_WIN
       base::Stack::SetCurrentThreadStackBounds(iter.wasm_stack()->limit(),
                                                iter.wasm_stack()->base());
 #endif
     }
-    // Regardless of the stack that the handler belongs to, these fields should
-    // be cleared.
-    thread_local_top()->secondary_stack_limit_ = 0;
-    thread_local_top()->secondary_stack_sp_ = 0;
 #endif
 
     // Return and clear exception. The contract is that:
@@ -4408,7 +4455,7 @@ bool Isolate::IsBuiltinTableHandleLocation(Address* handle_location) {
 }
 
 void Isolate::RegisterManagedPtrDestructor(ManagedPtrDestructor* destructor) {
-  if (destructor->shared_ == SharedFlag::kYes && !is_shared_space_isolate()) {
+  if (destructor->shared_ && !is_shared_space_isolate()) {
     shared_space_isolate()->RegisterManagedPtrDestructor(destructor);
     return;
   }
@@ -4416,7 +4463,7 @@ void Isolate::RegisterManagedPtrDestructor(ManagedPtrDestructor* destructor) {
   base::MutexGuard lock(&managed_ptr_destructors_mutex_);
   DCHECK_NULL(destructor->prev_);
   DCHECK_NULL(destructor->next_);
-  ManagedPtrDestructor** list = destructor->shared_ == SharedFlag::kYes
+  ManagedPtrDestructor** list = destructor->shared_
                                     ? &shared_managed_ptr_destructors_head_
                                     : &managed_ptr_destructors_head_;
   if (*list) {
@@ -4427,7 +4474,7 @@ void Isolate::RegisterManagedPtrDestructor(ManagedPtrDestructor* destructor) {
 }
 
 void Isolate::UnregisterManagedPtrDestructor(ManagedPtrDestructor* destructor) {
-  if (destructor->shared_ == SharedFlag::kYes && !is_shared_space_isolate()) {
+  if (destructor->shared_ && !is_shared_space_isolate()) {
     shared_space_isolate()->UnregisterManagedPtrDestructor(destructor);
     return;
   }
@@ -4436,7 +4483,7 @@ void Isolate::UnregisterManagedPtrDestructor(ManagedPtrDestructor* destructor) {
   if (destructor->prev_) {
     destructor->prev_->next_ = destructor->next_;
   } else {
-    ManagedPtrDestructor** list = destructor->shared_ == SharedFlag::kYes
+    ManagedPtrDestructor** list = destructor->shared_
                                       ? &shared_managed_ptr_destructors_head_
                                       : &managed_ptr_destructors_head_;
     DCHECK_EQ(destructor, *list);
@@ -4459,6 +4506,14 @@ void Isolate::IterateRegistersAndStackOfSimulator(
 bool Isolate::IsOnCentralStack(Address addr) {
   auto stack = SimulatorStack::GetCentralStackView(this);
   Address stack_top = reinterpret_cast<Address>(stack.begin());
+#if !USE_SIMULATOR
+  // Try to use the stack limit reported by the system instead of V8's own
+  // conservative limit to avoid false positives.
+  Address real_stack_top = base::Stack::GetReservedStackLimit();
+  if (real_stack_top) {
+    stack_top = real_stack_top;
+  }
+#endif
   Address stack_base = reinterpret_cast<Address>(stack.end());
   return stack_top < addr && addr <= stack_base;
 }
@@ -5018,11 +5073,11 @@ void Isolate::Deinit() {
     global_safepoint()->AssertNoClientsOnTearDown();
   }
 
-  if (has_shared_space() && !is_shared_space_isolate()) {
+  if (GlobalSafepoint* safepoint = global_safepoint();
+      safepoint && this != safepoint->shared_space_isolate()) {
     IgnoreLocalGCRequests ignore_gc_requests(heap());
-    main_thread_local_heap()->ExecuteMainThreadWhileParked([this]() {
-      shared_space_isolate()->global_safepoint()->clients_mutex_.Lock();
-    });
+    main_thread_local_heap()->ExecuteMainThreadWhileParked(
+        [safepoint]() { safepoint->clients_mutex_.Lock(); });
   }
 
 #ifdef DEBUG
@@ -5126,12 +5181,11 @@ void Isolate::Deinit() {
   heap_.TearDownWithSharedHeap();
   DumpAndResetBuiltinsProfileData();
 
-  // Detach from the shared heap isolate and then unlock the mutex.
-  if (has_shared_space() && !is_shared_space_isolate()) {
-    GlobalSafepoint* global_safepoint =
-        this->shared_space_isolate()->global_safepoint();
-    global_safepoint->RemoveClient(this);
-    global_safepoint->clients_mutex_.Unlock();
+  // Detach from the isolate group and then unlock the mutex.
+  if (GlobalSafepoint* safepoint = global_safepoint();
+      safepoint && this != safepoint->shared_space_isolate()) {
+    safepoint->RemoveClient(this);
+    safepoint->clients_mutex_.Unlock();
   }
 
   shared_space_isolate_.reset();
@@ -5956,8 +6010,7 @@ class BigIntPlatform final : public bigint::Platform {
 #if V8_ENABLE_SANDBOX
   explicit BigIntPlatform(Isolate* isolate)
       : isolate_(isolate),
-        allocator_(
-            IsolateGroup::GetDefault()->GetSandboxedArrayBufferAllocator()) {}
+        allocator_(IsolateGroup::current()->GetInSandboxAllocator()) {}
 
   digit_t* Allocate(size_t count) final {
     DCHECK_LT(count, std::numeric_limits<size_t>::max() / sizeof(digit_t));
@@ -5980,7 +6033,7 @@ class BigIntPlatform final : public bigint::Platform {
  private:
   Isolate* isolate_;
 #if V8_ENABLE_SANDBOX
-  SandboxedArrayBufferAllocatorBase* allocator_;
+  v8::Allocator* allocator_;
 #endif  // V8_ENABLE_SANDBOX
 };
 }  // namespace
@@ -6156,10 +6209,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   interpreter_ = new interpreter::Interpreter(this);
   bigint_processor_ = bigint::Processor::New(new BigIntPlatform(this));
 
-  if (is_shared_space_isolate()) {
-    global_safepoint_ = std::make_unique<GlobalSafepoint>(this);
-  }
-
   if (v8_flags.lazy_compile_dispatcher) {
     lazy_compile_dispatcher_ = std::make_unique<LazyCompileDispatcher>(
         this, V8::GetCurrentPlatform(), v8_flags.stack_size);
@@ -6207,10 +6256,10 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   // during deserialization.
   std::optional<base::RecursiveMutexGuard> clients_guard;
 
-  if (use_shared_space_isolate && !is_shared_space_isolate()) {
-    clients_guard.emplace(
-        &use_shared_space_isolate->global_safepoint()->clients_mutex_);
-    use_shared_space_isolate->global_safepoint()->AppendClient(this);
+  if (GlobalSafepoint* safepoint = global_safepoint();
+      safepoint && this != safepoint->shared_space_isolate()) {
+    clients_guard.emplace(&safepoint->clients_mutex_);
+    safepoint->AppendClient(this);
   }
 
   shared_space_isolate_ = use_shared_space_isolate;
@@ -7055,6 +7104,19 @@ base::RandomNumberGenerator* Isolate::fuzzer_rng() {
   return fuzzer_rng_;
 }
 
+void Isolate::SetStackSize(size_t v) {
+  stack_size_ = v;
+#if V8_ENABLE_WEBASSEMBLY
+  // During early isolate initialization (inside v8::Isolate::Initialize),
+  // SetStackSize is called before Isolate::Init allocates the first central
+  // Wasm stack. When that happens, wasm_stacks() is empty. Skip the bounds
+  // update since the central stack will query stack_size() upon creation.
+  if (!wasm_stacks().empty()) {
+    wasm_stacks()[0]->UpdateCentralStackLimit(this);
+  }
+#endif
+}
+
 int Isolate::GenerateIdentityHash(uint32_t mask) {
   int hash;
   int attempts = 0;
@@ -7654,7 +7716,8 @@ void Isolate::RunPromiseHook(PromiseHookType type,
 }
 
 void Isolate::OnAsyncFunctionSuspended(DirectHandle<JSPromise> promise,
-                                       DirectHandle<JSPromise> parent) {
+                                       DirectHandle<JSPromise> parent,
+                                       int skip_frame_count) {
   DCHECK(!promise->has_async_task_id());
   RunAllPromiseHooks(PromiseHookType::kInit, promise, parent);
   if (HasAsyncEventDelegate()) {
@@ -7662,8 +7725,8 @@ void Isolate::OnAsyncFunctionSuspended(DirectHandle<JSPromise> promise,
     current_async_task_id_ =
         JSPromise::GetNextAsyncTaskId(current_async_task_id_);
     promise->set_async_task_id(current_async_task_id_);
-    async_event_delegate_->AsyncEventOccurred(debug::kDebugAwait,
-                                              promise->async_task_id(), false);
+    async_event_delegate_->AsyncEventOccurred(
+        debug::kDebugAwait, promise->async_task_id(), false, skip_frame_count);
   }
 }
 
@@ -7698,9 +7761,10 @@ void Isolate::OnPromiseThen(DirectHandle<JSPromise> promise) {
         current_async_task_id_ =
             JSPromise::GetNextAsyncTaskId(current_async_task_id_);
         promise->set_async_task_id(current_async_task_id_);
-        async_event_delegate_->AsyncEventOccurred(action_type.FromJust(),
-                                                  promise->async_task_id(),
-                                                  debug()->IsBlackboxed(info));
+        const int kDontSkipFrames = 0;
+        async_event_delegate_->AsyncEventOccurred(
+            action_type.FromJust(), promise->async_task_id(),
+            debug()->IsBlackboxed(info), kDontSkipFrames);
       }
       return;
     }
@@ -7712,8 +7776,10 @@ void Isolate::OnPromiseBefore(DirectHandle<JSPromise> promise) {
                  factory()->undefined_value());
   if (HasAsyncEventDelegate()) {
     if (promise->has_async_task_id()) {
-      async_event_delegate_->AsyncEventOccurred(
-          debug::kDebugWillHandle, promise->async_task_id(), false);
+      const int kDontSkipFrames = 0;
+      async_event_delegate_->AsyncEventOccurred(debug::kDebugWillHandle,
+                                                promise->async_task_id(), false,
+                                                kDontSkipFrames);
     }
   }
 }
@@ -7723,16 +7789,20 @@ void Isolate::OnPromiseAfter(DirectHandle<JSPromise> promise) {
                  factory()->undefined_value());
   if (HasAsyncEventDelegate()) {
     if (promise->has_async_task_id()) {
-      async_event_delegate_->AsyncEventOccurred(
-          debug::kDebugDidHandle, promise->async_task_id(), false);
+      const int kDontSkipFrames = 0;
+      async_event_delegate_->AsyncEventOccurred(debug::kDebugDidHandle,
+                                                promise->async_task_id(), false,
+                                                kDontSkipFrames);
     }
   }
 }
 
 void Isolate::OnStackTraceCaptured(DirectHandle<StackTraceInfo> stack_trace) {
   if (HasAsyncEventDelegate()) {
+    const int kDontSkipFrames = 0;
     async_event_delegate_->AsyncEventOccurred(debug::kDebugStackTraceCaptured,
-                                              stack_trace->id(), false);
+                                              stack_trace->id(), false,
+                                              kDontSkipFrames);
   }
 }
 
@@ -8127,11 +8197,24 @@ bool StackLimitCheck::JsHasOverflowed(uintptr_t gap) const {
   return GetCurrentStackPosition() - gap < stack_guard->real_climit();
 }
 
+#if V8_ENABLE_WEBASSEMBLY
 bool StackLimitCheck::WasmHasOverflowed(uintptr_t gap) const {
   StackGuard* stack_guard = isolate_->stack_guard();
-  auto sp = isolate_->thread_local_top()->secondary_stack_sp_;
-  auto limit = isolate_->thread_local_top()->secondary_stack_limit_;
-  if (sp == 0) {
+  wasm::StackMemory* active_stack = isolate_->isolate_data()->active_stack();
+  uintptr_t sp = 0;
+  uintptr_t limit = 0;
+  auto fp = isolate_->thread_local_top()->c_entry_fp_;
+  // This must be called from a runtime function, so we must be on the central
+  // stack and the CEntry FP must be set.
+  DCHECK(isolate_->IsOnCentralStack());
+  DCHECK_NE(fp, 0);
+  if (active_stack->Contains(fp)) {
+    // If wasm was running on a secondary stack, we had to switch to the central
+    // stack to perform this check, and the current SP is not relevant in this
+    // case. Check whether the wasm SP overflowed the wasm stack limit instead.
+    sp = fp + ExitFrameConstants::kCallerSPDisplacement;
+    limit = reinterpret_cast<uintptr_t>(active_stack->jslimit());
+  } else {
 #ifdef USE_SIMULATOR
     // The simulator uses a separate JS stack.
     // Use it if code is executed on the central stack.
@@ -8144,6 +8227,21 @@ bool StackLimitCheck::WasmHasOverflowed(uintptr_t gap) const {
   }
   return sp - gap < limit;
 }
+
+bool StackLimitCheck::WasmGrowableStackHasOverflowed(uintptr_t gap) const {
+  // Initial stack overflow check for growable stacks.
+  // Called from a fast C call, check the current SP directly.
+  wasm::StackMemory* active_stack = isolate_->isolate_data()->active_stack();
+#ifdef USE_SIMULATOR
+  uintptr_t sp = Simulator::current(isolate_)->get_sp();
+#else
+  uintptr_t sp = GetCurrentStackPosition();
+#endif
+  DCHECK(active_stack->Contains(sp));
+  uintptr_t limit = reinterpret_cast<uintptr_t>(active_stack->jslimit());
+  return sp - gap < limit;
+}
+#endif
 
 SaveContext::SaveContext(Isolate* isolate) : isolate_(isolate) {
   if (!isolate->context().is_null()) {

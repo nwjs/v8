@@ -41,6 +41,23 @@ using SmallShuffleVector = SmallZoneVector<const Simd128ShuffleOp*, 8>;
 // Used by the analysis to search back from uses to their defs, looking for
 // shuffles that could be reduced.
 
+enum class ShuffleSide : uint8_t {
+  kLeft,
+  kRight,
+};
+
+inline bool InRange(uint8_t byte_index, const ShuffleSide side) {
+  constexpr uint8_t left_lower = 0;
+  constexpr uint8_t left_upper = 15;
+  constexpr uint8_t right_lower = 16;
+  constexpr uint8_t right_upper = 31;
+  if (side == ShuffleSide::kLeft) {
+    return byte_index >= left_lower && byte_index <= left_upper;
+  } else {
+    return byte_index >= right_lower && byte_index <= right_upper;
+  }
+}
+
 class DemandedBytes {
  public:
   template <uint8_t num_bytes>
@@ -266,17 +283,81 @@ class WasmShuffleAnalyzer {
     const Simd128ShuffleOp& odd_shfop;
   };
 
-  struct ShuffleToShift {
-    const Simd128ShuffleOp* shuffle;
-    uint8_t begin_index;
-    uint8_t end_index;
-  };
+  // To represent a shuffle that has one, or more, shuffles as inputs, or a
+  // shuffle that is used by another shuffle.
+  class ShuffleWindow {
+   public:
+    ShuffleWindow(const Simd128ShuffleOp& shuffle, uint8_t begin_index,
+                  DemandedBytes demanded)
+        : shuffle_(&shuffle), begin_index_(begin_index), demanded_(demanded) {
+      DCHECK(begin_index < kSimd128Size);
+    }
 
-  struct ShuffleToReadShifted {
-    const Simd128ShuffleOp* shuffle;
-    uint8_t begin_index;
-    uint8_t end_index;
-    uint8_t shuffle_in_begin;
+    // Calculate DemandedBytes of the input from the span of indices that
+    // this shuffle uses.
+    DemandedBytes InputDemanded() const {
+      // Check that the range covered by this window is exclusively reading from
+      // either the left or right input.
+      DCHECK(std::all_of(
+                 begin(), end(),
+                 [](uint8_t i) { return InRange(i, ShuffleSide::kLeft); }) ||
+             std::all_of(begin(), end(), [](uint8_t i) {
+               return InRange(i, ShuffleSide::kRight);
+             }));
+      uint8_t input_msb = *std::max_element(begin(), end());
+      DCHECK_LT(input_msb - LowestInputByte(), kSimd128Size);
+      uint8_t span = input_msb - LowestInputByte() + 1;
+      return DemandedBytes::LowFromTotalBytes(span);
+    }
+
+    // Demanded bytes of shuffle.
+    DemandedBytes OutputDemanded() const { return demanded_; }
+
+    // If LSB used byte of the input isn't 0 or 16, which would be the LSB of
+    // the left or right input, then the input shuffle will need to be shifted
+    // left.
+    bool InputRequiresShift() const { return LowestInputByte() % kSimd128Size; }
+
+    void ReadShifted(std::array<uint8_t, kSimd128Size>& shuffle) const {
+      const uint8_t base = LowestInputByte() >= kSimd128Size ? kSimd128Size : 0;
+      const uint8_t input_lsb = LowestInputByte();
+      std::transform(begin(), end(), shuffle.begin() + begin_index(),
+                     [&base, &input_lsb](uint8_t original) {
+                       return base + original - input_lsb;
+                     });
+    }
+
+    void Shift(std::array<uint8_t, kSimd128Size>& shuffle) const {
+      std::copy_n(shuffle.begin() + begin_index(), OutputDemanded().bytes(),
+                  shuffle.begin());
+    }
+
+    // The least-significant byte of the input which is used by the shuffle, in
+    // the inclusive range: 0-31.
+    uint8_t LowestInputByte() const {
+      return *std::min_element(begin(), end());
+    }
+
+    // Pointer to the beginning of the window.
+    const uint8_t* begin() const { return shuffle_->shuffle + begin_index(); }
+
+    // Pointer to the past-the-end element of the window.
+    const uint8_t* end() const {
+      if (begin_index() + OutputDemanded().bytes() >= kSimd128Size) {
+        return shuffle()->shuffle + kSimd128Size;
+      }
+      return begin() + OutputDemanded().bytes();
+    }
+
+    // The index into the shuffle byte array.
+    uint8_t begin_index() const { return begin_index_; }
+
+    const Simd128ShuffleOp* shuffle() const { return shuffle_; }
+
+   private:
+    const Simd128ShuffleOp* shuffle_;
+    uint8_t begin_index_;
+    DemandedBytes demanded_;
   };
 
   void ProcessShuffleOfLoads(const Simd128ShuffleOp& shfop, const LoadOp& left,
@@ -312,11 +393,11 @@ class WasmShuffleAnalyzer {
   void ProcessLaneMemory(const Simd128LaneMemoryOp& lane_op);
   void ProcessShuffle(const Simd128ShuffleOp& shuffle_op);
   void TryReduceFromMSB(OpIndex input, const Simd128ShuffleOp& shuffle,
-                        uint8_t lower_limit, uint8_t upper_limit);
+                        const ShuffleSide side);
   // Return true if shuffle_op will be reduced.
   bool ProcessShuffleOfShuffle(const Simd128ShuffleOp& shuffle_op,
                                const Simd128ShuffleOp& shuffle,
-                               uint8_t lower_limit, uint8_t upper_limit);
+                               const ShuffleSide side);
 
   bool ShouldReduce() const {
     return !demanded_byte_analysis_.demanded_bytes().empty() ||
@@ -361,12 +442,11 @@ class WasmShuffleAnalyzer {
     load_lanes_[replace] = load_lane;
   }
 
-  const SmallZoneVector<ShuffleToShift, 8>& shuffles_to_shift() const {
+  const SmallZoneVector<ShuffleWindow, 8>& shuffles_to_shift() const {
     return shuffles_to_shift_;
   }
 
-  const SmallZoneVector<ShuffleToReadShifted, 8> shuffles_to_read_shifted()
-      const {
+  const SmallZoneVector<ShuffleWindow, 8> shuffles_to_read_shifted() const {
     return shuffles_to_read_shifted_;
   }
 
@@ -391,9 +471,8 @@ class WasmShuffleAnalyzer {
   Zone* phase_zone_;
   const Graph& input_graph_;
   DemandedByteAnalysis demanded_byte_analysis_{phase_zone_, input_graph_};
-  SmallZoneVector<ShuffleToShift, 8> shuffles_to_shift_{phase_zone_};
-  SmallZoneVector<ShuffleToReadShifted, 8> shuffles_to_read_shifted_{
-      phase_zone_};
+  SmallZoneVector<ShuffleWindow, 8> shuffles_to_shift_{phase_zone_};
+  SmallZoneVector<ShuffleWindow, 8> shuffles_to_read_shifted_{phase_zone_};
   ZoneUnorderedMap<const LoadOp*, const Simd128ReplaceLaneOp*>
       load_lane_candidates_{phase_zone_};
   ZoneUnorderedMap<const Simd128ReplaceLaneOp*, OpIndex> load_lanes_{
@@ -583,41 +662,24 @@ class WasmShuffleReducer : public Next {
     DemandedBytes demanded_bytes = analyzer_->GetDemandedBytes(&shuffle);
     bool emit_new_shuffle = !demanded_bytes.IsLow(kSimd128Size);
 
-    // For 'shifted' shuffles, the ones that are operands to other shuffles,
-    // we move the demanded elements into the LSBs.
-    for (const auto& shuffle_to_shift : analyzer_->shuffles_to_shift()) {
-      if (shuffle_to_shift.shuffle == &shuffle) {
-        const uint8_t begin_index = shuffle_to_shift.begin_index;
-        const uint8_t end_index = shuffle_to_shift.end_index;
-        DCHECK(begin_index <= kSimd128Size);
-        DCHECK(end_index <= kSimd128Size);
-        DCHECK_LT(begin_index, end_index);
-        std::copy(shuffle.shuffle + begin_index, shuffle.shuffle + end_index,
-                  shuffle_bytes.begin());
+    // For the shuffles that have shifted shuffles as operands, we need to
+    // update the shuffle to read from the LSBs.
+    for (const auto& shuffle_window : analyzer_->shuffles_to_read_shifted()) {
+      if (shuffle_window.shuffle() == &shuffle) {
+        // Update the shuffle bytes to read the shifted input.
+        shuffle_window.ReadShifted(shuffle_bytes);
         emit_new_shuffle = true;
       }
     }
 
-    // For the shuffles that have shifted shuffles as operands, we need to
-    // update the shuffle to read from the LSBs.
-    for (const auto& shuffle_to_read_shifted :
-         analyzer_->shuffles_to_read_shifted()) {
-      if (shuffle_to_read_shifted.shuffle == &shuffle) {
-        const uint8_t begin_index = shuffle_to_read_shifted.begin_index;
-        const uint8_t end_index = shuffle_to_read_shifted.end_index;
-        const uint8_t shuffle_in_begin =
-            shuffle_to_read_shifted.shuffle_in_begin;
-        DCHECK(begin_index <= kSimd128Size);
-        DCHECK(end_index <= kSimd128Size);
-        DCHECK_LT(begin_index, end_index);
-
-        uint8_t base =
-            shuffle.shuffle[begin_index] >= kSimd128Size ? kSimd128Size : 0;
-        for (uint8_t i = begin_index; i < end_index; ++i) {
-          uint8_t original = shuffle.shuffle[i];
-          DCHECK_GE(original, shuffle_in_begin);
-          shuffle_bytes[i] = base + (original - shuffle_in_begin);
-        }
+    // For 'shifted' shuffles, the ones that are operands to other shuffles,
+    // we move the demanded elements into the LSBs. This must happen after
+    // updating reads from shifted inputs, because a shuffle can itself be both
+    // the output shuffle of an inner shuffle-of-shuffle reduction and the input
+    // shuffle of an outer one.
+    for (const auto& shuffle_window : analyzer_->shuffles_to_shift()) {
+      if (shuffle_window.shuffle() == &shuffle) {
+        shuffle_window.Shift(shuffle_bytes);
         emit_new_shuffle = true;
       }
     }

@@ -74,7 +74,6 @@ bitfield struct ScopeFlags extends uint32 {
   // function name.
   function_variable: VariableAllocationInfo: 2 bit;
   has_inferred_function_name: bool: 1 bit;
-  is_asm_module: bool: 1 bit;
   has_simple_parameters: bool: 1 bit;
   function_kind: FunctionKind: 5 bit;
   has_outer_scope_info: bool: 1 bit;

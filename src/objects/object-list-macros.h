@@ -257,7 +257,6 @@ namespace internal {
   V(SourceTextModuleInfo)                       \
   V(StoreHandler)                               \
   V(String)                                     \
-  V(StrongDescriptorArray)                      \
   V(StringSet)                                  \
   V(RegisteredSymbolTable)                      \
   V(Struct)                                     \
@@ -425,8 +424,7 @@ namespace internal {
   IF_WASM(APPLY, V, WasmExportedFunctionData, WASM_EXPORTED_FUNCTION_DATA)     \
   IF_WASM(APPLY, V, WasmInternalFunction, WASM_INTERNAL_FUNCTION)              \
   IF_WASM(APPLY, V, WasmTrustedInstanceData, WASM_TRUSTED_INSTANCE_DATA)       \
-  IF_WASM(APPLY, V, WasmSuspenderObject, WASM_SUSPENDER_OBJECT)                \
-  IF_WASM(APPLY, V, AsmWasmData, ASM_WASM_DATA)
+  IF_WASM(APPLY, V, WasmSuspenderObject, WASM_SUSPENDER_OBJECT)
 
 #define TRUSTED_OBJECT_LIST1_ADAPTER(V, Name, NAME) V(Name)
 #define TRUSTED_OBJECT_LIST2_ADAPTER(V, Name, NAME) V(Name, NAME)

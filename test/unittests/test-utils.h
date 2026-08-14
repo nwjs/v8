@@ -32,6 +32,24 @@
 
 namespace v8 {
 
+// This tag value has been picked arbitrarily between 0 and
+// V8_EXTERNAL_POINTER_TAG_COUNT.
+constexpr v8::ExternalPointerTypeTag kTestConfigTag = 14;
+static_assert(kTestConfigTag < V8_EXTERNAL_POINTER_TAG_COUNT);
+
+// Used for wrapping passing raw pointers to Api callbacks.
+static v8::Local<v8::External> MakeData(v8::Isolate* isolate, void* pointer) {
+  return v8::External::New(isolate, pointer, kTestConfigTag);
+}
+
+// Unwraps raw pointer passed to Api callbacks.
+template <typename T, typename TCallbackInfo>
+static T* GetData(const TCallbackInfo& info) {
+  USE(MakeData);
+  return reinterpret_cast<T*>(
+      v8::External::Cast(*info.Data())->Value(kTestConfigTag));
+}
+
 class ArrayBufferAllocator;
 
 template <typename TMixin>
@@ -570,7 +588,7 @@ class FeedbackVectorHelper {
  public:
   explicit FeedbackVectorHelper(Handle<FeedbackVector> vector)
       : vector_(vector) {
-    int slot_count = vector->length();
+    uint32_t slot_count = vector->length().value();
     slots_.reserve(slot_count);
     DisallowGarbageCollection no_gc;
     FeedbackMetadataIterator iter(vector->metadata(), no_gc);

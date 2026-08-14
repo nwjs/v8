@@ -322,9 +322,7 @@ void Snapshot::ClearReconstructableDataForSerialization(
     for (i::Tagged<i::HeapObject> o = it.Next(); !o.is_null(); o = it.Next()) {
       if (IsJSFunction(o)) {
         i::Tagged<i::JSFunction> fun = i::Cast<i::JSFunction>(o);
-        if (fun->shared()->HasAsmWasmData()) {
-          FATAL("asm.js functions are not supported in snapshots");
-        }
+
         if (fun->shared()->HasWasmExportedFunctionData(isolate)) {
           FATAL(
               "Exported WebAssembly functions are not supported in snapshots");

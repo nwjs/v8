@@ -10,6 +10,7 @@
 
 #include "src/base/bit-field.h"
 #include "src/base/macros.h"
+#include "src/base/strong-alias.h"
 #include "src/builtins/builtins.h"
 #include "src/codegen/bailout-reason.h"
 #include "src/common/globals.h"
@@ -33,7 +34,6 @@
 
 namespace v8::internal {
 
-class AsmWasmData;
 class BytecodeArray;
 class CoverageInfo;
 class DebugInfo;
@@ -55,7 +55,8 @@ class ValueType;
 
 // Defines whether the source positions should be created during function
 // compilation.
-enum class CreateSourcePositions { kNo, kYes };
+using CreateSourcePositions =
+    base::StrongAlias<struct CreateSourcePositionsTag, bool>;
 
 // Data collected by the pre-parser storing information about scopes and inner
 // functions.
@@ -266,8 +267,7 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
   using IsClassConstructorBit = FunctionSyntaxKindBits::Next<bool, 1>;
   using HasDuplicateParametersBit = IsClassConstructorBit::Next<bool, 1>;
   using AllowLazyCompilationBit = HasDuplicateParametersBit::Next<bool, 1>;
-  using IsAsmWasmBrokenBit = AllowLazyCompilationBit::Next<bool, 1>;
-  using FunctionMapIndexBits = IsAsmWasmBrokenBit::Next<uint32_t, 5>;
+  using FunctionMapIndexBits = AllowLazyCompilationBit::Next<uint32_t, 5>;
   using DisabledOptimizationReasonBits =
       FunctionMapIndexBits::Next<BailoutReason, 4>;
   using RequiresInstanceMembersInitializerBit =
@@ -460,7 +460,6 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
   //  - a BytecodeArray for the interpreter [HasBytecodeArray()].
   //  - a InterpreterData with the BytecodeArray and a copy of the
   //    interpreter trampoline [HasInterpreterData()]
-  //  - an AsmWasmData with Asm->Wasm conversion [HasAsmWasmData()].
   //  - a Smi containing the builtin id [HasBuiltinId()]
   //  - a UncompiledDataWithoutPreparseData for lazy compilation
   //    [HasUncompiledDataWithoutPreparseData()]
@@ -547,12 +546,10 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
                                      IsolateForSandbox isolate);
 
 #if V8_ENABLE_WEBASSEMBLY
-  inline bool HasAsmWasmData() const;
   inline bool HasWasmFunctionData(IsolateForSandbox) const;
   inline bool HasWasmExportedFunctionData(IsolateForSandbox) const;
   inline bool HasWasmCapiFunctionData(IsolateForSandbox) const;
   inline bool HasWasmResumeData() const;
-  DECL_ACCESSORS(asm_wasm_data, Tagged<AsmWasmData>)
 
   // Note: The accessors below will read a trusted pointer; when accessing it
   // again, you must assume that it might have been swapped out e.g. by a
@@ -609,7 +606,7 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
   std::unique_ptr<char[]> DebugNameCStr() const;
   static Handle<String> DebugName(
       Isolate* isolate, DirectHandle<SharedFunctionInfo> shared,
-      AllowAllocation allow_allocation = AllowAllocation::kYes);
+      AllowAllocation allow_allocation = AllowAllocation{true});
 
   // Used for flags such as --turbo-filter.
   bool PassesFilter(const char* raw_filter);
@@ -686,11 +683,6 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
   // global object.
   DECL_BOOLEAN_ACCESSORS(native)
 
-#if V8_ENABLE_WEBASSEMBLY
-  // Indicates that asm->wasm conversion failed and should not be re-attempted.
-  DECL_BOOLEAN_ACCESSORS(is_asm_wasm_broken)
-#endif  // V8_ENABLE_WEBASSEMBLY
-
   // Indicates that the function was created by the Function function.
   // Though it's anonymous, toString should treat it as if it had the name
   // "anonymous".  We don't set the name itself so that the system does not
@@ -760,13 +752,8 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
   // Whether this function is defined in user-provided JavaScript code.
   inline bool IsUserJavaScript() const;
 
-#if V8_ENABLE_WEBASSEMBLY
-  using DiscardableData = UnionOf<BytecodeArray, InterpreterData, Code,
-                                  UncompiledDataWithPreparseData, AsmWasmData>;
-#else
   using DiscardableData = UnionOf<BytecodeArray, InterpreterData, Code,
                                   UncompiledDataWithPreparseData>;
-#endif
   inline bool CanDiscardCompiled(
       Tagged<DiscardableData>* out_data = nullptr) const;
 
@@ -838,7 +825,7 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
   static void EnsureBytecodeArrayAvailable(
       Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
       IsCompiledScope* is_compiled_scope,
-      CreateSourcePositions flag = CreateSourcePositions::kNo);
+      CreateSourcePositions flag = CreateSourcePositions{false});
 
   inline bool CanCollectSourcePosition(Isolate* isolate);
   static void EnsureSourcePositionsAvailable(

@@ -504,6 +504,8 @@ class V8_EXPORT_PRIVATE Debug {
   uint64_t IsolateId() const { return isolate_id_; }
   void SetIsolateId(uint64_t id) { isolate_id_ = id; }
 
+  bool IsTemporaryObject(DirectHandle<HeapObject> object) const;
+
  private:
   explicit Debug(Isolate* isolate);
   ~Debug();

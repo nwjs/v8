@@ -146,7 +146,7 @@ std::vector<ExecutionResult> PerformReferenceRun(
 
   DirectHandle<WasmInstanceObject> instance;
   if (!GetWasmEngine()
-           ->SyncInstantiate(isolate, &thrower, module_object, {}, {})
+           ->SyncInstantiate(isolate, &thrower, module_object, {})
            .ToHandle(&instance)) {
     CHECK(thrower.error());
     // The only reason to fail the second instantiation should be OOM. This can
@@ -340,7 +340,7 @@ int FuzzIt(base::Vector<const uint8_t> data) {
   DirectHandle<WasmModuleObject> module_object = compiled.ToHandleChecked();
   DirectHandle<WasmInstanceObject> instance;
   if (!GetWasmEngine()
-           ->SyncInstantiate(i_isolate, &thrower, module_object, {}, {})
+           ->SyncInstantiate(i_isolate, &thrower, module_object, {})
            .ToHandle(&instance)) {
     DCHECK(thrower.error());
     // The only reason to fail the second instantiation should be OOM. This can

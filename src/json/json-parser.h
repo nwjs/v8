@@ -235,6 +235,7 @@ class JsonParser final {
         : scope(isolate),
           max_index(0),
           elements(0),
+          fast_keys_matched(false),
           type_and_index_(TypeField::encode(type) | IndexField::encode(index)) {
     }
 
@@ -248,6 +249,11 @@ class JsonParser final {
     HandleScope scope;
     uint32_t max_index;
     uint32_t elements;
+    // True if ParseJsonObjectProperties<FastIterableState::kJsonFast> matched
+    // all property keys against the feedback map in exact sequence with no
+    // trailing properties. Used by BuildJsonObject for direct layout
+    // allocation.
+    bool fast_keys_matched;
 
    private:
     using TypeField = base::BitField<Type, 0, 2>;

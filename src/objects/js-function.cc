@@ -10,6 +10,7 @@
 #include "src/codegen/compiler.h"
 #include "src/common/globals.h"
 #include "src/diagnostics/code-tracer.h"
+#include "src/debug/debug.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate.h"
 #include "src/execution/tiering-manager.h"
@@ -178,16 +179,6 @@ V8_WARN_UNUSED_RESULT bool HighestTierOf(CodeKinds kinds,
 
 std::optional<CodeKind> JSFunction::GetActiveTier(
     IsolateForSandbox isolate) const {
-#if V8_ENABLE_WEBASSEMBLY
-  // Asm/Wasm functions are currently not supported. For simplicity, this
-  // includes invalid asm.js functions whose code hasn't yet been updated to
-  // CompileLazy but is still the InstantiateAsmJs builtin.
-  if (shared()->HasAsmWasmData() ||
-      code(isolate)->builtin_id() == Builtin::kInstantiateAsmJs) {
-    return {};
-  }
-#endif  // V8_ENABLE_WEBASSEMBLY
-
   CodeKind highest_tier;
   if (!HighestTierOf(GetAvailableCodeKinds(isolate), &highest_tier)) return {};
 
@@ -243,12 +234,13 @@ bool JSFunction::CanDiscardCompiled(IsolateForSandbox isolate) const {
 DirectHandle<Object> JSFunction::GetFunctionPrototype(
     Isolate* isolate, DirectHandle<JSFunction> function) {
   if (!function->has_prototype()) {
-    // We lazily allocate .prototype for functions, which confuses debug
-    // evaluate which assumes we can write to temporary objects we allocated
-    // during evaluation. We err on the side of caution here and prevent the
-    // newly allocated prototype from going into the temporary objects set,
-    // which means writes to it will be considered a side effect.
-    DisableTemporaryObjectTracking no_temp_tracking(isolate->debug());
+    // Disable temporary object tracking when lazily allocating .prototype for
+    // permanent functions. This prevents new permanent objects from being
+    // confused with dead temporary objects that left behind stale ranges.
+    std::optional<DisableTemporaryObjectTracking> no_temp_tracking;
+    if (!isolate->debug()->IsTemporaryObject(function)) {
+      no_temp_tracking.emplace(isolate->debug());
+    }
     DirectHandle<JSObject> proto =
         isolate->factory()->NewFunctionPrototype(function);
     JSFunction::SetPrototype(isolate, function, proto);
@@ -580,6 +572,9 @@ MaybeDirectHandle<Object> JSWrappedFunction::Create(
   // 8. If result is an Abrupt Completion, throw a TypeError exception.
   if (is_abrupt.IsNothing()) {
     DCHECK(isolate->has_exception());
+    if (isolate->is_execution_terminating()) {
+      return {};
+    }
     DirectHandle<Object> exception(isolate->exception(), isolate);
     isolate->clear_exception();
 
@@ -612,9 +607,6 @@ void JSFunction::EnsureClosureFeedbackCellArray(
     Isolate* isolate, DirectHandle<JSFunction> function) {
   DCHECK(function->shared()->is_compiled());
   DCHECK(function->shared()->HasFeedbackMetadata());
-#if V8_ENABLE_WEBASSEMBLY
-  if (function->shared()->HasAsmWasmData()) return;
-#endif  // V8_ENABLE_WEBASSEMBLY
 
   DirectHandle<SharedFunctionInfo> shared(function->shared(), isolate);
   DCHECK(shared->HasBytecodeArray());
@@ -669,9 +661,6 @@ void JSFunction::EnsureFeedbackVector(Isolate* isolate,
   CHECK(compiled_scope->is_compiled());
   DCHECK(function->shared()->HasFeedbackMetadata());
   if (function->has_feedback_vector()) return;
-#if V8_ENABLE_WEBASSEMBLY
-  if (function->shared()->HasAsmWasmData()) return;
-#endif  // V8_ENABLE_WEBASSEMBLY
 
   CreateAndAttachFeedbackVector(isolate, function, compiled_scope);
 }
@@ -683,9 +672,6 @@ void JSFunction::CreateAndAttachFeedbackVector(
   CHECK(compiled_scope->is_compiled());
   DCHECK(function->shared()->HasFeedbackMetadata());
   DCHECK(!function->has_feedback_vector());
-#if V8_ENABLE_WEBASSEMBLY
-  DCHECK(!function->shared()->HasAsmWasmData());
-#endif  // V8_ENABLE_WEBASSEMBLY
 
   DirectHandle<SharedFunctionInfo> shared(function->shared(), isolate);
   DCHECK(function->shared()->HasBytecodeArray());
@@ -707,7 +693,7 @@ void JSFunction::CreateAndAttachFeedbackVector(
 
   if (v8_flags.profile_guided_optimization &&
       v8_flags.profile_guided_optimization_for_empty_feedback_vector &&
-      function->feedback_vector()->length() == 0) {
+      function->feedback_vector()->length().value() == 0) {
     if (function->shared()->cached_tiering_decision() ==
         CachedTieringDecision::kEarlyMaglev) {
       function->RequestOptimization(isolate, CodeKind::MAGLEV,
@@ -725,17 +711,8 @@ void JSFunction::InitializeFeedbackCell(
     Isolate* isolate, DirectHandle<JSFunction> function,
     IsCompiledScope* is_compiled_scope,
     bool reset_budget_for_feedback_allocation) {
-#if V8_ENABLE_WEBASSEMBLY
-  // The following checks ensure that the feedback vectors are compatible with
-  // the feedback metadata. For Asm / Wasm functions we never allocate / use
-  // feedback vectors, so a mismatch between the metadata and feedback vector is
-  // harmless. The checks could fail for functions that has has_asm_wasm_broken
-  // set at runtime (for ex: failed instantiation).
-  if (function->shared()->HasAsmWasmData()) return;
-#endif  // V8_ENABLE_WEBASSEMBLY
-
   if (function->has_feedback_vector()) {
-    CHECK_EQ(function->feedback_vector()->length(),
+    CHECK_EQ(function->feedback_vector()->length().value(),
              function->feedback_vector()->metadata()->slot_count());
     return;
   }
@@ -1511,25 +1488,6 @@ DirectHandle<String> JSFunction::ToString(Isolate* isolate,
                                               end_position);
     }
   }
-
-  // If this function was compiled from asm.js, use the recorded offset
-  // information.
-#if V8_ENABLE_WEBASSEMBLY
-  if (shared_info->HasWasmExportedFunctionData(isolate)) {
-    DirectHandle<WasmExportedFunctionData> function_data(
-        shared_info->wasm_exported_function_data(), isolate);
-    const wasm::WasmModule* module = function_data->instance_data()->module();
-    if (is_asmjs_module(module)) {
-      std::pair<int, int> offsets =
-          module->asm_js_offset_information->GetFunctionOffsets(
-              declared_function_index(module, function_data->function_index()));
-      Handle<String> source(
-          Cast<String>(Cast<Script>(shared_info->script())->source()), isolate);
-      return isolate->factory()->NewSubString(source, offsets.first,
-                                              offsets.second);
-    }
-  }
-#endif  // V8_ENABLE_WEBASSEMBLY
 
   if (shared_info->function_token_position() == kNoSourcePosition) {
     // If the function token position isn't valid, return [native code] to

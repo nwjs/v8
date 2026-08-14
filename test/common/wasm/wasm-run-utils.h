@@ -103,13 +103,13 @@ bool IsSameNan(double expected, double actual);
 // objects, i.e. {WasmInstanceObject} and {WasmModuleObject}.
 class TestingModuleBuilder {
  public:
-  TestingModuleBuilder(Zone*, ModuleOrigin origin, ManuallyImportedJSFunction*,
-                       TestExecutionTier, Isolate* isolate);
+  TestingModuleBuilder(Zone*, ManuallyImportedJSFunction*, TestExecutionTier,
+                       Isolate* isolate);
   ~TestingModuleBuilder();
 
   WasmModule* module() const { return module_.get(); }
 
-  uint8_t* AddMemory(uint32_t size, SharedFlag shared = SharedFlag::kNo,
+  uint8_t* AddMemory(uint32_t size, SharedFlag shared = SharedFlag{false},
                      AddressType address_type = wasm::AddressType::kI32,
                      std::optional<size_t> max_size = {});
 
@@ -118,7 +118,7 @@ class TestingModuleBuilder {
   template <typename T>
   T* AddMemoryElems(uint32_t count,
                     AddressType address_type = wasm::AddressType::kI32) {
-    AddMemory(count * sizeof(T), SharedFlag::kNo, address_type);
+    AddMemory(count * sizeof(T), SharedFlag{false}, address_type);
     return raw_mem_start<T>();
   }
 
@@ -153,7 +153,7 @@ class TestingModuleBuilder {
   ModuleTypeIndex AddSignature(const FunctionSig* sig) {
     const bool is_final = true;
     module_->AddSignatureForTesting(sig, kNoSuperType, is_final,
-                                    SharedFlag::kNo);
+                                    SharedFlag{false});
     GetTypeCanonicalizer()->AddRecursiveGroup(module_.get(), 1);
     size_t size = module_->types.size();
     // The {ModuleTypeIndex} can handle more, but users of this class
@@ -220,7 +220,7 @@ class TestingModuleBuilder {
 
   void SetMemoryShared() {
     CHECK_EQ(1, module_->memories.size());
-    module_->memories[0].is_shared = SharedFlag::kYes;
+    module_->memories[0].is_shared = SharedFlag{true};
   }
 
   enum FunctionType { kImport, kWasm };
@@ -357,12 +357,12 @@ class WasmFunctionCompiler {
 // code, and run that code.
 class WasmRunnerBase {
  public:
-  WasmRunnerBase(ManuallyImportedJSFunction* maybe_import, ModuleOrigin origin,
+  WasmRunnerBase(ManuallyImportedJSFunction* maybe_import,
                  TestExecutionTier execution_tier, int num_params,
                  Isolate* isolate)
       : zone_(&allocator_, ZONE_NAME),
         handle_scope_(isolate),
-        builder_(&zone_, origin, maybe_import, execution_tier, isolate) {}
+        builder_(&zone_, maybe_import, execution_tier, isolate) {}
 
   Isolate* isolate() const { return handle_scope_.isolate(); }
 
@@ -506,11 +506,10 @@ template <typename ReturnType, typename... ParamTypes>
 class CommonWasmRunner : public WasmRunnerBase {
  public:
   CommonWasmRunner(Isolate* isolate, TestExecutionTier execution_tier,
-                   ModuleOrigin origin = kWasmOrigin,
                    ManuallyImportedJSFunction* maybe_import = nullptr,
                    const char* main_fn_name = "main")
-      : WasmRunnerBase(maybe_import, origin, execution_tier,
-                       sizeof...(ParamTypes), isolate) {
+      : WasmRunnerBase(maybe_import, execution_tier, sizeof...(ParamTypes),
+                       isolate) {
     WasmFunctionCompiler& main_fn =
         NewFunction<ReturnType, ParamTypes...>(main_fn_name);
     // Non-zero if there is an import.

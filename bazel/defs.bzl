@@ -590,6 +590,7 @@ def build_config_content(cpu, icu):
         ("local_off_stack_check", "false"),
         ("lower_limits_mode", "false"),
         ("memory_corruption_api", "false"),
+        ("cppgc_microtask_queue", "false"),
         ("mips_arch_variant", '""'),
         ("mips_use_msa", "false"),
         ("msan", "false"),
@@ -616,6 +617,7 @@ def build_config_content(cpu, icu):
         ("verify_heap", "false"),
         ("verify_predictable", "false"),
         ("wasm_random_fuzzers", "false"),
+        ("test_only_sync_points", "false"),
         ("write_barriers", "false"),
     ])
 

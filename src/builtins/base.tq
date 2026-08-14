@@ -347,6 +347,8 @@ extern enum PromiseState extends int31 constexpr 'Promise::PromiseState' {
 
 const kTaggedSize: constexpr int31 generates 'kTaggedSize';
 const kDoubleSize: constexpr int31 generates 'kDoubleSize';
+const kSystemPointerSize: constexpr int31 generates 'kSystemPointerSize';
+
 const kVariableSizeSentinel:
     constexpr int31 generates 'kVariableSizeSentinel';
 

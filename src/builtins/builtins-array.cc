@@ -553,24 +553,11 @@ BUILTIN(ArrayPush) {
 }
 
 V8_WARN_UNUSED_RESULT Tagged<Object> GenericArrayPushVararg(
-    Isolate* isolate, RuntimeArguments& args) {
-  int nargs = args.length();
-  DirectHandle<JSReceiver> receiver =
-      args.at<JSReceiver>(nargs - SuperSpreadArgs::kReceiverOffsetFromEnd);
-  auto arglist =
-      args.at<FixedArray>(nargs - SuperSpreadArgs::kArglistOffsetFromEnd);
-  int args_length =
-      args.smi_value_at(nargs - SuperSpreadArgs::kArglistLengthOffsetFromEnd);
-  int stack_arg_count = nargs - SuperSpreadArgs::kNumExtraArgs;
-
-  CHECK_GE(arglist->length().value(), static_cast<uint32_t>(args_length));
-
-  uint32_t total_args = stack_arg_count + args_length;
+    Isolate* isolate, DirectHandle<JSReceiver> receiver,
+    DirectHandle<FixedArray> merged_args) {
+  uint32_t total_args = merged_args->length().value();
   auto element_provider = [&](uint32_t i) -> DirectHandle<Object> {
-    if (i < static_cast<uint32_t>(stack_arg_count)) {
-      return args.at(stack_arg_count - i - 1);
-    }
-    DirectHandle<Object> element(arglist->get(i - stack_arg_count), isolate);
+    DirectHandle<Object> element(merged_args->get(i), isolate);
     if (IsTheHole(*element)) {
       return isolate->factory()->undefined_value();
     }

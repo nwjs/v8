@@ -37,11 +37,8 @@ namespace internal {
      13)                                                                       \
   HR(array_buffer_new_size_failures, V8.ArrayBufferNewSizeFailures, 0, 4096,   \
      13)                                                                       \
-  HR(wasm_asm_huge_function_size_bytes, V8.WasmHugeFunctionSizeBytes.asm,      \
-     100 * KB, GB, 51)                                                         \
   HR(wasm_wasm_huge_function_size_bytes, V8.WasmHugeFunctionSizeBytes.wasm,    \
      100 * KB, GB, 51)                                                         \
-  HR(wasm_asm_module_size_bytes, V8.WasmModuleSizeBytes.asm, 1, GB, 51)        \
   HR(wasm_wasm_module_size_bytes, V8.WasmModuleSizeBytes.wasm, 1, GB, 51)      \
   HR(wasm_compile_huge_function_peak_memory_bytes,                             \
      V8.WasmCompileHugeFunctionPeakMemoryBytes, 1, GB, 51)                     \
@@ -103,7 +100,6 @@ namespace internal {
   HR(external_pointer_table_compaction_outcome,                                \
      V8.ExternalPointerTableCompactionOutcome, 0, 2, 3)                        \
   HR(wasm_compilation_method, V8.WasmCompilationMethod, 0, 4, 5)               \
-  HR(asmjs_instantiate_result, V8.AsmjsInstantiateResult, 0, 1, 2)             \
   HR(esm_modules_per_page, V8.ESMModulesPerPage, 1, 1024, 30)                  \
   HR(esm_import_graph_depth, V8.ESMImportGraphDepth, 1, 128, 20)
 

@@ -296,10 +296,14 @@ Address* HandleScope::CreateHandle(Isolate* isolate, Address value) {
   HandleScopeData* data = isolate->handle_scope_data();
   Address* result = data->next;
   if (V8_UNLIKELY(result == data->limit)) {
-    result = Extend(isolate);
+    return ExtendAndCreateHandle(isolate, value);
   }
-  // Update the current next field, set the value in the created handle,
-  // and return the result.
+  return CreateHandleUnchecked(data, result, value);
+}
+
+V8_INLINE Address* HandleScope::CreateHandleUnchecked(HandleScopeData* data,
+                                                      Address* result,
+                                                      Address value) {
   DCHECK_LT(reinterpret_cast<Address>(result),
             reinterpret_cast<Address>(data->limit));
   data->next = reinterpret_cast<Address*>(reinterpret_cast<Address>(result) +

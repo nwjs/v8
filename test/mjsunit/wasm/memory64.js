@@ -238,8 +238,8 @@ function allowOOM(fn) {
   let instance = builder.instantiate();
   function grow(arg) {
     instance.exports.grow(arg);
-    let i64_arr = new BigInt64Array(instance.exports.memory.buffer, 0, 1);
-    return i64_arr[0];
+    let view = new DataView(instance.exports.memory.buffer, 0, 8);
+    return view.getBigInt64(0, true);
   }
 
   assertEquals(1n, grow(2n));

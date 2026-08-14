@@ -44,7 +44,12 @@ class V8_EXPORT_PRIVATE BytecodeOffsetIterator {
   }
 
   inline void AdvanceToPCOffset(Address pc_offset) {
-    while (current_pc_end_offset() < pc_offset) {
+    // The caller bounds pc_offset to instruction_size, which is rounded up to
+    // kMetadataAlignment past the last table-mapped PC. Advance() only guards
+    // against walking past done() under DCHECK, so check done() here in release
+    // builds too -- otherwise an offset in the alignment padding over-reads the
+    // table.
+    while (!done() && current_pc_end_offset() < pc_offset) {
       Advance();
     }
     DCHECK_GT(pc_offset, current_pc_start_offset());

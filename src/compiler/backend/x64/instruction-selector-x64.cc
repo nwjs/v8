@@ -2460,7 +2460,7 @@ void InstructionSelector::VisitWord64MulWide(OpIndex node, bool is_signed) {
   outputs[output_count++] =
       g.DefineAsFixed(out_low.valid() ? out_low.value() : node, rax);
   OptionalOpIndex out_high = FindProjection(node, 1);
-  if (out_high.valid()) {
+  if (out_high.valid() && IsUsed(out_high.value())) {
     outputs[output_count++] = g.DefineAsFixed(out_high.value(), rdx);
   } else {
     temps[temp_count++] = g.TempRegister(rdx);

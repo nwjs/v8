@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "src/base/logging.h"
+#include "src/base/strong-alias.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/register.h"
 #include "src/codegen/tnode.h"
@@ -66,6 +67,7 @@ namespace internal {
   V(StringEqual)                                                \
   V(Compare_Baseline)                                           \
   IF_SPARKPLUG_PLUS(V, CompareAndTryPatchCode)                  \
+  IF_SPARKPLUG_PLUS(V, BinaryOpAndTryPatchCode)                 \
   V(Compare_WithFeedback)                                       \
   V(Compare_WithEmbeddedFeedback)                               \
   V(Compare_WithEmbeddedFeedbackOffset)                         \
@@ -3111,6 +3113,21 @@ class CompareAndTryPatchCodeDescriptor
 
   static constexpr inline auto registers();
 };
+
+class BinaryOpAndTryPatchCodeDescriptor
+    : public StaticCallInterfaceDescriptor<BinaryOpAndTryPatchCodeDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  SANDBOXING_MODE(kSandboxed)
+  DEFINE_PARAMETERS_NO_CONTEXT(kLeft, kRight, kCurrentFeedback, kFeedbackOffset)
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kLeft
+                         MachineType::AnyTagged(),  // kRight
+                         MachineType::Int32(),      // kCurrentFeedback
+                         MachineType::UintPtr())    // kFeedbackOffset
+  DECLARE_DESCRIPTOR(BinaryOpAndTryPatchCodeDescriptor)
+
+  static constexpr inline auto registers();
+};
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
 
 class Compare_WithEmbeddedFeedbackOffsetDescriptor
@@ -3233,15 +3250,15 @@ DEFINE_DEBUG_PRINT_BUILTIN_DESCRIPTOR(Float32, MachineType::Float32)
 DEFINE_DEBUG_PRINT_BUILTIN_DESCRIPTOR(Float64, MachineType::Float64)
 #undef DEFINE_DEBUG_PRINT_BUILTIN_DESCRIPTOR
 
-#define DEFINE_TFS_BUILTIN_DESCRIPTOR(Name, DoesNeedContext, ...)            \
-  class Name##Descriptor                                                     \
-      : public StaticCallInterfaceDescriptor<Name##Descriptor> {             \
-   public:                                                                   \
-    INTERNAL_DESCRIPTOR()                                                    \
-    SANDBOXING_MODE(kSandboxed)                                              \
-    DEFINE_PARAMETERS(__VA_ARGS__)                                           \
-    static constexpr bool kNoContext = DoesNeedContext == NeedsContext::kNo; \
-    DECLARE_DEFAULT_DESCRIPTOR(Name##Descriptor)                             \
+#define DEFINE_TFS_BUILTIN_DESCRIPTOR(Name, DoesNeedContext, ...) \
+  class Name##Descriptor                                          \
+      : public StaticCallInterfaceDescriptor<Name##Descriptor> {  \
+   public:                                                        \
+    INTERNAL_DESCRIPTOR()                                         \
+    SANDBOXING_MODE(kSandboxed)                                   \
+    DEFINE_PARAMETERS(__VA_ARGS__)                                \
+    static constexpr bool kNoContext = !DoesNeedContext;          \
+    DECLARE_DEFAULT_DESCRIPTOR(Name##Descriptor)                  \
   };
 BUILTIN_LIST_TFS(DEFINE_TFS_BUILTIN_DESCRIPTOR)
 #undef DEFINE_TFS_BUILTIN_DESCRIPTOR

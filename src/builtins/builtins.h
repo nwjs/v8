@@ -715,6 +715,19 @@ DEFINE_TYPED_OP_CHECKER(LessThan, Number, None)
 DEFINE_TYPED_OP_CHECKER(GreaterThan, Number, None)
 DEFINE_TYPED_OP_CHECKER(LessThanOrEqual, Number, None)
 DEFINE_TYPED_OP_CHECKER(GreaterThanOrEqual, Number, None)
+// Binary op typed-stub families.
+DEFINE_TYPED_OP_CHECKER(Add, None, String)
+DEFINE_TYPED_OP_CHECKER(Subtract, None, Number)
+DEFINE_TYPED_OP_CHECKER(Multiply, None, Number)
+DEFINE_TYPED_OP_CHECKER(Divide, None, Number)
+DEFINE_TYPED_OP_CHECKER(Modulus, None, Number)
+DEFINE_TYPED_OP_CHECKER(Exponentiate, None, Number)
+DEFINE_TYPED_OP_CHECKER(BitwiseOr, None, SignedSmall)
+DEFINE_TYPED_OP_CHECKER(BitwiseXor, None, SignedSmall)
+DEFINE_TYPED_OP_CHECKER(BitwiseAnd, None, SignedSmall)
+DEFINE_TYPED_OP_CHECKER(ShiftLeft, None, SignedSmall)
+DEFINE_TYPED_OP_CHECKER(ShiftRight, None, SignedSmall)
+DEFINE_TYPED_OP_CHECKER(ShiftRightLogical, None, SignedSmall)
 #undef DEFINE_TYPED_OP_CHECKER
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
 
@@ -729,18 +742,5 @@ bool BuiltinCanAllocate(Builtin builtin);
 
 }  // namespace internal
 }  // namespace v8
-
-// Helper while transitioning some functions to libm.
-#if defined(V8_USE_LIBM_TRIG_FUNCTIONS)
-#define SIN_IMPL(X)                                             \
-  v8_flags.use_libm_trig_functions ? base::ieee754::libm_sin(X) \
-                                   : base::ieee754::fdlibm_sin(X)
-#define COS_IMPL(X)                                             \
-  v8_flags.use_libm_trig_functions ? base::ieee754::libm_cos(X) \
-                                   : base::ieee754::fdlibm_cos(X)
-#else
-#define SIN_IMPL(X) base::ieee754::sin(X)
-#define COS_IMPL(X) base::ieee754::cos(X)
-#endif
 
 #endif  // V8_BUILTINS_BUILTINS_H_

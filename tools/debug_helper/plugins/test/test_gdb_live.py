@@ -13,6 +13,8 @@ from .helpers.corruptions import check_corrupted_map_inspect
 from .helpers.corruptions import get_corruption_cases
 from .helpers.inspect import check_inspect_receiver
 from .helpers.inspect import check_inspect_recurses_into_map
+from .helpers.isolate import check_isolate_command
+from .helpers.isolate import check_isolate_none_on_idle_thread
 from .helpers.session import GdbSession
 from .helpers.utils import DebuggerTestConfig
 from .helpers.utils import FIXTURES_DIR
@@ -103,6 +105,18 @@ class GdbInspectLiveTest(unittest.TestCase):
     with self._session() as session:
       session.run_to_abort()
       check_inspect_recurses_into_map(session)
+
+  def test_isolate(self):
+    """Checks `v8 isolate` resolves the current Isolate in a live session."""
+    with self._session() as session:
+      session.run_to_abort()
+      check_isolate_command(session)
+
+  def test_isolate_none_on_idle_thread(self):
+    """Checks `v8 isolate` reports <none> on a thread outside V8."""
+    with self._session() as session:
+      session.run_to_abort()
+      check_isolate_none_on_idle_thread(session)
 
 
 class GdbCorruptedMapTest(unittest.TestCase):

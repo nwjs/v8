@@ -265,6 +265,7 @@
   'SyncPrimitivesArmTest*': [SKIP],
   'CodePagesTest.*': [SKIP],
   'MacroAssemblerX64Test.EmbeddedObj': [SKIP],
+  'RegExpTest.AssertionMergingToNode': [SKIP],
   'RegExpTest.MacroAssemblernativeAtStart': [SKIP],
   'RegExpTest.MacroAssemblerNativeBackReferenceLATIN1': [SKIP],
   'RegExpTest.MacroAssemblerNativeBackReferenceUC16': [SKIP],

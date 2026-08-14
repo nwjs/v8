@@ -1437,7 +1437,7 @@ class ReducerBase : public Next {
     V<Any> raw_call =
         Next::ReduceCall(callee, frame_state, arguments, descriptor, effects);
     bool has_catch_block = false;
-    if (descriptor->can_throw == CanThrow::kYes ||
+    if (descriptor->can_throw ||
         !Asm().effect_handlers_for_next_call().empty()) {
       // TODO(nicohartmann@): Unfortunately, we have many descriptors where
       // effects are not set consistently with {can_throw}. We should fix those
@@ -1574,21 +1574,9 @@ class AssemblerOpInterface : public Next {
   // Methods to be used by the reducers to reducer operations with the whole
   // reducer stack.
 
-  V<Float64OrWord32> TypeHint(V<Float64OrWord32> input, TypeHintOp::Type type) {
-    return ReduceIfReachableTypeHint(input, type);
-  }
-
-  V<Word32> TypeHintUint32(V<Word32> input) {
-    return V<Word32>::Cast(TypeHint(input, TypeHintOp::Type::kUint32));
-  }
-  V<Word32> TypeHintInt32(V<Word32> input) {
-    return V<Word32>::Cast(TypeHint(input, TypeHintOp::Type::kInt32));
-  }
-  V<Float64> TypeHintFloat64(V<Float64> input) {
-    return V<Float64>::Cast(TypeHint(input, TypeHintOp::Type::kFloat64));
-  }
-  V<Float64> TypeHintHoleyFloat64(V<Float64> input) {
-    return V<Float64>::Cast(TypeHint(input, TypeHintOp::Type::kHoleyFloat64));
+  void PrepareForLoop(V<EagerFrameState> frame_state,
+                      FeedbackSource feedback = FeedbackSource()) {
+    ReduceIfReachablePrepareForLoop(frame_state, feedback);
   }
 
   V<Object> GenericBinop(V<Object> left, V<Object> right,
@@ -3327,11 +3315,14 @@ class AssemblerOpInterface : public Next {
           maybe_initializing_or_transitioning);
   }
 
-  void StoreFixedArrayElement(V<FixedArray> array, int index, V<Object> value,
-                              compiler::WriteBarrierKind write_barrier) {
+  void StoreFixedArrayElement(
+      V<FixedArray> array, int index, V<Object> value,
+      compiler::WriteBarrierKind write_barrier,
+      bool maybe_initializing_or_transitioning = false) {
     Store(array, value, LoadOp::Kind::TaggedBase(),
           MemoryRepresentation::AnyTagged(), write_barrier,
-          FixedArray::OffsetOfElementAt(index));
+          FixedArray::OffsetOfElementAt(index),
+          maybe_initializing_or_transitioning);
   }
 
   void StoreFixedArrayElement(V<FixedArray> array, V<WordPtr> index,
@@ -3489,13 +3480,10 @@ class AssemblerOpInterface : public Next {
   // provided; the return value is the potentially-updated value.
   // Returns a V<Tuple<WordPtr, WordPtr>> when *both* {memory_start} and
   // {memory_size} are provided.
-  V<Any> WasmStackCheck(
+  V<None> WasmStackCheck(
       WasmStackCheckOp::Kind kind,
-      OptionalV<WasmTrustedInstanceData> trusted_instance_data = {},
-      OptionalV<WordPtr> memory_start = {},
-      OptionalV<WordPtr> memory_size = {}) {
-    return ReduceIfReachableWasmStackCheck(trusted_instance_data, memory_start,
-                                           memory_size, kind);
+      OptionalV<WasmTrustedInstanceData> trusted_instance_data = {}) {
+    return ReduceIfReachableWasmStackCheck(trusted_instance_data, kind);
   }
 
   void MemoryCopy(V<WordPtr> dst_base, V<WordPtr> src_base,
@@ -3680,7 +3668,7 @@ class AssemblerOpInterface : public Next {
   detail::index_type_for_t<typename Descriptor::results_t> CallBuiltin(
       Isolate* isolate, FrameStateForCall frame_state, V<Context> context,
       const typename Descriptor::arguments_t& args,
-      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow::kNo)
+      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow{false})
     requires(Descriptor::kNeedsFrameState && Descriptor::kNeedsContext)
   {
     using result_t = detail::index_type_for_t<typename Descriptor::results_t>;
@@ -3736,7 +3724,7 @@ class AssemblerOpInterface : public Next {
   detail::index_type_for_t<typename Descriptor::results_t> CallBuiltin(
       Isolate* isolate, FrameStateForCall frame_state,
       const typename Descriptor::arguments_t& args,
-      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow::kNo)
+      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow{false})
     requires(Descriptor::kNeedsFrameState && !Descriptor::kNeedsContext)
   {
     using result_t = detail::index_type_for_t<typename Descriptor::results_t>;
@@ -3914,7 +3902,7 @@ class AssemblerOpInterface : public Next {
     requires(!Desc::kNeedsContext && Desc::kCanTriggerLazyDeopt)
   detail::index_type_for_t<typename Desc::returns_t> CallBuiltin(
       OptionalV<LazyFrameState> frame_state, const Desc::Arguments& args,
-      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow::kNo) {
+      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow{false}) {
     using result_t = detail::index_type_for_t<typename Desc::returns_t>;
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return result_t::Invalid();
@@ -3938,7 +3926,7 @@ class AssemblerOpInterface : public Next {
   detail::index_type_for_t<typename Desc::returns_t> CallBuiltin(
       OptionalV<LazyFrameState> frame_state, V<Context> context,
       const Desc::Arguments& args,
-      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow::kNo) {
+      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow{false}) {
     using result_t = detail::index_type_for_t<typename Desc::returns_t>;
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return result_t::Invalid();
@@ -4059,7 +4047,7 @@ class AssemblerOpInterface : public Next {
   typename Desc::returns_t CallRuntime(V<Context> context,
                                        const Desc::Arguments& args) {
     return CallRuntimeImpl<Desc>(OptionalV<LazyFrameState>::Nullopt(), context,
-                                 args, LazyDeoptOnThrow::kNo);
+                                 args, LazyDeoptOnThrow{false});
   }
 
   V<Any> CallBuiltinImpl(Isolate* isolate, Builtin builtin,
@@ -4086,7 +4074,7 @@ class AssemblerOpInterface : public Next {
 
     return Call<Object>(
         stub_code, frame_state, arguments,
-        TSCallDescriptor::Create(call_descriptor, CanThrow::kYes,
+        TSCallDescriptor::Create(call_descriptor, CanThrow{true},
                                  lazy_deopt_on_throw, graph_zone));
   }
 
@@ -4189,8 +4177,8 @@ class AssemblerOpInterface : public Next {
             __ graph_zone(), f, fun->nargs, Operator::kNoProperties,
             CallDescriptor::kNoFlags);
     const TSCallDescriptor* ts_call_descriptor = TSCallDescriptor::Create(
-        call_descriptor, compiler::CanThrow::kYes,
-        compiler::LazyDeoptOnThrow::kNo, __ graph_zone());
+        call_descriptor, compiler::CanThrow{true},
+        compiler::LazyDeoptOnThrow{false}, __ graph_zone());
     return __ Call(centry_stub, OpIndex::Invalid(), base::VectorOf(centry_args),
                    ts_call_descriptor);
   }
@@ -4581,7 +4569,7 @@ class AssemblerOpInterface : public Next {
     DCHECK_EQ(call_descriptor->NeedsFrameState(), frame_state.valid());
 
     const TSCallDescriptor* ts_call_descriptor = TSCallDescriptor::Create(
-        call_descriptor, can_throw, LazyDeoptOnThrow::kNo, graph_zone);
+        call_descriptor, can_throw, LazyDeoptOnThrow{false}, graph_zone);
 
     OpIndex callee = Asm().HeapConstant(callable.code());
 
@@ -4622,13 +4610,14 @@ class AssemblerOpInterface : public Next {
     return ReduceIfReachableLoadFieldByIndex(object, index);
   }
 
-  V<Object> LoadDictionaryField(V<JSReceiver> object, V<Context> context,
-                                V<LazyFrameState> fs, size_t index,
-                                compiler::NameRef name,
-                                const FeedbackSource& feedback,
+  V<Object> LoadDictionaryField(V<JSReceiver> object, V<Object> receiver,
+                                V<Context> context, V<LazyFrameState> fs,
+                                size_t index, compiler::NameRef name,
+                                const FeedbackSource& feedback, bool is_super,
                                 LazyDeoptOnThrow lazy_deopt_on_throw) {
-    return ReduceIfReachableLoadDictionaryField(
-        object, context, fs, index, name, feedback, lazy_deopt_on_throw);
+    return ReduceIfReachableLoadDictionaryField(object, receiver, context, fs,
+                                                index, name, feedback, is_super,
+                                                lazy_deopt_on_throw);
   }
 
   void DebugBreak() { ReduceIfReachableDebugBreak(); }
@@ -4850,7 +4839,7 @@ class AssemblerOpInterface : public Next {
                              V<Context> context,
                              StringToCaseIntlOp::Kind kind) {
     return ReduceIfReachableStringToCaseIntl(string, frame_state, context, kind,
-                                             LazyDeoptOnThrow::kNo);
+                                             LazyDeoptOnThrow{false});
   }
   V<String> StringToLowerCaseIntl(V<String> string,
                                   V<LazyFrameState> frame_state,

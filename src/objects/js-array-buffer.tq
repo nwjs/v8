@@ -7,7 +7,6 @@ bitfield struct JSArrayBufferFlags extends uint32 {
   is_external: bool: 1 bit;
   is_detachable: bool: 1 bit;
   was_detached: bool: 1 bit;
-  is_asm_js_memory: bool: 1 bit;
   is_shared: bool: 1 bit;
   is_resizable_by_js: bool: 1 bit;
   is_immutable: bool: 1 bit;

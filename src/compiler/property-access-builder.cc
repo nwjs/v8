@@ -392,16 +392,17 @@ Node* PropertyAccessBuilder::BuildLoadDataField(
 
 Node* PropertyAccessBuilder::BuildLoadDictionaryField(
     NameRef name, PropertyAccessInfo const& access_info,
-    Node* lookup_start_object, Node** effect, Node** control,
+    Node* lookup_start_object, Node* receiver, Node** effect, Node** control,
     FeedbackSource const& source, Node* context, Node* frame_state) {
   DCHECK(!V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL);
   DCHECK(access_info.IsDictionaryDataField());
   DCHECK(source.IsValid());
 
-  Node* value = graph()->NewNode(
-      simplified()->LoadDictionaryField(access_info.dictionary_index(), name,
-                                        source),
-      lookup_start_object, context, frame_state, *effect, *control);
+  Node* value = graph()->NewNode(simplified()->LoadDictionaryField(
+                                     access_info.dictionary_index(), name,
+                                     source, receiver != lookup_start_object),
+                                 lookup_start_object, receiver, context,
+                                 frame_state, *effect, *control);
   *effect = value;
   *control = value;
   return value;

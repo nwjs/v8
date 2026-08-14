@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Flags: --trace-wasm-typer --trace-turbo-graph --no-liftoff
-// Flags: --wasm-lazy-compilation --experimental-wasm-shared
+// Flags: --wasm-lazy-compilation --wasm-shared
 
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 d8.file.execute('test/mjsunit/mjsunit.js');

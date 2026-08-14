@@ -200,7 +200,6 @@ const DISALLOWED_DIFFERENTIAL_FUZZ_FLAGS = [
   /^--trace.*/,
   '--expose-externalize-string',
   '--interpreted-frames-native-stack',
-  '--validate-asm',
 ];
 
 // Pairs of flags that shouldn't be used together.

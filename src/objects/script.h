@@ -100,10 +100,9 @@ V8_OBJECT class Script : public Struct {
 
   // [eval_from_shared]: for eval scripts the shared function info for the
   // function from which eval was called.
-  inline Tagged<SharedFunctionInfo> eval_from_shared() const;
-  inline void set_eval_from_shared(
-      Tagged<SharedFunctionInfo> shared,
-      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  Tagged<SharedFunctionInfo> eval_from_shared() const;
+  void set_eval_from_shared(Tagged<SharedFunctionInfo> shared,
+                            WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // [wrapped_arguments]: for the list of arguments in a wrapped script.
   inline Tagged<FixedArray> wrapped_arguments() const;
@@ -167,9 +166,6 @@ V8_OBJECT class Script : public Struct {
   // this wasm module.
   inline bool break_on_entry() const;
   inline void set_break_on_entry(bool value);
-
-  // Check if the script contains any Asm modules.
-  bool ContainsAsmModule();
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   // Read/write the raw 'flags' field. This uses relaxed atomic loads/stores
@@ -260,7 +256,7 @@ V8_OBJECT class Script : public Struct {
   // Retrieve source position from where eval was called.
   static int GetEvalPosition(Isolate* isolate, DirectHandle<Script> script);
 
-  Tagged<Script> inline GetEvalOrigin();
+  Tagged<Script> GetEvalOrigin();
 
   // Initialize line_ends array with source code positions of line ends if
   // it doesn't exist yet.

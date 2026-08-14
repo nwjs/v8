@@ -34,6 +34,7 @@
 #include "src/base/bounded-page-allocator.h"
 #include "src/base/macros.h"
 #include "src/base/platform/platform.h"
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
 #include "src/heap/allocation-result.h"
 #include "src/heap/factory.h"
@@ -316,8 +317,7 @@ TEST(SemiSpaceNewSpace) {
       heap, heap->InitialSemiSpaceSize(), heap->InitialSemiSpaceSize(),
       heap->InitialSemiSpaceSize());
   MainAllocator allocator(heap->main_thread_local_heap(), new_space.get(),
-                          MainAllocator::IsNewGeneration::kYes,
-                          &allocation_info);
+                          MainAllocator::kNewGeneration, &allocation_info);
   CHECK(new_space->MaximumCapacity());
 
   size_t successful_allocations = 0;
@@ -350,8 +350,7 @@ TEST(PagedNewSpace) {
       heap, heap->InitialSemiSpaceSize(), heap->InitialSemiSpaceSize(),
       heap->InitialSemiSpaceSize());
   MainAllocator allocator(heap->main_thread_local_heap(), new_space.get(),
-                          MainAllocator::IsNewGeneration::kYes,
-                          &allocation_info);
+                          MainAllocator::kNewGeneration, &allocation_info);
   GrowNewSpaceToMaximumCapacity(heap);
 
   size_t successful_allocations = 0;
@@ -386,8 +385,7 @@ TEST(OldSpace) {
 
   auto old_space = std::make_unique<OldSpace>(heap);
   MainAllocator allocator(heap->main_thread_local_heap(), old_space.get(),
-                          MainAllocator::IsNewGeneration::kNo,
-                          &allocation_info);
+                          MainAllocator::kOldGeneration, &allocation_info);
   const int obj_size = kMaxRegularHeapObjectSize;
 
   size_t successful_allocations = 0;
@@ -433,13 +431,13 @@ TEST(OldLargeObjectSpace) {
     CHECK(IsHeapObject(obj));
     Tagged<HeapObject> ho = Cast<HeapObject>(obj);
     CHECK(lo->Contains(ho));
-    CHECK_EQ(0, Heap::GetFillToAlign(ho.address(), kTaggedAligned));
+    CHECK_EQ(0, MainAllocator::GetFillToAlign(ho.address(), kTaggedAligned));
     // All large objects have the same alignment because they start at the
     // same offset within a page. Fixed double arrays have the most strict
     // alignment requirements.
-    CHECK_EQ(0,
-             Heap::GetFillToAlign(ho.address(), HeapObject::RequiredAlignment(
-                                                    lo->identity(), map)));
+    CHECK_EQ(0, MainAllocator::GetFillToAlign(
+                    ho.address(),
+                    HeapObject::RequiredAlignment(lo->identity(), map)));
     DirectHandle<HeapObject> keep_alive(ho, isolate);
   }
   CHECK_LT(0, successful_allocations);

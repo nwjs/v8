@@ -79,7 +79,7 @@ struct CppHeapPointerTableEntry {
   // Move the content of this entry into the provided entry, possibly clearing
   // the marking bit. Used during table compaction and during promotion.
   // Invalidates the source entry.
-  inline void Evacuate(CppHeapPointerTableEntry& dest);
+  inline void Evacuate(CppHeapPointerTableEntry& dest, EvacuateMarkMode mode);
 
   // Mark this entry as alive during table garbage collection. Returns true if
   // the entry transitioned from un-marked to marked, and false otherwise.
@@ -88,6 +88,9 @@ struct CppHeapPointerTableEntry {
   static constexpr bool IsWriteProtected = false;
 
  private:
+  friend struct ExternalEntityTableCompactionTraits<CppHeapPointerTableEntry>;
+  friend class CompactibleExternalEntityTable<
+      CppHeapPointerTableEntry, kCppHeapPointerTableReservationSize>;
   friend class CppHeapPointerTable;
   friend class CppHeapPointerTableEntryPrinter;
 
@@ -95,7 +98,7 @@ struct CppHeapPointerTableEntry {
     using TagType = CppHeapPointerTag;
     static constexpr uint64_t kMarkBit = kCppHeapPointerMarkBit;
     static constexpr uint64_t kTagShift = kCppHeapPointerTagShift;
-    static constexpr uint64_t kTagMask = 0xfffe;
+    static constexpr uint64_t kTagMask = kCppHeapPointerTagMask;
     static constexpr uint64_t kPayloadShift = kCppHeapPointerPayloadShift;
     static constexpr uint64_t kPayloadMask = ~0ULL;
     static constexpr TagType kFreeEntryTag = CppHeapPointerTag::kFreeEntryTag;
@@ -120,6 +123,23 @@ struct CppHeapPointerTableEntry {
 static_assert(sizeof(CppHeapPointerTableEntry) == 8);
 
 /**
+ * Trait used to implement table compaction for CppHeapPointerTableEntry.
+ */
+template <>
+struct ExternalEntityTableCompactionTraits<CppHeapPointerTableEntry> {
+  using Handle = CppHeapPointerHandle;
+  static constexpr Handle kNullHandle = kNullCppHeapPointerHandle;
+  static bool IsValidHandle(Handle handle);
+  static uint32_t HandleToIndex(Handle handle);
+  static Handle IndexToHandle(uint32_t index);
+  template <typename Table>
+  static void FreeEntry(Table* base_table, uint32_t index);
+  template <typename Table>
+  static void RelocateAuxiliaryEntryData(Table* base_table, uint32_t old_index,
+                                         uint32_t new_index);
+};
+
+/**
  * A table storing pointers to objects in the CppHeap
  *
  * This table is essentially a specialized version of the ExternalPointerTable
@@ -138,14 +158,17 @@ class V8_EXPORT_PRIVATE CppHeapPointerTable
   using Base =
       CompactibleExternalEntityTable<CppHeapPointerTableEntry,
                                      kCppHeapPointerTableReservationSize>;
-  static_assert(kMaxCppHeapPointers == kMaxCapacity);
+  static_assert(kMaxCppHeapPointers == Base::kMaxCapacity);
 
  public:
   CppHeapPointerTable() = default;
   CppHeapPointerTable(const CppHeapPointerTable&) = delete;
   CppHeapPointerTable& operator=(const CppHeapPointerTable&) = delete;
 
-  using Space = Base::Space;
+  struct Space : public Base::Space {
+   public:
+    inline void NotifyCppHeapPointerFieldInvalidated(Address field_address);
+  };
 
   // Retrieves the entry referenced by the given handle.
   //
@@ -193,13 +216,13 @@ class V8_EXPORT_PRIVATE CppHeapPointerTable
   void Verify(Isolate* isolate, Space* space);
 
  private:
+  friend struct ExternalEntityTableCompactionTraits<CppHeapPointerTableEntry>;
+  friend class CompactibleExternalEntityTable<
+      CppHeapPointerTableEntry, kCppHeapPointerTableReservationSize>;
+
   static inline bool IsValidHandle(CppHeapPointerHandle handle);
   static inline uint32_t HandleToIndex(CppHeapPointerHandle handle);
   static inline CppHeapPointerHandle IndexToHandle(uint32_t index);
-
-  void ResolveEvacuationEntryDuringSweeping(
-      uint32_t index, CppHeapPointerHandle* handle_location,
-      uint32_t start_of_evacuation_area);
 };
 
 #ifdef OBJECT_PRINT

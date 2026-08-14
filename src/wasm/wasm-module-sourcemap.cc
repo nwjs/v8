@@ -23,6 +23,7 @@ namespace wasm {
 
 WasmModuleSourceMap::WasmModuleSourceMap(v8::Isolate* v8_isolate,
                                          v8::Local<v8::String> src_map_str) {
+  if (src_map_str.IsEmpty()) return;
   v8::HandleScope scope(v8_isolate);
   v8::Local<v8::Context> context = v8::Context::New(v8_isolate);
 

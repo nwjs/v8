@@ -11,6 +11,7 @@
 #include "src/ast/ast-value-factory.h"
 #include "src/base/platform/elapsed-timer.h"
 #include "src/base/small-vector.h"
+#include "src/base/strong-alias.h"
 #include "src/base/threaded-list.h"
 #include "src/codegen/background-merge-task.h"
 #include "src/codegen/bailout-reason.h"
@@ -86,7 +87,7 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
                       ClearExceptionFlag flag,
                       IsCompiledScope* is_compiled_scope,
                       CreateSourcePositions create_source_positions_flag =
-                          CreateSourcePositions::kNo);
+                          CreateSourcePositions{false});
   static bool Compile(Isolate* isolate, DirectHandle<JSFunction> function,
                       ClearExceptionFlag flag,
                       IsCompiledScope* is_compiled_scope);
@@ -668,7 +669,7 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
 // background parsing and compiling and finalizing it on the main thread.
 struct V8_EXPORT_PRIVATE ScriptStreamingData {
   ScriptStreamingData(
-      std::unique_ptr<ScriptCompiler::ExternalSourceStream> source_stream,
+      std::unique_ptr<ScriptCompiler::ExternalSourceStreamBase> source_stream,
       ScriptCompiler::StreamedSource::Encoding encoding);
   ScriptStreamingData(const ScriptStreamingData&) = delete;
   ScriptStreamingData& operator=(const ScriptStreamingData&) = delete;
@@ -677,7 +678,7 @@ struct V8_EXPORT_PRIVATE ScriptStreamingData {
   void Release();
 
   // Internal implementation of v8::ScriptCompiler::StreamedSource.
-  std::unique_ptr<ScriptCompiler::ExternalSourceStream> source_stream;
+  std::unique_ptr<ScriptCompiler::ExternalSourceStreamBase> source_stream;
   ScriptCompiler::StreamedSource::Encoding encoding;
 
   // Task that performs background parsing and compilation.

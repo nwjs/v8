@@ -946,6 +946,14 @@ Reduction JSNativeContextSpecialization::ReduceJSResolvePromise(Node* node) {
   AccessInfoFactory access_info_factory(broker(), graph()->zone());
 
   for (MapRef map : resolution_maps) {
+    // Reducing to FulfillPromise skips the SameValue(resolution, promise)
+    // self-resolution cycle check, which precedes the "then" lookup in the
+    // spec. That is only sound because a promise resolution would carry a
+    // "then" property; a JSPromise whose prototype chain was mutated to drop
+    // "then" breaks that reasoning, so refuse promise values explicitly.
+    // Instance types are immutable per object, so this needs no stability
+    // dependency.
+    if (map.IsJSPromiseMap()) return inference.NoChange();
     access_infos.push_back(broker()->GetPropertyAccessInfo(
         map, broker()->then_string(), AccessMode::kLoad));
   }
@@ -1294,6 +1302,12 @@ Reduction JSNativeContextSpecialization::ReduceProxyAccess(
     Node* node, Node* value, ProxyFeedback const& feedback,
     AccessMode access_mode, FeedbackSource const& source, Node* key) {
   DCHECK_EQ(access_mode, AccessMode::kLoad);
+
+  // For a super property load the proxy sits on the home object's prototype,
+  // not on input 0 (the receiver). The fast path below assumes the proxy is
+  // the receiver and lookup start object, so bail out and let the generic IC
+  // handle super accesses.
+  if (node->opcode() == IrOpcode::kJSLoadNamedFromSuper) return NoChange();
 
   Node* context = NodeProperties::GetContextInput(node);
   FrameState frame_state{NodeProperties::GetFrameStateInput(node)};
@@ -3296,9 +3310,9 @@ JSNativeContextSpecialization::BuildPropertyLoad(
     } else {
       const ZoneVector<MapRef>& maps = access_info.lookup_start_object_maps();
       DCHECK_EQ(maps.size(), 1);
-      value = graph()->NewNode(
+      value = effect = graph()->NewNode(
           simplified()->TypedArrayLength(maps[0].elements_kind()),
-          lookup_start_object);
+          lookup_start_object, effect, control);
     }
   } else {
     DCHECK(access_info.IsDataField() || access_info.IsFastDataConstant() ||
@@ -3312,8 +3326,8 @@ JSNativeContextSpecialization::BuildPropertyLoad(
       value = maybe_value.value();
     } else if (access_info.IsDictionaryDataField()) {
       value = access_builder.BuildLoadDictionaryField(
-          name, access_info, lookup_start_object, &effect, &control, source,
-          context, frame_state);
+          name, access_info, lookup_start_object, receiver, &effect, &control,
+          source, context, frame_state);
       if (if_exceptions != nullptr) {
         Node* const if_exception =
             graph()->NewNode(common()->IfException(), effect, control);

@@ -419,6 +419,42 @@ void ExternalPointerTable::FreeManagedResourceIfPresent(uint32_t entry_index) {
   }
 }
 
+void ExternalPointerTable::RelocateManagedResourceIfPresent(
+    uint32_t old_index, uint32_t new_index) {
+  if (Address addr = at(new_index).ExtractManagedResourceOrNull()) {
+    ManagedResource* resource = reinterpret_cast<ManagedResource*>(addr);
+    DCHECK_EQ(resource->ept_entry_, IndexToHandle(old_index));
+    resource->ept_entry_ = IndexToHandle(new_index);
+  }
+}
+
+inline bool ExternalEntityTableCompactionTraits<
+    ExternalPointerTableEntry>::IsValidHandle(Handle handle) {
+  return ExternalPointerTable::IsValidHandle(handle);
+}
+inline uint32_t ExternalEntityTableCompactionTraits<
+    ExternalPointerTableEntry>::HandleToIndex(Handle handle) {
+  return ExternalPointerTable::HandleToIndex(handle);
+}
+inline ExternalPointerHandle ExternalEntityTableCompactionTraits<
+    ExternalPointerTableEntry>::IndexToHandle(uint32_t index) {
+  return ExternalPointerTable::IndexToHandle(index);
+}
+template <typename Table>
+void ExternalEntityTableCompactionTraits<ExternalPointerTableEntry>::FreeEntry(
+    Table* base_table, uint32_t index) {
+  auto* table = static_cast<ExternalPointerTable*>(base_table);
+  table->FreeManagedResourceIfPresent(index);
+}
+template <typename Table>
+void ExternalEntityTableCompactionTraits<
+    ExternalPointerTableEntry>::RelocateAuxiliaryEntryData(Table* base_table,
+                                                           uint32_t old_index,
+                                                           uint32_t new_index) {
+  auto* table = static_cast<ExternalPointerTable*>(base_table);
+  table->RelocateManagedResourceIfPresent(old_index, new_index);
+}
+
 }  // namespace internal
 }  // namespace v8
 

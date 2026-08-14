@@ -298,49 +298,7 @@ bool Heap::IsPendingAllocationInternal(Tagged<HeapObject> object) {
   MemoryChunk* chunk = MemoryChunk::FromHeapObject(object);
   if (chunk->InReadOnlySpace()) return false;
 
-  BaseSpace* base_space = chunk->Metadata(isolate())->owner();
-  Address addr = object.address();
-
-  switch (base_space->identity()) {
-    case NEW_SPACE: {
-      return allocator()->new_space_allocator()->IsPendingAllocation(addr);
-    }
-
-    case OLD_SPACE: {
-      return allocator()->old_space_allocator()->IsPendingAllocation(addr);
-    }
-
-    case CODE_SPACE: {
-      return allocator()->code_space_allocator()->IsPendingAllocation(addr);
-    }
-
-    case TRUSTED_SPACE: {
-      return allocator()->trusted_space_allocator()->IsPendingAllocation(addr);
-    }
-
-    case LO_SPACE:
-    case CODE_LO_SPACE:
-    case TRUSTED_LO_SPACE:
-    case NEW_LO_SPACE: {
-      LargeObjectSpace* large_space =
-          static_cast<LargeObjectSpace*>(base_space);
-      base::MutexGuard guard(large_space->pending_allocation_mutex());
-      return addr == large_space->pending_object();
-    }
-
-    case SHARED_SPACE:
-    case SHARED_LO_SPACE:
-    case SHARED_TRUSTED_SPACE:
-    case SHARED_TRUSTED_LO_SPACE:
-      // TODO(v8:13267): Ensure that all shared space objects have a memory
-      // barrier after initialization.
-      return false;
-
-    case RO_SPACE:
-      UNREACHABLE();
-  }
-
-  UNREACHABLE();
+  return IsPendingAllocationSlow(object, chunk);
 }
 
 bool Heap::IsPendingAllocation(Tagged<HeapObject> object) {

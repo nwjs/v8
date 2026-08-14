@@ -35,6 +35,17 @@ DirectHandle<String> ToInternalString(StringBuilder& sb, Isolate* isolate) {
       base::VectorOf(sb.start(), sb.length()));
 }
 
+Address GetDebugBreakFp(WasmFrame* frame) {
+  Address callee_fp = frame->callee_fp();
+  if (callee_fp == kNullAddress) return kNullAddress;
+  intptr_t marker =
+      base::Memory<intptr_t>(callee_fp + TypedFrameConstants::kFrameTypeOffset);
+  if (marker != StackFrame::TypeToMarker(StackFrame::WASM_DEBUG_BREAK)) {
+    return kNullAddress;
+  }
+  return callee_fp;
+}
+
 enum DebugProxyId {
   kFunctionsProxy,
   kGlobalsProxy,
@@ -431,7 +442,7 @@ struct LocalsProxy : NamedDebugProxy<LocalsProxy, kLocalsProxy, FixedArray> {
     for (int i = 0; i < count; ++i) {
       auto value = WasmValueObject::New(
           isolate, debug_info->GetLocalValue(i, frame->pc(), frame->fp(),
-                                             frame->callee_fp(), isolate));
+                                             GetDebugBreakFp(frame), isolate));
       values->set(i, *value);
     }
     values->set(count + 0, frame->wasm_instance()->module_object());
@@ -478,7 +489,7 @@ struct StackProxy : IndexedDebugProxy<StackProxy, kStackProxy, FixedArray> {
     for (int i = 0; i < count; ++i) {
       auto value = WasmValueObject::New(
           isolate, debug_info->GetStackValue(i, frame->pc(), frame->fp(),
-                                             frame->callee_fp(), isolate));
+                                             GetDebugBreakFp(frame), isolate));
       values->set(i, *value);
     }
     return IndexedDebugProxy::Create(isolate, values);
@@ -1105,9 +1116,7 @@ DirectHandle<String> GetWasmFunctionDebugName(
   wasm::NamesProvider* names = native_module->GetNamesProvider();
   StringBuilder sb;
   wasm::NamesProvider::FunctionNamesBehavior behavior =
-      is_asmjs_module(native_module->module())
-          ? wasm::NamesProvider::kWasmInternal
-          : wasm::NamesProvider::kDevTools;
+      wasm::NamesProvider::kDevTools;
   names->PrintFunctionName(sb, func_index, behavior);
   return ToInternalString(sb, isolate);
 }

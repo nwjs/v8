@@ -50,9 +50,12 @@ template <typename NodeProcessor>
 class GraphBackwardProcessor;
 
 enum class BlockProcessResult {
-  kContinue,  // Process exited normally.
-  kSkip,      // Skip processing this blockand and do not call the following
-              // processors.
+  kContinue,     // Process exited normally.
+  kSkip,         // Skip processing this blockand and do not call the following
+                 // processors. Only valid for PreProcessBasicBlock.
+  kRevisitLoop,  // Revisit the current loop, assuming that the current block
+                 // ends with a JumpLoop (no MultiProcessor support, and only
+                 // valid for PostProcessBasicBlock)
 };
 
 enum class ProcessResult {
@@ -87,10 +90,11 @@ class ProcessingState {
  public:
   static constexpr int kNoNodeIndex = -1;
 
-  explicit ProcessingState(BlockConstIterator block_end,
-                           BlockConstIterator block_it,
+  explicit ProcessingState(Graph* graph, int current_block_index,
                            int node_index = kNoNodeIndex)
-      : block_end_(block_end), block_it_(block_it), node_index_(node_index) {
+      : graph_(graph),
+        current_block_index_(current_block_index),
+        node_index_(node_index) {
     DCHECK_IMPLIES(node_index != kNoNodeIndex, node_index >= 0);
   }
 
@@ -99,14 +103,17 @@ class ProcessingState {
   ProcessingState& operator=(const ProcessingState&) = delete;
 
   BasicBlock* block() const {
-    if (block_it_ == block_end_) return nullptr;
-    return *block_it_;
+    if (current_block_index_ == graph_->num_blocks()) {
+      return nullptr;
+    }
+    return graph_->blocks()[current_block_index_];
   }
+
   BasicBlock* next_block() const {
-    DCHECK_NE(block_it_, block_end_);
-    BlockConstIterator next_block_it = block_it_ + 1;
-    if (next_block_it == block_end_) return nullptr;
-    return *next_block_it;
+    if (current_block_index_ + 1 >= static_cast<int>(graph_->blocks().size())) {
+      return nullptr;
+    }
+    return graph_->blocks()[current_block_index_ + 1];
   }
 
   int node_index() const {
@@ -115,8 +122,8 @@ class ProcessingState {
   }
 
  private:
-  BlockConstIterator block_end_;
-  BlockConstIterator block_it_;
+  Graph* graph_;
+  int current_block_index_;
   const int node_index_;  // Index inside the basic block.
 };
 
@@ -129,9 +136,10 @@ class GraphProcessor {
 
   void ProcessGraph(Graph* graph) {
     graph_ = graph;
-    // Initializing {block_it_} to `graph->end()` so that the ProcessingState
-    // can return nullptr as the block of the constant nodes.
-    block_it_ = graph->end();
+    // Initializing {current_block_index_} to `graph->num_blocks()` so that
+    // the ProcessingState can return nullptr as the block of the constant
+    // nodes.
+    current_block_index_ = graph->num_blocks();
     node_processor_.PreProcessGraph(graph);
 
     auto process_constants = [&](auto& map) {
@@ -167,12 +175,13 @@ class GraphProcessor {
     process_constants(graph->holey_float64());
     process_constants(graph->heap_number());
     process_constants(graph->trusted_constants());
-    // LINT.ThenChange()
+    // LINT.ThenChange(/src/maglev/maglev-graph-processor.h:maglev_backward_constant_nodes)
 
-    for (block_it_ = graph->begin(); block_it_ != graph->end(); ++block_it_) {
-      bool process_control_block = true;
-      BasicBlock* block = *block_it_;
+    for (current_block_index_ = 0; current_block_index_ < graph->num_blocks();
+         current_block_index_++) {
+      BasicBlock* block = graph->blocks()[current_block_index_];
       if (V8_UNLIKELY(block->is_dead())) continue;
+      bool process_control_block = true;
 
       BlockProcessResult preprocess_result =
           node_processor_.PreProcessBasicBlock(block);
@@ -181,6 +190,8 @@ class GraphProcessor {
           break;
         case BlockProcessResult::kSkip:
           continue;
+        case BlockProcessResult::kRevisitLoop:
+          UNREACHABLE();
       }
 
       if (block->has_phi()) {
@@ -251,7 +262,7 @@ class GraphProcessor {
                 break;
               }
             }
-            block->nodes().resize(node_it_ - block->nodes().begin());
+            TruncateBlockAtNode(block, node);
             node_it_ = block->nodes().end();
             graph_->set_may_have_unreachable_blocks(true);
             break;
@@ -295,7 +306,19 @@ class GraphProcessor {
         }
       }
     skip_block:
-      node_processor_.PostProcessBasicBlock(block);
+      BlockProcessResult post_action =
+          node_processor_.PostProcessBasicBlock(block);
+      switch (post_action) {
+        case BlockProcessResult::kContinue:
+          break;
+        case BlockProcessResult::kRevisitLoop: {
+          JumpLoop* jump = block->control_node()->Cast<JumpLoop>();
+          current_block_index_ = graph->block_offset(jump->target()) - 1;
+          break;
+        }
+        case BlockProcessResult::kSkip:
+          UNREACHABLE();
+      }
       continue;
     }
 
@@ -308,7 +331,7 @@ class GraphProcessor {
  private:
   ProcessingState GetCurrentState(
       size_t node_index = ProcessingState::kNoNodeIndex) {
-    return ProcessingState(graph_->end(), block_it_,
+    return ProcessingState(graph_, current_block_index_,
                            static_cast<int>(node_index));
   }
 
@@ -334,6 +357,18 @@ class GraphProcessor {
     np->HasPendingSplice();
   };
 
+  // Truncates `block` to end just before `node`, dropping `node` and every
+  // node after it. The cut point is located by value rather than a cached
+  // iterator or index: a mid-block deopt or throw can emit an abrupt block
+  // end whose node flush reallocates block->nodes(), dangling any iterator
+  // taken before the flush.
+  void TruncateBlockAtNode(BasicBlock* block, Node* node) {
+    auto& nodes = block->nodes();
+    auto it = std::find(nodes.begin(), nodes.end(), node);
+    DCHECK_NE(it, nodes.end());
+    nodes.resize(it - nodes.begin());
+  }
+
   // Splices the subgraph recorded by the processor's reducer into the
   // graph at the visited node. If `truncate` is false, the tail (after the
   // visited node) moves to splice.exit; the visited node itself is expected
@@ -350,10 +385,7 @@ class GraphProcessor {
     ZoneVector<Node*> tail_nodes(graph_->zone());
     if (truncate) {
       // Drop the visited node and everything after it.
-      auto& nodes = block->nodes();
-      auto it = std::find(nodes.begin(), nodes.end(), node);
-      DCHECK_NE(it, nodes.end());
-      nodes.resize(it - nodes.begin());
+      TruncateBlockAtNode(block, node);
     } else {
       // The visitor must have rewritten the visited node to an Identity
       // (typically to the spliced result Phi), so uses on the join-block
@@ -409,9 +441,7 @@ class GraphProcessor {
           });
     }
 
-    size_t current_idx = block_it_ - graph_->begin();
-    graph_->AddBlocksAt(splice.all_blocks, current_idx);
-    block_it_ = graph_->begin() + current_idx;
+    graph_->AddBlocksAt(splice.all_blocks, current_block_index_);
     node_it_ = block->nodes().end();
 
     if (truncate) {
@@ -421,7 +451,7 @@ class GraphProcessor {
 
   NodeProcessor node_processor_;
   Graph* graph_;
-  BlockConstIterator block_it_;
+  int current_block_index_;
   NodeIterator node_it_;
 };
 
@@ -436,6 +466,18 @@ class GraphBackwardProcessor {
     node_processor_.PreProcessGraph(graph);
 
     for (BasicBlock* block : base::Reversed(graph->blocks())) {
+      if (V8_UNLIKELY(block->is_dead())) continue;
+      BlockProcessResult preprocess_result =
+          node_processor_.PreProcessBasicBlock(block);
+      switch (preprocess_result) {
+        [[likely]] case BlockProcessResult::kContinue:
+          break;
+        case BlockProcessResult::kSkip:
+          continue;
+        case BlockProcessResult::kRevisitLoop:
+          UNREACHABLE();
+      }
+
       {
         ProcessResult control_result = ProcessNodeBase(block->control_node());
         switch (control_result) {
@@ -514,6 +556,8 @@ class GraphBackwardProcessor {
         }
       }
     };
+
+  // LINT.IfChange(maglev_backward_constant_nodes)
     process_constants(graph->heap_constants());
     process_constants(graph->root());
     process_constants(graph->smi());
@@ -522,8 +566,10 @@ class GraphBackwardProcessor {
     process_constants(graph->uint32());
     process_constants(graph->intptr());
     process_constants(graph->float64());
+    process_constants(graph->holey_float64());
     process_constants(graph->heap_number());
     process_constants(graph->trusted_constants());
+  // LINT.ThenChange(/src/maglev/maglev-graph-processor.h:maglev_constant_nodes)
 
     node_processor_.PostProcessGraph(graph);
   }
@@ -556,9 +602,11 @@ class NodeMultiProcessor<> {
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     return BlockProcessResult::kContinue;
   }
-  void PostProcessBasicBlock(BasicBlock* block) {}
-  V8_INLINE ProcessResult Process(NodeBase* node,
-                                  const ProcessingState& state) {
+  BlockProcessResult PostProcessBasicBlock(BasicBlock* block) {
+    return BlockProcessResult::kContinue;
+  }
+  template <typename... Args>
+  V8_INLINE ProcessResult Process(NodeBase* node, const Args&... args) {
     return ProcessResult::kContinue;
   }
   void PostPhiProcessing() {}
@@ -578,12 +626,15 @@ class NodeMultiProcessor<Processor, Processors...>
   explicit NodeMultiProcessor(Args&&... processors)
       : Base(std::forward<Args>(processors)...) {}
 
-  template <typename Node>
-  ProcessResult Process(Node* node, const ProcessingState& state) {
-    auto res = processor_.Process(node, state);
+  // Forwards Process calls to each processor in the chain.
+  // Forward processors receive (Node* node, const ProcessingState& state),
+  // whereas backward processors receive only (Node* node).
+  template <typename Node, typename... Args>
+  ProcessResult Process(Node* node, const Args&... args) {
+    auto res = processor_.Process(node, args...);
     switch (res) {
       [[likely]] case ProcessResult::kContinue:
-        return Base::Process(node, state);
+        return Base::Process(node, args...);
       case ProcessResult::kRevisit:
       case ProcessResult::kAbort:
       case ProcessResult::kRemove:
@@ -597,6 +648,7 @@ class NodeMultiProcessor<Processor, Processors...>
     }
     UNREACHABLE();
   }
+
   void PreProcessGraph(Graph* graph) {
     processor_.PreProcessGraph(graph);
     Base::PreProcessGraph(graph);
@@ -606,9 +658,19 @@ class NodeMultiProcessor<Processor, Processors...>
     Base::PostProcessGraph(graph);
     processor_.PostProcessGraph(graph);
   }
-  void PostProcessBasicBlock(BasicBlock* block) {
-    Base::PostProcessBasicBlock(block);
-    processor_.PostProcessBasicBlock(block);
+  BlockProcessResult PostProcessBasicBlock(BasicBlock* block) {
+    BlockProcessResult post_action = Base::PostProcessBasicBlock(block);
+    switch (post_action) {
+      [[likely]] case BlockProcessResult::kContinue:
+        return processor_.PostProcessBasicBlock(block);
+      case BlockProcessResult::kRevisitLoop:
+        // TODO(dmercadier): How to combine this with multiple processors
+        // depends on the needs of the actual processors. Implement once needed.
+        UNREACHABLE();
+      case BlockProcessResult::kSkip:
+        // The block has already been processed, there is nothing to skip.
+        UNREACHABLE();
+    }
   }
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     BlockProcessResult res = processor_.PreProcessBasicBlock(block);
@@ -617,6 +679,8 @@ class NodeMultiProcessor<Processor, Processors...>
         return Base::PreProcessBasicBlock(block);
       case BlockProcessResult::kSkip:
         return res;
+      case BlockProcessResult::kRevisitLoop:
+        UNREACHABLE();
     }
     UNREACHABLE();
   }
@@ -636,7 +700,9 @@ class NodeMultiProcessor<Processor, Processors...>
   }
 
   void PostPhiProcessing() {
-    processor_.PostPhiProcessing();
+    if constexpr (requires(Processor& p) { p.PostPhiProcessing(); }) {
+      processor_.PostPhiProcessing();
+    }
     Base::PostPhiProcessing();
   }
 
@@ -646,6 +712,10 @@ class NodeMultiProcessor<Processor, Processors...>
 
 template <typename... Processors>
 using GraphMultiProcessor = GraphProcessor<NodeMultiProcessor<Processors...>>;
+
+template <typename... Processors>
+using GraphBackwardMultiProcessor =
+    GraphBackwardProcessor<NodeMultiProcessor<Processors...>>;
 
 }  // namespace maglev
 }  // namespace internal

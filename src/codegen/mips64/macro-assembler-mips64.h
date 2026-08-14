@@ -118,6 +118,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void InitializeRootRegister() {
     ExternalReference isolate_root = ExternalReference::isolate_root(isolate());
     li(kRootRegister, Operand(isolate_root));
+    dmtc1(zero_reg, kDoubleRegZero);
   }
 
   // Jump unconditionally to given label.
@@ -766,8 +767,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Float64MaxOutOfLine(FPURegister dst, FPURegister src1, FPURegister src2);
   void Float64MinOutOfLine(FPURegister dst, FPURegister src1, FPURegister src2);
 
-  bool IsDoubleZeroRegSet() { return has_double_zero_reg_set_; }
-
   // TODO(ishell): rename to LoadAddress to make semantics cleaner.
   void LoadIsolateField(Register dst, IsolateFieldId id);
 
@@ -1277,7 +1276,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   inline int32_t GetOffset(int32_t offset, Label* L, OffsetSize bits);
 
  private:
-  bool has_double_zero_reg_set_ = false;
 
   // Helper functions for generating invokes.
   void InvokePrologue(Register expected_parameter_count,

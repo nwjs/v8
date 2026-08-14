@@ -5,8 +5,7 @@ set noparent
 # Allow eng reviewers to override approval.
 file://ENG_REVIEW_OWNERS #{LAST_RESORT_SUGGESTION}
 
-paolosev@microsoft.com
-Emmanuel.Romero@microsoft.com
+paolosev@microsoft.com # Security contact for Drumbrake-related issues.
 
 # Allow OWNERS file itself to be changed by the Wasm owners if needed.
 per-file OWNERS=file://src/wasm/OWNERS

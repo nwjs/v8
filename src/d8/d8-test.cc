@@ -1082,11 +1082,23 @@ class FastCApiObject {
       isolate->ThrowError(
           "wasm_memory was used when the WebAssembly.Memory was not set on the "
           "receiver.");
+      return true;
+    }
+
+    if (!mem->IsWasmMemoryObject()) {
+      isolate->ThrowError(
+          "wasm_memory property is not a WebAssembly.Memory object.");
+      return true;
     }
 
     v8::Local<v8::WasmMemoryObject> wasm_memory =
         mem.As<v8::WasmMemoryObject>();
-    reinterpret_cast<uint8_t*>(wasm_memory->Buffer()->Data())[address] = 42;
+    v8::Local<v8::ArrayBuffer> buffer = wasm_memory->Buffer();
+    if (address >= buffer->ByteLength()) {
+      isolate->ThrowError("Address out of bounds for Wasm memory.");
+      return true;
+    }
+    reinterpret_cast<uint8_t*>(buffer->Data())[address] = 42;
 
     return true;
   }

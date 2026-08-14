@@ -867,11 +867,7 @@ void HeapVerifier::VerifyObjectLayoutChangeIsAllowed(
     CHECK(IsString(object));
     // Shared strings only change layout under GC, never concurrently.
     if (IsShared(object)) {
-      Isolate* isolate = heap->isolate();
-      Isolate* shared_space_isolate = isolate->is_shared_space_isolate()
-                                          ? isolate
-                                          : isolate->shared_space_isolate();
-      shared_space_isolate->global_safepoint()->AssertActive();
+      heap->isolate()->global_safepoint()->AssertActive();
     }
     // Non-shared strings in the shared heap are allowed to change layout
     // outside of GC like strings in non-shared heaps.

@@ -16,7 +16,7 @@ modules, and schema structures, refer directly to the native Perfetto AI skills
 inside `third_party/perfetto/ai/skills`:
 
 - **Querying Traces**: See the
-  [perfetto_infra_querying_traces](../../../../../third_party/perfetto/ai/skills/perfetto_infra_querying_traces/SKILL.md)
+  [perfetto querying traces](/third_party/perfetto/ai/skills/perfetto/infra-references/querying.md)
   skill.
 - **Common SQL Tables**: Explore standard table definitions such as `slice`,
   `thread`, `process`, `sched_slice`, and `track`.

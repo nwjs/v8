@@ -4,7 +4,7 @@
 
 // TODO(manoskouk): Fix error messages once we support shared globals, tables,
 // and functions
-// Flags: --experimental-wasm-shared
+// Flags: --wasm-shared
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 

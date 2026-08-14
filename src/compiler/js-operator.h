@@ -912,7 +912,7 @@ const GetIteratorParameters& GetIteratorParametersOf(const Operator* op);
 
 class ForOfNextParameters final {
  public:
-  ForOfNextParameters(const FeedbackSource& call_feedback)
+  explicit ForOfNextParameters(const FeedbackSource& call_feedback)
       : call_feedback_(call_feedback) {}
 
   FeedbackSource const& callFeedback() const { return call_feedback_; }
@@ -1365,6 +1365,7 @@ class JSGetIteratorNode final : public JSNodeWrapperBase {
   INPUTS(DEFINE_INPUT_ACCESSORS)
 #undef INPUTS
 };
+
 
 class JSForOfNextNode final : public JSNodeWrapperBase {
  public:

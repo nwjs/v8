@@ -44,6 +44,8 @@ std::ostream& operator<<(std::ostream& os,
       return os << "SmiConstant";
     case MaglevPhiRepresentationSelector::UntaggingKind::kHeapNumberConstant:
       return os << "HeapNumberConstant";
+    case MaglevPhiRepresentationSelector::UntaggingKind::kUndefinedConstant:
+      return os << "UndefinedConstant";
     case MaglevPhiRepresentationSelector::UntaggingKind::kConversion:
       return os << "Conversion";
     case MaglevPhiRepresentationSelector::UntaggingKind::kUntaggedPhi:
@@ -169,13 +171,27 @@ MaglevPhiRepresentationSelector::ProcessPhi(Phi* node) {
         has_float64_constant_input = true;
         input_reprs.Add(ValueRepresentation::kFloat64);
         untagging_kinds[i] = UntaggingKind::kHeapNumberConstant;
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+      } else if (constant->object().IsUndefined()) {
+        // 'undefined' can flow into a HoleyFloat64 phi as the undefined NaN
+        // pattern, which retagging and deopt materialization convert back to
+        // 'undefined'.
+        input_reprs.Add(ValueRepresentation::kHoleyFloat64);
+        untagging_kinds[i] = UntaggingKind::kUndefinedConstant;
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
       } else {
         // Not a HeapConstant that we can untag.
-        // TODO(leszeks): Consider treating 'undefined' as a potential
-        // HoleyFloat64.
         input_reprs.RemoveAll();
         break;
       }
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+    } else if (input->Is<RootConstant>() &&
+               input->Cast<RootConstant>()->index() ==
+                   RootIndex::kUndefinedValue) {
+      // Same as HeapConstant 'undefined' above.
+      input_reprs.Add(ValueRepresentation::kHoleyFloat64);
+      untagging_kinds[i] = UntaggingKind::kUndefinedConstant;
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
     } else if (input->is_conversion() || input->Is<ReturnedValue>()) {
       DCHECK_EQ(input->input_count(), 1);
       // The graph builder tags all Phi inputs, so this conversion should
@@ -360,7 +376,8 @@ MaglevPhiRepresentationSelector::ProcessPhi(Phi* node) {
           UseRepresentationSet(
               {UseRepresentation::kTaggedForNumberToString,
                UseRepresentation::kInt32, UseRepresentation::kTruncatedInt32,
-               UseRepresentation::kFloat64, UseRepresentation::kHoleyFloat64}),
+               UseRepresentation::kFloat64, UseRepresentation::kHoleyFloat64,
+               UseRepresentation::kNonTruncated}),
       UseRepresentationSet());
 
   // The rules for untagging are that we can only widen input representations,
@@ -406,7 +423,8 @@ MaglevPhiRepresentationSelector::ProcessPhi(Phi* node) {
   } else {
     DCHECK(!use_reprs.empty() &&
            use_reprs.is_subset_of({UseRepresentation::kHoleyFloat64,
-                                   UseRepresentation::kTruncatedInt32}));
+                                   UseRepresentation::kTruncatedInt32,
+                                   UseRepresentation::kNonTruncated}));
     allowed_inputs_for_uses = {ValueRepresentation::kInt32,
                                ValueRepresentation::kFloat64,
                                ValueRepresentation::kHoleyFloat64};
@@ -607,6 +625,7 @@ void MaglevPhiRepresentationSelector::UntagInputWithHoistedUntagging(
       break;
     case UntaggingKind::kSmiConstant:
     case UntaggingKind::kHeapNumberConstant:
+    case UntaggingKind::kUndefinedConstant:
     case UntaggingKind::kConversion:
     case UntaggingKind::kUntaggedPhi:
     case UntaggingKind::kSelfBackedge:
@@ -987,6 +1006,30 @@ void MaglevPhiRepresentationSelector::ConvertTaggedPhiTo(
         UntagConstantInput(phi, repr, truncating, input_index,
                            input->Cast<HeapConstant>());
         break;
+      case UntaggingKind::kUndefinedConstant:
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+        if (truncating) {
+          // Truncated phis have no tagged and no deopt-frame uses (those
+          // record kTagged/kNonTruncated hints, which prevent truncated
+          // untagging), so the undefined value cannot be observed and can be
+          // replaced by its truncation:
+          // ToInt32(ToNumber(undefined)) = ToInt32(NaN) = 0.
+          DCHECK_EQ(repr, ValueRepresentation::kInt32);
+          TRACE_UNTAGGING(TRACE_INPUT_LABEL
+                          << ": Making Int32 0 instead of undefined");
+          phi->change_input(input_index, graph_->GetInt32Constant(0));
+          break;
+        }
+        DCHECK_EQ(repr, ValueRepresentation::kHoleyFloat64);
+        TRACE_UNTAGGING(
+            TRACE_INPUT_LABEL
+            << ": Making undefined-pattern HoleyFloat64 instead of undefined");
+        phi->change_input(input_index, graph_->GetHoleyFloat64Constant(
+                                           Float64::undefined_nan()));
+        break;
+#else
+        UNREACHABLE();
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
       case UntaggingKind::kConversion:
         DCHECK(input->is_conversion() || input->Is<ReturnedValue>());
         UntagConversionInput(phi, repr, truncating, input_index, input);
@@ -1113,6 +1156,30 @@ ProcessResult MaglevPhiRepresentationSelector::UpdateUntaggingOfPhi(
       // in the graph.
       return ProcessResult::kRemove;
     }
+    return ProcessResult::kContinue;
+  }
+
+  if (old_untagging->Is<TruncateUnsafeNumberAsSafeIntToInt32>() ||
+      old_untagging->Is<TruncateCheckedNumberAsSafeIntToInt32>()) {
+    // These conversions truncate to Int32 but must keep the
+    // AdditiveSafeInteger range check: the truncation pass turned
+    // Float64SpeculateSafeAdd chains into Int32 operations, which is only
+    // value-equivalent as long as inputs stay in the safe integer range.
+    // Using a fully checked Float64->Int32 conversion here instead would
+    // deopt for any value outside Int32 range and cause deopt loops.
+    if (from_repr == ValueRepresentation::kFloat64) {
+      old_untagging->OverwriteWith<TruncateFloat64AsSafeIntToInt32>();
+      return ProcessResult::kContinue;
+    }
+    // A phi with holey-float64 inputs untags to HoleyFloat64. The
+    // HoleyFloat64 variant keeps the SafeInt range check (deopting on the hole,
+    // which is not a SafeInt) rather than falling through to the generic
+    // CheckedHoleyFloat64ToInt32, which deopt-loops on safe integers outside
+    // Int32 range.
+    // HoleyFloat64 is the only remaining possibility here: Tagged/Float64
+    // returned above, and Int32 was folded to Identity by the from == to check.
+    DCHECK_EQ(from_repr, ValueRepresentation::kHoleyFloat64);
+    old_untagging->OverwriteWith<TruncateHoleyFloat64AsSafeIntToInt32>();
     return ProcessResult::kContinue;
   }
 
@@ -1274,9 +1341,57 @@ ProcessResult MaglevPhiRepresentationSelector::UpdateNodePhiInput(
   UNREACHABLE();
 }
 
-void MaglevPhiRepresentationSelector::PostProcessBasicBlock(BasicBlock* block) {
+ProcessResult MaglevPhiRepresentationSelector::UpdateNodePhiInput(
+    AssumeType* node, Phi* phi, int input_index, const ProcessingState* state) {
+  DCHECK_EQ(input_index, 0);
+  return ProcessResult::kContinue;
+}
+
+// When a CheckedNumberOrOddballToUint8Clamped has an untagged Phi as input, we
+// clamp the untagged value directly instead of retagging the Phi: an untagged
+// phi is guaranteed to hold a number, except that HoleyFloat64 phis may hold
+// the hole or undefined NaN patterns, which clamp to 0 — exactly the result of
+// clamping ToNumber(undefined) = NaN.
+ProcessResult MaglevPhiRepresentationSelector::UpdateNodePhiInput(
+    CheckedNumberOrOddballToUint8Clamped* node, Phi* phi, int input_index,
+    const ProcessingState* state) {
+  DCHECK_EQ(input_index, 0);
+  switch (phi->value_representation()) {
+    case ValueRepresentation::kInt32:
+      node->OverwriteWith<Int32ToUint8Clamped>();
+      return ProcessResult::kContinue;
+
+    case ValueRepresentation::kFloat64:
+      node->OverwriteWith<Float64ToUint8Clamped>();
+      return ProcessResult::kContinue;
+
+    case ValueRepresentation::kHoleyFloat64: {
+      ValueNode* input =
+          AddNewNodeNoInputConversion<UnsafeHoleyFloat64ToFloat64>(
+              reducer_.current_block(), BasicBlockPosition::Start(), {phi});
+      node->OverwriteWith<Float64ToUint8Clamped>();
+      node->change_input(0, input);
+      return ProcessResult::kContinue;
+    }
+
+    case ValueRepresentation::kTagged:
+      // {phi} wasn't untagged, so we don't need to do anything.
+      return ProcessResult::kContinue;
+
+    case ValueRepresentation::kUint32:
+    case ValueRepresentation::kIntPtr:
+    case ValueRepresentation::kRawPtr:
+    case ValueRepresentation::kNone:
+      UNREACHABLE();
+  }
+  UNREACHABLE();
+}
+
+BlockProcessResult MaglevPhiRepresentationSelector::PostProcessBasicBlock(
+    BasicBlock* block) {
   DCHECK_EQ(block, reducer_.current_block());
   reducer_.FlushNodesToBlock();
+  return BlockProcessResult::kContinue;
 }
 
 // When a BranchIfToBooleanTrue has an untagged Int32/Float64 Phi as input, we
@@ -1683,6 +1798,12 @@ void MaglevPhiRepresentationSelector::PreparePhiTaggings(
 
     // Only merge blocks should require Phis.
     DCHECK(new_block->is_merge_block());
+
+    // Resumable loops are entered through their backedge, so the header
+    // doesn't dominate it and the self-reference set below wouldn't be valid.
+    if (new_block->state()->is_resumable_loop()) {
+      return static_cast<Phi*>(nullptr);
+    }
 
     // We create a Phi to merge all of the existing taggings.
     int predecessor_count = new_block->predecessor_count();

@@ -4,6 +4,7 @@
 
 // Flags: --allow-natives-syntax --turbolev-future --turbofan
 // Flags: --no-concurrent-osr --no-maglev-hoist-osr-value-phi-untagging
+// Flags: --no-turbolev-eager-loop-peeling-osr
 
 // Peeling an OSR loop with the OSR-value untagging hoist disabled, exercising
 // the non-hoisted conversion of the float OSR value.

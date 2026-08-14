@@ -70,6 +70,7 @@ struct GarbageCollectionFullCycle {
   GarbageCollectionLimits old_generation_consumed;
   GarbageCollectionLimits global_consumed;
   int64_t external_memory_bytes = -1;
+  int64_t found_js_global_proxies = -1;
   double collection_rate_in_percent = -1.0;
   double collection_rate_cpp_in_percent = -1.0;
   double efficiency_in_bytes_per_us = -1.0;

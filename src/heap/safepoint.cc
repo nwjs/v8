@@ -23,6 +23,7 @@
 #include "src/heap/local-heap-inl.h"
 #include "src/heap/local-heap.h"
 #include "src/heap/parked-scope.h"
+#include "src/init/isolate-group.h"
 #include "src/logging/counters-scopes.h"
 #include "src/objects/objects.h"
 
@@ -92,7 +93,7 @@ class GlobalSafepointInterruptTask : public CancelableTask {
 
 void IsolateSafepoint::InitiateGlobalSafepointScope(
     Isolate* initiator, PerClientSafepointData* client_data) {
-  shared_space_isolate()->global_safepoint()->AssertActive();
+  isolate()->global_safepoint()->AssertActive();
   LockMutex(initiator->main_thread_local_heap());
   CHECK_EQ(++active_safepoint_scopes_, 1);
   barrier_.Arm();
@@ -282,10 +283,6 @@ void IsolateSafepoint::AssertMainThreadIsOnlyThread() {
 
 Isolate* IsolateSafepoint::isolate() const { return heap_->isolate(); }
 
-Isolate* IsolateSafepoint::shared_space_isolate() const {
-  return isolate()->shared_space_isolate();
-}
-
 std::optional<IsolateSafepointScope>
 IsolateSafepoint::ReachSafepointWithoutTriggeringGC() {
   if (isolate()->has_shared_space()) {
@@ -338,8 +335,11 @@ IsolateSafepointScope::~IsolateSafepointScope() {
   }
 }
 
-GlobalSafepoint::GlobalSafepoint(Isolate* isolate)
-    : shared_space_isolate_(isolate) {}
+GlobalSafepoint::GlobalSafepoint(IsolateGroup* group) : group_(group) {}
+
+Isolate* GlobalSafepoint::shared_space_isolate() const {
+  return group_->shared_space_isolate();
+}
 
 void GlobalSafepoint::AppendClient(Isolate* client) {
   clients_mutex_.AssertHeld();
@@ -411,7 +411,7 @@ void GlobalSafepoint::EnterGlobalSafepointScope(Isolate* initiator) {
 
 #if DEBUG
   for (const PerClientSafepointData& client : clients) {
-    DCHECK_EQ(client.isolate()->shared_space_isolate(), shared_space_isolate_);
+    DCHECK_EQ(client.isolate()->shared_space_isolate(), shared_space_isolate());
   }
 #endif  // DEBUG
 
@@ -443,15 +443,12 @@ bool GlobalSafepoint::IsRequestedForTesting() {
 }
 
 GlobalSafepointScope::GlobalSafepointScope(Isolate* initiator)
-    : initiator_(initiator),
-      shared_space_isolate_(initiator->shared_space_isolate()) {
-  shared_space_isolate_->global_safepoint()->EnterGlobalSafepointScope(
-      initiator_);
+    : initiator_(initiator) {
+  initiator_->global_safepoint()->EnterGlobalSafepointScope(initiator_);
 }
 
 GlobalSafepointScope::~GlobalSafepointScope() {
-  shared_space_isolate_->global_safepoint()->LeaveGlobalSafepointScope(
-      initiator_);
+  initiator_->global_safepoint()->LeaveGlobalSafepointScope(initiator_);
 }
 
 SafepointScope::SafepointScope(Isolate* initiator, SafepointKind kind) {

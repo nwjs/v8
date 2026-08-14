@@ -8,8 +8,10 @@
 #include "hwy/highway.h"
 #include "include/v8config.h"
 #include "src/base/small-vector.h"
+#include "src/base/strong-alias.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
+#include "src/common/synchronization-point-support.h"
 #include "src/execution/isolate-utils.h"
 #include "src/execution/thread-id.h"
 #include "src/handles/handles-inl.h"
@@ -139,7 +141,7 @@ void String::MakeThin(IsolateT* isolate,
   DisallowGarbageCollection no_gc;
   DCHECK_NE(this, internalized);
 
-  SYNCHRONIZATION_POINT_FOR_TESTING("MakeThinString");
+  SYNCHRONIZATION_POINT("MakeThinString");
 
   Tagged<Map> initial_map = map(kAcquireLoad);
   StringShape initial_shape(initial_map);
@@ -170,8 +172,8 @@ void String::MakeThin(IsolateT* isolate,
     // ExternalString -> ThinString transitions can only happen on the
     // main-thread.
     isolate->AsIsolate()->heap()->NotifyObjectLayoutChange(
-        Tagged(this), no_gc, InvalidateRecordedSlots::kYes,
-        InvalidateExternalPointerSlots::kYes, sizeof(ThinString));
+        Tagged(this), no_gc, InvalidateRecordedSlots{true},
+        InvalidateExternalPointerSlots{true}, sizeof(ThinString));
     MigrateExternalString(isolate->AsIsolate(), this, internalized);
   }
 
@@ -187,8 +189,8 @@ void String::MakeThin(IsolateT* isolate,
     if (!HeapLayout::InAnyLargeSpace(thin)) {
       isolate->heap()->NotifyObjectSizeChange(
           thin, old_size, sizeof(ThinString),
-          may_contain_recorded_slots ? ClearRecordedSlots::kYes
-                                     : ClearRecordedSlots::kNo);
+          may_contain_recorded_slots ? ClearRecordedSlots{true}
+                                     : ClearRecordedSlots{false});
     } else {
       // We don't need special handling for the combination InAnyLargeSpace &&
       // may_contain_recorded_slots, because indirect strings never get that
@@ -317,7 +319,7 @@ void String::MakeExternalDuringGC(Isolate* isolate, T* resource) {
 
   if (!HeapLayout::InAnyLargeSpace(this)) {
     isolate->heap()->NotifyObjectSizeChange(this, size, new_size,
-                                            ClearRecordedSlots::kNo);
+                                            ClearRecordedSlots{false});
   }
 
   // The external pointer slots must be initialized before the new map is
@@ -352,7 +354,7 @@ bool String::MakeExternal(Isolate* isolate,
   // Disallow garbage collection to avoid possible GC vs string access deadlock.
   DisallowGarbageCollection no_gc;
 
-  SYNCHRONIZATION_POINT_FOR_TESTING("MakeExternalTwoByteString");
+  SYNCHRONIZATION_POINT("MakeExternalTwoByteString");
 
   // Externalizing twice leaks the external resource, so it's
   // prohibited by the API.
@@ -406,14 +408,14 @@ bool String::MakeExternal(Isolate* isolate,
 
   if (has_pointers) {
     isolate->heap()->NotifyObjectLayoutChange(
-        this, no_gc, InvalidateRecordedSlots::kYes,
-        InvalidateExternalPointerSlots::kNo, new_size);
+        this, no_gc, InvalidateRecordedSlots{true},
+        InvalidateExternalPointerSlots{false}, new_size);
   }
 
   if (!HeapLayout::InAnyLargeSpace(this)) {
     isolate->heap()->NotifyObjectSizeChange(
         this, size, new_size,
-        has_pointers ? ClearRecordedSlots::kYes : ClearRecordedSlots::kNo);
+        has_pointers ? ClearRecordedSlots{true} : ClearRecordedSlots{false});
   } else {
     // We don't need special handling for the combination InAnyLargeSpace &&
     // has_pointers, because indirect strings never get that large.
@@ -445,7 +447,7 @@ bool String::MakeExternal(Isolate* isolate,
   // Disallow garbage collection to avoid possible GC vs string access deadlock.
   DisallowGarbageCollection no_gc;
 
-  SYNCHRONIZATION_POINT_FOR_TESTING("MakeExternalOneByteString");
+  SYNCHRONIZATION_POINT("MakeExternalOneByteString");
 
   // Externalizing twice leaks the external resource, so it's
   // prohibited by the API.
@@ -506,12 +508,12 @@ bool String::MakeExternal(Isolate* isolate,
     if (has_pointers) {
       DCHECK(!HeapLayout::InWritableSharedSpace(this));
       isolate->heap()->NotifyObjectLayoutChange(
-          this, no_gc, InvalidateRecordedSlots::kYes,
-          InvalidateExternalPointerSlots::kNo, new_size);
+          this, no_gc, InvalidateRecordedSlots{true},
+          InvalidateExternalPointerSlots{false}, new_size);
     }
     isolate->heap()->NotifyObjectSizeChange(
         this, size, new_size,
-        has_pointers ? ClearRecordedSlots::kYes : ClearRecordedSlots::kNo);
+        has_pointers ? ClearRecordedSlots{true} : ClearRecordedSlots{false});
   } else {
     // We don't need special handling for the combination InAnyLargeSpace &&
     // has_pointers, because indirect strings never get that large.
@@ -798,24 +800,33 @@ void String::WriteToFlat(Tagged<String> source, SinkCharT* sink, uint32_t start,
 
     if (source->DispatchToSpecificType(absl::Overload{
             [&](Tagged<SeqOneByteString> str) {
+              SYNCHRONIZATION_POINT_TEST_ONLY(
+                  "StringWriteToFlatSeqOneByteString");
               CopyChars(sink, str->GetChars(no_gc, access_guard) + start,
                         length);
               return true;
             },
             [&](Tagged<SeqTwoByteString> str) {
+              SYNCHRONIZATION_POINT_TEST_ONLY(
+                  "StringWriteToFlatSeqTwoByteString");
               CopyChars(sink, str->GetChars(no_gc, access_guard) + start,
                         length);
               return true;
             },
             [&](Tagged<ExternalOneByteString> str) {
+              SYNCHRONIZATION_POINT_TEST_ONLY(
+                  "StringWriteToFlatExternalOneByteString");
               CopyChars(sink, str->GetChars() + start, length);
               return true;
             },
             [&](Tagged<ExternalTwoByteString> str) {
+              SYNCHRONIZATION_POINT_TEST_ONLY(
+                  "StringWriteToFlatExternalTwoByteString");
               CopyChars(sink, str->GetChars() + start, length);
               return true;
             },
             [&](Tagged<ConsString> cons_string) {
+              SYNCHRONIZATION_POINT_TEST_ONLY("StringWriteToFlatConsString");
               Tagged<String> first = cons_string->first();
               uint32_t boundary = first->length();
               // Here we explicitly use signed ints as the values can become
@@ -878,12 +889,14 @@ void String::WriteToFlat(Tagged<String> source, SinkCharT* sink, uint32_t start,
               return length == 0;
             },
             [&](Tagged<SlicedString> slice) {
+              SYNCHRONIZATION_POINT_TEST_ONLY("StringWriteToFlatSlicedString");
               uint32_t offset = slice->offset();
               source = slice->parent();
               start += offset;
               return false;
             },
             [&](Tagged<ThinString> thin_string) {
+              SYNCHRONIZATION_POINT_TEST_ONLY("StringWriteToFlatThinString");
               source = thin_string->actual();
               return false;
             }})) {
@@ -2068,7 +2081,7 @@ Handle<String> SeqString::Truncate(Isolate* isolate, Handle<SeqString> string,
     // No slot invalidation needed since this method is only used on freshly
     // allocated strings.
     heap->NotifyObjectSizeChange(*string, old_size, new_size,
-                                 ClearRecordedSlots::kNo);
+                                 ClearRecordedSlots{false});
   }
   // We are storing the new length using release store after creating a filler
   // for the left-over space to avoid races with the sweeper thread.

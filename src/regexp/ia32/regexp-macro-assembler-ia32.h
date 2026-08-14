@@ -184,10 +184,6 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerIA32
   // name to the register.
   static constexpr Register backtrack_stackpointer() { return ecx; }
 
-  // Equivalent to an unconditional branch to the label, unless the label
-  // is nullptr, in which case it is a Backtrack.
-  void BranchOrBacktrack(Label* to);
-
   // Equivalent to a conditional branch to the label, unless the label
   // is nullptr, in which case it is a conditional Backtrack.
   void BranchOrBacktrack(Condition condition, Label* to);

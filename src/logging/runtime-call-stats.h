@@ -279,8 +279,10 @@ namespace v8::internal {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevMaglevGraphBuilding)       \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevInlining)                  \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevTruncation)                \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevPrePhiUntagging)           \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevPhiUntagging)              \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevLoopPeeling)               \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevEscapeAnalysis)            \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevRangeAnalysis)             \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevPostOptimizer)             \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurbolevAnyUseMarking)             \
@@ -304,6 +306,7 @@ namespace v8::internal {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftInstructionSelection)    \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftInt64Lowering)           \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftLateOptimization)        \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftLoopOptimization)        \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftLoopPeeling)             \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftLoopUnrolling)           \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftMachineLowering)         \

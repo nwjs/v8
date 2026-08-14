@@ -164,6 +164,7 @@ ALL_VARIANT_FLAGS = {
         # TODO(nicohartmann): Enable randomized JS rescheduling.
         "--wasm-random-rescheduling"
     ],
+    "validate_generated_code": ["--validate-generated-code"],
     # Google3 variant.
     "google3": [],
 }
@@ -172,8 +173,8 @@ ALL_VARIANT_FLAGS = {
 # disabled (i.e. not part of the binary), or when all codegen is disallowed (in
 # jitless mode).
 kIncompatibleFlagsForNoTurbofan = [
-    "--turbofan", "--liftoff", "--validate-asm", "--maglev", "--turbolev",
-    "--turbolev-future", "--stress-concurrent-inlining", "--turboshaft"
+    "--turbofan", "--liftoff", "--maglev", "--turbolev", "--turbolev-future",
+    "--stress-concurrent-inlining", "--turboshaft"
 ]
 
 kIncompatibleFlagsForNoLiftoff = [
@@ -206,6 +207,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         ],
     "jitless":
         kIncompatibleFlagsForNoTurbofan + [
+            "--no-jitless",
             "--track-field-types",
             "--sparkplug",
             "--concurrent-sparkplug",
@@ -217,6 +219,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
             "--script-context-cells",
         ],
     "nooptimization": [
+        "--no-disable-optimizing-compilers",
         "--turbofan",
         "--turboshaft",
         "--wasm-in-js-inlining-body",
@@ -227,7 +230,6 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         "--no-liftoff",
         "--wasm-tier-up",
         "--wasm-dynamic-tiering",
-        "--validate-asm",
         "--track-field-types",
         "--stress-concurrent-inlining",
         "--additive-safe-int-feedback",
@@ -363,7 +365,7 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
         "--shared-strings",
         "--shared-heap",
         "--harmony-struct",
-        "--experimental-wasm-shared",
+        "--wasm-shared",
     ],
     "!slow_dchecks": ["--enable-slow-asserts"],
     "!gdbjit": ["--gdbjit", "--gdbjit_full", "--gdbjit_dump"],

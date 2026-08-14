@@ -9,6 +9,7 @@
 #include "src/heap/read-only-heap.h"
 #include "src/heap/visit-object.h"
 #include "src/objects/free-space-inl.h"
+#include "src/objects/heap-object-field-inl.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/slots.h"

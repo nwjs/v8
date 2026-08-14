@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/api/api-arguments-inl.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/builtins/builtins.h"
@@ -1701,6 +1702,165 @@ RUNTIME_FUNCTION(Runtime_SwissTableDetailsAt) {
   InternalIndex index(args.smi_value_at(1));
   PropertyDetails d = table->DetailsAt(index);
   return d.AsSmi();
+}
+
+RUNTIME_FUNCTION(Runtime_IterableToListWithInterceptor) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  DirectHandle<JSObject> holder = args.at<JSObject>(0);
+
+  DirectHandle<InterceptorInfo> interceptor(
+      Cast<JSInterceptorMap>(holder->map())->indexed_interceptor(), isolate);
+
+  DCHECK(interceptor->has_indexed_iterable_to_list());
+
+  PropertyCallbackArguments arguments(isolate, *holder);
+
+  DirectHandle<JSAny> result =
+      arguments.CallIndexedIterableToList(isolate, interceptor);
+  // An exception was thrown in the interceptor. Propagate.
+  RETURN_FAILURE_IF_EXCEPTION_DETECTOR(isolate, arguments);
+
+  CHECK(IsJSArray(*result));
+  // TODO(ishell): array with dictionary elements is likely too big to be
+  // handled by spread operator anyway.
+  CHECK(Cast<JSArray>(result)->HasFastElements());
+  return *result;
+}
+
+RUNTIME_FUNCTION(Runtime_CheckFastIterableToListPrototype) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  DirectHandle<JSObject> holder = args.at<JSObject>(0);
+
+  DCHECK(IsJSInterceptorMap(holder->map()));
+  DirectHandle<JSInterceptorMap> map(Cast<JSInterceptorMap>(holder->map()),
+                                     isolate);
+  DCHECK(map->supports_fast_iterable_to_list());
+
+  // The interceptor's prototype must have [Symbol.iterator] property and
+  // "length" property accessor.
+  DCHECK(IsJSObject(map->prototype()));
+  DirectHandle<JSObject> prototype(Cast<JSObject>(map->prototype()), isolate);
+
+  // 1. Check if the prototype has expected [Symbol.iterator] property.
+  {
+    DirectHandle<Name> iterator_symbol = isolate->factory()->iterator_symbol();
+    LookupIterator it_iterator(isolate, prototype, iterator_symbol,
+                               LookupIterator::OWN_SKIP_INTERCEPTOR);
+    if (it_iterator.state() != LookupIterator::DATA) {
+      return ReadOnlyRoots(isolate).false_value();
+    }
+    DirectHandle<Object> iterator_val = it_iterator.GetDataValue();
+    if (!IsJSFunction(*iterator_val)) {
+      return ReadOnlyRoots(isolate).false_value();
+    }
+    auto iterator_func = Cast<JSFunction>(iterator_val);
+    if (iterator_func->code(isolate)->builtin_id() !=
+        Builtin::kArrayPrototypeValues) {
+      return ReadOnlyRoots(isolate).false_value();
+    }
+  }
+
+  // 2. Check if the prototype has expected "length" property accessor.
+  DirectHandle<String> length_string = isolate->factory()->length_string();
+  DirectHandle<FunctionTemplateInfo> length_getter_template;
+  {
+    LookupIterator it_length(isolate, prototype, length_string,
+                             LookupIterator::OWN_SKIP_INTERCEPTOR);
+    if (it_length.state() != LookupIterator::ACCESSOR) {
+      return ReadOnlyRoots(isolate).false_value();
+    }
+    DirectHandle<Object> length_acc = it_length.GetAccessors();
+    if (!IsAccessorPair(*length_acc)) {
+      return ReadOnlyRoots(isolate).false_value();
+    }
+    auto length_pair = Cast<AccessorPair>(length_acc);
+    // Try to get getter's FunctionTemplateInfo assuming it's a lazy accessor
+    // pair.
+    if (IsFunctionTemplateInfo(length_pair->getter())) {
+      length_getter_template = direct_handle(
+          Cast<FunctionTemplateInfo>(length_pair->getter()), isolate);
+
+    } else if (IsJSFunction(length_pair->getter())) {
+      auto length_getter = Cast<JSFunction>(length_pair->getter());
+      if (!length_getter->shared()->IsApiFunction()) {
+        return ReadOnlyRoots(isolate).false_value();
+      }
+      length_getter_template =
+          direct_handle(length_getter->shared()->api_func_data(), isolate);
+    } else {
+      return ReadOnlyRoots(isolate).false_value();
+    }
+  }
+
+  // 3. Find the expected length getter from the interface's prototype's
+  // template and check that it matches the length_getter_template.
+  {
+    DirectHandle<JSFunction> constructor(
+        Cast<JSFunction>(map->GetConstructor()), isolate);
+    DCHECK(constructor->shared()->IsApiFunction());
+
+    DirectHandle<FunctionTemplateInfo> constructor_info(
+        constructor->shared()->api_func_data(), isolate);
+
+    DirectHandle<Object> proto_template_obj(
+        constructor_info->GetPrototypeTemplate(), isolate);
+    DCHECK(IsObjectTemplateInfo(*proto_template_obj));
+    auto proto_template = Cast<ObjectTemplateInfo>(proto_template_obj);
+
+    bool found_matching_length_getter = false;
+    DCHECK(IsArrayList(proto_template->property_list()));
+    Tagged<ArrayList> properties =
+        Cast<ArrayList>(proto_template->property_list());
+
+    // The properties list consists of tuples describing each property:
+    //  - <name, property details, property value> (data property),
+    //  - <name, property details, getter, setter> (accessor property),
+    //  - <name, intrinsic marker, property details, property value>
+    //    (intrinsic data property).
+    // See ApiNatives::AddDataProperty()/AddAccessorProperty() for details.
+    int properties_length = properties->length();
+    for (int i = 0; i < properties_length;) {
+      Tagged<Name> name = Cast<Name>(properties->get(i++));
+      Tagged<Object> intrinsic_marker_or_details = properties->get(i++);
+      if (IsSmi(intrinsic_marker_or_details)) {
+        PropertyDetails details(Cast<Smi>(intrinsic_marker_or_details));
+        if (details.kind() == PropertyKind::kData) {
+          // This is a data property.
+          i++;  // skip value
+        } else {
+          // This is an accessor property.
+          Tagged<Object> getter = properties->get(i++);
+          i++;  // skip setter
+
+          if (name == *length_string) {
+            // Found "length" property, check if the getter template matches.
+            if (getter == *length_getter_template) {
+              found_matching_length_getter = true;
+            }
+            break;
+          }
+        }
+      } else {
+        // This is an intrinsic data property.
+        i += 2;  // skip property details and property value
+      }
+      DCHECK_LE(i, properties_length);
+    }
+    if (!found_matching_length_getter) {
+      return ReadOnlyRoots(isolate).false_value();
+    }
+  }
+
+  // Fast path is still applicable, update validity cell.
+  DirectHandle<Map> proto_map(prototype->map(), isolate);
+  DirectHandle<Object> new_cell =
+      Map::GetOrCreatePrototypeChainValidityCell(proto_map, isolate);
+  CHECK(IsCell(*new_cell));
+  map->set_fast_case_validity_cell(Cast<Cell>(*new_cell));
+
+  return ReadOnlyRoots(isolate).true_value();
 }
 
 }  // namespace internal

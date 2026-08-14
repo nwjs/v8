@@ -31,7 +31,6 @@ class WasmSuspenderObject;
 class WasmFunctionData;
 class WasmExportedFunctionData;
 class WasmCapiFunctionData;
-class AsmWasmData;
 
 template <typename T, IndirectPointerTagRange kTagRange>
 class TrustedPointerMember;
@@ -55,8 +54,7 @@ namespace detail {
   IF_WASM(V, kWasmFunctionDataIndirectPointerTagRange, WasmFunctionData)    \
   IF_WASM(V, kWasmExportedFunctionDataIndirectPointerTag,                   \
           WasmExportedFunctionData)                                         \
-  IF_WASM(V, kWasmCapiFunctionDataIndirectPointerTag, WasmCapiFunctionData) \
-  IF_WASM(V, kAsmWasmDataIndirectPointerTag, AsmWasmData)
+  IF_WASM(V, kWasmCapiFunctionDataIndirectPointerTag, WasmCapiFunctionData)
 
 template <IndirectPointerTagRange tag_range>
 struct TrustedPointerType {

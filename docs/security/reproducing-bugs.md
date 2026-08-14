@@ -9,7 +9,7 @@ This document describes some of the configurations that can help with identifyin
 Reproductions (POCs) should work on `d8`.
 To help identify whether a bug is a valid vulnerability or a regular correctness bug, various flags are used to filter out configurations that are not relevant for security testing.
 
-The recommended way to verify if a bug is a security vulnerability is to run the reproduction with `--run-as-security-poc` in addition to any provided flags.
+The recommended way to verify if a bug is a security vulnerability is to run the reproduction with `--run-as-security-poc` as first argument in addition to any provided flags.
 If the crash still occurs with this flag enabled, it is likely a valid security vulnerability (**Type=Vulnerability**).
 
 ### Fine-grained control over configurations
@@ -28,7 +28,7 @@ If a POC stops reproducing when any of the above flags are set, it is likely not
 ## Sandbox security bugs
 
 The steps are generally similar to regular security bugs.
-The difference is the bugs are expected to reproduce with `--run-as-sandbox-security-poc` in addition to any provided flags.
+The difference is the bugs are expected to reproduce with `--run-as-sandbox-security-poc` as first argument in addition to any provided flags.
 A successful reproduction must result in the crash filter reporting a sandbox violation (e.g. "V8 sandbox violation detected") when run in the [sandbox testing environment](../../src/sandbox/README.md#testing).
 Crashes reported as "harmless" by the filter do not qualify as sandbox escapes.
 If the crash still occurs with this flag enabled, and the test filter does not consider it harmless, it is likely a valid security vulnerability (**Type=Vulnerability**).

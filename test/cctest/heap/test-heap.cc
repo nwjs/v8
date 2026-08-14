@@ -32,6 +32,7 @@
 #include "include/v8-function.h"
 #include "src/api/api-inl.h"
 #include "src/base/strings.h"
+#include "src/base/strong-alias.h"
 #include "src/builtins/builtins-inl.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/compilation-cache.h"
@@ -907,9 +908,11 @@ TEST(JSInterceptorMap) {
             JS_OBJECT_TYPE,
             JSObject::kHeaderSize + inobject_properties * kTaggedSize,
             TERMINAL_FAST_ELEMENTS_KIND, inobject_properties));
-        map->clear_extended_padding();
+        map->init_flags_and_clear_extended_padding();
         map->set_named_interceptor(*named_interceptor);
         map->set_indexed_interceptor(*indexed_interceptor);
+        map->set_fast_case_validity_cell(
+            ReadOnlyRoots(isolate).invalid_prototype_validity_cell());
       }
 
       Handle<JSObject> obj = factory->NewJSObjectFromMap(map);
@@ -2240,32 +2243,33 @@ HEAP_TEST(TestSizeOfObjects) {
 TEST(TestAlignmentCalculations) {
   // Maximum fill amounts are consistent.
   int maximum_double_misalignment = kDoubleSize - kTaggedSize;
-  int max_word_fill = Heap::GetMaximumFillToAlign(kTaggedAligned);
+  int max_word_fill = MainAllocator::GetMaximumFillToAlign(kTaggedAligned);
   CHECK_EQ(0, max_word_fill);
-  int max_double_fill = Heap::GetMaximumFillToAlign(kDoubleAligned);
+  int max_double_fill = MainAllocator::GetMaximumFillToAlign(kDoubleAligned);
   CHECK_EQ(maximum_double_misalignment, max_double_fill);
-  int max_double_unaligned_fill = Heap::GetMaximumFillToAlign(kDoubleUnaligned);
+  int max_double_unaligned_fill =
+      MainAllocator::GetMaximumFillToAlign(kDoubleUnaligned);
   CHECK_EQ(maximum_double_misalignment, max_double_unaligned_fill);
 
   Address base = kNullAddress;
   int fill = 0;
 
   // Word alignment never requires fill.
-  fill = Heap::GetFillToAlign(base, kTaggedAligned);
+  fill = MainAllocator::GetFillToAlign(base, kTaggedAligned);
   CHECK_EQ(0, fill);
-  fill = Heap::GetFillToAlign(base + kTaggedSize, kTaggedAligned);
+  fill = MainAllocator::GetFillToAlign(base + kTaggedSize, kTaggedAligned);
   CHECK_EQ(0, fill);
 
   // No fill is required when address is double aligned.
-  fill = Heap::GetFillToAlign(base, kDoubleAligned);
+  fill = MainAllocator::GetFillToAlign(base, kDoubleAligned);
   CHECK_EQ(0, fill);
   // Fill is required if address is not double aligned.
-  fill = Heap::GetFillToAlign(base + kTaggedSize, kDoubleAligned);
+  fill = MainAllocator::GetFillToAlign(base + kTaggedSize, kDoubleAligned);
   CHECK_EQ(maximum_double_misalignment, fill);
   // kDoubleUnaligned has the opposite fill amounts.
-  fill = Heap::GetFillToAlign(base, kDoubleUnaligned);
+  fill = MainAllocator::GetFillToAlign(base, kDoubleUnaligned);
   CHECK_EQ(maximum_double_misalignment, fill);
-  fill = Heap::GetFillToAlign(base + kTaggedSize, kDoubleUnaligned);
+  fill = MainAllocator::GetFillToAlign(base + kTaggedSize, kDoubleUnaligned);
   CHECK_EQ(0, fill);
 }
 
@@ -2351,7 +2355,7 @@ static Tagged<HeapObject> OldSpaceAllocateAligned(
 static Address AlignOldSpace(AllocationAlignment alignment, int offset) {
   LinearAllocationArea* old_space =
       &CcTest::i_isolate()->isolate_data()->old_allocation_info();
-  int fill = Heap::GetFillToAlign(old_space->top(), alignment);
+  int fill = MainAllocator::GetFillToAlign(old_space->top(), alignment);
   int allocation = fill + offset;
   if (allocation) {
     OldSpaceAllocateAligned(allocation, kTaggedAligned);
@@ -2426,9 +2430,9 @@ TEST(HeapNumberAlignment) {
   HandleScope sc(isolate);
 
   const auto required_alignment = HeapObject::RequiredAlignment(
-      kNotInSharedSpace, *factory->heap_number_map());
+      InSharedSpace{false}, *factory->heap_number_map());
   const int maximum_misalignment =
-      Heap::GetMaximumFillToAlign(required_alignment);
+      MainAllocator::GetMaximumFillToAlign(required_alignment);
 
   for (int offset = 0; offset <= maximum_misalignment; offset += kTaggedSize) {
     if (!v8_flags.single_generation) {
@@ -2437,8 +2441,9 @@ TEST(HeapNumberAlignment) {
       DirectHandle<Object> number_new = factory->NewNumber(1.000123);
       CHECK(IsHeapNumber(*number_new));
       CHECK(HeapLayout::InYoungGeneration(*number_new));
-      CHECK_EQ(0, Heap::GetFillToAlign(Cast<HeapObject>(*number_new).address(),
-                                       required_alignment));
+      CHECK_EQ(
+          0, MainAllocator::GetFillToAlign(
+                 Cast<HeapObject>(*number_new).address(), required_alignment));
     }
 
     AlignOldSpace(required_alignment, offset);
@@ -2446,8 +2451,9 @@ TEST(HeapNumberAlignment) {
         factory->NewNumber<AllocationType::kOld>(1.000321);
     CHECK(IsHeapNumber(*number_old));
     CHECK(heap->InOldSpace(*number_old));
-    CHECK_EQ(0, Heap::GetFillToAlign(Cast<HeapObject>(*number_old).address(),
-                                     required_alignment));
+    CHECK_EQ(0,
+             MainAllocator::GetFillToAlign(
+                 Cast<HeapObject>(*number_old).address(), required_alignment));
   }
 }
 
@@ -4647,7 +4653,7 @@ TEST(ObjectsInEagerlyDeoptimizedCodeAreWeak) {
 
 static DirectHandle<InstructionStream> DummyOptimizedCode(Isolate* isolate) {
   uint8_t buffer[i::Assembler::kDefaultBufferSize];
-  MacroAssembler masm(isolate, v8::internal::CodeObjectRequired::kYes,
+  MacroAssembler masm(isolate, v8::internal::CodeObjectRequired{true},
                       ExternalAssemblerBuffer(buffer, sizeof(buffer)));
   CodeDesc desc;
 #if V8_TARGET_ARCH_ARM64
@@ -7236,7 +7242,7 @@ TEST(Regress9701) {
   for (int i = 0; i < 1000; i++) {
     HandleScope scope(heap->isolate());
     CcTest::i_isolate()->factory()->NewJSArrayBufferAndBackingStore(
-        64 * KB, InitializedFlag::kZeroInitialized);
+        64 * KB, InitializedFlag{true});
   }
   int mark_sweep_count_after = heap->ms_count();
   // We expect only scavenges, no full GCs.
@@ -7485,7 +7491,7 @@ TEST(Regress10900) {
   Heap* heap = isolate->heap();
   HandleScope handle_scope(isolate);
   uint8_t buffer[i::Assembler::kDefaultBufferSize];
-  MacroAssembler masm(isolate, v8::internal::CodeObjectRequired::kYes,
+  MacroAssembler masm(isolate, v8::internal::CodeObjectRequired{true},
                       ExternalAssemblerBuffer(buffer, sizeof(buffer)));
 #if V8_TARGET_ARCH_ARM64
   UseScratchRegisterScope temps(&masm);

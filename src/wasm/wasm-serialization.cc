@@ -1206,9 +1206,9 @@ MaybeDirectHandle<WasmModuleObject> DeserializeNativeModule(
   if (!HeaderMatches(data, enabled_features, compile_imports)) return {};
 
   WasmDetectedFeatures detected_features;
-  ModuleResult decode_result = DecodeWasmModule(
-      isolate, enabled_features, wire_bytes_vec.as_vector(), false,
-      i::wasm::kWasmOrigin, DecodingMethod::kDeserialize, &detected_features);
+  ModuleResult decode_result =
+      DecodeWasmModule(isolate, enabled_features, wire_bytes_vec.as_vector(),
+                       false, DecodingMethod::kDeserialize, &detected_features);
   // The wire bytes were previously considered valid for the same enabled
   // features (checked above).
   CHECK(!decode_result.failed());
@@ -1217,8 +1217,7 @@ MaybeDirectHandle<WasmModuleObject> DeserializeNativeModule(
 
   WasmEngine* wasm_engine = GetWasmEngine();
   std::shared_ptr<NativeModule> shared_native_module =
-      wasm_engine->MaybeGetNativeModule(module->origin,
-                                        wire_bytes_vec.as_vector(),
+      wasm_engine->MaybeGetNativeModule(wire_bytes_vec.as_vector(),
                                         enabled_features, compile_imports);
   if (shared_native_module) {
     // For consistency, take ownership of the passed `wire_bytes_vec` also when

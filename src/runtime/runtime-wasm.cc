@@ -19,6 +19,7 @@
 #include "src/heap/read-only-heap.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/dictionary-inl.h"
+#include "src/objects/js-promise-inl.h"
 #include "src/objects/lookup-inl.h"
 #include "src/objects/managed-inl.h"
 #include "src/objects/object-list-macros.h"
@@ -614,7 +615,7 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
   // We don't need to care about exactness of the import here, because that
   // has already been validated (hence no kLinkError can happen here).
   wasm::CanonicalValueType expected_type = wasm::CanonicalValueType::Ref(
-      sig->index(), SharedFlag::kNo, wasm::RefTypeKind::kFunction);
+      sig->index(), SharedFlag{false}, wasm::RefTypeKind::kFunction);
   wasm::ResolvedWasmImport resolved({}, -1, callable, expected_type, sig,
                                     wasm::WellKnownImport::kUninstantiated);
   wasm::ImportCallKind kind = resolved.kind();
@@ -900,17 +901,10 @@ RUNTIME_FUNCTION(Runtime_WasmTableInit) {
 
   DCHECK(!isolate->context().is_null());
 
-  DirectHandle<WasmTrustedInstanceData> shared_trusted_instance_data;
-  if (trusted_instance_data->module()->has_shared_part) {
-    // For now, we never pass the shared WTID to this runtime function.
-    DCHECK_NE(*trusted_instance_data, trusted_instance_data->shared_part());
-    shared_trusted_instance_data =
-        direct_handle(trusted_instance_data->shared_part(), isolate);
-  }
   std::optional<MessageTemplate> opt_error =
-      WasmTrustedInstanceData::InitTableEntries(
-          isolate, trusted_instance_data, shared_trusted_instance_data,
-          table_index, elem_segment_index, dst, src, count);
+      WasmTrustedInstanceData::InitTableEntries(isolate, trusted_instance_data,
+                                                table_index, elem_segment_index,
+                                                dst, src, count);
   if (opt_error.has_value()) {
     return ThrowWasmError(isolate, opt_error.value());
   }
@@ -1164,7 +1158,7 @@ RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
 
   Tagged<WasmTypeInfo> type_info = rtt->wasm_type_info();
   wasm::CanonicalValueType element_type = type_info->element_type();
-  AllocationType allocation = type_info->type().is_shared() == SharedFlag::kYes
+  AllocationType allocation = type_info->type().is_shared()
                                   ? AllocationType::kSharedOld
                                   : AllocationType::kYoung;
 
@@ -1207,14 +1201,10 @@ RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
       return ThrowWasmError(
           isolate, MessageTemplate::kWasmTrapElementSegmentOutOfBounds);
     }
-    DirectHandle<WasmTrustedInstanceData> shared_instance =
-        trusted_instance_data->has_shared_part()
-            ? handle(trusted_instance_data->shared_part(), isolate)
-            : trusted_instance_data;
     DirectHandle<Object> result =
         isolate->factory()->NewWasmArrayFromElementSegment(
-            trusted_instance_data, shared_instance, segment_index, offset,
-            length, rtt, allocation, element_type);
+            trusted_instance_data, segment_index, offset, length, rtt,
+            allocation, element_type);
     if (IsSmi(*result)) {
       return ThrowWasmError(
           isolate, static_cast<MessageTemplate>(Cast<Smi>(*result).value()));
@@ -1291,12 +1281,8 @@ RUNTIME_FUNCTION(Runtime_WasmArrayInitSegment) {
 
     // If the element segment has not been initialized yet, lazily initialize it
     // now.
-    DirectHandle<WasmTrustedInstanceData> shared_instance =
-        trusted_instance_data->has_shared_part()
-            ? handle(trusted_instance_data->shared_part(), isolate)
-            : trusted_instance_data;
     std::optional<MessageTemplate> opt_error = wasm::InitializeElementSegment(
-        isolate, trusted_instance_data, shared_instance, segment_index);
+        isolate, trusted_instance_data, segment_index);
     if (opt_error.has_value()) {
       return ThrowWasmError(isolate, opt_error.value());
     }
@@ -1369,6 +1355,67 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
 
   // Stack limit will be updated in WasmReturnPromiseOnSuspendAsm builtin.
   return *suspender;
+}
+
+namespace {
+int GetWasmFrameCount(Isolate* isolate, Tagged<WasmSuspenderObject> suspender) {
+  int count = 0;
+  for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
+    StackFrame* frame = it.frame();
+#ifdef DEBUG
+    Tagged<WasmSuspenderObject> parent = suspender->parent();
+    wasm::StackMemory* end_stack = parent->stack();
+    DCHECK_NOT_NULL(end_stack);
+    bool suspender_contains_frame = false;
+    for (wasm::StackMemory* stack = isolate->isolate_data()->active_stack();
+         stack != end_stack; stack = stack->jmpbuf()->parent) {
+      if (stack->Contains(frame->fp())) {
+        suspender_contains_frame = true;
+        break;
+      }
+    }
+#endif
+    if (frame->is_wasm()) {
+      WasmFrame* wasm_frame = WasmFrame::cast(frame);
+      count += wasm_frame->Summarize().size();
+      DCHECK(suspender_contains_frame);
+    } else if (frame->is_javascript()) {
+      // By construction, the first JS frame must be the JSPI entry point and is
+      // outside of the captured stack. Stop the count.
+      DCHECK(!suspender_contains_frame);
+      break;
+    }
+  }
+  return count;
+}
+}  // namespace
+
+RUNTIME_FUNCTION(Runtime_WasmSuspended) {
+  HandleScope scope(isolate);
+  DirectHandle<JSPromise> awaited_promise(Cast<JSPromise>(args[0]), isolate);
+  DirectHandle<WasmSuspenderObject> suspender(
+      TrustedCast<WasmSuspenderObject>(args[1]), isolate);
+
+  DirectHandle<JSPromise> throwaway =
+      isolate->factory()->NewJSPromiseWithoutHook();
+  int skip_frame_count = GetWasmFrameCount(isolate, *suspender);
+  isolate->OnAsyncFunctionSuspended(throwaway, awaited_promise,
+                                    skip_frame_count);
+  throwaway->set_has_handler(true);
+
+  if (isolate->debug()->is_active()) {
+    Tagged<Object> promise_obj = suspender->promise();
+    if (IsJSPromise(promise_obj)) {
+      DirectHandle<JSPromise> outer_promise(Cast<JSPromise>(promise_obj),
+                                            isolate);
+      Object::SetProperty(isolate, throwaway,
+                          isolate->factory()->promise_handled_by_symbol(),
+                          outer_promise, StoreOrigin::kMaybeKeyed,
+                          Just(ShouldThrow::kThrowOnError))
+          .Check();
+    }
+  }
+  return *throwaway;
 }
 
 // Helper function needed for the stress stack switching mode.
@@ -2064,12 +2111,8 @@ MaybeDirectHandle<FixedArray> GetElementSegment(
     return {Cast<FixedArray>(segment_raw), isolate};
   }
 
-  DirectHandle<WasmTrustedInstanceData> shared_instance =
-      instance->has_shared_part() ? handle(instance->shared_part(), isolate)
-                                  : instance;
-  std::optional<MessageTemplate> opt_error =
-      wasm::InitializeElementSegment(isolate, instance, shared_instance,
-                                     segment_index, wasm::kPrecreateExternal);
+  std::optional<MessageTemplate> opt_error = wasm::InitializeElementSegment(
+      isolate, instance, segment_index, wasm::kPrecreateExternal);
   if (opt_error.has_value()) {
     ThrowWasmError(isolate, opt_error.value());
     return {};

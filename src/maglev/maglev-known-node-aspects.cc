@@ -4,6 +4,7 @@
 
 #include "src/maglev/maglev-known-node-aspects.h"
 
+#include <algorithm>
 #include <iostream>
 
 #include "include/v8-internal.h"
@@ -183,7 +184,7 @@ bool LoopHeaderCompatibleWithBackEdge(const NodeInfo& loop_header,
     return false;
   }
   if (loop_header.possible_maps_are_known() &&
-      loop_header.any_map_or_node_type_is_unstable()) {
+      loop_header.any_map_is_unstable()) {
     if (!backedge.possible_maps_are_known()) {
       return false;
     }
@@ -272,6 +273,8 @@ void KnownNodeAspects::Merge(const KnownNodeAspects& other, Zone* zone) {
                          merge_loaded_properties);
   DestructivelyIntersect(loaded_properties_, other.loaded_properties_,
                          merge_loaded_properties);
+  DestructivelyIntersect(loaded_tagged_keyed_properties_,
+                         other.loaded_tagged_keyed_properties_);
   DestructivelyIntersect(loaded_context_constants_,
                          other.loaded_context_constants_);
   may_have_aliasing_contexts_ = ContextSlotLoadsAliasMerge(
@@ -288,7 +291,8 @@ void KnownNodeAspects::MergeForLoop(const KnownNodeAspects& backedge,
                                     Zone* zone,
                                     const LoopEffects* loop_effects) {
   if (side_effects_require_invalidation_ &&
-      (loop_effects == nullptr || loop_effects->unstable_aspects_cleared)) {
+      (loop_effects == nullptr || loop_effects->unstable_aspects_cleared ||
+       loop_effects->elements_kind_transitioned)) {
     ZoneMap<ValueNode*, NodeInfo> cleared(zone);
     for (auto& entry : node_infos_) {
       cleared.emplace(entry.first,
@@ -301,24 +305,42 @@ void KnownNodeAspects::MergeForLoop(const KnownNodeAspects& backedge,
   if (effect_epoch_ != backedge.effect_epoch_) {
     effect_epoch_ = std::max(effect_epoch_, backedge.effect_epoch_) + 1;
   }
-  DestructivelyIntersect(
-      available_expressions_, backedge.available_expressions_,
-      [&](uint32_t hash, const AvailableExpression& lhs,
-          const AvailableExpression& rhs) {
-        DCHECK_IMPLIES(lhs.node == rhs.node,
-                       lhs.effect_epoch == rhs.effect_epoch);
-        DCHECK_NE(lhs.effect_epoch, kEffectEpochOverflow);
-        DCHECK_IMPLIES(
-            !lhs.node->Is<Identity>(),
-            Node::needs_epoch_check(lhs.node->opcode()) ==
-                (lhs.effect_epoch != kEffectEpochForPureInstructions));
-        ValueNode* rhs_value = rhs.node->TryCast<ValueNode>();
-        NodeBase* rhs_node =
-            rhs_value ? rhs_value->UnwrapIdentities() : rhs.node;
-        return !lhs.node->Is<Identity>() &&
-               lhs.node->IsStructurallyEqualTo(rhs_node) &&
-               lhs.effect_epoch >= effect_epoch_;
-      });
+  // Forward entries for pure (epoch-exempt) expressions are kept even without
+  // a backedge equivalent: the forward predecessor dominates the loop body and
+  // loop effects cannot invalidate a pure expression. Other entries need a
+  // structurally equal backedge entry with a still-valid epoch.
+  for (auto it = available_expressions_.begin();
+       it != available_expressions_.end();) {
+    const AvailableExpression& lhs = it->second;
+    DCHECK_NE(lhs.effect_epoch, kEffectEpochOverflow);
+    DCHECK_IMPLIES(!lhs.node->Is<Identity>(),
+                   Node::needs_epoch_check(lhs.node->opcode()) ==
+                       (lhs.effect_epoch != kEffectEpochForPureInstructions));
+    if (lhs.node->Is<Identity>()) {
+      it = available_expressions_.erase(it);
+      continue;
+    }
+    if (lhs.effect_epoch == kEffectEpochForPureInstructions) {
+      ++it;
+      continue;
+    }
+    bool keep = false;
+    auto rhs_it = backedge.available_expressions_.find(it->first);
+    if (rhs_it != backedge.available_expressions_.end()) {
+      const AvailableExpression& rhs = rhs_it->second;
+      DCHECK_IMPLIES(lhs.node == rhs.node,
+                     lhs.effect_epoch == rhs.effect_epoch);
+      ValueNode* rhs_value = rhs.node->TryCast<ValueNode>();
+      NodeBase* rhs_node = rhs_value ? rhs_value->UnwrapIdentities() : rhs.node;
+      keep = lhs.node->IsStructurallyEqualTo(rhs_node) &&
+             lhs.effect_epoch >= effect_epoch_;
+    }
+    if (keep) {
+      ++it;
+    } else {
+      it = available_expressions_.erase(it);
+    }
+  }
 
   const bool keep_invariant_loads =
       loop_effects != nullptr && !loop_effects->unstable_aspects_cleared;
@@ -336,16 +358,22 @@ void KnownNodeAspects::MergeForLoop(const KnownNodeAspects& backedge,
                                });
         return !lhs.empty();
       };
+  auto entry_invariant = [&](PropertyKey key, ValueNode* obj) {
+    if (!keep_invariant_loads) return false;
+    if (loop_effects->keys_cleared.contains(key)) return false;
+    if (loop_effects->objects_written.contains(obj)) return false;
+    if (loop_effects->elements_kind_transitioned &&
+        key == PropertyKey::Elements() && !TryGetInfoWithFreshMaps(obj)) {
+      return false;
+    }
+    return true;
+  };
   auto merge_loaded_properties =
       [&](PropertyKey key, ZoneMap<ValueNode*, ValueNode*>& lhs,
           const ZoneMap<ValueNode*, ValueNode*>& rhs) {
-        const bool key_invariant =
-            keep_invariant_loads && !loop_effects->keys_cleared.contains(key);
         DestructivelyIntersect(
             lhs, rhs, [&](ValueNode* obj, ValueNode* l, ValueNode* r) {
-              return l == r || (key_invariant &&
-                                !loop_effects->objects_written.contains(obj) &&
-                                same_load(l, r));
+              return l == r || (entry_invariant(key, obj) && same_load(l, r));
             });
         return !lhs.empty();
       };
@@ -354,6 +382,8 @@ void KnownNodeAspects::MergeForLoop(const KnownNodeAspects& backedge,
                          merge_constant_properties);
   DestructivelyIntersect(loaded_properties_, backedge.loaded_properties_,
                          merge_loaded_properties);
+  DestructivelyIntersect(loaded_tagged_keyed_properties_,
+                         backedge.loaded_tagged_keyed_properties_);
   DestructivelyIntersect(loaded_context_constants_,
                          backedge.loaded_context_constants_,
                          [&](auto key, ValueNode* l, ValueNode* r) {
@@ -407,6 +437,14 @@ void KnownNodeAspects::UnwrapIdentitiesAndPhisInKeys(Zone* zone) {
   };
   remap_loaded_properties(loaded_properties_);
   remap_loaded_properties(loaded_constant_properties_);
+
+  {
+    ZoneMap<std::pair<ValueNode*, ValueNode*>, ValueNode*> remapped(zone);
+    for (auto& [key, value] : loaded_tagged_keyed_properties_) {
+      remapped[{unwrap(key.first), unwrap(key.second)}] = value;
+    }
+    loaded_tagged_keyed_properties_ = std::move(remapped);
+  }
 
   // Context slot loads: (context node, offset) -> value. Only the context node
   // in the key is remapped.
@@ -500,7 +538,7 @@ void KnownNodeAspects::ClearUnstableNodeAspectsForStoreMap(
       };
       // Mark aliasing maps as stale.
       if (MarkMapsStaleIfAny(MaybeAliases)) {
-        if (V8_UNLIKELY(v8_flags.trace_maglev_kna)) {
+        if (V8_UNLIKELY(v8_flags.trace_maglev_kna && is_tracing_enabled)) {
           std::cout << kRed << "[KNA] StoreMap: Invalidate alias "
                     << Brief(*old_map.object()) << kReset << std::endl;
         }
@@ -511,10 +549,57 @@ void KnownNodeAspects::ClearUnstableNodeAspectsForStoreMap(
 
   // TODO(olivf): Only invalidate nodes with the same type.
   OnSideEffect();
-  if (V8_UNLIKELY(v8_flags.trace_maglev_kna)) {
+  if (V8_UNLIKELY(v8_flags.trace_maglev_kna && is_tracing_enabled)) {
     std::cout << kRed << "[KNA] StoreMap: Invalidate all unstable maps"
               << kReset << std::endl;
   }
+}
+
+void KnownNodeAspects::ClearUnstableNodeAspectsForElementsTransition(
+    const ZoneVector<compiler::MapRef>& transition_sources,
+    bool is_tracing_enabled) {
+  // The transition only fires on objects whose current map is one of the
+  // sources, so only facts about nodes that may hold such an object can go
+  // stale; everything else survives.
+  auto MaybeAliases = [&](compiler::MapRef map) -> bool {
+    for (compiler::MapRef source : transition_sources) {
+      if (source.equals(map)) return true;
+    }
+    return false;
+  };
+  if (MarkMapsStaleIfAny(MaybeAliases)) {
+    if (V8_UNLIKELY(v8_flags.trace_maglev_kna && is_tracing_enabled)) {
+      std::cout << kRed
+                << "[KNA] ElementsTransition: Invalidate source-map aliases"
+                << kReset << std::endl;
+    }
+  }
+  // A transitioning object's elements store may be reallocated; drop cached
+  // elements for any node that may alias a source-mapped object (including
+  // nodes whose map is unknown or already stale).
+  auto it = loaded_properties_.find(PropertyKey::Elements());
+  if (it == loaded_properties_.end()) return;
+  bool dropped_any =
+      std::erase_if(it->second, [&](const auto& entry) {
+        const NodeInfo* info = TryGetInfoWithFreshMaps(entry.first);
+        if (!info) return true;
+        const auto& maps = info->possible_maps();
+        return std::any_of(maps.begin(), maps.end(), MaybeAliases);
+      }) > 0;
+  if (dropped_any &&
+      V8_UNLIKELY(v8_flags.trace_maglev_kna && is_tracing_enabled)) {
+    std::cout << kRed << "[KNA] ElementsTransition: Drop aliased [Elements]"
+              << kReset << std::endl;
+  }
+}
+
+const NodeInfo* KnownNodeAspects::TryGetInfoWithFreshMaps(
+    ValueNode* object) const {
+  const NodeInfo* info = TryGetInfoFor(object);
+  if (!info || !info->possible_maps_are_known() || info->maps_are_stale()) {
+    return nullptr;
+  }
+  return info;
 }
 
 void KnownNodeAspects::ClearUnstableNodeAspects(bool is_tracing_enabled) {
@@ -528,6 +613,7 @@ void KnownNodeAspects::ClearUnstableNodeAspects(bool is_tracing_enabled) {
   // to not change (and we added a dependency on this), so we don't have to
   // clear those.
   loaded_properties_.clear();
+  loaded_tagged_keyed_properties_.clear();
   loaded_context_slots_.clear();
   may_have_aliasing_contexts_ = KnownNodeAspects::ContextSlotLoadsAlias::kNone;
 }
@@ -542,6 +628,7 @@ KnownNodeAspects::KnownNodeAspects(const KnownNodeAspects& other,
                                    LoopEffects* loop_effects, Zone* zone)
     : loaded_constant_properties_(other.loaded_constant_properties_),
       loaded_properties_(zone),
+      loaded_tagged_keyed_properties_(zone),
       loaded_context_constants_(other.loaded_context_constants_),
       loaded_context_slots_(zone),
       available_expressions_(zone),
@@ -555,12 +642,12 @@ KnownNodeAspects::KnownNodeAspects(const KnownNodeAspects& other,
     node_infos_ = other.node_infos_;
 #ifdef DEBUG
     for (const auto& it : node_infos_) {
-      DCHECK(!it.second.any_map_or_node_type_is_unstable() ||
-             it.second.maps_are_stale());
+      DCHECK(!it.second.any_map_is_unstable() || it.second.maps_are_stale());
     }
 #endif
   } else if (optimistic_initial_state &&
-             !loop_effects->unstable_aspects_cleared) {
+             !loop_effects->unstable_aspects_cleared &&
+             !loop_effects->elements_kind_transitioned) {
     node_infos_ = other.node_infos_;
     side_effects_require_invalidation_ =
         other.side_effects_require_invalidation_;
@@ -574,7 +661,8 @@ KnownNodeAspects::KnownNodeAspects(const KnownNodeAspects& other,
     // IMPORTANT: Whatever we clone here needs to be checked for consistency
     // in when we try to terminate the loop in `IsCompatibleWithLoopHeader`.
     if (loop_effects->objects_written.empty() &&
-        loop_effects->keys_cleared.empty()) {
+        loop_effects->keys_cleared.empty() &&
+        !loop_effects->elements_kind_transitioned) {
       loaded_properties_ = other.loaded_properties_;
     } else {
       auto cleared_key = loop_effects->keys_cleared.begin();
@@ -585,14 +673,22 @@ KnownNodeAspects::KnownNodeAspects(const KnownNodeAspects& other,
         if (NextInIgnoreList(cleared_key, cleared_keys_end, loaded_key.first)) {
           continue;
         }
+        const bool check_elements_transition =
+            loop_effects->elements_kind_transitioned &&
+            loaded_key.first == PropertyKey::Elements();
         auto& props_for_key =
             loaded_properties_.try_emplace(loaded_key.first, zone)
                 .first->second;
         for (auto loaded_obj : loaded_key.second) {
-          if (!NextInIgnoreList(cleared_obj, cleared_objs_end,
-                                loaded_obj.first)) {
-            props_for_key.emplace(loaded_obj);
+          if (NextInIgnoreList(cleared_obj, cleared_objs_end,
+                               loaded_obj.first)) {
+            continue;
           }
+          if (check_elements_transition &&
+              !TryGetInfoWithFreshMaps(loaded_obj.first)) {
+            continue;
+          }
+          props_for_key.emplace(loaded_obj);
         }
       }
     }
@@ -817,7 +913,7 @@ void KnownNodeAspects::Print(std::ostream& os) const {
           os << " " << kRed << "[stale]" << kReset;
         }
       }
-      if (info.any_map_or_node_type_is_unstable()) {
+      if (info.any_map_is_unstable()) {
         os << " " << kRed << "[unstable]" << kReset;
       }
       if (!info.alternative().has_none()) {

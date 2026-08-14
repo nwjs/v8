@@ -179,7 +179,8 @@ V8_OBJECT class AccessCheckInfo : public Struct {
 
 #define INDEXED_INTERCEPTOR_INFO_CALLBACK_LIST(V) \
   COMMON_INTERCEPTOR_INFO_CALLBACK_LIST(V)        \
-  V(IndexOf, index_of)
+  V(IndexOf, index_of)                            \
+  V(IterableToList, iterable_to_list)
 
 V8_OBJECT class InterceptorInfo : public HeapObject {
  public:
@@ -200,6 +201,7 @@ V8_OBJECT class InterceptorInfo : public HeapObject {
   inline bool has_definer() const;
 
   inline bool has_index_of() const;
+  inline bool has_iterable_to_list() const;
 
   // Accessor callbacks for named interceptors.
   DECL_LAZY_REDIRECTED_CALLBACK_ACCESSORS_MAYBE_READ_ONLY_HOST(named_getter,
@@ -236,6 +238,8 @@ V8_OBJECT class InterceptorInfo : public HeapObject {
   // Indexed interceptor-only callbacks.
   DECL_LAZY_EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST(indexed_index_of,
                                                             Address)
+  DECL_LAZY_EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST(
+      indexed_iterable_to_list, Address)
 
   DECL_BOOLEAN_ACCESSORS(can_intercept_symbols)
   DECL_BOOLEAN_ACCESSORS(non_masking)
@@ -280,6 +284,7 @@ V8_OBJECT class InterceptorInfo : public HeapObject {
   static const int kOptionalPaddingOffsetEnd;
   static const int kEndOfStrongFieldsOffset;
   static const int kIndexOfOffsetEnd;
+  static const int kIterableToListOffsetEnd;
   static const int kSize;
 
  private:
@@ -302,6 +307,8 @@ V8_OBJECT class InterceptorInfo : public HeapObject {
   ExternalPointerMember<kApiNamedPropertyEnumeratorCallbackTag> enumerator_;
   ExternalPointerMember<kApiNamedPropertyDefinerCallbackTag> definer_;
   ExternalPointerMember<kApiIndexedPropertyIndexOfCallbackTag> index_of_;
+  ExternalPointerMember<kApiIndexedPropertyIterableToListCallbackTag>
+      iterable_to_list_;
 } V8_OBJECT_END;
 
 inline constexpr int InterceptorInfo::kOptionalPaddingOffset =
@@ -315,6 +322,11 @@ inline constexpr int InterceptorInfo::kEndOfStrongFieldsOffset =
 inline constexpr int InterceptorInfo::kIndexOfOffsetEnd =
     offsetof(InterceptorInfo, index_of_) +
     sizeof(ExternalPointerMember<kApiIndexedPropertyIndexOfCallbackTag>) - 1;
+inline constexpr int InterceptorInfo::kIterableToListOffsetEnd =
+    offsetof(InterceptorInfo, iterable_to_list_) +
+    sizeof(
+        ExternalPointerMember<kApiIndexedPropertyIterableToListCallbackTag>) -
+    1;
 inline constexpr int InterceptorInfo::kSize = sizeof(InterceptorInfo);
 
 }  // namespace internal

@@ -1119,9 +1119,6 @@ void EnumCache::EnumCachePrint(std::ostream& os) {
   os << "\n";
 }
 
-void StrongDescriptorArray::StrongDescriptorArrayPrint(std::ostream& os) {
-  DescriptorArrayPrint(os);
-}
 
 void DescriptorArray::DescriptorArrayPrint(std::ostream& os) {
   PrintHeader(os, "DescriptorArray");
@@ -1136,11 +1133,6 @@ void DescriptorArray::DescriptorArrayPrint(std::ostream& os) {
   }
   os << "\n - nof slack descriptors: " << number_of_slack_descriptors();
   os << "\n - nof descriptors: " << number_of_descriptors();
-  const auto raw = raw_gc_state(kRelaxedLoad);
-  os << "\n - raw gc state: mc epoch "
-     << DescriptorArrayMarkingState::Epoch::decode(raw) << ", marked "
-     << DescriptorArrayMarkingState::Marked::decode(raw) << ", delta "
-     << DescriptorArrayMarkingState::Delta::decode(raw);
   os << "\n - fast iterable state: ";
   switch (fast_iterable()) {
     case FastIterableState::kJsonFast:
@@ -1999,7 +1991,7 @@ void ClosureFeedbackCellArray::ClosureFeedbackCellArrayPrint(std::ostream& os) {
 void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
   PrintHeader(os, "FeedbackVector");
   os << "\n - length: " << length();
-  if (length() == 0) {
+  if (length().value() == 0) {
     os << " (empty)\n";
     return;
   }
@@ -2764,19 +2756,13 @@ void JSFunctionWithPrototype::JSFunctionWithPrototypePrint(std::ostream& os) {
 }
 
 void SharedFunctionInfo::PrintSourceCode(std::ostream& os) {
-  if (HasSourceCode()) {
-#if V8_ENABLE_WEBASSEMBLY
-    // asm.js functions have HasSourceCode() == true, but their start/end
-    // positions refer to module wire bytes, so the code below won't work.
-    if (HasWasmExportedFunctionData(GetCurrentIsolateForSandbox())) return;
-#endif  // V8_ENABLE_WEBASSEMBLY
-    os << "\n - source code: ";
-    Tagged<String> source = Cast<String>(Cast<Script>(script())->source());
-    int start = StartPosition();
-    int length = EndPosition() - start;
-    std::unique_ptr<char[]> source_string = source->ToCString(start, length);
-    os << source_string.get();
-  }
+  if (!HasSourceCode()) return;
+  os << "\n - source code: ";
+  Tagged<String> source = Cast<String>(Cast<Script>(script())->source());
+  int start = StartPosition();
+  int length = EndPosition() - start;
+  std::unique_ptr<char[]> source_string = source->ToCString(start, length);
+  os << source_string.get();
 }
 
 void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {
@@ -3208,12 +3194,6 @@ void WasmStringViewIter::WasmStringViewIterPrint(std::ostream& os) {
   os << "\n";
 }
 
-void AsmWasmData::AsmWasmDataPrint(std::ostream& os) {
-  PrintHeader(os, "AsmWasmData");
-  os << "\n - native module: " << Brief(managed_native_module());
-  os << "\n - uses bitset: " << uses_bitset();
-  os << "\n";
-}
 
 void WasmExceptionTag::WasmExceptionTagPrint(std::ostream& os) {
   PrintHeader(os, "WasmExceptionTag");
@@ -3438,14 +3418,13 @@ void WasmTrustedInstanceData::WasmTrustedInstanceDataPrint(std::ostream& os) {
   PrintHeader(os, "WasmTrustedInstanceData");
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(instance_object, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(native_context, Brief);
-  PRINT_WASM_INSTANCE_FIELD(shared_part, Brief);
   PRINT_WASM_INSTANCE_FIELD(memory_objects, Brief);
   PRINT_WASM_INSTANCE_FIELD(untagged_globals_buffer, Brief);
   PRINT_WASM_INSTANCE_FIELD(tagged_globals_buffer, Brief);
   PRINT_WASM_INSTANCE_FIELD(imported_mutable_globals_buffers, Brief);
   PRINT_WASM_INSTANCE_FIELD(imported_mutable_globals_offsets, Brief);
 #if V8_ENABLE_DRUMBRAKE
-  PRINT_OPTIONAL_WASM_INSTANCE_FIELD(interpreter_object, Brief);
+  PRINT_OPTIONAL_WASM_INSTANCE_FIELD(interpreter_handle, Brief);
 #endif  // V8_ENABLE_DRUMBRAKE
   PRINT_WASM_INSTANCE_FIELD(tables, Brief);
   PRINT_WASM_INSTANCE_FIELD(dispatch_table0, Brief);
@@ -4170,7 +4149,6 @@ void ScopeInfo::ScopeInfoPrint(std::ostream& os) {
     os << "\n - function name(" << FunctionVariableBits::decode(flags) << "): ";
     ShortPrint(FunctionName(), os);
   }
-  if (IsAsmModule()) os << "\n - asm module";
   if (HasSimpleParameters()) os << "\n - simple parameters";
   if (PrivateNameLookupSkipsOuterClass()) {
     os << "\n - private name lookup skips outer class";
@@ -4873,10 +4851,15 @@ void Map::MapPrint(std::ostream& os) {
       case ExtendedMapKind::kJSInterceptorMap: {
         Tagged<JSInterceptorMap> js_interceptor_map =
             UncheckedCast<JSInterceptorMap>(map_ex);
+        if (js_interceptor_map->supports_fast_iterable_to_list()) {
+          os << "\n - supports_fast_iterable_to_list";
+        }
         os << "\n - named_interceptor: "
            << Brief(js_interceptor_map->named_interceptor());
         os << "\n - indexed_interceptor: "
            << Brief(js_interceptor_map->indexed_interceptor());
+        os << "\n - fast_case_validity_cell: "
+           << Brief(js_interceptor_map->fast_case_validity_cell());
         break;
       }
     }

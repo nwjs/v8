@@ -3301,7 +3301,10 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
   __ Jump(s1);
 }
 
-void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
+namespace {
+enum class DebugBreakKind { kBreak, kTrap };
+
+void Generate_WasmDebugBreakOrTrap(MacroAssembler* masm, DebugBreakKind kind) {
   HardAbortScope hard_abort(masm);  // Avoid calls to Abort.
   {
     FrameScope scope(masm, StackFrame::WASM_DEBUG_BREAK);
@@ -3311,16 +3314,47 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
     __ MultiPush(WasmDebugBreakFrameConstants::kPushedGpRegs);
     __ MultiPushFPU(WasmDebugBreakFrameConstants::kPushedFpRegs);
 
-    // Initialize the JavaScript context with 0. CEntry will use it to
-    // set the current context on the isolate.
-    __ Move(cp, Smi::zero());
-    __ CallRuntime(Runtime::kWasmDebugBreak, 0);
+    UseScratchRegisterScope temps(masm);
+    Register scratch = temps.Acquire();
 
-    // Restore registers.
-    __ MultiPopFPU(WasmDebugBreakFrameConstants::kPushedFpRegs);
-    __ MultiPop(WasmDebugBreakFrameConstants::kPushedGpRegs);
+    // Load instance data from the caller's frame.
+    __ LoadWord(scratch, MemOperand(fp, 0));
+    __ LoadWord(
+        kWasmImplicitArgRegister,
+        MemOperand(scratch, WasmFrameConstants::kWasmInstanceDataOffset));
+    __ LoadTaggedField(
+        cp, FieldMemOperand(kWasmImplicitArgRegister,
+                            WasmTrustedInstanceData::kNativeContextOffset));
+
+    if (kind == DebugBreakKind::kTrap) {
+      // The error reason was pushed by PrepareDebugTrap before CallBuiltin.
+      // EnterFrame(WASM_DEBUG_BREAK) then pushes:
+      //   Push(ra, fp)  →  [fp+0]=old_fp, [fp+8]=ra
+      //   Push(marker)  →  [fp-8]=marker (below fp)
+      // Reason sits above fp: [fp+16] = 2*kSystemPointerSize.
+      __ LoadWord(scratch, MemOperand(fp, 2 * kSystemPointerSize));
+      __ Push(scratch);
+      __ CallRuntime(Runtime::kThrowWasmError, 1);
+      __ stop();
+    } else {
+      DCHECK_EQ(DebugBreakKind::kBreak, kind);
+      __ CallRuntime(Runtime::kWasmDebugBreak, 0);
+
+      // Restore registers.
+      __ MultiPopFPU(WasmDebugBreakFrameConstants::kPushedFpRegs);
+      __ MultiPop(WasmDebugBreakFrameConstants::kPushedGpRegs);
+    }
   }
-  __ Ret();
+  if (kind == DebugBreakKind::kBreak) __ Ret();
+}
+}  // namespace
+
+void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
+  Generate_WasmDebugBreakOrTrap(masm, DebugBreakKind::kBreak);
+}
+
+void Builtins::Generate_WasmDebugTrap(MacroAssembler* masm) {
+  Generate_WasmDebugBreakOrTrap(masm, DebugBreakKind::kTrap);
 }
 
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -3594,6 +3628,7 @@ void Builtins::Generate_WasmHandleStackOverflow(MacroAssembler* masm) {
     __ AddWord(new_fp, kReturnRegister0, new_fp);
     __ mv(fp, new_fp);
   }
+  SwitchSimulatorStackLimit(masm);
   __ mv(sp, kReturnRegister0);
   {
     UseScratchRegisterScope temps(masm);
@@ -4048,6 +4083,7 @@ void Generate_WasmResumeHelper(MacroAssembler* masm, wasm::OnResume on_resume) {
   }
   __ Trap();
   __ bind(&suspend);
+  __ LoadRoot(kReturnRegister0, RootIndex::kUndefinedValue);
   __ LeaveFrame(StackFrame::WASM_JSPI);
   // Pop receiver + parameter.
   // __ DropArguments(2);

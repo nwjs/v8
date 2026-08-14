@@ -124,6 +124,15 @@ class RegExpMacroAssembler {
   // array, and if the found byte is non-zero, we jump to the on_bit_set label.
   virtual void CheckBitInTable(Handle<ByteArray> table, Label* on_bit_set) = 0;
 
+  // Scan helpers. Each loads the character at |cp_offset| and advances the
+  // position by |advance_by| until its stop condition holds (a single char, one
+  // of two chars, a bit-table test, ...). Position on exit, which SIMD
+  // overrides must preserve:
+  //  - on_match:    stop condition held; position unadvanced, so the matching
+  //                 char is at |cp_offset| (not consumed).
+  //  - on_no_match: bounds check failed first; position left where the load at
+  //                 |cp_offset| went out of bounds, for the caller to step
+  //                 back.
   virtual void SkipUntilBitInTable(int cp_offset, Handle<ByteArray> table,
                                    Handle<ByteArray> nibble_table,
                                    int advance_by, int bounds_check_offset,
@@ -144,10 +153,24 @@ class RegExpMacroAssembler {
   virtual void SkipUntilChar(int cp_offset, int advance_by, unsigned character,
                              int bounds_check_offset, Label* on_match,
                              Label* on_no_match);
+  virtual bool SkipUntilCharUseSimd(int advance_by) { return false; }
+  virtual void SkipUntilCharSimd(int cp_offset, int advance_by,
+                                 unsigned character, int bounds_check_offset,
+                                 Label* on_match, Label* on_no_match) {
+    UNREACHABLE();
+  }
+
   virtual void SkipUntilCharOrChar(int cp_offset, int advance_by,
                                    unsigned char1, unsigned char2,
                                    int bounds_check_offset, Label* on_match,
                                    Label* on_no_match);
+  virtual bool SkipUntilCharOrCharUseSimd(int advance_by) { return false; }
+  virtual void SkipUntilCharOrCharSimd(int cp_offset, int advance_by,
+                                       unsigned char1, unsigned char2,
+                                       int bounds_check_offset, Label* on_match,
+                                       Label* on_no_match) {
+    UNREACHABLE();
+  }
   virtual void SkipUntilGtOrNotBitInTable(int cp_offset, int advance_by,
                                           unsigned character,
                                           Handle<ByteArray> table,
@@ -187,6 +210,21 @@ class RegExpMacroAssembler {
     return false;
   }
   virtual void SkipUntilOneOfMasked3(const SkipUntilOneOfMasked3Args& args);
+
+  // Dispatches on bits [shift, shift + log2(table_size)) of the current
+  // character: control continues at the code offset stored in the table at
+  // index (current_character >> shift) & (table_size - 1). table_size is a
+  // power of two. The caller later emits the table data in place via
+  // EmitTableSwitchTable, once every target label is bound. Only emitted
+  // when CanTableSwitchOnBits() is true.
+  virtual bool CanTableSwitchOnBits() { return false; }
+  virtual void TableSwitchOnBits(int shift, int table_size, Label* table) {
+    UNREACHABLE();
+  }
+  virtual void EmitTableSwitchTable(Label* table,
+                                    base::Vector<Label* const> targets) {
+    UNREACHABLE();
+  }
 
   // Checks whether the given offset from the current position is is in-bounds.
   // May overwrite the current character.
@@ -326,6 +364,25 @@ class RegExpMacroAssembler {
   // be controlled with set_backtrack_limit.
   virtual void set_can_fallback(bool val) { can_fallback_ = val; }
 
+  // Whether any op touched the backtrack stack (a push, pop or stackpointer
+  // transfer) while emitting the body.  Set as the body emits and read back at
+  // GetCode time; a pattern that never backtracks skips the backtrack stack
+  // setup and the fail label push below.
+  bool backtrack_stack_used() const { return backtrack_stack_used_; }
+
+  // The fail label: the bottom-of-stack backtrack target that exhausting all
+  // real backtracks pops to fail the match.  Set once by the compiler; drivers
+  // other than the compiler (the bytecode-to-native code generator, tests)
+  // leave it unset and emit their own as part of the body.
+  virtual void set_fail_label(Label* label) { fail_label_ = label; }
+
+  // Whether GetCode pushes the fail label from the entry prologue instead of
+  // relying on the compiler's up-front PushBacktrack.  Deferring lets the
+  // prologue observe the final backtrack_stack_used() and omit it for patterns
+  // that never backtrack.  Overridden by the assemblers implementing the
+  // elision (x64, arm64).
+  virtual bool prologue_pushes_fail_label() const { return false; }
+
   enum GlobalMode {
     NOT_GLOBAL,
     GLOBAL_NO_ZERO_LENGTH_CHECK,
@@ -369,6 +426,9 @@ class RegExpMacroAssembler {
 
   bool can_fallback() const { return can_fallback_; }
 
+  void set_backtrack_stack_used() { backtrack_stack_used_ = true; }
+  Label* fail_label() const { return fail_label_; }
+
   // Which mode to generate code for (LATIN1 or UC16).
   Mode mode() const { return mode_; }
 
@@ -381,6 +441,8 @@ class RegExpMacroAssembler {
  private:
   uint32_t backtrack_limit_;
   bool can_fallback_ = false;
+  bool backtrack_stack_used_ = false;
+  Label* fail_label_ = nullptr;
   GlobalMode global_mode_;
   Isolate* const isolate_;
   Zone* const zone_;

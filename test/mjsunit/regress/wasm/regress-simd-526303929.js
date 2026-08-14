@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-revectorize --allow-natives-syntax
+// Flags: --wasm-revectorize --allow-natives-syntax
 
 // Regression test for handling Simd256Extract128Lane results as function
 // call arguments. On x64, the Extract128Lane node for lane 0 is elided

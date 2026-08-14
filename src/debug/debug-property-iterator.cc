@@ -50,6 +50,11 @@ void DebugPropertyIterator::AdvanceToPrototype() {
   is_own_ = false;
   if (!prototype_iterator_.HasAccess()) is_done_ = true;
   prototype_iterator_.AdvanceIgnoringProxies();
+  while (!prototype_iterator_.IsAtEnd() &&
+         IsJSProxy(
+             *PrototypeIterator::GetCurrent<JSReceiver>(prototype_iterator_))) {
+    prototype_iterator_.AdvanceIgnoringProxies();
+  }
   if (prototype_iterator_.IsAtEnd()) is_done_ = true;
 }
 

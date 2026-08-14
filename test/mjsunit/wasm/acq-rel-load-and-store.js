@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-acquire-release
+// Flags: --wasm-acquire-release
 
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
@@ -13,49 +13,49 @@ builder.addMemory(1, 1, true);
 builder.addFunction('i32_atomic_load_acquire', kSig_i_i)
     .addBody([
       kExprLocalGet, 0,
-      kAtomicPrefix, kExprI32AtomicLoad, 0x22, kAtomicAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicLoad, 0x12, kAtomicAcqRel, 0
     ])
     .exportFunc();
 
 builder.addFunction('i32_atomic_load8_u_acquire', kSig_i_i)
     .addBody([
       kExprLocalGet, 0,
-      kAtomicPrefix, kExprI32AtomicLoad8U, 0x20, kAtomicAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicLoad8U, 0x10, kAtomicAcqRel, 0
     ])
     .exportFunc();
 
 builder.addFunction('i32_atomic_load16_u_acquire', kSig_i_i)
     .addBody([
       kExprLocalGet, 0,
-      kAtomicPrefix, kExprI32AtomicLoad16U, 0x21, kAtomicAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicLoad16U, 0x11, kAtomicAcqRel, 0
     ])
     .exportFunc();
 
 builder.addFunction('i64_atomic_load_acquire', kSig_l_i)
   .addBody([
     kExprLocalGet, 0,
-    kAtomicPrefix, kExprI64AtomicLoad, 0x23, kAtomicAcqRel, 0
+    kAtomicPrefix, kExprI64AtomicLoad, 0x13, kAtomicAcqRel, 0
   ])
   .exportFunc();
 
 builder.addFunction('i64_atomic_load8_u_acquire', kSig_l_i)
     .addBody([
       kExprLocalGet, 0,
-      kAtomicPrefix, kExprI64AtomicLoad8U, 0x20, kAtomicAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicLoad8U, 0x10, kAtomicAcqRel, 0
     ])
     .exportFunc();
 
 builder.addFunction('i64_atomic_load16_u_acquire', kSig_l_i)
     .addBody([
       kExprLocalGet, 0,
-      kAtomicPrefix, kExprI64AtomicLoad16U, 0x21, kAtomicAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicLoad16U, 0x11, kAtomicAcqRel, 0
     ])
     .exportFunc();
 
 builder.addFunction('i64_atomic_load32_u_acquire', kSig_l_i)
     .addBody([
       kExprLocalGet, 0,
-      kAtomicPrefix, kExprI64AtomicLoad32U, 0x22, kAtomicAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicLoad32U, 0x12, kAtomicAcqRel, 0
     ])
     .exportFunc();
 
@@ -64,7 +64,7 @@ builder.addFunction('i64_atomic_load32_u_acquire', kSig_l_i)
 builder.addFunction('i32_atomic_store_release', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicStore, 0x22, kAtomicAcqRel, 0,
+      kAtomicPrefix, kExprI32AtomicStore, 0x12, kAtomicAcqRel, 0,
       kExprLocalGet, 0,
       kAtomicPrefix, kExprI32AtomicLoad, 2, 0,
     ])
@@ -73,7 +73,7 @@ builder.addFunction('i32_atomic_store_release', kSig_i_ii)
 builder.addFunction('i32_atomic_store8_u_release', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicStore8U, 0x20, kAtomicAcqRel, 0,
+      kAtomicPrefix, kExprI32AtomicStore8U, 0x10, kAtomicAcqRel, 0,
       kExprLocalGet, 0,
       kAtomicPrefix, kExprI32AtomicLoad8U, 0, 0,
     ])
@@ -82,7 +82,7 @@ builder.addFunction('i32_atomic_store8_u_release', kSig_i_ii)
 builder.addFunction('i32_atomic_store16_u_release', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicStore16U, 0x21, kAtomicAcqRel, 0,
+      kAtomicPrefix, kExprI32AtomicStore16U, 0x11, kAtomicAcqRel, 0,
       kExprLocalGet, 0,
       kAtomicPrefix, kExprI32AtomicLoad16U, 1, 0,
     ])
@@ -92,7 +92,7 @@ builder.addFunction(
     'i64_atomic_store_release', makeSig([kWasmI32, kWasmI64], [kWasmI64]))
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicStore, 0x23, kAtomicAcqRel, 0,
+      kAtomicPrefix, kExprI64AtomicStore, 0x13, kAtomicAcqRel, 0,
       kExprLocalGet, 0,
       kAtomicPrefix, kExprI64AtomicLoad, 3, 0,
     ])
@@ -103,7 +103,7 @@ builder.addFunction(
     makeSig([kWasmI32, kWasmI64], [kWasmI64]))
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicStore8U, 0x20, kAtomicAcqRel, 0,
+      kAtomicPrefix, kExprI64AtomicStore8U, 0x10, kAtomicAcqRel, 0,
       kExprLocalGet, 0,
       kAtomicPrefix, kExprI64AtomicLoad8U, 0, 0,
     ])
@@ -114,7 +114,7 @@ builder.addFunction(
     makeSig([kWasmI32, kWasmI64], [kWasmI64]))
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicStore16U, 0x21, kAtomicAcqRel, 0,
+      kAtomicPrefix, kExprI64AtomicStore16U, 0x11, kAtomicAcqRel, 0,
       kExprLocalGet, 0, kAtomicPrefix, kExprI64AtomicLoad16U, 1, 0,
     ])
     .exportFunc();
@@ -124,7 +124,7 @@ builder.addFunction(
     makeSig([kWasmI32, kWasmI64], [kWasmI64]))
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicStore32U, 0x22, kAtomicAcqRel, 0,
+      kAtomicPrefix, kExprI64AtomicStore32U, 0x12, kAtomicAcqRel, 0,
       kExprLocalGet, 0, kAtomicPrefix, kExprI64AtomicLoad32U, 2, 0,
     ])
     .exportFunc();

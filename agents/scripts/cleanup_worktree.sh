@@ -21,9 +21,10 @@ WS_ROOT="$(dirname "$TOPLEVEL")"
 
 if command -v rift >/dev/null 2>&1 && [ -f "$WS_ROOT/.rift_prime_directive.json" ]; then
   CURRENT_WS="$(basename "$WS_ROOT")"
-  RIFT_PARENT_DIR="$(dirname "$WS_ROOT")"
 
-  if [[ "$TASK_ID" == "${CURRENT_WS}_subagent_"* ]] || [ -d "$RIFT_PARENT_DIR/$TASK_ID" ]; then
+  # Mirror create_worktree.sh: a bare TASK_ID names the subagent workspace only
+  # when it already carries the prefix, otherwise derive it.
+  if [[ "$TASK_ID" == "${CURRENT_WS}_subagent_"* ]]; then
     SUBAGENT_WS="$TASK_ID"
   else
     SUBAGENT_WS="${CURRENT_WS}_subagent_${TASK_ID}"

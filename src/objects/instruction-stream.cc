@@ -141,5 +141,22 @@ void InstructionStream::ValidateJSDispatchHandles(Heap* heap,
   }
 }
 
+#ifdef V8_ENABLE_GENERATED_CODE_VALIDATOR
+bool InstructionStream::IsValidated() const {
+  return ReadField<bool>(kIsValidatedOffset);
+}
+
+void InstructionStream::SetValidated() {
+  DCHECK(!IsValidated());
+  WritableJitAllocation writable_allocation =
+      ThreadIsolation::LookupJitAllocation(
+          address(), InstructionStream::SizeFor(body_size()),
+          ThreadIsolation::JitAllocationType::kInstructionStream);
+  DCHECK_EQ(InstructionStream::SizeFor(body_size()),
+            writable_allocation.size());
+  writable_allocation.WriteHeaderSlot<bool, kIsValidatedOffset>(true);
+}
+#endif  // V8_ENABLE_GENERATED_CODE_VALIDATOR
+
 }  // namespace internal
 }  // namespace v8

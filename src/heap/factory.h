@@ -8,6 +8,7 @@
 // Clients of this interface shouldn't depend on lots of heap internals.
 // Do not include anything from src/heap here!
 #include "src/base/strings.h"
+#include "src/base/strong-alias.h"
 #include "src/base/vector.h"
 #include "src/baseline/baseline.h"
 #include "src/builtins/builtins.h"
@@ -109,7 +110,7 @@ class StackMemory;
 }  // namespace wasm
 #endif
 
-enum class InitializedFlag : uint8_t;
+using InitializedFlag = base::StrongAlias<struct InitializedFlagTag, bool>;
 
 enum FunctionMode {
   kWithNameBit = 1 << 0,
@@ -577,7 +578,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<Foreign> NewForeign(
       Address addr, AllocationType allocation_type = AllocationType::kYoung);
 
-  Handle<TrustedForeign> NewTrustedForeign(Address addr, SharedFlag shared);
+  Handle<TrustedForeign> NewTrustedForeign(Address addr);
 
   Handle<Cell> NewCell(Tagged<Smi> value);
   Handle<Cell> NewCell();
@@ -852,21 +853,20 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       DirectHandle<Map> map);
 
 #if V8_ENABLE_WEBASSEMBLY
-  DirectHandle<WasmTrustedInstanceData> NewWasmTrustedInstanceData(
-      SharedFlag shared);
+  DirectHandle<WasmTrustedInstanceData> NewWasmTrustedInstanceData();
   DirectHandle<WasmDispatchTable> NewWasmDispatchTable(
-      int length, wasm::CanonicalValueType table_type, SharedFlag shared);
+      int length, wasm::CanonicalValueType table_type);
   DirectHandle<WasmDispatchTableForImports> NewWasmDispatchTableForImports(
-      int length, SharedFlag shared);
+      int length);
   DirectHandle<WasmTypeInfo> NewWasmTypeInfo(
       wasm::CanonicalValueType type, wasm::CanonicalValueType element_type,
       DirectHandle<Map> opt_parent, int num_supertypes, SharedFlag shared);
   DirectHandle<WasmInternalFunction> NewWasmInternalFunction(
-      DirectHandle<TrustedObject> ref, int function_index, SharedFlag shared,
+      DirectHandle<TrustedObject> ref, int function_index,
       WasmCodePointer call_target, const wasm::CanonicalSig* sig);
   DirectHandle<WasmFuncRef> NewWasmFuncRef(
       DirectHandle<WasmInternalFunction> internal_function,
-      DirectHandle<Map> rtt, SharedFlag shared);
+      DirectHandle<Map> rtt);
   DirectHandle<WasmCapiFunctionData> NewWasmCapiFunctionData(
       Address call_target, DirectHandle<Foreign> embedder_data,
       DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
@@ -880,12 +880,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   DirectHandle<WasmImportData> NewWasmImportData(
       DirectHandle<HeapObject> callable, wasm::Suspend suspend,
       MaybeDirectHandle<WasmTrustedInstanceData> importing_instance_data,
-      const wasm::CanonicalSig* sig, SharedFlag shared);
+      const wasm::CanonicalSig* sig);
   DirectHandle<WasmImportData> NewWasmImportData(
-      DirectHandle<WasmImportData> ref, SharedFlag shared);
-  Handle<AsmWasmData> NewAsmWasmData(
-      DirectHandle<TrustedManaged<wasm::NativeModule>> managed_native_module,
-      uint64_t uses_bitset);
+      DirectHandle<WasmImportData> ref);
 
   DirectHandle<WasmFastApiCallData> NewWasmFastApiCallData(
       DirectHandle<HeapObject> signature, DirectHandle<Object> callback_data);
@@ -924,7 +921,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // {MessageTemplate} if computing the array's elements leads to an error.
   DirectHandle<Object> NewWasmArrayFromElementSegment(
       DirectHandle<WasmTrustedInstanceData> trusted_instance_data,
-      DirectHandle<WasmTrustedInstanceData> shared_trusted_instance_data,
       uint32_t segment_index, uint32_t start_offset, uint32_t length,
       DirectHandle<Map> map, AllocationType allocation,
       wasm::CanonicalValueType element_type);
@@ -955,7 +951,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   MaybeHandle<JSArrayBuffer> NewJSArrayBufferAndBackingStore(
       size_t byte_length, size_t max_byte_length, InitializedFlag initialized,
-      ResizableFlag resizable = ResizableFlag::kNotResizable,
+      ResizableFlag resizable = ResizableFlag{false},
       AllocationType allocation = AllocationType::kYoung);
 
   Handle<JSArrayBuffer> NewJSSharedArrayBuffer(
@@ -1215,7 +1211,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   DirectHandle<String> ToPrimitiveHintString(ToPrimitiveHint hint);
 
   Handle<JSPromise> NewJSPromiseWithoutHook();
-  Handle<JSPromise> NewJSPromise();
+  // Creates a new JSPromise and runs the PromiseHook kInit event. If `parent`
+  // is non-null it is reported as the parent promise (e.g. for promise chains
+  // created via Promise.prototype.then); otherwise the parent is undefined.
+  Handle<JSPromise> NewJSPromise(DirectHandle<Object> parent = {});
 
   DirectHandle<Context> CreatePromiseAllResolveElementContext(
       DirectHandle<PromiseCapability> capability);

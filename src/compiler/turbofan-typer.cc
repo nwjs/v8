@@ -2173,6 +2173,7 @@ Type Typer::Visitor::TypeJSCallWithSpread(Node* node) {
 Type Typer::Visitor::TypeJSCallRuntime(Node* node) {
   switch (CallRuntimeParametersOf(node->op()).id()) {
     case Runtime::kInlineCreateIterResultObject:
+    case Runtime::kInlineGeneratorYieldResult:
       return Type::OtherObject();
     case Runtime::kHasInPrototypeChain:
       return Type::Boolean();

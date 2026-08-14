@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-shared --experimental-wasm-imported-strings-utf8
+// Flags: --wasm-shared --wasm-imported-strings-utf8
 
 // Adapted from 'test/mjsunit/wasm/imported-strings-utf8.js'.
 

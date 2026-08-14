@@ -51,90 +51,90 @@ enum InstanceType : uint16_t;
   V(TurboshaftWord64SetType)         \
   IF_WASM(V, WasmNull)
 
-#define POINTER_VISITOR_ID_LIST(V)    \
-  V(AccessorInfo)                     \
-  V(AllocationSite)                   \
-  V(BytecodeWrapper)                  \
-  V(CallSiteInfo)                     \
-  V(Cell)                             \
-  V(CodeWrapper)                      \
-  V(ConsString)                       \
-  V(Context)                          \
-  V(ContextCell)                      \
-  V(CppHeapExternalObject)            \
-  V(DataHandler)                      \
-  V(DescriptorArray)                  \
-  V(StrongDescriptorArray)            \
-  V(DoubleStringCache)                \
-  V(EmbedderDataArray)                \
-  V(EphemeronHashTable)               \
-  V(ExternalString)                   \
-  V(FeedbackCell)                     \
-  V(FeedbackVector)                   \
-  V(Foreign)                          \
-  V(FreeSpace)                        \
-  V(FunctionTemplateInfo)             \
-  V(InterceptorInfo)                  \
-  V(JSApiObject)                      \
-  V(JSArrayBuffer)                    \
-  V(JSDataViewOrRabGsabDataView)      \
-  V(JSDate)                           \
-  V(JSExternalObject)                 \
-  V(JSFinalizationRegistry)           \
-  V(JSFunction)                       \
-  V(JSObject)                         \
-  V(JSObjectFast)                     \
-  V(JSProxy)                          \
-  V(JSRegExp)                         \
-  V(JSSynchronizationPrimitive)       \
-  V(JSTypedArray)                     \
-  V(JSWeakCollection)                 \
-  V(JSWeakRef)                        \
-  V(Map)                              \
-  V(MegaDomHandler)                   \
-  V(NativeContext)                    \
-  V(Oddball)                          \
-  V(OnHeapBasicBlockProfilerData)     \
-  V(PreparseData)                     \
-  V(PropertyArray)                    \
-  V(PropertyCell)                     \
-  V(PrototypeInfo)                    \
-  V(PrototypeSharedClosureInfo)       \
-  V(RegExpBoilerplateDescription)     \
-  V(RegExpDataWrapper)                \
-  V(ScopeInfo)                        \
-  V(SharedFunctionInfo)               \
-  V(ShortcutCandidate)                \
-  V(SlicedString)                     \
-  V(SmallOrderedHashMap)              \
-  V(SmallOrderedHashSet)              \
-  V(SmallOrderedNameDictionary)       \
-  V(SortState)                        \
-  V(SourceTextModule)                 \
-  V(Struct)                           \
-  V(SwissNameDictionary)              \
-  V(Symbol)                           \
-  V(TurbofanHeapConstantType)         \
-  V(TurbofanUnionType)                \
-  V(SyntheticModule)                  \
-  V(ThinString)                       \
-  V(TransitionArray)                  \
-  IF_WASM(V, WasmArray)               \
-  IF_WASM(V, WasmFuncRef)             \
-  IF_WASM(V, WasmGlobalObject)        \
-  IF_WASM(V, WasmInstanceObject)      \
-  IF_WASM(V, WasmMemoryObject)        \
-  IF_WASM(V, WasmResumeData)          \
-  IF_WASM(V, WasmStruct)              \
-  IF_WASM(V, WasmSuspendingObject)    \
-  IF_WASM(V, WasmContinuationObject)  \
-  IF_WASM(V, WasmFastApiCallData)     \
-  IF_WASM(V, WasmStackObject)         \
-  IF_WASM(V, WasmStringViewIter)      \
-  IF_WASM(V, WasmTableObject)         \
-  IF_WASM(V, WasmTagObject)           \
-  IF_WASM(V, WasmTypeInfo)            \
-  V(WeakCell)                         \
+#define POINTER_VISITOR_ID_LIST(V)   \
+  V(AccessorInfo)                    \
+  V(AllocationSite)                  \
+  V(BytecodeWrapper)                 \
+  V(CallSiteInfo)                    \
+  V(Cell)                            \
+  V(CodeWrapper)                     \
+  V(ConsString)                      \
+  V(Context)                         \
+  V(ContextCell)                     \
+  V(CppHeapExternalObject)           \
+  V(DataHandler)                     \
+  V(DescriptorArray)                 \
+  V(DoubleStringCache)               \
+  V(EmbedderDataArray)               \
+  V(EphemeronHashTable)              \
+  V(ExternalString)                  \
+  V(FeedbackCell)                    \
+  V(FeedbackVector)                  \
+  V(Foreign)                         \
+  V(FreeSpace)                       \
+  V(FunctionTemplateInfo)            \
+  V(InterceptorInfo)                 \
+  V(JSApiObject)                     \
+  V(JSArrayBuffer)                   \
+  V(JSDataViewOrRabGsabDataView)     \
+  V(JSDate)                          \
+  V(JSExternalObject)                \
+  V(JSFinalizationRegistry)          \
+  V(JSFunction)                      \
+  V(JSGlobalProxy)                   \
+  V(JSObject)                        \
+  V(JSObjectFast)                    \
+  V(JSProxy)                         \
+  V(JSRegExp)                        \
+  V(JSSynchronizationPrimitive)      \
+  V(JSTypedArray)                    \
+  V(JSWeakCollection)                \
+  V(JSWeakRef)                       \
+  V(Map)                             \
+  V(MegaDomHandler)                  \
+  V(NativeContext)                   \
+  V(Oddball)                         \
+  V(OnHeapBasicBlockProfilerData)    \
+  V(PreparseData)                    \
+  V(PropertyArray)                   \
+  V(PropertyCell)                    \
+  V(PrototypeInfo)                   \
+  V(PrototypeSharedClosureInfo)      \
+  V(RegExpBoilerplateDescription)    \
+  V(RegExpDataWrapper)               \
+  V(ScopeInfo)                       \
+  V(SharedFunctionInfo)              \
+  V(ShortcutCandidate)               \
+  V(SlicedString)                    \
+  V(SmallOrderedHashMap)             \
+  V(SmallOrderedHashSet)             \
+  V(SmallOrderedNameDictionary)      \
+  V(SortState)                       \
+  V(SourceTextModule)                \
+  V(Struct)                          \
+  V(SwissNameDictionary)             \
+  V(Symbol)                          \
+  V(TurbofanHeapConstantType)        \
+  V(TurbofanUnionType)               \
+  V(SyntheticModule)                 \
+  V(ThinString)                      \
+  V(TransitionArray)                 \
+  IF_WASM(V, WasmArray)              \
+  IF_WASM(V, WasmFuncRef)            \
+  IF_WASM(V, WasmGlobalObject)       \
+  IF_WASM(V, WasmInstanceObject)     \
+  IF_WASM(V, WasmMemoryObject)       \
+  IF_WASM(V, WasmResumeData)         \
+  IF_WASM(V, WasmStruct)             \
+  IF_WASM(V, WasmSuspendingObject)   \
+  IF_WASM(V, WasmContinuationObject) \
+  IF_WASM(V, WasmFastApiCallData)    \
+  IF_WASM(V, WasmStackObject)        \
+  IF_WASM(V, WasmStringViewIter)     \
+  IF_WASM(V, WasmTableObject)        \
+  IF_WASM(V, WasmTagObject)          \
+  IF_WASM(V, WasmTypeInfo)           \
+  V(WeakCell)                        \
   SIMPLE_HEAP_OBJECT_LIST1(V)
 
 #define TRUSTED_VISITOR_ID_LIST(V) CONCRETE_TRUSTED_OBJECT_TYPE_LIST1(V)
@@ -993,8 +993,6 @@ V8_OBJECT class Map : public HeapObject {
 #undef MAKE_CASE
       case DESCRIPTOR_ARRAY_TYPE:
         return RootIndex::kDescriptorArrayMap;
-      case STRONG_DESCRIPTOR_ARRAY_TYPE:
-        return RootIndex::kStrongDescriptorArrayMap;
       case ON_HEAP_BASIC_BLOCK_PROFILER_DATA_TYPE:
         return RootIndex::kOnHeapBasicBlockProfilerDataMap;
       case TURBOFAN_BITSET_TYPE_TYPE:

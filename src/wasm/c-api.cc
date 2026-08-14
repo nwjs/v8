@@ -2317,7 +2317,7 @@ WASM_EXPORT auto Memory::make(Store* store_abs, const MemoryType* type)
     if (maximum > i::wasm::kSpecMaxMemory32Pages) return nullptr;
   }
   // TODO(wasm+): Support shared memory and memory64.
-  i::SharedFlag shared = i::SharedFlag::kNo;
+  i::SharedFlag shared = i::SharedFlag{false};
   i::wasm::AddressType address_type = i::wasm::AddressType::kI32;
   i::DirectHandle<i::WasmMemoryObject> memory_obj;
   if (!i::WasmMemoryObject::New(isolate, minimum, maximum, shared, address_type)
@@ -2420,8 +2420,7 @@ WASM_EXPORT own<Instance> Instance::make(Store* store_abs,
   i::wasm::ErrorThrower thrower(isolate, "instantiation");
   i::MaybeDirectHandle<i::WasmInstanceObject> instance_obj =
       i::wasm::GetWasmEngine()->SyncInstantiate(
-          isolate, &thrower, module->v8_object(), imports_obj,
-          i::MaybeDirectHandle<i::JSArrayBuffer>());
+          isolate, &thrower, module->v8_object(), imports_obj);
   if (trap) {
     if (thrower.error()) {
       *trap = implement<Trap>::type::make(

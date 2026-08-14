@@ -114,17 +114,25 @@ class LiteralBuffer final {
     return iscntrl(code_unit) || isprint(code_unit);
   }
 
-  V8_INLINE void AddOneByteChar(uint8_t one_byte_char) {
-    DCHECK(is_one_byte());
-    if (position_ >= backing_store_.size()) ExpandBuffer();
+  V8_INLINE void AddOneByteCharUnchecked(uint8_t one_byte_char) {
     backing_store_[position_] = one_byte_char;
     position_ += kOneByteSize;
+  }
+
+  V8_INLINE void AddOneByteChar(uint8_t one_byte_char) {
+    DCHECK(is_one_byte());
+    if (V8_UNLIKELY(position_ >= backing_store_.size())) {
+      return ExpandBufferAndAddOneByteChar(one_byte_char);
+    }
+    AddOneByteCharUnchecked(one_byte_char);
   }
 
   void AddTwoByteChar(base::uc32 code_unit);
   size_t NewCapacity(size_t min_capacity);
   V8_NOINLINE V8_PRESERVE_MOST void ExpandBuffer();
   V8_NOINLINE V8_PRESERVE_MOST void ExpandBufferTo(size_t min_size);
+  V8_NOINLINE V8_PRESERVE_MOST void ExpandBufferAndAddOneByteChar(
+      uint8_t one_byte_char);
   void ConvertToTwoByte();
 
   base::Vector<uint8_t> backing_store_;

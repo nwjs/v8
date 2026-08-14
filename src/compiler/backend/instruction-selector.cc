@@ -10,6 +10,7 @@
 #include "include/v8-internal.h"
 #include "src/base/iterator.h"
 #include "src/base/logging.h"
+#include "src/base/strong-alias.h"
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/tick-counter.h"
@@ -2031,6 +2032,7 @@ IF_WASM(VISIT_UNSUPPORTED_OP, MemoryCopy)
 IF_WASM(VISIT_UNSUPPORTED_OP, MemoryFill)
 
 IF_SIMD128(VISIT_UNSUPPORTED_OP, I32x4AddPairwise)
+IF_SIMD128(VISIT_UNSUPPORTED_OP, I32x4DotI8x16S)
 
 IF_SIMD128(VISIT_UNSUPPORTED_OP, I8x16MoveLane)
 IF_SIMD128(VISIT_UNSUPPORTED_OP, I16x8MoveLane)
@@ -2297,8 +2299,7 @@ void InstructionSelector::VisitCall(
   }
 
   // Pass label of exception handler block.
-  bool lazy_deopt_on_throw =
-      call_op.descriptor->lazy_deopt_on_throw == LazyDeoptOnThrow::kYes;
+  bool lazy_deopt_on_throw = call_op.descriptor->lazy_deopt_on_throw.value();
   if (exception_handler) {
     flags |= CallDescriptor::kHasExceptionHandler;
     buffer.instruction_args.push_back(g.Label(exception_handler));
@@ -2421,7 +2422,9 @@ void InstructionSelector::VisitTailCall(OpIndex node) {
                        OptionalOpIndex::Nullopt(), call_op.arguments(),
                        static_cast<int>(call_op.outputs_rep().size()),
                        stack_param_delta);
-  UpdateMaxPushedArgumentCount(stack_param_delta);
+  if (stack_param_delta > 0) {
+    UpdateMaxPushedArgumentCount(stack_param_delta);
+  }
 
   // Select the appropriate opcode based on the call type.
   InstructionCode opcode;
@@ -3565,7 +3568,13 @@ void InstructionSelector::VisitNode(OpIndex node) {
           if constexpr (Is64()) {
             DCHECK_EQ(cast.kind, TaggedBitcastOp::Kind::kSmi);
             DCHECK(SmiValuesAre31Bits());
+// On the LoongArch64 platform, 32-bit integers should always be
+// sign-extended.
+#if V8_TARGET_ARCH_LOONG64
+            return VisitTruncateInt64ToInt32(node);
+#else
             return VisitBitcastSmiToWord(node);
+#endif
           } else {
             return VisitBitcastTaggedToWord(node);
           }
@@ -3584,7 +3593,11 @@ void InstructionSelector::VisitNode(OpIndex node) {
         case multi(Rep::Compressed(), Rep::Word32()):
           MarkAsWord32(node);
           if (cast.kind == TaggedBitcastOp::Kind::kSmi) {
+#if V8_TARGET_ARCH_LOONG64
+            return VisitTruncateInt64ToInt32(node);
+#else
             return VisitBitcastSmiToWord(node);
+#endif
           } else {
             return VisitBitcastTaggedToWord(node);
           }

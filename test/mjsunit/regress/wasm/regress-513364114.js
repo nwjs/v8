@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-shared --allow-natives-syntax
+// Flags: --wasm-shared --allow-natives-syntax
 // Flags: --wasm-wrapper-tiering-budget=10
 
 // Optimized JS-to-Wasm export wrapper ToJS should call String::Unshare for

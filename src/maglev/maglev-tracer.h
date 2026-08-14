@@ -214,6 +214,9 @@ class TraceLogger {
 #define TRACE_INLINING(...) TRACE_IMPL(trace_inlining, tracer_, __VA_ARGS__)
 #define TRACE_PEEL(...) \
   TRACE_IMPL(trace_loop_peeling, tracer_, "[loop-peeling] " << __VA_ARGS__)
+#define TRACE_ESCAPE_ANALYSIS(...)           \
+  TRACE_IMPL(trace_escape_analysis, tracer_, \
+             "[escape-analysis] " << __VA_ARGS__)
 
 }  // namespace v8::internal::maglev
 

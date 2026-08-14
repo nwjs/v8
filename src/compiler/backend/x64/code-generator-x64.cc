@@ -8221,7 +8221,9 @@ void CodeGenerator::AssembleConstructFrame() {
   if (required_slots > 0) {
     DCHECK(frame_access_state()->has_frame());
 #if V8_ENABLE_WEBASSEMBLY
-    if (info()->IsWasm() && required_slots * kSystemPointerSize > 4 * KB) {
+    int32_t stack_space =
+        required_slots * kSystemPointerSize + GetStackCheckOffset();
+    if (info()->IsWasm() && stack_space > 4 * KB) {
       // For WebAssembly functions with big frames we have to do the stack
       // overflow check before we construct the frame. Otherwise we may not
       // have enough space on the stack to call the runtime for the stack
@@ -8231,11 +8233,10 @@ void CodeGenerator::AssembleConstructFrame() {
       // If the frame is bigger than the stack, we throw the stack overflow
       // exception unconditionally. Thereby we can avoid the integer overflow
       // check in the condition code.
-      if (required_slots * kSystemPointerSize < v8_flags.stack_size * KB) {
+      if (stack_space < v8_flags.stack_size * KB) {
         __ movq(kScratchRegister,
                 __ StackLimitAsOperand(StackLimitKind::kRealStackLimit));
-        __ addq(kScratchRegister,
-                Immediate(required_slots * kSystemPointerSize));
+        __ addq(kScratchRegister, Immediate(stack_space));
         __ cmpq(rsp, kScratchRegister);
         __ j(above_equal, &done, Label::kNear);
       }
@@ -8251,7 +8252,7 @@ void CodeGenerator::AssembleConstructFrame() {
         for (auto reg : wasm::kFpParamRegisters) fp_regs_to_save.set(reg);
         __ PushAll(fp_regs_to_save);
         __ movq(WasmHandleStackOverflowDescriptor::GapRegister(),
-                Immediate(required_slots * kSystemPointerSize));
+                Immediate(stack_space));
         __ movq(WasmHandleStackOverflowDescriptor::FrameBaseRegister(), rbp);
         __ addq(WasmHandleStackOverflowDescriptor::FrameBaseRegister(),
                 Immediate(static_cast<int32_t>(
@@ -8967,6 +8968,7 @@ void CodeGenerator::AssembleSwap(InstructionOperand* source,
         // Use the XOR trick to swap without a temporary. The xorps may read
         // from unaligned address, causing a slowdown, but swaps
         // between slots should be rare.
+        CpuFeatureScope avx_scope(masm(), AVX);
         __ vmovups(kScratchSimd256Reg, src);
         __ vxorps(kScratchSimd256Reg, kScratchSimd256Reg,
                   dst);  // scratch contains src ^ dst.

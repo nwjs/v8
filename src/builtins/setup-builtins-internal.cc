@@ -4,6 +4,7 @@
 
 #include <fstream>
 
+#include "src/base/strong-alias.h"
 #include "src/builtins/builtins-effects-analyzer.h"
 #include "src/builtins/builtins-inl.h"
 #include "src/builtins/profile-data-reader.h"
@@ -160,7 +161,7 @@ using CodeAssemblerInstaller = compiler::Pipeline::CodeAssemblerInstaller;
 DirectHandle<Code> BuildPlaceholder(Isolate* isolate, Builtin builtin) {
   HandleScope scope(isolate);
   uint8_t buffer[kBufferSize];
-  MacroAssembler masm(isolate, CodeObjectRequired::kYes,
+  MacroAssembler masm(isolate, CodeObjectRequired{true},
                       ExternalAssemblerBuffer(buffer, kBufferSize));
   DCHECK(!masm.has_frame());
   {
@@ -186,7 +187,7 @@ V8_NOINLINE Tagged<Code> BuildWithMacroAssembler(
   uint8_t buffer[kBufferSize];
 
   MacroAssembler masm(isolate, BuiltinAssemblerOptions(isolate, builtin),
-                      CodeObjectRequired::kYes,
+                      CodeObjectRequired{true},
                       ExternalAssemblerBuffer(buffer, kBufferSize));
   masm.set_builtin(builtin);
   DCHECK(!masm.has_frame());
@@ -226,10 +227,18 @@ V8_NOINLINE Tagged<Code> BuildWithMacroAssembler(
   masm.GetCode(isolate->main_thread_local_isolate(), &desc,
                MacroAssembler::kNoSafepointTable, handler_table_offset);
 
+  int parameter_count = 0;
+#if V8_ENABLE_WEBASSEMBLY
+  if (builtin == Builtin::kWasmResume || builtin == Builtin::kWasmReject) {
+    parameter_count = Builtins::GetFormalParameterCount(builtin);
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
+
   DirectHandle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::BUILTIN)
           .set_self_reference(masm.CodeObject())
           .set_builtin(builtin)
+          .set_parameter_count(parameter_count)
           .Build();
 #if defined(V8_OS_WIN64)
   isolate->SetBuiltinUnwindData(builtin, masm.GetUnwindInfo());
@@ -242,7 +251,7 @@ Tagged<Code> BuildAdaptor(Isolate* isolate, Builtin builtin,
   HandleScope scope(isolate);
   uint8_t buffer[kBufferSize];
   MacroAssembler masm(isolate, BuiltinAssemblerOptions(isolate, builtin),
-                      CodeObjectRequired::kYes,
+                      CodeObjectRequired{true},
                       ExternalAssemblerBuffer(buffer, kBufferSize));
   masm.set_builtin(builtin);
   DCHECK(!masm.has_frame());

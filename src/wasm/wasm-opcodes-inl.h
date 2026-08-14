@@ -35,7 +35,6 @@ constexpr const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     case kSimdPrefix:
     case kAtomicPrefix:
     case kGCPrefix:
-    case kAsmJsPrefix:
       return "unknown";
   }
   // Even though the switch above handles all well-defined enum values,
@@ -130,12 +129,6 @@ constexpr WasmOpcodeSig GetShortOpcodeSigIndex(uint8_t opcode) {
 #undef CASE
 }
 
-constexpr WasmOpcodeSig GetAsmJsOpcodeSigIndex(uint8_t opcode) {
-#define CASE(name, opc, sig, ...) opcode == (opc & 0xFF) ? kSigEnum_##sig:
-  return FOREACH_ASMJS_COMPAT_OPCODE(CASE) kSigEnum_None;
-#undef CASE
-}
-
 constexpr WasmOpcodeSig GetSimdOpcodeSigIndex(uint8_t opcode) {
 #define CASE(name, opc, sig, ...) opcode == (opc & 0xFF) ? kSigEnum_##sig:
   return FOREACH_SIMD_MVP_0_OPERAND_OPCODE(CASE) FOREACH_SIMD_MEM_OPCODE(CASE)
@@ -172,8 +165,6 @@ constexpr WasmOpcodeSig GetNumericOpcodeSigIndex(uint8_t opcode) {
 
 constexpr std::array<WasmOpcodeSig, 256> kShortSigTable =
     base::make_array<256>(GetShortOpcodeSigIndex);
-constexpr std::array<WasmOpcodeSig, 256> kSimpleAsmjsExprSigTable =
-    base::make_array<256>(GetAsmJsOpcodeSigIndex);
 constexpr std::array<WasmOpcodeSig, 256> kSimdExprSigTable =
     base::make_array<256>(GetSimdOpcodeSigIndex);
 constexpr std::array<WasmOpcodeSig, 256> kRelaxedSimdExprSigTable =
@@ -206,8 +197,6 @@ constexpr const FunctionSig* WasmOpcodes::Signature(WasmOpcode opcode) {
     }
     case kNumericPrefix:
       return impl::kCachedSigs[impl::kNumericExprSigTable[opcode & 0xff]];
-    case kAsmJsPrefix:
-      return impl::kCachedSigs[impl::kSimpleAsmjsExprSigTable[opcode & 0xff]];
     default:
       UNREACHABLE();  // invalid prefix.
   }
@@ -220,11 +209,6 @@ constexpr const FunctionSig* WasmOpcodes::SignatureForAtomicOp(
   } else {
     return impl::kCachedSigs[impl::kAtomicExprSigTableMem32[opcode & 0xff]];
   }
-}
-
-constexpr const FunctionSig* WasmOpcodes::AsmjsSignature(WasmOpcode opcode) {
-  DCHECK_GT(impl::kSimpleAsmjsExprSigTable.size(), (opcode & 0xff));
-  return impl::kCachedSigs[impl::kSimpleAsmjsExprSigTable[opcode & 0xff]];
 }
 
 }  // namespace wasm

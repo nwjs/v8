@@ -70,7 +70,7 @@ bool CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
     base::Vector<const uint8_t> func_code =
         wire_bytes_accessor.GetFunctionBytes(&func);
     FunctionBody func_body(func.sig, func.code.offset(), func_code.begin(),
-                           func_code.end(), SharedFlag::kNo);
+                           func_code.end());
     auto result = ExecuteLiftoffCompilation(
         &env, func_body,
         LiftoffOptions{.func_index = static_cast<int>(func.func_index),
@@ -439,9 +439,8 @@ MaybeDirectHandle<WasmModuleObject> CompileReferenceModule(
   constexpr bool kNoVerifyFunctions = false;
   auto enabled_features = WasmEnabledFeatures::FromIsolate(isolate);
   WasmDetectedFeatures detected_features;
-  ModuleResult module_res =
-      DecodeWasmModule(enabled_features, wire_bytes, kNoVerifyFunctions,
-                       ModuleOrigin::kWasmOrigin, &detected_features);
+  ModuleResult module_res = DecodeWasmModule(
+      enabled_features, wire_bytes, kNoVerifyFunctions, &detected_features);
   CHECK(module_res.ok());
   std::shared_ptr<WasmModule> module = std::move(module_res).value();
   CHECK_NOT_NULL(module);
@@ -522,8 +521,8 @@ ExecutionResult ExecuteReferenceRun(Isolate* isolate,
   {
     ErrorThrower thrower(isolate, "ExecuteAgainstReference");
     if (!GetWasmEngine()
-             ->SyncInstantiate(isolate, &thrower, module_ref, {},
-                               {})  // no imports & memory
+             ->SyncInstantiate(isolate, &thrower, module_ref,
+                               /* no imports */ {})
              .ToHandle(&instance_ref)) {
       isolate->clear_exception();
       thrower.Reset();  // Ignore errors.
@@ -620,8 +619,8 @@ static std::optional<ExecutionResult> ExecuteNonReferenceRun(
   {
     ErrorThrower thrower(isolate, "ExecuteNonReferenceRun");
     if (!GetWasmEngine()
-             ->SyncInstantiate(isolate, &thrower, module_object, {},
-                               {})  // no imports & memory
+             ->SyncInstantiate(isolate, &thrower, module_object,
+                               /* no imports */ {})
              .ToHandle(&instance)) {
       CHECK(thrower.error());
       // The only reason to fail this instantiation should be OOM, because
@@ -964,9 +963,9 @@ int ExecuteAgainstReference(Isolate* isolate,
     // instance. So, we run the validation here before running drumbrake.
     auto enabled_features = WasmEnabledFeatures::FromIsolate(isolate);
     WasmDetectedFeatures unused_detected_features;
-    ModuleDecoderImpl decoder(
-        enabled_features, module_object->native_module()->wire_bytes(),
-        ModuleOrigin::kWasmOrigin, &unused_detected_features);
+    ModuleDecoderImpl decoder(enabled_features,
+                              module_object->native_module()->wire_bytes(),
+                              &unused_detected_features);
     if (decoder.DecodeModule(/*validate_functions=*/true).failed()) return -1;
   }
 #endif  // V8_ENABLE_DRUMBRAKE
@@ -1141,9 +1140,9 @@ void GenerateTestCase(StdoutStream& os, Isolate* isolate,
   constexpr bool kVerifyFunctions = false;
   auto enabled_features = WasmEnabledFeatures::FromIsolate(isolate);
   WasmDetectedFeatures unused_detected_features;
-  ModuleResult module_res = DecodeWasmModule(
-      enabled_features, wire_bytes.module_bytes(), kVerifyFunctions,
-      ModuleOrigin::kWasmOrigin, &unused_detected_features);
+  ModuleResult module_res =
+      DecodeWasmModule(enabled_features, wire_bytes.module_bytes(),
+                       kVerifyFunctions, &unused_detected_features);
   CHECK_WITH_MSG(module_res.ok(), module_res.error().message().c_str());
   WasmModule* module = module_res.value().get();
   CHECK_NOT_NULL(module);
@@ -1304,16 +1303,21 @@ int WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
   uint8_t flags_byte = data.empty() ? 0 : data[0];
   if (!data.empty()) data += 1;
 
-  // Enable Wasm type assertions half the time.
 #if defined(DEBUG) && defined(V8_USE_ADDRESS_SANITIZER)
+  // Disable register allocator verification on slow builds (Debug + ASan) to
+  // avoid timeouts in TurboFan/Turboshaft compilation on pathological inputs
+  // (see crbug.com/527760872).
+  FlagScope<bool> no_verify_allocator(&v8_flags.turbo_verify_allocation, false);
   // Disable type assertions on slow builds (Debug + ASan) to avoid timeouts in
   // TurboFan compilation (see crbug.com/520317061).
   const bool assert_types = false;
 #else
+  // Enable Wasm type assertions half the time.
   const bool assert_types = flags_byte & 1;
 #endif
   flags_byte >>= 1;
   FlagScope<bool> assert_types_scope(&v8_flags.wasm_assert_types, assert_types);
+
   // Enable rescheduling of operations in the Turboshaft graph half the time.
   const bool turbofan_random_rescheduling = flags_byte & 1;
   flags_byte >>= 1;

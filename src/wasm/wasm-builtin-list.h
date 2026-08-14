@@ -23,6 +23,7 @@ namespace v8::internal::wasm {
   V(WasmTriggerTierUp)                                                         \
   V(WasmLiftoffFrameSetup)                                                     \
   V(WasmDebugBreak)                                                            \
+  V(WasmDebugTrap)                                                             \
   V(WasmInt32ToHeapNumber)                                                     \
   V(WasmInt32ToSharedHeapNumber)                                               \
   V(WasmFloat64ToString)                                                       \

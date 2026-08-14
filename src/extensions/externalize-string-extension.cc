@@ -7,6 +7,7 @@
 #include "include/v8-template.h"
 #include "src/api/api-inl.h"
 #include "src/base/strings.h"
+#include "src/common/synchronization-point-support.h"
 #include "src/execution/isolate.h"
 #include "src/handles/handles.h"
 #include "src/heap/heap-layout-inl.h"
@@ -108,10 +109,12 @@ void ExternalizeStringExtension::Externalize(
   }
   if (externalize_as_one_byte) {
     auto* resource = new OwningExternalOneByteStringResource(*string);
+    SYNCHRONIZATION_POINT("ExternalizeStringExtensionMakeExternalOneByte");
     result = Utils::ToLocal(string)->MakeExternal(info.GetIsolate(), resource);
     if (!result) delete resource;
   } else {
     auto* resource = new OwningExternalStringResource(*string);
+    SYNCHRONIZATION_POINT("ExternalizeStringExtensionMakeExternalTwoByte");
     result = Utils::ToLocal(string)->MakeExternal(info.GetIsolate(), resource);
     if (!result) delete resource;
   }

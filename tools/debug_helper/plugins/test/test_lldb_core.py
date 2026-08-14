@@ -13,6 +13,8 @@ from .helpers.corruptions import check_corrupted_map_inspect
 from .helpers.corruptions import get_corruption_cases
 from .helpers.inspect import check_inspect_receiver
 from .helpers.inspect import check_inspect_recurses_into_map
+from .helpers.isolate import check_isolate_command
+from .helpers.isolate import check_isolate_none_on_idle_thread
 from .helpers.session import LldbSession
 from .helpers.utils import DebuggerTestConfig
 from .helpers.utils import get_lldb_core_test_config
@@ -92,6 +94,16 @@ class LldbInspectCoreTest(unittest.TestCase):
     """Checks inspection of Map by following the receiver's `.map` address."""
     with self._session() as session:
       check_inspect_recurses_into_map(session)
+
+  def test_isolate(self):
+    """Checks `v8 isolate` resolves the current Isolate from a core dump."""
+    with self._session() as session:
+      check_isolate_command(session)
+
+  def test_isolate_none_on_idle_thread(self):
+    """Checks `v8 isolate` reports <none> on a thread outside V8."""
+    with self._session() as session:
+      check_isolate_none_on_idle_thread(session)
 
 
 class LldbCorruptedMapCoreTest(unittest.TestCase):

@@ -75,7 +75,7 @@ TEST_F(FeedbackVectorTest, VectorStructure) {
     CHECK_EQ(helper.slot(7), vector->ToSlot(index));
 
     CHECK_EQ(3 + 5 * FeedbackMetadata::GetSlotSize(FeedbackSlotKind::kCall),
-             vector->length());
+             vector->length().value());
   }
 
   {

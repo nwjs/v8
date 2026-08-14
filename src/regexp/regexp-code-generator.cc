@@ -16,7 +16,6 @@
 #include "src/objects/code-inl.h"
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/fixed-primitive-array-inl.h"
-#include "src/regexp/regexp-bytecode-analysis.h"
 #include "src/regexp/regexp-bytecode-iterator-inl.h"
 #include "src/regexp/regexp-bytecodes-inl.h"
 
@@ -42,20 +41,6 @@ CodeGenerator::Result CodeGenerator::Assemble(DirectHandle<RegExpData> re_data,
                                               Flags flags) {
   USE(isolate_);
   USE(masm_);
-
-  // Bytecode analysis is currently unused. In future work it could form the
-  // basis for compiler optimizations.
-  if (V8_UNLIKELY(v8_flags.regexp_bytecode_analysis)) {
-    BytecodeAnalysis analysis(isolate_, &zone_, bytecode_);
-    analysis.Analyze();
-    if (v8_flags.trace_regexp_bytecode_analysis) {
-      std::unique_ptr<char[]> pattern_cstring =
-          re_data->escaped_source()->ToCString();
-      RegExpBytecodeDisassemble(bytecode_->begin(),
-                                bytecode_->ulength().value(),
-                                pattern_cstring.get(), &analysis);
-    }
-  }
 
   PreVisitBytecodes();
   iter_.reset();

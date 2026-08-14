@@ -37,7 +37,7 @@ MaybeDirectHandle<WasmInstanceObject> CompileAndInstantiateForTesting(
       CompileForTesting(isolate, thrower, bytes);
   if (module.is_null()) return {};
   return GetWasmEngine()->SyncInstantiate(isolate, thrower,
-                                          module.ToHandleChecked(), {}, {});
+                                          module.ToHandleChecked(), {});
 }
 
 DirectHandleVector<Object> MakeDefaultArguments(Isolate* isolate,

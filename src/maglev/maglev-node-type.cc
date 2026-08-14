@@ -20,9 +20,6 @@ NodeType StaticTypeForMap(compiler::MapRef map,
     if (map.IsInternalizedStringMap()) {
       return NodeType::kInternalizedString;
     }
-    if (map.IsSeqStringMap() && map.IsOneByteStringMap()) {
-      return NodeType::kSeqOneByteString;
-    }
     return NodeType::kString;
   }
   if (map.IsStringWrapperMap()) return NodeType::kStringWrapper;
@@ -39,6 +36,9 @@ NodeType StaticTypeForMap(compiler::MapRef map,
     return NodeType::kCallable;
   }
   if (map.IsJSDataViewMap()) return NodeType::kJSDataView;
+  if (map.instance_type() == JS_GENERATOR_OBJECT_TYPE) {
+    return NodeType::kJSGeneratorObject;
+  }
   if (map.IsJSReceiverMap()) {
     // JSReceiver but not any of the above.
     return NodeType::kOtherJSReceiver;
@@ -54,12 +54,6 @@ NodeType StaticTypeForConstant(compiler::JSHeapBroker* broker,
   }
   NodeType type = StaticTypeForMap(ref.AsHeapObject().map(broker), broker);
   DCHECK(!IsEmptyNodeType(type));
-  if (type == NodeType::kInternalizedString && ref.is_read_only()) {
-    if (ref.AsString().IsSeqString() &&
-        ref.AsString().IsOneByteRepresentation()) {
-      type = NodeType::kROSeqInternalizedOneByteString;
-    }
-  }
   return type;
 }
 
@@ -80,20 +74,12 @@ bool IsInstanceOfLeafNodeType(compiler::MapRef map, NodeType type,
       return map.IsSymbolMap();
     case NodeType::kBigInt:
       return map.IsBigIntMap();
+    case NodeType::kInternalizedString:
+      return map.IsInternalizedStringMap();
     case NodeType::kOtherString:
       // This doesn't exclude other string leaf types, which means one should
       // never test for this node type alone.
       return map.IsStringMap();
-    case NodeType::kOtherSeqOneByteString:
-      return map.IsSeqStringMap() && map.IsOneByteStringMap();
-    // We can't prove with a map alone that an object is in RO-space, but
-    // these maps will be potential candidates.
-    case NodeType::kROSeqInternalizedOneByteString:
-    case NodeType::kOtherSeqInternalizedOneByteString:
-      return map.IsInternalizedStringMap() && map.IsSeqStringMap() &&
-             map.IsOneByteStringMap();
-    case NodeType::kOtherInternalizedString:
-      return map.IsInternalizedStringMap();
     case NodeType::kStringWrapper:
       return map.IsStringWrapperMap();
     case NodeType::kContext:
@@ -108,9 +94,13 @@ bool IsInstanceOfLeafNodeType(compiler::MapRef map, NodeType type,
       return map.is_callable() && !map.IsJSFunctionMap();
     case NodeType::kJSDataView:
       return map.IsJSDataViewMap();
+    case NodeType::kJSGeneratorObject:
+      return map.instance_type() == JS_GENERATOR_OBJECT_TYPE;
     case NodeType::kOtherJSReceiver:
       return map.IsJSReceiverMap() && !map.IsJSArrayMap() &&
-             !map.is_callable() && !map.IsStringWrapperMap();
+             !map.is_callable() && !map.IsStringWrapperMap() &&
+             !map.IsJSDataViewMap() &&
+             map.instance_type() != JS_GENERATOR_OBJECT_TYPE;
     case NodeType::kOtherHeapObject:
       return !map.IsHeapNumberMap() && !map.IsOddballMap() &&
              !map.IsContextMap() && !map.IsSymbolMap() && !map.IsStringMap() &&

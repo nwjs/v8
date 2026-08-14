@@ -329,6 +329,11 @@ constexpr auto Compare_BaselineDescriptor::registers() {
 constexpr auto CompareAndTryPatchCodeDescriptor::registers() {
   return RegisterArray(rdx, rax, rbx, rdi);
 }
+
+// static
+constexpr auto BinaryOpAndTryPatchCodeDescriptor::registers() {
+  return RegisterArray(rdx, rax, rbx, rdi);
+}
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
 
 // static

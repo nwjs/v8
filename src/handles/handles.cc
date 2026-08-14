@@ -211,6 +211,12 @@ Address* HandleScope::Extend(Isolate* isolate) {
   return result;
 }
 
+Address* HandleScope::ExtendAndCreateHandle(Isolate* isolate, Address value) {
+  Address* result = Extend(isolate);
+  HandleScopeData* data = isolate->handle_scope_data();
+  return CreateHandleUnchecked(data, result, value);
+}
+
 void HandleScope::DeleteExtensions(Isolate* isolate) {
   HandleScopeData* current = isolate->handle_scope_data();
   isolate->handle_scope_implementer()->DeleteExtensions(current->limit);

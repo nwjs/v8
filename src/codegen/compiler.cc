@@ -9,11 +9,11 @@
 
 #include "include/v8-script.h"
 #include "src/api/api-inl.h"
-#include "src/asmjs/asm-js.h"
 #include "src/ast/scopes.h"
 #include "src/base/fpu.h"
 #include "src/base/logging.h"
 #include "src/base/platform/time.h"
+#include "src/base/strong-alias.h"
 #include "src/baseline/baseline.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/compilation-cache.h"
@@ -421,18 +421,9 @@ void LogUnoptimizedCompilation(Isolate* isolate,
                                LogEventListener::CodeTag code_type,
                                base::TimeDelta time_taken_to_execute,
                                base::TimeDelta time_taken_to_finalize) {
-  DirectHandle<AbstractCode> abstract_code;
-  if (shared->HasBytecodeArray()) {
-    abstract_code = direct_handle(
-        Cast<AbstractCode>(shared->GetBytecodeArray(isolate)), isolate);
-  } else {
-#if V8_ENABLE_WEBASSEMBLY
-    DCHECK(shared->HasAsmWasmData());
-    abstract_code = Cast<AbstractCode>(BUILTIN_CODE(isolate, InstantiateAsmJs));
-#else
-    UNREACHABLE();
-#endif  // V8_ENABLE_WEBASSEMBLY
-  }
+  DCHECK(shared->HasBytecodeArray());
+  DirectHandle<AbstractCode> abstract_code(
+      Cast<AbstractCode>(shared->GetBytecodeArray(isolate)), isolate);
 
   double time_taken_ms = time_taken_to_execute.InMillisecondsF() +
                          time_taken_to_finalize.InMillisecondsF();
@@ -656,23 +647,6 @@ uint64_t TurbofanCompilationJob::trace_id() const {
 
 namespace {
 
-#if V8_ENABLE_WEBASSEMBLY
-bool UseAsmWasm(FunctionLiteral* literal, bool asm_wasm_broken) {
-  // Check whether asm.js validation is enabled.
-  if (!v8_flags.validate_asm) return false;
-
-  // Modules that have validated successfully, but were subsequently broken by
-  // invalid module instantiation attempts are off limit forever.
-  if (asm_wasm_broken) return false;
-
-  // In stress mode we want to run the validator on everything.
-  if (v8_flags.stress_validate_asm) return true;
-
-  // In general, we respect the "use asm" directive.
-  return literal->scope()->IsAsmModule();
-}
-#endif
-
 }  // namespace
 
 void Compiler::InstallInterpreterTrampolineCopy(
@@ -720,37 +694,16 @@ template <typename IsolateT>
 void InstallUnoptimizedCode(UnoptimizedCompilationInfo* compilation_info,
                             DirectHandle<SharedFunctionInfo> shared_info,
                             IsolateT* isolate) {
-  if (compilation_info->has_bytecode_array()) {
-    DCHECK(!shared_info->HasBytecodeArray());  // Only compiled once.
-    DCHECK(!compilation_info->has_asm_wasm_data());
-    DCHECK(!shared_info->HasFeedbackMetadata());
+  DCHECK(compilation_info->has_bytecode_array());
+  DCHECK(!shared_info->HasBytecodeArray());  // Only compiled once.
+  DCHECK(!shared_info->HasFeedbackMetadata());
 
-#if V8_ENABLE_WEBASSEMBLY
-    // If the function failed asm-wasm compilation, mark asm_wasm as broken
-    // to ensure we don't try to compile as asm-wasm.
-    if (compilation_info->literal()->scope()->IsAsmModule()) {
-      shared_info->set_is_asm_wasm_broken(true);
-    }
-#endif  // V8_ENABLE_WEBASSEMBLY
+  DirectHandle<FeedbackMetadata> feedback_metadata =
+      FeedbackMetadata::New(isolate, compilation_info->feedback_vector_spec());
+  shared_info->set_feedback_metadata(*feedback_metadata, kReleaseStore);
 
-    DirectHandle<FeedbackMetadata> feedback_metadata = FeedbackMetadata::New(
-        isolate, compilation_info->feedback_vector_spec());
-    shared_info->set_feedback_metadata(*feedback_metadata, kReleaseStore);
-
-    shared_info->set_age(0);
-    shared_info->set_bytecode_array(*compilation_info->bytecode_array());
-  } else {
-#if V8_ENABLE_WEBASSEMBLY
-    DCHECK(compilation_info->has_asm_wasm_data());
-    // We should only have asm/wasm data when finalizing on the main thread.
-    DCHECK((std::is_same_v<IsolateT, Isolate>));
-    shared_info->set_asm_wasm_data(*compilation_info->asm_wasm_data());
-    shared_info->set_feedback_metadata(
-        ReadOnlyRoots(isolate).empty_feedback_metadata(), kReleaseStore);
-#else
-    UNREACHABLE();
-#endif  // V8_ENABLE_WEBASSEMBLY
-  }
+  shared_info->set_age(0);
+  shared_info->set_bytecode_array(*compilation_info->bytecode_array());
 }
 
 template <typename IsolateT>
@@ -829,20 +782,6 @@ ExecuteSingleUnoptimizedCompilationJob(
     AccountingAllocator* allocator,
     std::vector<FunctionLiteral*>* eager_inner_literals,
     LocalIsolate* local_isolate) {
-#if V8_ENABLE_WEBASSEMBLY
-  if (UseAsmWasm(literal, parse_info->flags().is_asm_wasm_broken())) {
-    std::unique_ptr<UnoptimizedCompilationJob> asm_job(
-        AsmJs::NewCompilationJob(parse_info, literal, allocator));
-    if (asm_job->ExecuteJob() == CompilationJob::SUCCEEDED) {
-      return asm_job;
-    }
-    // asm.js validation failed, fall through to standard unoptimized compile.
-    // Note: we rely on the fact that AsmJs jobs have done all validation in the
-    // PrepareJob and ExecuteJob phases and can't fail in FinalizeJob with
-    // with a validation error or another error that could be solve by falling
-    // through to standard unoptimized compile.
-  }
-#endif
   std::unique_ptr<UnoptimizedCompilationJob> job(
       interpreter::Interpreter::NewCompilationJob(
           parse_info, literal, script, allocator, eager_inner_literals,
@@ -1596,7 +1535,7 @@ MaybeHandle<SharedFunctionInfo> CompileToplevel(
   VMState<BYTECODE_COMPILER> state(isolate);
   if (parse_info->literal() == nullptr &&
       !parsing::ParseProgram(parse_info, script, maybe_outer_scope_info,
-                             isolate, parsing::ReportStatisticsMode::kYes)) {
+                             isolate, parsing::ReportStatisticsMode{true})) {
     FailWithException(isolate, script, parse_info,
                       Compiler::ClearExceptionFlag::KEEP_EXCEPTION);
     return MaybeHandle<SharedFunctionInfo>();
@@ -1714,11 +1653,13 @@ BackgroundCompileTask::BackgroundCompileTask(
     DCHECK_NULL(compile_hint_callback_data);
   }
   flags_.set_compile_hints_magic_enabled(
-      options &
-      ScriptCompiler::CompileOptions::kFollowCompileHintsMagicComment);
+      v8_flags.compile_hints_magic ||
+      (options &
+       ScriptCompiler::CompileOptions::kFollowCompileHintsMagicComment));
   flags_.set_compile_hints_per_function_magic_enabled(
-      options & ScriptCompiler::CompileOptions::
-                    kFollowCompileHintsPerFunctionMagicComment);
+      v8_flags.compile_hints_magic ||
+      (options & ScriptCompiler::CompileOptions::
+                     kFollowCompileHintsPerFunctionMagicComment));
 }
 
 BackgroundCompileTask::BackgroundCompileTask(
@@ -2109,9 +2050,8 @@ class ConstantPoolPointerForwarder {
     Tagged<ScopeInfo> scope_info;
     if (Is<SharedFunctionInfo>(info)) {
       Tagged<SharedFunctionInfo> old_sfi = Cast<SharedFunctionInfo>(info);
-      // Also record context-having own scope infos for SFIs.
-      if (!old_sfi->scope_info()->IsEmpty() &&
-          old_sfi->scope_info()->HasContext()) {
+      // Also record own scope infos for SFIs.
+      if (!old_sfi->scope_info()->IsEmpty()) {
         scope_info = old_sfi->scope_info();
       } else if (old_sfi->HasOuterScopeInfo()) {
         scope_info = old_sfi->GetOuterScopeInfo();
@@ -2614,18 +2554,9 @@ Handle<SharedFunctionInfo> BackgroundMergeTask::CompleteMergeInForeground(
     DisallowGarbageCollection no_gc;
     Tagged<MaybeObject> maybe_old_info = old_script->infos()->get(i);
     Tagged<MaybeObject> maybe_new_info = new_script->infos()->get(i);
-    if (maybe_new_info == maybe_old_info) {
-      if (sfis_without_scope_info_.contains(i) && maybe_old_info.IsWeak()) {
-        Tagged<SharedFunctionInfo> sfi =
-            Cast<SharedFunctionInfo>(maybe_old_info.GetHeapObjectAssumeWeak());
-        if (!sfi->scope_info()->IsEmpty()) {
-          forwarder.RecordScopeInfos(sfi);
-        }
-      }
-      continue;
-    }
     if (maybe_old_info.IsWeak()) {
-      if (Is<SharedFunctionInfo>(maybe_old_info.GetHeapObjectAssumeWeak())) {
+      if (maybe_new_info != maybe_old_info &&
+          Is<SharedFunctionInfo>(maybe_old_info.GetHeapObjectAssumeWeak())) {
         forwarder.set_has_shared_function_info_to_forward();
       }
       forwarder.RecordScopeInfos(maybe_old_info);
@@ -2650,7 +2581,7 @@ Handle<SharedFunctionInfo> BackgroundMergeTask::CompleteMergeInForeground(
       // that the old_sfi bytecode is dropped before we decide whether to
       // actually copy it.
       Tagged<SharedFunctionInfo> sfi = *new_compiled_data.new_sfi;
-      forwarder.InstallOwnScopeInfo(sfi);
+      forwarder.UpdateScopeInfo(sfi);
       if (new_compiled_data.new_sfi->HasBytecodeArray()) {
         forwarder.AddBytecodeArray(
             new_compiled_data.new_sfi->GetBytecodeArray(isolate));
@@ -2737,7 +2668,7 @@ MaybeHandle<SharedFunctionInfo> BackgroundCompileTask::FinalizeScript(
   Handle<Script> script = script_;
 
   // We might not have been able to finalize all jobs on the background
-  // thread (e.g. asm.js jobs), so finalize those deferred jobs now.
+  // thread, so finalize those deferred jobs now.
   if (FinalizeDeferredUnoptimizedCompilationJobs(
           isolate, script, &jobs_to_retry_finalization_on_main_thread_,
           compile_state_.pending_error_handler(),
@@ -2761,13 +2692,7 @@ MaybeHandle<SharedFunctionInfo> BackgroundCompileTask::FinalizeScript(
       // compilation (HasUncompiledData). Function here are all user defined
       // functions and should not have a builtin_id.
       DCHECK(!shared->HasBuiltinId());
-      DCHECK(shared->HasBytecodeArray() ||
-             shared->HasUncompiledData(isolate)
-#if V8_ENABLE_WEBASSEMBLY
-             // compiled data for 'use asm' functions
-             || shared->HasAsmWasmData()
-#endif
-      );
+      DCHECK(shared->HasBytecodeArray() || shared->HasUncompiledData(isolate));
     }
   }
 #endif
@@ -2828,7 +2753,7 @@ bool BackgroundCompileTask::FinalizeFunction(
       input_shared_info_.ToHandleChecked();
 
   // We might not have been able to finalize all jobs on the background
-  // thread (e.g. asm.js jobs), so finalize those deferred jobs now.
+  // thread, so finalize those deferred jobs now.
   if (FinalizeDeferredUnoptimizedCompilationJobs(
           isolate, script_, &jobs_to_retry_finalization_on_main_thread_,
           compile_state_.pending_error_handler(),
@@ -2997,7 +2922,7 @@ bool Compiler::CollectSourcePositions(
   // Parse and update ParseInfo with the results. Don't update parsing
   // statistics since we've already parsed the code before.
   if (!parsing::ParseAny(&parse_info, shared_info, isolate,
-                         parsing::ReportStatisticsMode::kNo)) {
+                         parsing::ReportStatisticsMode{false})) {
     // Parsing failed probably as a result of stack exhaustion.
     bytecode->SetSourcePositionsFailedToCollect();
     return FailAndClearException(isolate);
@@ -3067,7 +2992,7 @@ bool Compiler::Compile(Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
   // Set up parse info.
   UnoptimizedCompileFlags flags =
       UnoptimizedCompileFlags::ForFunctionCompile(isolate, *shared_info);
-  if (create_source_positions_flag == CreateSourcePositions::kYes) {
+  if (create_source_positions_flag) {
     flags.set_collect_source_positions(true);
   }
 
@@ -3095,12 +3020,12 @@ bool Compiler::Compile(Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
 
   // Parse and update ParseInfo with the results.
   if (!parsing::ParseAny(&parse_info, shared_info, isolate,
-                         parsing::ReportStatisticsMode::kYes)) {
+                         parsing::ReportStatisticsMode{true})) {
     return FailWithException(isolate, script, &parse_info, flag);
   }
   parse_info.literal()->set_shared_function_info(shared_info);
 
-  // Generate the unoptimized bytecode or asm-js data.
+  // Generate the unoptimized bytecode.
   FinalizeUnoptimizedCompilationDataList
       finalize_unoptimized_compilation_data_list;
 
@@ -4134,10 +4059,12 @@ MaybeDirectHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
 
       flags.set_is_eager(compile_options & ScriptCompiler::kEagerCompile);
       flags.set_compile_hints_magic_enabled(
-          compile_options & ScriptCompiler::kFollowCompileHintsMagicComment);
+          v8_flags.compile_hints_magic ||
+          (compile_options & ScriptCompiler::kFollowCompileHintsMagicComment));
       flags.set_compile_hints_per_function_magic_enabled(
-          compile_options &
-          ScriptCompiler::kFollowCompileHintsPerFunctionMagicComment);
+          v8_flags.compile_hints_magic ||
+          (compile_options &
+           ScriptCompiler::kFollowCompileHintsPerFunctionMagicComment));
 
       if (DirectHandle<Script> script; maybe_script.ToHandle(&script)) {
         flags.set_script_id(script->id());
@@ -4684,7 +4611,7 @@ void Compiler::PostInstantiation(Isolate* isolate,
                                  IsCompiledScope* is_compiled_scope) {
   DirectHandle<SharedFunctionInfo> shared(function->shared(), isolate);
 
-  // If code is compiled to bytecode (i.e., isn't asm.js), then allocate a
+  // If code is compiled to bytecode, then allocate a
   // feedback and check for optimized code.
   if (is_compiled_scope->is_compiled() && shared->HasBytecodeArray()) {
     // Don't reset budget if there is a closure feedback cell array already. We
@@ -4714,7 +4641,7 @@ void Compiler::PostInstantiation(Isolate* isolate,
 // Implementation of ScriptStreamingData
 
 ScriptStreamingData::ScriptStreamingData(
-    std::unique_ptr<ScriptCompiler::ExternalSourceStream> source_stream,
+    std::unique_ptr<ScriptCompiler::ExternalSourceStreamBase> source_stream,
     ScriptCompiler::StreamedSource::Encoding encoding)
     : source_stream(std::move(source_stream)), encoding(encoding) {}
 

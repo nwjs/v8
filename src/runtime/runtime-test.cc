@@ -15,9 +15,11 @@
 #include "src/base/iterator.h"
 #include "src/base/macros.h"
 #include "src/base/numbers/double.h"
+#include "src/base/strong-alias.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/pending-optimization-table.h"
 #include "src/common/globals.h"
+#include "src/common/synchronization-point-support.h"
 #include "src/compiler-dispatcher/lazy-compile-dispatcher.h"
 #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
 #include "src/debug/debug-evaluate.h"
@@ -127,18 +129,6 @@ V8_WARN_UNUSED_RESULT Tagged<Object> ReturnFuzzSafe(Tagged<Object> value,
 #define CONVERT_BOOLEAN_ARG_FUZZ_SAFE(name, index) \
   CHECK_UNLESS_FUZZING(IsBoolean(args[index]));    \
   bool name = IsTrue(args[index]);
-
-bool IsAsmWasmFunction(Isolate* isolate, Tagged<JSFunction> function) {
-  DisallowGarbageCollection no_gc;
-#if V8_ENABLE_WEBASSEMBLY
-  // For simplicity we include invalid asm.js functions whose code hasn't yet
-  // been updated to CompileLazy but is still the InstantiateAsmJs builtin.
-  return function->shared()->HasAsmWasmData() ||
-         function->code(isolate)->builtin_id() == Builtin::kInstantiateAsmJs;
-#else
-  return false;
-#endif  // V8_ENABLE_WEBASSEMBLY
-}
 
 }  // namespace
 
@@ -358,8 +348,6 @@ bool CanOptimizeFunction(CodeKind target_kind,
   if (function->shared()->optimization_disabled(target_kind)) {
     return false;
   }
-
-  CHECK_UNLESS_FUZZING_RETURN_FALSE(!IsAsmWasmFunction(isolate, *function));
 
   // If we're fuzzing, allow having not marked the function for manual
   // optimization (if the steps below succeed).
@@ -656,8 +644,6 @@ RUNTIME_FUNCTION(Runtime_PrepareFunctionForOptimization) {
   if (function->shared()->all_optimization_disabled()) {
     return ReadOnlyRoots(isolate).undefined_value();
   }
-
-  CHECK_UNLESS_FUZZING(!IsAsmWasmFunction(isolate, *function));
 
   // Hold onto the bytecode array between marking and optimization to ensure
   // it's not flushed.
@@ -2090,6 +2076,14 @@ RUNTIME_FUNCTION(Runtime_AssertNotPeeled) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
+RUNTIME_FUNCTION(Runtime_AssertEscapeAnalysisElided) {
+  SealHandleScope shs(isolate);
+  // Always removed during escape analysis in Turbolev, so we never get here in
+  // compiled code (if it was elided). If it wasn't elided, we crash during
+  // compile. In interpreter, we just return undefined.
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
 RUNTIME_FUNCTION(Runtime_IsBeingInterpreted) {
   SealHandleScope shs(isolate);
   // Always lowered to false in Turbofan, so we never get here in compiled code.
@@ -2256,7 +2250,7 @@ RUNTIME_FUNCTION(Runtime_StringToCString) {
   DirectHandle<JSArrayBuffer> result =
       isolate->factory()
           ->NewJSArrayBufferAndBackingStore(output_length,
-                                            InitializedFlag::kUninitialized)
+                                            InitializedFlag{false})
           .ToHandleChecked();
   memcpy(result->backing_store(), bytes.get(), output_length);
   return *result;
@@ -2274,7 +2268,7 @@ RUNTIME_FUNCTION(Runtime_StringUtf8Value) {
   DirectHandle<JSArrayBuffer> result =
       isolate->factory()
           ->NewJSArrayBufferAndBackingStore(value.length(),
-                                            InitializedFlag::kUninitialized)
+                                            InitializedFlag{false})
           .ToHandleChecked();
   memcpy(result->backing_store(), *value, value.length());
   return *result;
@@ -2681,8 +2675,7 @@ RUNTIME_FUNCTION(Runtime_GetBytecode) {
   int length = bytecode_array->length();
   Handle<JSArrayBuffer> bytecode_buffer =
       isolate->factory()
-          ->NewJSArrayBufferAndBackingStore(length,
-                                            InitializedFlag::kUninitialized)
+          ->NewJSArrayBufferAndBackingStore(length, InitializedFlag{false})
           .ToHandleChecked();
   memcpy(
       bytecode_buffer->backing_store(),
@@ -2706,8 +2699,7 @@ RUNTIME_FUNCTION(Runtime_GetBytecode) {
   size_t ht_length = static_cast<size_t>(handler_table->ulength().value());
   Handle<JSArrayBuffer> handler_table_buffer =
       isolate->factory()
-          ->NewJSArrayBufferAndBackingStore(ht_length,
-                                            InitializedFlag::kUninitialized)
+          ->NewJSArrayBufferAndBackingStore(ht_length, InitializedFlag{false})
           .ToHandleChecked();
   memcpy(handler_table_buffer->backing_store(), handler_table->begin(),
          ht_length);
@@ -2873,14 +2865,16 @@ RUNTIME_FUNCTION(Runtime_AllocateHeapNumberWithValue) {
 // This is primarily used for deterministically testing race conditions.
 RUNTIME_FUNCTION(Runtime_BlockAt) {
   HandleScope scope(isolate);
+  CHECK_UNLESS_FUZZING(v8_flags.allow_natives_syntax ||
+                       v8_flags.allow_natives_for_differential_fuzzing);
   DCHECK_EQ(2, args.length());
   CHECK_UNLESS_FUZZING(IsString(args[0]));
   CHECK_UNLESS_FUZZING(IsSmi(args[1]));
   DirectHandle<String> phase_name = args.at<String>(0);
   base::TimeDelta timeout =
       base::TimeDelta::FromMilliseconds(args.smi_value_at(1));
-  isolate->isolate_group()->SetBlockAtSynchronizationPointForTesting(
-      phase_name->ToStdString(), timeout);
+  SynchronizationPointSupport::Get()->RequestBlockAt(phase_name->ToStdString(),
+                                                     timeout);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -2888,16 +2882,14 @@ RUNTIME_FUNCTION(Runtime_BlockAt) {
 // blocked by %BlockAt at the specified synchronization point.
 RUNTIME_FUNCTION(Runtime_Resume) {
   HandleScope scope(isolate);
+  CHECK_UNLESS_FUZZING(v8_flags.allow_natives_syntax ||
+                       v8_flags.allow_natives_for_differential_fuzzing);
   DCHECK_EQ(1, args.length());
   CHECK_UNLESS_FUZZING(IsString(args[0]));
   DirectHandle<String> phase_name = args.at<String>(0);
-  bool resumed = isolate->isolate_group()->ResumeSynchronizationPointForTesting(
-      phase_name->ToStdString());
-  if (!resumed) {
-    return isolate->Throw(*isolate->factory()->NewStringFromAsciiChecked(
-        "No thread is currently blocked at this synchronization point"));
-  }
-  return ReadOnlyRoots(isolate).undefined_value();
+  bool success =
+      SynchronizationPointSupport::Get()->Resume(phase_name->ToStdString());
+  return isolate->heap()->ToBoolean(success);
 }
 
 // Waits until the given synchronization point is reached. Throws an exception
@@ -2905,6 +2897,8 @@ RUNTIME_FUNCTION(Runtime_Resume) {
 // provided in milliseconds.
 RUNTIME_FUNCTION(Runtime_WaitUntilBlocked) {
   HandleScope scope(isolate);
+  CHECK_UNLESS_FUZZING(v8_flags.allow_natives_syntax ||
+                       v8_flags.allow_natives_for_differential_fuzzing);
   DCHECK_EQ(2, args.length());
   CHECK_UNLESS_FUZZING(IsString(args[0]));
   CHECK_UNLESS_FUZZING(IsSmi(args[1]));
@@ -2912,15 +2906,9 @@ RUNTIME_FUNCTION(Runtime_WaitUntilBlocked) {
   base::TimeDelta timeout =
       base::TimeDelta::FromMilliseconds(args.smi_value_at(1));
 
-  bool timed_out = false;
-  bool blocked = isolate->isolate_group()->WaitUntilBlockedForTesting(
-      phase_name->ToStdString(), timeout, timed_out);
-  if (!blocked) {
-    return isolate->Throw(*isolate->factory()->NewStringFromAsciiChecked(
-        timed_out ? "Synchronization point wait timed out"
-                  : "Synchronization point not found or not armed"));
-  }
-  return ReadOnlyRoots(isolate).undefined_value();
+  bool success = SynchronizationPointSupport::Get()->WaitUntilBlocked(
+      phase_name->ToStdString(), timeout);
+  return isolate->heap()->ToBoolean(success);
 }
 
 }  // namespace internal

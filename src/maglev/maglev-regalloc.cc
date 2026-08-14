@@ -207,7 +207,7 @@ void StraightForwardRegisterAllocator::ApplyPatches(BasicBlock* block) {
 }
 
 ProcessingState StraightForwardRegisterAllocator::GetCurrentState() {
-  return ProcessingState(graph_->end(), block_it_);
+  return ProcessingState(graph_, current_block_id_);
 }
 
 StraightForwardRegisterAllocator::StraightForwardRegisterAllocator(
@@ -428,8 +428,9 @@ void StraightForwardRegisterAllocator::AllocateRegisters() {
   }
   // LINT.ThenChange()
 
-  for (block_it_ = graph_->begin(); block_it_ != graph_->end(); ++block_it_) {
-    BasicBlock* block = *block_it_;
+  for (current_block_id_ = 0; current_block_id_ < graph_->num_blocks();
+       current_block_id_++) {
+    BasicBlock* block = graph_->blocks()[current_block_id_];
     DCHECK(!block->is_dead());
     current_node_ = nullptr;
 
@@ -1283,7 +1284,8 @@ void StraightForwardRegisterAllocator::AddMoveBeforeCurrentNode(
   if (compilation_info_->has_graph_labeller()) {
     graph_labeller()->RegisterNode(gap_move);
   }
-  BasicBlock* block = *block_it_;
+
+  BasicBlock* block = graph_->blocks()[current_block_id_];
   if (node_it_ == block->nodes().end()) {
     DCHECK(current_node_->Is<ControlNode>());
     // We're at the control node, so append instead.

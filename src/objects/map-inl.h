@@ -967,10 +967,6 @@ void Map::AppendDescriptor(Isolate* isolate, Descriptor* desc) {
     // barrier.
     descriptors->Append(desc);
     SetNumberOfOwnDescriptors(number_of_own_descriptors + 1);
-#ifndef V8_DISABLE_WRITE_BARRIERS
-    WriteBarrier::ForDescriptorArray(descriptors,
-                                     number_of_own_descriptors + 1);
-#endif
   }
   // Properly mark the map if the {desc} is an "interesting symbol".
   if (desc->GetKey()->IsInteresting(isolate)) {

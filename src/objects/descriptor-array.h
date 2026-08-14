@@ -204,15 +204,10 @@ V8_OBJECT class DescriptorArray : public HeapObject {
 
   void Initialize(Tagged<EnumCache> enum_cache,
                   Tagged<HeapObject> undefined_value, int nof_descriptors,
-                  int slack, uint32_t raw_gc_state);
+                  int slack);
 
   // Constant for denoting key was not found.
   static const int kNotFound = -1;
-
-  // Garbage collection support.
-  inline uint32_t raw_gc_state(RelaxedLoadTag) const;
-  inline void set_raw_gc_state(uint32_t value, RelaxedStoreTag);
-  static constexpr size_t kSizeOfRawGcState = sizeof(uint32_t);
 
   static constexpr int SizeFor(int number_of_all_descriptors);
   static constexpr int OffsetOfDescriptorAt(int descriptor);
@@ -317,11 +312,7 @@ V8_OBJECT class DescriptorArray : public HeapObject {
   // consistent value during trimming in mark-compact.
   std::atomic<uint16_t> number_of_all_descriptors_;
   std::atomic<uint16_t> number_of_descriptors_;
-  std::atomic<uint32_t> raw_gc_state_;
   std::atomic<uint32_t> flags_;
-#if TAGGED_SIZE_8_BYTES
-  uint32_t optional_padding_;
-#endif
   TaggedMember<EnumCache> enum_cache_;
   FLEXIBLE_ARRAY_MEMBER(Entry, entries);
 } V8_OBJECT_END;
@@ -359,95 +350,8 @@ static_assert(offsetof(DescriptorArray, number_of_all_descriptors_) ==
               sizeof(HeapObject));
 static_assert(offsetof(DescriptorArray, number_of_descriptors_) ==
               sizeof(HeapObject) + sizeof(uint16_t));
-static_assert(offsetof(DescriptorArray, raw_gc_state_) ==
-              sizeof(HeapObject) + 2 * sizeof(uint16_t));
 static_assert(offsetof(DescriptorArray, flags_) ==
-              sizeof(HeapObject) + 2 * sizeof(uint16_t) + sizeof(uint32_t));
-
-// A DescriptorArray where all values are held strongly. Bodyless subclass with
-// identical layout and BodyDescriptor. The distinct instance type routes to
-// the default VisitWithBodyDescriptor path, bypassing the specialized
-// MarkingVisitorBase::VisitDescriptorArray override (which runs the
-// DescriptorArrayMarkingState epoch/delta protocol for incremental weak-Map
-// trimming).
-V8_OBJECT class StrongDescriptorArray : public DescriptorArray {
- public:
-  DECL_PRINTER(StrongDescriptorArray)
-  DECL_VERIFIER(StrongDescriptorArray)
-} V8_OBJECT_END;
-
-template <>
-struct ObjectTraits<StrongDescriptorArray> {
-  using BodyDescriptor = DescriptorArray::BodyDescriptor;
-};
-
-// Custom DescriptorArray marking state for visitors that are allowed to write
-// into the heap. The marking state uses DescriptorArray::raw_gc_state() as
-// storage.
-//
-// The state essentially keeps track of 3 fields:
-// 1. The collector epoch: The rest of the state is only valid if the epoch
-//    matches. If the epoch doesn't match, the other fields should be considered
-//    invalid. The epoch is necessary, as not all DescriptorArray objects are
-//    eventually trimmed in the atomic pause and thus available for resetting
-//    the state.
-// 2. Number of already marked descriptors.
-// 3. Delta of to be marked descriptors in this cycle. This must be 0 after
-//    marking is done.
-class DescriptorArrayMarkingState final {
- public:
-#define BIT_FIELD_FIELDS(V, _) \
-  V(Epoch, unsigned, 2, _)     \
-  V(Marked, uint16_t, 14, _)   \
-  V(Delta, uint16_t, 16, _)
-  DEFINE_BIT_FIELDS(BIT_FIELD_FIELDS)
-#undef BIT_FIELD_FIELDS
-  static_assert(Marked::kMax <= Delta::kMax);
-  static_assert(kMaxNumberOfDescriptors <= Marked::kMax);
-
-  using DescriptorIndex = uint16_t;
-  using RawGCStateType = uint32_t;
-
-  static constexpr RawGCStateType kInitialGCState = 0;
-
-  static constexpr RawGCStateType GetFullyMarkedState(
-      unsigned epoch, DescriptorIndex number_of_descriptors) {
-    return NewState(epoch & Epoch::kMask, number_of_descriptors, 0);
-  }
-
-  // Potentially updates the delta of to be marked descriptors. Returns true if
-  // the update was successful and the object should be processed via a marking
-  // visitor.
-  //
-  // The call issues and Acq/Rel barrier to allow synchronizing other state
-  // (e.g. value of descriptor slots) with it.
-  static inline bool TryUpdateIndicesToMark(unsigned gc_epoch,
-                                            Tagged<DescriptorArray> array,
-                                            DescriptorIndex index_to_mark);
-
-  // Used from the visitor when processing a DescriptorArray. Returns a range of
-  // start and end descriptor indices. No processing is required for start ==
-  // end. The method signals the first invocation by returning start == 0, and
-  // end != 0.
-  static inline std::pair<DescriptorIndex, DescriptorIndex>
-  AcquireDescriptorRangeToMark(unsigned gc_epoch,
-                               Tagged<DescriptorArray> array);
-
- private:
-  static constexpr RawGCStateType NewState(unsigned masked_epoch,
-                                           DescriptorIndex marked,
-                                           DescriptorIndex delta) {
-    return Epoch::encode(masked_epoch) | Marked::encode(marked) |
-           Delta::encode(delta);
-  }
-
-  static bool SwapState(Tagged<DescriptorArray> array, RawGCStateType old_state,
-                        RawGCStateType new_state) {
-    return array->raw_gc_state_.compare_exchange_strong(
-        old_state, new_state, std::memory_order_acq_rel,
-        std::memory_order_acquire);
-  }
-};
+              sizeof(HeapObject) + 2 * sizeof(uint16_t));
 
 }  // namespace internal
 }  // namespace v8

@@ -68,7 +68,7 @@ class MaglevPhiRepresentationSelector {
     }
   }
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block);
-  void PostProcessBasicBlock(BasicBlock* block);
+  BlockProcessResult PostProcessBasicBlock(BasicBlock* block);
   void PostPhiProcessing() {}
 
   enum ProcessPhiResult { kNone, kRetryOnChange, kChanged };
@@ -110,6 +110,10 @@ class MaglevPhiRepresentationSelector {
     // HeapNumberConstants can be turned into Float64Constant and sometimes
     // Int32Constants as well.
     kHeapNumberConstant,
+
+    // The 'undefined' constant can be turned into the undefined NaN pattern
+    // when untagging to HoleyFloat64.
+    kUndefinedConstant,
 
     // Untagged inputs can be retrieved by taking the input of a conversion
     // nodes.
@@ -243,7 +247,11 @@ class MaglevPhiRepresentationSelector {
                                    const ProcessingState* state);
   ProcessResult UpdateNodePhiInput(CheckNumber* node, Phi* phi, int input_index,
                                    const ProcessingState* state);
-
+  ProcessResult UpdateNodePhiInput(CheckedNumberOrOddballToUint8Clamped* node,
+                                   Phi* phi, int input_index,
+                                   const ProcessingState* state);
+  ProcessResult UpdateNodePhiInput(AssumeType* node, Phi* phi, int input_index,
+                                   const ProcessingState* state);
   ProcessResult UpdateNodePhiInput(BranchIfToBooleanTrue* node, Phi* phi,
                                    int input_index,
                                    const ProcessingState* state);

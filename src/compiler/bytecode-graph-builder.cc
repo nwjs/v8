@@ -4,6 +4,7 @@
 
 #include "src/compiler/bytecode-graph-builder.h"
 
+#include <algorithm>
 #include <optional>
 
 #include "src/ast/ast.h"
@@ -11,10 +12,13 @@
 #include "src/codegen/tick-counter.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
+#include "src/compiler/access-builder.h"
 #include "src/compiler/bytecode-analysis.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/compiler-source-position-table.h"
+#include "src/compiler/feedback-source.h"
+#include "src/compiler/frame-states.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/js-type-hint-lowering.h"
 #include "src/compiler/linkage.h"
@@ -135,7 +139,9 @@ class BytecodeGraphBuilder {
   Node* NewIfValue(int32_t value) { return NewNode(common()->IfValue(value)); }
   Node* NewIfDefault() { return NewNode(common()->IfDefault()); }
   Node* NewMerge() { return NewNode(common()->Merge(1), true); }
-  Node* NewLoop() { return NewNode(common()->Loop(1), true); }
+  Node* NewLoop(const FeedbackSource& feedback = {}) {
+    return NewNode(common()->Loop(1, feedback), true);
+  }
   Node* NewBranch(Node* condition, BranchHint hint = BranchHint::kNone) {
     return NewNode(common()->Branch(hint), condition);
   }
@@ -160,8 +166,8 @@ class BytecodeGraphBuilder {
   Node** EnsureInputBufferSize(int size);
 
   Node* const* GetCallArgumentsFromRegisters(Node* callee, Node* receiver,
-                                              interpreter::Register first_arg,
-                                              int arg_count);
+                                             interpreter::Register first_arg,
+                                             int arg_count);
   Node* const* ProcessCallVarArgs(ConvertReceiverMode receiver_mode,
                                   Node* callee, interpreter::Register first_reg,
                                   int arg_count);
@@ -596,7 +602,8 @@ class BytecodeGraphBuilder::Environment : public ZoneObject {
 
   void FillWithOsrValues();
   void PrepareForLoop(const BytecodeLoopAssignments& assignments,
-                      const BytecodeLivenessState* liveness);
+                      const BytecodeLivenessState* liveness,
+                      const FeedbackSource& feedback = {});
   void PrepareForLoopExit(Node* loop,
                           const BytecodeLoopAssignments& assignments,
                           const BytecodeLivenessState* liveness);
@@ -718,7 +725,6 @@ BytecodeGraphBuilder::Environment::Environment(
       accumulator_base_(other->accumulator_base_) {
   values_ = other->values_;
 }
-
 
 int BytecodeGraphBuilder::Environment::RegisterToValuesIndex(
     interpreter::Register the_register) const {
@@ -865,9 +871,9 @@ void BytecodeGraphBuilder::Environment::Merge(
 
 void BytecodeGraphBuilder::Environment::PrepareForLoop(
     const BytecodeLoopAssignments& assignments,
-    const BytecodeLivenessState* liveness) {
+    const BytecodeLivenessState* liveness, const FeedbackSource& feedback) {
   // Create a control node for the loop header.
-  Node* control = builder()->NewLoop();
+  Node* control = builder()->NewLoop(feedback);
 
   // Create a Phi for external effects.
   Node* effect = builder()->NewEffectPhi(1, GetEffectDependency(), control);
@@ -1031,11 +1037,11 @@ Node* BytecodeGraphBuilder::Environment::Checkpoint(
   return result;
 }
 
-class BytecodeGraphBuilder::BytecodePositionDecorator final :
-public GraphDecorator {
+class BytecodeGraphBuilder::BytecodePositionDecorator final
+    : public GraphDecorator {
  public:
   explicit BytecodePositionDecorator(NodeOriginTable* node_origins)
-      :  node_origins_(node_origins) {}
+      : node_origins_(node_origins) {}
 
   void Decorate(Node* node) final {
     node_origins_->SetNodeOrigin(node->id(), NodeOrigin::kJSBytecode,
@@ -2069,11 +2075,10 @@ void BytecodeGraphBuilder::VisitStaLookupSlot() {
   DCHECK_IMPLIES(lookup_hoisting_mode == LookupHoistingMode::kLegacySloppy,
                  is_sloppy(language_mode));
   const Operator* op = javascript()->CallRuntime(
-      is_strict(language_mode)
-          ? Runtime::kStoreLookupSlot_Strict
-          : lookup_hoisting_mode == LookupHoistingMode::kLegacySloppy
-                ? Runtime::kStoreLookupSlot_SloppyHoisting
-                : Runtime::kStoreLookupSlot_Sloppy);
+      is_strict(language_mode) ? Runtime::kStoreLookupSlot_Strict
+      : lookup_hoisting_mode == LookupHoistingMode::kLegacySloppy
+          ? Runtime::kStoreLookupSlot_SloppyHoisting
+          : Runtime::kStoreLookupSlot_Sloppy);
   Node* store = NewNode(op, name, value);
   environment()->BindAccumulator(store, Environment::kAttachFrameState);
 }
@@ -2537,6 +2542,8 @@ void BytecodeGraphBuilder::VisitCreateArrayFromIterable() {
                            environment()->LookupAccumulator());
   environment()->BindAccumulator(iterable, Environment::kAttachFrameState);
 }
+
+void BytecodeGraphBuilder::VisitArrayDestructure() { UNREACHABLE(); }
 
 void BytecodeGraphBuilder::VisitCreateObjectLiteral() {
   ObjectBoilerplateDescriptionRef constant_properties =
@@ -4031,8 +4038,8 @@ void BytecodeGraphBuilder::VisitGetIterator() {
 }
 
 void BytecodeGraphBuilder::VisitSuspendGenerator() {
-  Node* generator = environment()->LookupRegister(
-      bytecode_iterator().GetRegisterOperand(0));
+  Node* generator =
+      environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(0));
   interpreter::Register first_reg = bytecode_iterator().GetRegisterOperand(1);
   // We assume we are storing a range starting from index 0.
   CHECK_EQ(0, first_reg.index());
@@ -4234,8 +4241,19 @@ void BytecodeGraphBuilder::BuildLoopHeaderEnvironment(int current_offset) {
     const auto& resume_jump_targets = loop_info.resume_jump_targets();
     bool generate_suspend_switch = !resume_jump_targets.empty();
 
+    FeedbackSource feedback;
+    if (!generate_suspend_switch) {
+      PrepareEagerCheckpoint();
+
+      interpreter::BytecodeArrayIterator iterator(bytecode_array().object(),
+                                                  loop_info.jump_loop_offset());
+      DCHECK_EQ(iterator.current_bytecode(), interpreter::Bytecode::kJumpLoop);
+      FeedbackSlot slot = iterator.GetSlotOperand(2);
+      feedback = FeedbackSource(feedback_vector(), slot);
+    }
+
     // Add loop header.
-    environment()->PrepareForLoop(loop_info.assignments(), liveness);
+    environment()->PrepareForLoop(loop_info.assignments(), liveness, feedback);
 
     // Store a copy of the environment so we can connect merged back edge inputs
     // to the loop header.
@@ -4253,11 +4271,18 @@ void BytecodeGraphBuilder::BuildLoopHeaderEnvironment(int current_offset) {
       // Set the generator state to a known constant.
       environment()->BindGeneratorState(
           jsgraph()->SmiConstant(JSGeneratorObject::kGeneratorExecuting));
+    } else {
+      mark_as_needing_eager_checkpoint(true);
     }
   }
 }
 
 void BytecodeGraphBuilder::MergeIntoSuccessorEnvironment(int target_offset) {
+  if (bytecode_analysis().IsLoopHeader(target_offset) &&
+      bytecode_iterator().current_offset() > target_offset) {
+    mark_as_needing_eager_checkpoint(true);
+    PrepareEagerCheckpoint();
+  }
   BuildLoopExitsForBranch(target_offset);
   Environment*& merge_environment = merge_environments_[target_offset];
 
@@ -4737,11 +4762,10 @@ Node* BytecodeGraphBuilder::MakeNode(const Operator* op, int value_input_count,
   return result;
 }
 
-
 Node* BytecodeGraphBuilder::NewPhi(int count, Node* input, Node* control) {
   const Operator* phi_op = common()->Phi(MachineRepresentation::kTagged, count);
   Node** buffer = EnsureInputBufferSize(count + 1);
-  Memset(buffer, input, count);
+  std::fill_n(buffer, count, input);
   buffer[count] = control;
   return graph()->NewNode(phi_op, count + 1, buffer, true);
 }
@@ -4750,17 +4774,17 @@ Node* BytecodeGraphBuilder::NewEffectPhi(int count, Node* input,
                                          Node* control) {
   const Operator* phi_op = common()->EffectPhi(count);
   Node** buffer = EnsureInputBufferSize(count + 1);
-  Memset(buffer, input, count);
+  std::fill_n(buffer, count, input);
   buffer[count] = control;
   return graph()->NewNode(phi_op, count + 1, buffer, true);
 }
-
 
 Node* BytecodeGraphBuilder::MergeControl(Node* control, Node* other) {
   int inputs = control->op()->ControlInputCount() + 1;
   if (control->opcode() == IrOpcode::kLoop) {
     // Control node for loop exists, add input.
-    const Operator* op = common()->Loop(inputs);
+    FeedbackSource feedback = OpParameter<FeedbackSource>(control->op());
+    const Operator* op = common()->Loop(inputs, feedback);
     control->AppendInput(graph_zone(), other);
     NodeProperties::ChangeOp(control, op);
   } else if (control->opcode() == IrOpcode::kMerge) {

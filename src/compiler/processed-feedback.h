@@ -20,6 +20,7 @@ class ForInFeedback;
 class GlobalAccessFeedback;
 class HomomorphicPropertyAccessFeedback;
 class InstanceOfFeedback;
+class JumpLoopFeedback;
 class LiteralFeedback;
 class MegaDOMPropertyAccessFeedback;
 class NamedAccessFeedback;
@@ -38,6 +39,7 @@ class ProcessedFeedback : public ZoneObject {
     kForIn,
     kGlobalAccess,
     kInstanceOf,
+    kJumpLoop,
     kTypeOf,
     kLiteral,
     kHomomorphicPropertyAccess,
@@ -60,6 +62,7 @@ class ProcessedFeedback : public ZoneObject {
   ForInFeedback const& AsForIn() const;
   GlobalAccessFeedback const& AsGlobalAccess() const;
   InstanceOfFeedback const& AsInstanceOf() const;
+  JumpLoopFeedback const& AsJumpLoop() const;
   NamedAccessFeedback const& AsNamedAccess() const;
   ProxyFeedback const& AsProxy() const;
   HomomorphicPropertyAccessFeedback const& AsHomomorphicPropertyAccess() const;
@@ -306,6 +309,7 @@ class SingleValueFeedback : public ProcessedFeedback {
         (K == kCompareOperation && slot_kind == FeedbackSlotKind::kCompareOp) ||
         (K == kForIn && slot_kind == FeedbackSlotKind::kForIn) ||
         (K == kInstanceOf && slot_kind == FeedbackSlotKind::kInstanceOf) ||
+        (K == kJumpLoop && slot_kind == FeedbackSlotKind::kJumpLoop) ||
         ((K == kLiteral || K == kRegExpLiteral || K == kTemplateObject) &&
          slot_kind == FeedbackSlotKind::kLiteral));
   }
@@ -360,6 +364,12 @@ class CompareOperationFeedback
 
 class ForInFeedback
     : public SingleValueFeedback<ForInHint, ProcessedFeedback::kForIn> {
+  using SingleValueFeedback::SingleValueFeedback;
+};
+
+class JumpLoopFeedback
+    : public SingleValueFeedback<SpeculationMode,
+                                 ProcessedFeedback::kJumpLoop> {
   using SingleValueFeedback::SingleValueFeedback;
 };
 

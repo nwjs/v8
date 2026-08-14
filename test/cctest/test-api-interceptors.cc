@@ -16,6 +16,7 @@
 #include "src/strings/unicode-inl.h"
 #include "test/cctest/heap/heap-utils.h"
 #include "test/cctest/test-api.h"
+#include "test/common/flag-utils.h"
 
 using ::v8::Boolean;
 using ::v8::Context;
@@ -7261,4 +7262,126 @@ THREADED_TEST(HasOwnPropertyWithInterceptorThrow) {
     )");
     CHECK(result->StrictEquals(v8_str("interceptor exception")));
   }
+}
+
+namespace {
+
+// Query interceptor that, on the outer script's first lexical name, re-enters
+// V8 to compile an inner script declaring c_0..c_9. That inner script grows the
+// (full) ScriptContextTable into a fresh, larger table.
+v8::Intercepted ReenterOnLexicalQuery(
+    Local<Name> property, const v8::PropertyCallbackInfo<v8::Integer>& info) {
+  v8::Isolate* isolate = info.GetIsolate();
+  String::Utf8Value name(isolate, property);
+  if (*name == nullptr || strncmp(*name, "v_", 2) != 0) {
+    return v8::Intercepted::kNo;
+  }
+  std::string inner;
+  for (int i = 0; i < 9; i++) inner += "let c_" + std::to_string(i) + " = 0;\n";
+  inner += "let c_9 = 1234;\n";
+  CompileRun(inner.c_str());
+  return v8::Intercepted::kNo;
+}
+
+// Adds script contexts until the native context's ScriptContextTable is full,
+// so that the next NewScriptContext grows (and reallocates) it.
+void FillScriptContextTableToCapacity(Local<Context> context) {
+  int i = 0;
+  while (true) {
+    i::DirectHandle<i::Context> i_context =
+        v8::Utils::OpenDirectHandle(*context);
+    i::Tagged<i::ScriptContextTable> table =
+        i_context->native_context()->script_context_table();
+    int length = table->length(v8::kAcquireLoad).value();
+    int capacity = table->capacity().value();
+    if (length > 0 && length == capacity) break;
+    CompileRun(("let d_" + std::to_string(i++) + " = 0;").c_str());
+  }
+}
+
+}  // namespace
+
+// Regression test for a re-entrancy bug in NewScriptContext: a global-object
+// property interceptor invoked from the name-clash check can grow and replace
+// the ScriptContextTable. Extending the stale table captured before the loop
+// resurrected the pre-interceptor table, dropping the re-entrant additions, so
+// two contexts ended up at the same index and cached global ICs read/wrote out
+// of bounds.
+TEST(ScriptContextTableReentrancy) {
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+
+  Local<ObjectTemplate> global_template = ObjectTemplate::New(isolate);
+  global_template->SetHandler(v8::NamedPropertyHandlerConfiguration(
+      nullptr, nullptr, ReenterOnLexicalQuery, nullptr, nullptr, Local<Value>(),
+      v8::PropertyHandlerFlags::kHasDontDeleteProperty));
+
+  Local<Context> context = Context::New(isolate, nullptr, global_template);
+  v8::Context::Scope context_scope(context);
+
+  FillScriptContextTableToCapacity(context);
+
+  // Compiling the outer script grabs a handle to the now-full table and, via
+  // the clash check for `v_0`, re-enters V8 through the interceptor, which
+  // declares an inner script (c_0..c_9) that grows and replaces the table.
+  CompileRun("let v_0 = 0;");
+
+  // Both the inner script's lexicals and the outer script's must survive: with
+  // the stale-handle bug the outer Add dropped the inner script's context, so
+  // c_9 was lost entirely.
+  CHECK_EQ(1234, v8_run_int32("c_9"));
+  CHECK_EQ(0, v8_run_int32("v_0"));
+}
+
+namespace {
+
+// Query interceptor that, the first time it sees the outer script's second
+// lexical name `b`, re-enters V8 to declare `a` -- a name the outer clash
+// check has already passed by then.
+v8::Intercepted ReenterAndDeclareEarlierName(
+    Local<Name> property, const v8::PropertyCallbackInfo<v8::Integer>& info) {
+  v8::Isolate* isolate = info.GetIsolate();
+  String::Utf8Value name(isolate, property);
+  if (*name == nullptr || strcmp(*name, "b") != 0) {
+    return v8::Intercepted::kNo;
+  }
+  bool& declared_a = *GetData<bool>(info);
+  if (!declared_a) {
+    declared_a = true;
+    CompileRun("let a = 1;");
+  }
+  return v8::Intercepted::kNo;
+}
+
+}  // namespace
+
+// Regression test: the name-clash check in NewScriptContext runs before each
+// name's interceptor, so a re-entrant declaration colliding with an
+// already-checked name used to slip past clash detection and end up as a
+// silent duplicate binding added by ScriptContextTable::Add. Compiling
+// `let a; let b;` re-enters on `b` to declare `a`, which must turn the outer
+// `a` into a redeclaration SyntaxError rather than a second binding.
+TEST(ScriptContextTableReentrantClash) {
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+
+  bool declared_a = false;
+  Local<ObjectTemplate> global_template = ObjectTemplate::New(isolate);
+  global_template->SetHandler(v8::NamedPropertyHandlerConfiguration(
+      nullptr, nullptr, ReenterAndDeclareEarlierName, nullptr, nullptr,
+      MakeData(isolate, &declared_a),
+      v8::PropertyHandlerFlags::kHasDontDeleteProperty));
+
+  Local<Context> context = Context::New(isolate, nullptr, global_template);
+  v8::Context::Scope context_scope(context);
+
+  v8::TryCatch try_catch(isolate);
+  CompileRun("let a; let b;");
+  CHECK(try_catch.HasCaught());
+  CHECK(try_catch.Exception()->IsNativeError());
+  String::Utf8Value message(isolate, try_catch.Message()->Get());
+  CHECK_NOT_NULL(strstr(*message, "has already been declared"));
+
+  // The re-entrant declaration committed before the outer script was rejected.
+  CHECK_EQ(1, v8_run_int32("a"));
 }

@@ -161,17 +161,13 @@ Local<String> GetFunctionDescription(Local<Function> function) {
       int func_index = function_data->function_index();
       i::DirectHandle<i::WasmTrustedInstanceData> instance_data(
           function_data->instance_data(), i_isolate);
-      if (instance_data->module()->origin == i::wasm::kWasmOrigin) {
-        // For asm.js functions, we can still print the source
-        // code (hopefully), so don't bother with them here.
-        auto debug_name =
-            i::GetWasmFunctionDebugName(i_isolate, instance_data, func_index);
-        i::IncrementalStringBuilder builder(i_isolate);
-        builder.AppendCStringLiteral("function ");
-        builder.AppendString(debug_name);
-        builder.AppendCStringLiteral("() { [native code] }");
-        return Utils::ToLocal(builder.Finish().ToHandleChecked());
-      }
+      auto debug_name =
+          i::GetWasmFunctionDebugName(i_isolate, instance_data, func_index);
+      i::IncrementalStringBuilder builder(i_isolate);
+      builder.AppendCStringLiteral("function ");
+      builder.AppendString(debug_name);
+      builder.AppendCStringLiteral("() { [native code] }");
+      return Utils::ToLocal(builder.Finish().ToHandleChecked());
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
     return Utils::ToLocal(i::JSFunction::ToString(i_isolate, js_function));

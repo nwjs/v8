@@ -132,7 +132,7 @@ RUNTIME_FUNCTION(Runtime_TypedArraySortFast) {
   CHECK(IsJSArrayBuffer(array->buffer()));
   DirectHandle<JSArrayBuffer> buffer(Cast<JSArrayBuffer>(array->buffer()),
                                      isolate);
-  const bool copy_data = buffer->is_shared();
+  const bool copy_data = buffer->is_shared().value();
 
   DirectHandle<ByteArray> array_copy;
   std::vector<uint8_t> offheap_copy;

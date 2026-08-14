@@ -152,9 +152,6 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
     case DESCRIPTOR_ARRAY_TYPE:
       return kVisitDescriptorArray;
 
-    case STRONG_DESCRIPTOR_ARRAY_TYPE:
-      return kVisitStrongDescriptorArray;
-
     case FEEDBACK_CELL_TYPE:
       return kVisitFeedbackCell;
 
@@ -393,8 +390,9 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
     // Objects that are used as API wrapper objects and can have embedder
     // fields. Note that there's more of these kinds (e.g. JS_ARRAY_BUFFER_TYPE)
     // but they have their own visitor id for other reasons
-    case JS_API_OBJECT_TYPE:
     case JS_GLOBAL_PROXY_TYPE:
+      return kVisitJSGlobalProxy;
+    case JS_API_OBJECT_TYPE:
     case JS_GLOBAL_OBJECT_TYPE:
     case JS_SPECIAL_API_OBJECT_TYPE:
       return kVisitJSApiObject;
@@ -742,10 +740,6 @@ void Map::ReplaceDescriptors(Isolate* isolate,
   // descriptors will not be trimmed in the mark-compactor, we need to mark
   // all its elements.
   Tagged<Map> current = this;
-#ifndef V8_DISABLE_WRITE_BARRIERS
-  WriteBarrier::ForDescriptorArray(to_replace,
-                                   to_replace->number_of_descriptors());
-#endif
   while (current->instance_descriptors() == to_replace) {
     Tagged<Map> next;
     if (!current->TryGetBackPointer(&next)) {
@@ -935,14 +929,6 @@ void Map::EnsureDescriptorSlack(Isolate* isolate, DirectHandle<Map> map,
   // enumerated descriptors than available in the original cache, the cache
   // will be lazily replaced by the extended cache when needed.
   new_descriptors->CopyEnumCacheFrom(*descriptors);
-
-  // Replace descriptors by new_descriptors in all maps that share it. The old
-  // descriptors will not be trimmed in the mark-compactor, we need to mark
-  // all its elements.
-#ifndef V8_DISABLE_WRITE_BARRIERS
-  WriteBarrier::ForDescriptorArray(*descriptors,
-                                   descriptors->number_of_descriptors());
-#endif
 
   // Update the descriptors from {map} (inclusive) until the initial map
   // (exclusive). In the case that {map} is the initial map, update it.
@@ -2541,9 +2527,6 @@ void Map::SetInstanceDescriptors(Tagged<DescriptorArray> descriptors,
 #endif
   set_instance_descriptors(descriptors, kReleaseStore, barrier_mode);
   SetNumberOfOwnDescriptors(number_of_own_descriptors);
-#ifndef V8_DISABLE_WRITE_BARRIERS
-  WriteBarrier::ForDescriptorArray(descriptors, number_of_own_descriptors);
-#endif
 }
 
 // static

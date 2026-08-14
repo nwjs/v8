@@ -88,7 +88,7 @@ RegExpMacroAssemblerIA32::RegExpMacroAssemblerIA32(Isolate* isolate, Zone* zone,
                                                    int registers_to_save)
     : NativeRegExpMacroAssembler(isolate, zone, mode),
       masm_(std::make_unique<MacroAssembler>(
-          isolate, CodeObjectRequired::kYes,
+          isolate, CodeObjectRequired{true},
           NewAssemblerBuffer(kRegExpCodeSize))),
       no_root_array_scope_(masm_.get()),
       num_registers_(registers_to_save),
@@ -191,7 +191,7 @@ void RegExpMacroAssemblerIA32::CheckFixedLengthLoop(Label* on_equal) {
   __ cmp(edi, Operand(backtrack_stackpointer(), 0));
   __ j(not_equal, &fallthrough, Label::kNear);
   __ add(backtrack_stackpointer(), Immediate(kSystemPointerSize));  // Pop.
-  BranchOrBacktrack(on_equal);
+  GoTo(on_equal);
   __ bind(&fallthrough);
 }
 
@@ -301,7 +301,7 @@ void RegExpMacroAssemblerIA32::CheckNotBackReferenceIgnoreCase(
     // Restore original values before failing.
     __ pop(backtrack_stackpointer());
     __ pop(edi);
-    BranchOrBacktrack(on_no_match);
+    GoTo(on_no_match);
 
     __ bind(&success);
     // Restore original value before continuing.
@@ -439,7 +439,7 @@ void RegExpMacroAssemblerIA32::CheckNotBackReference(int start_reg,
   __ bind(&fail);
   // Restore backtrack stackpointer.
   __ pop(backtrack_stackpointer());
-  BranchOrBacktrack(on_no_match);
+  GoTo(on_no_match);
 
   __ bind(&success);
   // Move current character position to position after match.
@@ -1080,7 +1080,9 @@ DirectHandle<HeapObject> RegExpMacroAssemblerIA32::GetCode(
   return Cast<HeapObject>(code);
 }
 
-void RegExpMacroAssemblerIA32::GoTo(Label* to) { BranchOrBacktrack(to); }
+void RegExpMacroAssemblerIA32::GoTo(Label* to) {
+  __ jmp(to ? to : &backtrack_label_);
+}
 
 void RegExpMacroAssemblerIA32::IfRegisterGE(int reg, int comparand,
                                             Label* if_ge) {
@@ -1266,14 +1268,6 @@ void RegExpMacroAssemblerIA32::CheckPosition(int cp_offset,
     __ cmp(eax, Operand(ebp, kStringStartMinusOneOffset));
     BranchOrBacktrack(less_equal, on_outside_input);
   }
-}
-
-void RegExpMacroAssemblerIA32::BranchOrBacktrack(Label* to) {
-  if (to == nullptr) {
-    Backtrack();
-    return;
-  }
-  __ jmp(to);
 }
 
 void RegExpMacroAssemblerIA32::BranchOrBacktrack(Condition condition,

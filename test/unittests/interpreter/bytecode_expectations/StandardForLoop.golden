@@ -119,7 +119,7 @@ bytecodes: [
                 B(PopContext), R(6),
                 B(Jump), U8(8),
                 B(PopContext), R(6),
-                B(JumpLoop), U8(111), I8(0), FBV(6),
+                B(JumpLoop), U8(111), I8(0), FBV(7),
                 B(PopContext), R(5),
                 B(LdaUndefined),
   /*   61 S> */ B(Return),
@@ -192,7 +192,7 @@ bytecodes: [
                 B(PopContext), R(4),
                 B(Jump), U8(8),
                 B(PopContext), R(4),
-                B(JumpLoop), U8(84), I8(0), FBV(4),
+                B(JumpLoop), U8(84), I8(0), FBV(5),
                 B(LdaUndefined),
   /*   80 S> */ B(Return),
 ]
@@ -296,7 +296,7 @@ snippet: "
 "
 frame size: 4
 parameter count: 1
-bytecode array length: 92
+bytecode array length: 93
 bytecodes: [
                 B(SwitchOnGeneratorState), R(0), U8(0:Smi [20]), U8(2),
                 B(Mov), R(closure), R(2),
@@ -316,11 +316,10 @@ bytecodes: [
                 B(Star1),
   /*   36 S> */ B(LdaSmi), I8(10),
   /*   36 E> */ B(TestLessThan), R(1), EmbeddedFeedback(),
-                B(JumpIfFalse), U8(44),
-  /*   47 S> */ B(LdaFalse),
-                B(Star3),
-                B(Mov), R(1), R(2),
-                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(2), RegCount8(2),
+                B(JumpIfFalse), U8(45),
+  /*   47 S> */ B(Mov), R(1), R(2),
+                B(Mov), R(0), R(3),
+                B(InvokeIntrinsic), U8(Runtime::k_GeneratorYieldResult), R(2), RegCount8(2),
   /*   47 E> */ B(SuspendGenerator), R(0), R(0), RegCount8(2), U8(1),
                 B(ResumeGenerator), R(0), R(0), RegCount8(2),
                 B(Star2),
@@ -333,13 +332,13 @@ bytecodes: [
   /*   44 S> */ B(Ldar), R(1),
                 B(Inc), FBV(0),
                 B(Star1),
-  /*   18 E> */ B(JumpLoop), U8(45), I8(0), FBV(1),
+  /*   18 E> */ B(JumpLoop), U8(46), I8(0), FBV(1),
                 B(LdaUndefined),
   /*   56 S> */ B(Return),
 ]
 constant pool: [
   Smi [20],
-  Smi [62],
+  Smi [63],
   Smi [10],
   Smi [7],
   Smi [10],

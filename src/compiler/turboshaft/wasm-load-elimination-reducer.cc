@@ -88,10 +88,10 @@ void WasmLoadEliminationAnalyzer::ProcessBlock(const Block& block,
         ProcessStructSet(op_idx, op.Cast<StructSetOp>());
         break;
       case Opcode::kStructAtomicRMW:
-        ProcessAtomicRMW(op_idx, op.Cast<StructAtomicRMWOp>());
+        ProcessStructAtomicRMW(op_idx, op.Cast<StructAtomicRMWOp>());
         break;
       case Opcode::kArrayAtomicRMW:
-        // Nothing to be done. We don't eliminate loads on wasm arrays at all.
+        ProcessArrayAtomicRMW(op_idx, op.Cast<ArrayAtomicRMWOp>());
         break;
       case Opcode::kArrayLength:
         ProcessArrayLength(op_idx, op.Cast<ArrayLengthOp>());
@@ -114,8 +114,6 @@ void WasmLoadEliminationAnalyzer::ProcessBlock(const Block& block,
         // a "load-like" instruction too, to eliminate repeated casts.
         ProcessAssertNotNull(op_idx, op.Cast<AssertNotNullOp>());
         break;
-      case Opcode::kArraySet:
-        break;
       case Opcode::kAllocate:
         // Create new non-alias.
         ProcessAllocate(op_idx, op.Cast<AllocateOp>());
@@ -129,13 +127,20 @@ void WasmLoadEliminationAnalyzer::ProcessBlock(const Block& block,
         ProcessPhi(op_idx, op.Cast<PhiOp>());
         break;
       case Opcode::kLoad:
-        // Atomic loads have the "can_write" bit set, because they make
-        // writes on other threads visible. At any rate, we have to
-        // explicitly skip them here.
+        ProcessLoad(op_idx, op.Cast<LoadOp>());
+        break;
       case Opcode::kStore:
-        // We rely on having no raw "Store" operations operating on Wasm
-        // objects at this point in the pipeline.
-        // TODO(jkummerow): Is there any way to DCHECK that?
+        ProcessStore(op_idx, op.Cast<StoreOp>());
+        break;
+      case Opcode::kAtomicRMW:
+      case Opcode::kAtomicWord32Pair:
+        // Despite this being unrelated to struct operations, we have to
+        // invalidate the state because linear-memory atomic operations could be
+        // used to sync among threads.
+        if (v8_flags.wasm_shared) {
+          memory_.InvalidateMutableSharedBase();
+        }
+        break;
       case Opcode::kMemoryCopy:
       case Opcode::kMemoryFill:
         // These should never operate on GC objects.
@@ -144,8 +149,6 @@ void WasmLoadEliminationAnalyzer::ProcessBlock(const Block& block,
       case Opcode::kRetain:
       case Opcode::kDidntThrow:
       case Opcode::kCheckException:
-      case Opcode::kAtomicRMW:
-      case Opcode::kAtomicWord32Pair:
       case Opcode::kMemoryBarrier:
       case Opcode::kJSStackCheck:
       case Opcode::kWasmStackCheck:
@@ -187,13 +190,10 @@ void WasmLoadEliminationAnalyzer::ProcessBlock(const Block& block,
         break;
 
       case Opcode::kArrayGet:
-        if (op.Effects().can_write()) {
-          DCHECK(op.Cast<ArrayGetOp>().memory_order.has_value());
-          // For now invalidate "everything", similar to the effect of a call.
-          // TODO(manoskouk): What's the desired behavior here?
-          InvalidateAllNonAliasingInputs(op);
-          memory_.InvalidateMaybeAliasing();
-        }
+        ProcessArrayGet(op_idx, op.Cast<ArrayGetOp>());
+        break;
+      case Opcode::kArraySet:
+        ProcessArraySet(op_idx, op.Cast<ArraySetOp>());
         break;
 
       default:
@@ -261,9 +261,20 @@ bool RepIsCompatible(RegisterRepresentation actual,
 
 void WasmLoadEliminationAnalyzer::ProcessStructGet(OpIndex op_idx,
                                                    const StructGetOp& get) {
-  // TODO(mliedtke): struct.atomic.get also participates in load-elimination by
-  // providing values that can be used to load-eliminate struct.get operations
-  // for the same field. Is this the desired behavior?
+  // struct.atomic.get and struct.get operations can provide values that could
+  // be used to load-eliminate operations for the same field. It is invalid to
+  // substitute an atomic operation with a non-atomic one.
+  // Also, we are not allowed to conceptually move a seqcst operation
+  // backwards past an atomic seqcst store. We also cannot move any memory
+  // access backwards past an atomic load.
+  // For these reasons, we are strict here and completely erase the mutable,
+  // shared-base state when we encounter an atomic load.
+  // TODO(manoskouk): Improve this.
+  if (get.is_atomic()) {
+    memory_.InvalidateMutableSharedBase();
+    return;
+  }
+
   OpIndex existing = memory_.Find(get);
   if (existing.valid()) {
     const Operation& replacement = graph_.Get(existing);
@@ -290,8 +301,22 @@ void WasmLoadEliminationAnalyzer::ProcessStructSet(OpIndex op_idx,
     return;
   }
 
+  // It is invalid to move a seqcst operation backwards past a seqcst store.
+  // Therefore we would have to erase at least all seqcst loads in the state
+  // here. We currently do not have an efficient way to do that. As a strict
+  // solution we erase all mutable shared-base state (including for release
+  // stores).
+  if (set.memory_order.has_value()) {
+    memory_.InvalidateMutableSharedBase();
+  }
+
   memory_.Invalidate(set);
-  memory_.Insert(set);
+
+  // For now we do not load-eliminate loads with atomic-store values.
+  // TODO(manoskouk): Can we improve this?
+  if (!set.memory_order.has_value()) {
+    memory_.Insert(set);
+  }
 
   // Updating aliases if the value stored was known as non-aliasing.
   OpIndex value = set.value();
@@ -300,9 +325,61 @@ void WasmLoadEliminationAnalyzer::ProcessStructSet(OpIndex op_idx,
   }
 }
 
-void WasmLoadEliminationAnalyzer::ProcessAtomicRMW(
+void WasmLoadEliminationAnalyzer::ProcessStructAtomicRMW(
     OpIndex op_idx, const StructAtomicRMWOp& op) {
+  // We always have to invalidate this StructAtomicRMWOp in case it is applied
+  // on a non-shared struct.
   memory_.Invalidate(op);
+  // See ProcessStructGet/Set.
+  memory_.InvalidateMutableSharedBase();
+}
+
+void WasmLoadEliminationAnalyzer::ProcessArrayAtomicRMW(
+    OpIndex op_idx, const ArrayAtomicRMWOp& op) {
+  // Despite this being unrelated to struct operations, we have to invalidate
+  // the state because array atomic operations could be used to sync among
+  // threads.
+  memory_.InvalidateMutableSharedBase();
+}
+
+void WasmLoadEliminationAnalyzer::ProcessLoad(OpIndex op_idx,
+                                              const LoadOp& op) {
+  if (op.kind.is_atomic && v8_flags.wasm_shared) {
+    // Despite this being unrelated to struct operations, we have to invalidate
+    // the state because linear-memory atomic operations could be used to sync
+    // among threads.
+    memory_.InvalidateMutableSharedBase();
+  }
+}
+
+void WasmLoadEliminationAnalyzer::ProcessStore(OpIndex op_idx,
+                                               const StoreOp& op) {
+  if (op.kind.is_atomic && v8_flags.wasm_shared) {
+    // Despite this being unrelated to struct operations, we have to invalidate
+    // the state because linear-memory atomic operations could be used to sync
+    // among threads.
+    memory_.InvalidateMutableSharedBase();
+  }
+}
+
+void WasmLoadEliminationAnalyzer::ProcessArrayGet(OpIndex op_idx,
+                                                  const ArrayGetOp& op) {
+  if (op.memory_order.has_value()) {
+    // Despite this being unrelated to struct operations, we have to invalidate
+    // the state because array atomic operations could be used to sync
+    // among threads.
+    memory_.InvalidateMutableSharedBase();
+  }
+}
+
+void WasmLoadEliminationAnalyzer::ProcessArraySet(OpIndex op_idx,
+                                                  const ArraySetOp& op) {
+  if (op.memory_order.has_value()) {
+    // Despite this being unrelated to struct operations, we have to invalidate
+    // the state because array atomic operations could be used to sync
+    // among threads.
+    memory_.InvalidateMutableSharedBase();
+  }
 }
 
 void WasmLoadEliminationAnalyzer::ProcessArrayLength(

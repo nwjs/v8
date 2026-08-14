@@ -358,9 +358,7 @@ TEST(WrapperReplacement_IndirectExport) {
     builder->AddExport(base::CStrVector("exported_table"), kExternalTable, 0);
 
     // Point from the exported table to the Wasm function.
-    builder->SetIndirectFunction(
-        table_index, 0, function_index,
-        WasmModuleBuilder::WasmElemSegment::kRelativeToImports);
+    builder->SetIndirectFunction(table_index, 0, function_index);
 
     // Compile the module.
     DirectHandle<WasmInstanceObject> instance =

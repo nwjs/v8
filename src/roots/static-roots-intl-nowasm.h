@@ -102,7 +102,7 @@ struct StaticReadOnlyRoot {
   static constexpr Tagged_t kEmptyWeakArrayList = kEmptyWeakFixedArray + 8;
   static constexpr Tagged_t kEmptyEnumCache = kEmptyWeakArrayList + 12;
   static constexpr Tagged_t kEmptyDescriptorArray = kEmptyEnumCache + 12;
-  static constexpr Tagged_t kScopeInfoMap = kEmptyDescriptorArray + 20;
+  static constexpr Tagged_t kScopeInfoMap = kEmptyDescriptorArray + 16;
   static constexpr Tagged_t kModuleInfoMap = kScopeInfoMap + 40;
   static constexpr Tagged_t kClosureFeedbackCellArrayMap = kModuleInfoMap + 40;
   static constexpr Tagged_t kFeedbackVectorMap =
@@ -147,7 +147,7 @@ struct StaticReadOnlyRoot {
   static constexpr Tagged_t kPreparseDataMap = kInterceptorInfoMap + 40;
   static constexpr Tagged_t kSharedFunctionInfoMap = kPreparseDataMap + 40;
   static constexpr Tagged_t kCodeMap = kSharedFunctionInfoMap + 40;
-  static constexpr Tagged_t kHashSeed = kCodeMap + 44;
+  static constexpr Tagged_t kHashSeed = kCodeMap + 40;
   static constexpr Tagged_t kprototype_string = kHashSeed + 36;
   static constexpr Tagged_t kname_string = kprototype_string + 24;
   static constexpr Tagged_t klength_string = kname_string + 16;
@@ -245,9 +245,8 @@ struct StaticReadOnlyRoot {
   static constexpr Tagged_t kStoreHandler1Map = kStoreHandler0Map + 40;
   static constexpr Tagged_t kStoreHandler2Map = kStoreHandler1Map + 40;
   static constexpr Tagged_t kStoreHandler3Map = kStoreHandler2Map + 40;
-  static constexpr Tagged_t kStrongDescriptorArrayMap = kStoreHandler3Map + 40;
   static constexpr Tagged_t kTurboshaftWord32SetTypeMap =
-      kStrongDescriptorArrayMap + 40;
+      kStoreHandler3Map + 40;
   static constexpr Tagged_t kTurboshaftWord64SetTypeMap =
       kTurboshaftWord32SetTypeMap + 40;
   static constexpr Tagged_t kTurboshaftFloat64SetTypeMap =
@@ -1141,10 +1140,8 @@ struct StaticReadOnlyRoot {
       kstrict_function_transition_symbol + 16;
   static constexpr Tagged_t ktemplate_literal_slot_id_symbol =
       ktemplate_literal_function_literal_id_symbol + 16;
-  static constexpr Tagged_t kwasm_asm_single_function_symbol =
-      ktemplate_literal_slot_id_symbol + 16;
   static constexpr Tagged_t kwasm_cross_instance_call_symbol =
-      kwasm_asm_single_function_symbol + 16;
+      ktemplate_literal_slot_id_symbol + 16;
   static constexpr Tagged_t kwasm_exception_tag_symbol =
       kwasm_cross_instance_call_symbol + 16;
   static constexpr Tagged_t kwasm_exception_values_symbol =
@@ -1217,16 +1214,16 @@ struct StaticReadOnlyRoot {
   static constexpr Tagged_t kExternalMap = 0x180039;
   static constexpr Tagged_t kCppHeapExternalMap = 0x180061;
   static constexpr Tagged_t kJSSharedArrayMap = 0x180089;
-  static constexpr Tagged_t kJSAtomicsMutexMap = 0x1800d1;
-  static constexpr Tagged_t kJSAtomicsConditionMap = 0x1800f9;
-  static constexpr Tagged_t kNoOpNamedInterceptorInfo = 0x180121;
-  static constexpr Tagged_t kNoOpIndexedInterceptorInfo = 0x18016d;
+  static constexpr Tagged_t kJSAtomicsMutexMap = 0x1800cd;
+  static constexpr Tagged_t kJSAtomicsConditionMap = 0x1800f5;
+  static constexpr Tagged_t kNoOpNamedInterceptorInfo = 0x18011d;
+  static constexpr Tagged_t kNoOpIndexedInterceptorInfo = 0x180171;
 
   static constexpr Tagged_t kFirstAllocatedRoot = 0x11;
-  static constexpr Tagged_t kLastAllocatedRoot = 0x18016d;
+  static constexpr Tagged_t kLastAllocatedRoot = 0x180171;
 };
 
-static constexpr std::array<Tagged_t, 1023> StaticReadOnlyRootsPointerTable = {
+static constexpr std::array<Tagged_t, 1021> StaticReadOnlyRootsPointerTable = {
     StaticReadOnlyRoot::kUndefinedValue,
     StaticReadOnlyRoot::kTheHoleValue,
     StaticReadOnlyRoot::kNullValue,
@@ -1368,7 +1365,6 @@ static constexpr std::array<Tagged_t, 1023> StaticReadOnlyRootsPointerTable = {
     StaticReadOnlyRoot::kJSAtomicsMutexMap,
     StaticReadOnlyRoot::kJSAtomicsConditionMap,
     StaticReadOnlyRoot::kDescriptorArrayMap,
-    StaticReadOnlyRoot::kStrongDescriptorArrayMap,
     StaticReadOnlyRoot::kOnHeapBasicBlockProfilerDataMap,
     StaticReadOnlyRoot::kTurbofanBitsetTypeMap,
     StaticReadOnlyRoot::kTurbofanUnionTypeMap,
@@ -2171,7 +2167,6 @@ static constexpr std::array<Tagged_t, 1023> StaticReadOnlyRootsPointerTable = {
     StaticReadOnlyRoot::kstrict_function_transition_symbol,
     StaticReadOnlyRoot::ktemplate_literal_function_literal_id_symbol,
     StaticReadOnlyRoot::ktemplate_literal_slot_id_symbol,
-    StaticReadOnlyRoot::kwasm_asm_single_function_symbol,
     StaticReadOnlyRoot::kwasm_cross_instance_call_symbol,
     StaticReadOnlyRoot::kwasm_exception_tag_symbol,
     StaticReadOnlyRoot::kwasm_exception_values_symbol,

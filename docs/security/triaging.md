@@ -38,6 +38,16 @@ Specifically, the following properties are different from regular security bugs:
 Note that further mitigating factors may additionally apply.
 E.g., requiring a debugger further reduces the severity of such issues as well.
 
+### Officially unsupported ports or projects
+
+V8 does contain architecture ports or projects that are not officially supported by Chromium.
+The issues should be triaged like any other security issue with the following differences:
+
+- **[Security_Impact-None][hl-impact-none]**
+- **[v8-unsupported-chrome][hl-unsupported]**
+
+Common cases: [RISCV][owners-riscv], [PPC][owners-ppc], [S390][owners-s390], [MIPS][owners-mips], [LOONG][owners-loong], [Drumbrake][owners-drumbrake].
+
 ## Reproducing security bugs
 
 Security bugs should have proof-of-concept reproductions (POCs) attached to them.
@@ -133,14 +143,6 @@ Rationale: `--enable-inspector` does not accurately represent the production beh
 `inspector-test` should be used for valid reproductions.
 For more details see [security documentation](../../src/inspector/SECURITY.md).
 
-### Bugs in platforms that are not officially supported by Chrome
-
-Fields: **Type=Vulnerability**, **[Security_Impact-None][hl-impact-none]**, **[v8-unsupported-chrome][hl-unsupported]**
-
-In addition, assignee should be one of the well-known OWNERS of the platform.
-
-Rationale: The bugs may be security bugs but are outside of the scope of Chrome.
-
 ### Sandbox: Reliance on libc++ hardening
 
 V8's sandbox security boundary relies on libc++ hardening (specifically `_LIBCPP_HARDENING_MODE`) to prevent out-of-bounds accesses in standard containers like `std::vector` and `std::span`.
@@ -165,3 +167,9 @@ Rationale: Sandbox bypasses that only lead to read access outside of the sandbox
 [hl-sandbox]: https://issues.chromium.org/hotlists/4802478
 [c-devtools]: https://issues.chromium.org/issues?q=componentid:1457055
 [c-javascript]: https://issues.chromium.org/issues?q=componentid:1456824
+[owners-drumbrake]: https://chromium.googlesource.com/v8/v8/+/HEAD/src/wasm/interpreter/OWNERS
+[owners-loong]: https://chromium.googlesource.com/v8/v8/+/HEAD/LOONG_OWNERS
+[owners-mips]: https://chromium.googlesource.com/v8/v8/+/HEAD/MIPS_OWNERS
+[owners-ppc]: https://chromium.googlesource.com/v8/v8/+/HEAD/PPC_OWNERS
+[owners-riscv]: https://chromium.googlesource.com/v8/v8/+/HEAD/RISCV_OWNERS
+[owners-s390]: https://chromium.googlesource.com/v8/v8/+/HEAD/S390_OWNERS

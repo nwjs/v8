@@ -6,6 +6,7 @@
 #define V8_OBJECTS_HEAP_OBJECT_H_
 
 #include "src/base/macros.h"
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
 #include "src/objects/casting.h"
 #include "src/objects/instance-type.h"
@@ -55,7 +56,7 @@ struct ObjectTraits {
   using BodyDescriptor = typename T::BodyDescriptor;
 };
 
-enum InSharedSpace : bool { kInSharedSpace = true, kNotInSharedSpace = false };
+using InSharedSpace = base::StrongAlias<struct InSharedSpaceTag, bool>;
 
 // HeapObject is the superclass for all classes describing heap allocated
 // objects.
@@ -330,7 +331,7 @@ V8_OBJECT class HeapObject {
       InSharedSpace in_shared_space, Tagged<Map> map);
   static inline AllocationAlignment RequiredAlignment(
       AllocationSpace allocation_space, Tagged<Map> map);
-  bool inline CheckRequiredAlignment() const;
+  bool CheckRequiredAlignment() const;
 
   // Whether the object needs rehashing. That is the case if the object's
   // content depends on v8_flags.hash_seed. When the object is deserialized into
@@ -423,7 +424,6 @@ IS_TYPE_FUNCTION_DECL(SloppyArgumentsElements)
 IS_TYPE_FUNCTION_DECL(SmallOrderedHashTable)
 IS_TYPE_FUNCTION_DECL(PropertyDictionary)
 IS_TYPE_FUNCTION_DECL(AnyHole)
-IS_TYPE_FUNCTION_DECL(StrongDescriptorArray)
 #undef IS_TYPE_FUNCTION_DECL
 
 #define IS_TYPE_FUNCTION_DECL(Type, ...) \

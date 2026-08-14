@@ -61,7 +61,6 @@ class MaybeObjectSize final {
   V(CoverageInfo)                     \
   V(DataHandler)                      \
   V(DescriptorArray)                  \
-  V(StrongDescriptorArray)            \
   V(DoubleStringCache)                \
   V(EmbedderDataArray)                \
   V(EphemeronHashTable)               \
@@ -137,6 +136,7 @@ class MaybeObjectSize final {
   V(JSExternalObject)                       \
   V(JSFinalizationRegistry)                 \
   V(JSFunction)                             \
+  V(JSGlobalProxy)                          \
   V(JSObject)                               \
   V(JSRegExp)                               \
   V(JSSynchronizationPrimitive)             \

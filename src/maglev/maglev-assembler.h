@@ -6,6 +6,7 @@
 #define V8_MAGLEV_MAGLEV_ASSEMBLER_H_
 
 #include "src/base/logging.h"
+#include "src/base/strong-alias.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/common/globals.h"
@@ -98,7 +99,7 @@ class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
 
   MaglevAssembler(Isolate* isolate, Zone* zone,
                   MaglevCodeGenState* code_gen_state)
-      : MacroAssembler(isolate, zone, CodeObjectRequired::kNo),
+      : MacroAssembler(isolate, zone, CodeObjectRequired{false}),
         code_gen_state_(code_gen_state) {}
 
   static constexpr RegList GetAllocatableRegisters() {
@@ -580,15 +581,10 @@ class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
   inline void JumpIfStringMap(Register map, Label* target,
                               Label::Distance distance = Label::kFar,
                               bool jump_if_true = true);
-  inline void JumpIfSeqOneByteStringMap(Register map, Label* target,
-                                        Label::Distance distance = Label::kFar,
-                                        bool jump_if_true = true);
   inline void JumpIfString(Register heap_object, Label* target,
                            Label::Distance distance = Label::kFar);
   inline void JumpIfNotString(Register heap_object, Label* target,
                               Label::Distance distance = Label::kFar);
-  inline void JumpIfNotSeqOneByteString(Register heap_object, Label* target,
-                                        Label::Distance distance = Label::kFar);
   inline void CheckJSAnyIsStringAndBranch(Register heap_object, Label* if_true,
                                           Label::Distance true_distance,
                                           bool fallthrough_when_true,
@@ -681,6 +677,7 @@ class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
                          Label* target, Label::Distance distance = Label::kFar);
 
   inline void Float64SilenceNan(DoubleRegister value);
+  inline void Float64ExtractHighWord32(Register dst, DoubleRegister src);
 #ifdef V8_ENABLE_UNDEFINED_DOUBLE
   inline void JumpIfUndefinedNan(DoubleRegister value, Register scratch,
                                  Label* target,

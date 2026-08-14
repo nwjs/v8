@@ -2504,32 +2504,23 @@ class FastElementsAccessor : public ElementsAccessorBase<Subclass, KindTraits> {
                                   unshift_size, AT_START);
   }
 
-  static MaybeDirectHandle<Object> FillImpl(Isolate* isolate,
-                                            DirectHandle<JSObject> receiver,
-                                            DirectHandle<Object> obj_value,
-                                            size_t start, size_t end) {
+  static Maybe<bool> EnsureFillRangeCapacity(Isolate* isolate,
+                                             DirectHandle<JSObject> receiver,
+                                             size_t start, size_t end) {
     // Ensure indexes are within array bounds
     DCHECK_LE(0, start);
     DCHECK_LE(start, end);
 
-    // Make sure COW arrays are copied.
-    if (IsSmiOrObjectElementsKind(Subclass::kind())) {
-      JSObject::EnsureWritableFastElements(isolate, receiver);
-    }
-
     // Make sure we have enough space.
     DCHECK_LE(end, std::numeric_limits<uint32_t>::max());
     if (end > Subclass::GetCapacityImpl(*receiver, receiver->elements())) {
-      MAYBE_RETURN_NULL(Subclass::GrowCapacityAndConvertImpl(
-          isolate, receiver, static_cast<uint32_t>(end)));
+      MAYBE_RETURN(Subclass::GrowCapacityAndConvertImpl(
+                       isolate, receiver, static_cast<uint32_t>(end)),
+                   Nothing<bool>());
       CHECK_EQ(Subclass::kind(), receiver->GetElementsKind());
     }
     DCHECK_LE(end, Subclass::GetCapacityImpl(*receiver, receiver->elements()));
-
-    for (size_t index = start; index < end; ++index) {
-      Subclass::SetImpl(receiver, InternalIndex(index), *obj_value);
-    }
-    return MaybeDirectHandle<Object>(receiver);
+    return Just(true);
   }
 
   static Maybe<bool> IncludesValueImpl(Isolate* isolate,
@@ -2849,6 +2840,29 @@ class FastSmiOrObjectElementsAccessor
   static Tagged<Object> GetRaw(Tagged<FixedArray> backing_store,
                                InternalIndex entry) {
     return backing_store->get(entry.as_uint32());
+  }
+
+  static MaybeDirectHandle<Object> FillImpl(Isolate* isolate,
+                                            DirectHandle<JSObject> receiver,
+                                            DirectHandle<Object> obj_value,
+                                            size_t start, size_t end) {
+    // Make sure COW arrays are copied.
+    JSObject::EnsureWritableFastElements(isolate, receiver);
+
+    MAYBE_RETURN_NULL(
+        Subclass::EnsureFillRangeCapacity(isolate, receiver, start, end));
+
+    if (IsSmi(*obj_value)) {
+      MemsetTagged(Cast<FixedArray>(receiver->elements())
+                       ->RawFieldOfElementAt(static_cast<uint32_t>(start)),
+                   *obj_value, end - start);
+      return MaybeDirectHandle<Object>(receiver);
+    }
+
+    for (size_t index = start; index < end; ++index) {
+      Subclass::SetImpl(receiver, InternalIndex(index), *obj_value);
+    }
+    return MaybeDirectHandle<Object>(receiver);
   }
 
   // NOTE: this method violates the handlified function signature convention:
@@ -3352,6 +3366,34 @@ class FastDoubleElementsAccessor
                              WriteBarrierMode mode) {
     Cast<FixedDoubleArray>(backing_store)
         ->set(entry.as_uint32(), Object::NumberValue(value));
+  }
+
+  static MaybeDirectHandle<Object> FillImpl(Isolate* isolate,
+                                            DirectHandle<JSObject> receiver,
+                                            DirectHandle<Object> obj_value,
+                                            size_t start, size_t end) {
+    MAYBE_RETURN_NULL(
+        Subclass::EnsureFillRangeCapacity(isolate, receiver, start, end));
+
+    Tagged<FixedDoubleArray> elements =
+        Cast<FixedDoubleArray>(receiver->elements());
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+    if (IsUndefined(*obj_value)) {
+      for (size_t index = start; index < end; ++index) {
+        elements->set_undefined(static_cast<uint32_t>(index));
+      }
+      return MaybeDirectHandle<Object>(receiver);
+    }
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
+    double value = Object::NumberValue(*obj_value);
+    if (std::isnan(value)) {
+      value = std::numeric_limits<double>::quiet_NaN();
+    }
+    UnalignedDoubleMember* data = elements->begin();
+    for (size_t index = start; index < end; ++index) {
+      data[index].set_value(value);
+    }
+    return MaybeDirectHandle<Object>(receiver);
   }
 
   static void CopyElementsImpl(Isolate* isolate, Tagged<FixedArrayBase> from,
@@ -4200,8 +4242,8 @@ class TypedElementsAccessor
     uint8_t* dest_data = static_cast<uint8_t*>(destination->DataPtr()) +
                          ComputeStoreOffset(offset) * destination_size;
 
-    bool source_shared = source->buffer()->is_shared();
-    bool destination_shared = destination->buffer()->is_shared();
+    SharedFlag source_shared = source->buffer()->is_shared();
+    SharedFlag destination_shared = destination->buffer()->is_shared();
 
     // Don't read source or destination after reading the fields.
     source = {};

@@ -629,7 +629,9 @@ class JSONMaglevGraphWriter {
       return BlockProcessResult::kContinue;
     }
     void PostPhiProcessing() {}
-    void PostProcessBasicBlock(BasicBlock* block) {}
+    BlockProcessResult PostProcessBasicBlock(BasicBlock* block) {
+      return BlockProcessResult::kContinue;
+    }
     void PostProcessGraph(Graph* graph) {}
     ProcessResult Process(NodeBase* node, const ProcessingState& state) {
       writer_->node_to_block_[node] = state.block();
@@ -650,7 +652,9 @@ class JSONMaglevGraphWriter {
       return BlockProcessResult::kContinue;
     }
     void PostPhiProcessing() {}
-    void PostProcessBasicBlock(BasicBlock* block) {}
+    BlockProcessResult PostProcessBasicBlock(BasicBlock* block) {
+      return BlockProcessResult::kContinue;
+    }
     void PostProcessGraph(Graph* graph) {}
     ProcessResult Process(NodeBase* node, const ProcessingState& state) {
       writer_->PrintNodeAndDependencies(node, state.block(), &first_);

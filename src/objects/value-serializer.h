@@ -12,8 +12,10 @@
 #include "src/base/macros.h"
 #include "src/base/strings.h"
 #include "src/base/vector.h"
+#include "src/common/globals.h"
 #include "src/common/message-template.h"
 #include "src/handles/maybe-handles.h"
+#include "src/objects/backing-store.h"
 #include "src/utils/identity-map.h"
 #include "src/zone/zone.h"
 
@@ -301,7 +303,7 @@ class ValueDeserializer {
   MaybeDirectHandle<JSMap> ReadJSMap() V8_WARN_UNUSED_RESULT;
   MaybeDirectHandle<JSSet> ReadJSSet() V8_WARN_UNUSED_RESULT;
   MaybeDirectHandle<JSArrayBuffer> ReadJSArrayBuffer(
-      bool is_shared, bool is_resizable,
+      SharedFlag is_shared, ResizableFlag is_resizable,
       bool is_immutable) V8_WARN_UNUSED_RESULT;
   MaybeDirectHandle<JSArrayBuffer> ReadTransferredJSArrayBuffer()
       V8_WARN_UNUSED_RESULT;

@@ -38,21 +38,6 @@ V8_EXPORT_PRIVATE const char* SectionName(SectionCode code);
 
 using ModuleResult = Result<std::shared_ptr<WasmModule>>;
 
-struct AsmJsOffsetEntry {
-  int byte_offset;
-  int source_position_call;
-  int source_position_number_conversion;
-};
-struct AsmJsOffsetFunctionEntries {
-  int start_offset;
-  int end_offset;
-  std::vector<AsmJsOffsetEntry> entries;
-};
-struct AsmJsOffsets {
-  std::vector<AsmJsOffsetFunctionEntries> functions;
-};
-using AsmJsOffsetsResult = Result<AsmJsOffsets>;
-
 class DecodedNameSection {
  public:
   explicit DecodedNameSection(base::Vector<const uint8_t> wire_bytes,
@@ -99,15 +84,15 @@ enum class DecodingMethod {
 // updating counters in the given isolate.
 V8_EXPORT_PRIVATE ModuleResult DecodeWasmModule(
     Isolate*, WasmEnabledFeatures, base::Vector<const uint8_t> wire_bytes,
-    bool validate_functions, ModuleOrigin origin,
-    DecodingMethod decoding_method, WasmDetectedFeatures* detected_features);
+    bool validate_functions, DecodingMethod decoding_method,
+    WasmDetectedFeatures* detected_features);
 
 // Decodes the bytes of a wasm module in {wire_bytes} and returns delayed
 // counter updates and the metrics event to the caller.
 V8_EXPORT_PRIVATE ModuleResult DecodeWasmModule(
     WasmEnabledFeatures enabled_features,
     base::Vector<const uint8_t> wire_bytes, bool validate_functions,
-    ModuleOrigin origin, DelayedCounterUpdates* delayed_counters,
+    DelayedCounterUpdates* delayed_counters,
     std::optional<v8::metrics::WasmModuleDecoded>* metrics_event,
     DecodingMethod decoding_method, WasmDetectedFeatures* detected_features);
 
@@ -116,7 +101,7 @@ V8_EXPORT_PRIVATE ModuleResult DecodeWasmModule(
 V8_EXPORT_PRIVATE ModuleResult DecodeWasmModule(
     WasmEnabledFeatures enabled_features,
     base::Vector<const uint8_t> wire_bytes, bool validate_functions,
-    ModuleOrigin origin, WasmDetectedFeatures* detected_features);
+    WasmDetectedFeatures* detected_features);
 
 // Stripped down version for disassembler needs.
 V8_EXPORT_PRIVATE ModuleResult DecodeWasmModuleForDisassembler(
@@ -137,11 +122,6 @@ struct CustomSectionOffset {
 
 V8_EXPORT_PRIVATE std::vector<CustomSectionOffset> DecodeCustomSections(
     base::Vector<const uint8_t> wire_bytes);
-
-// Extracts the mapping from wasm byte offset to asm.js source position per
-// function.
-AsmJsOffsetsResult DecodeAsmJsOffsets(
-    base::Vector<const uint8_t> encoded_offsets);
 
 // Decode the function names from the name section. Returns the result as an
 // unordered map. Only names with valid utf8 encoding are stored and conflicts

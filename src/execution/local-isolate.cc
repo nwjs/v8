@@ -68,8 +68,7 @@ class LocalBigIntPlatform final : public bigint::Platform {
 
 #if V8_ENABLE_SANDBOX
   LocalBigIntPlatform()
-      : allocator_(
-            IsolateGroup::GetDefault()->GetSandboxedArrayBufferAllocator()) {}
+      : allocator_(IsolateGroup::current()->GetInSandboxAllocator()) {}
 
   digit_t* Allocate(size_t count) final {
     return static_cast<digit_t*>(
@@ -78,7 +77,7 @@ class LocalBigIntPlatform final : public bigint::Platform {
   void Free(digit_t* ptr) final { allocator_->Free(ptr); }
 
  private:
-  SandboxedArrayBufferAllocatorBase* allocator_;
+  v8::Allocator* allocator_;
 #else
   LocalBigIntPlatform() {}
   digit_t* Allocate(size_t count) final { return new digit_t[count]; }

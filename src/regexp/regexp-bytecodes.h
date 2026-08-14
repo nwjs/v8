@@ -392,14 +392,10 @@ class Bytecodes final : public AllStatic {
   static constexpr BytecodeFlags Flags(uint8_t bytecode);
 };
 
-class BytecodeAnalysis;
-
 void RegExpBytecodeDisassembleSingle(const uint8_t* code_base,
                                      const uint8_t* pc);
 void RegExpBytecodeDisassemble(const uint8_t* code_base, uint32_t length,
                                const char* pattern);
-void RegExpBytecodeDisassemble(const uint8_t* code_base, uint32_t length,
-                               const char* pattern, BytecodeAnalysis* analysis);
 
 }  // namespace regexp
 }  // namespace internal

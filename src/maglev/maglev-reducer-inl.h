@@ -16,6 +16,7 @@
 #include "src/base/logging.h"
 #include "src/common/scoped-modification.h"
 #include "src/compiler/processed-feedback.h"
+#include "src/maglev/maglev-cse.h"
 #include "src/maglev/maglev-ir-inl.h"
 #include "src/maglev/maglev-map-inference.h"
 #include "src/maglev/maglev-node-type.h"
@@ -32,82 +33,13 @@
     TraceLogger(tracer()) << __VA_ARGS__; \
   }
 
+#define FAIL(...)                                                         \
+  TRACE("Failed " << __func__ << ":" << __LINE__ << ": " << __VA_ARGS__); \
+  return {};
+
 namespace v8 {
 namespace internal {
 namespace maglev {
-
-// Some helpers for CSE
-namespace cse {
-inline size_t fast_hash_combine(size_t seed, size_t h) {
-  // Implementation from boost. Good enough for GVN.
-  return h + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-}
-
-template <typename T>
-size_t gvn_hash_value(const T& in) {
-  return base::hash_value(in);
-}
-
-inline size_t gvn_hash_value(const compiler::MapRef& map) {
-  return map.hash_value();
-}
-
-inline size_t gvn_hash_value(const interpreter::Register& reg) {
-  return base::hash_value(reg.index());
-}
-
-inline size_t gvn_hash_value(const Representation& rep) {
-  return base::hash_value(rep.kind());
-}
-
-inline size_t gvn_hash_value(const ExternalReference& ref) {
-  return base::hash_value(ref.address());
-}
-
-inline size_t gvn_hash_value(const PolymorphicAccessInfo& access_info) {
-  return access_info.hash_value();
-}
-
-inline size_t gvn_hash_value(const PropertyKey& key) {
-  return base::hash_value(key.data());
-}
-
-template <typename T>
-size_t gvn_hash_value(const v8::internal::ZoneCompactSet<T>& vector) {
-  size_t hash = base::hash_value(vector.size());
-  for (auto e : vector) {
-    hash = fast_hash_combine(hash, gvn_hash_value(e));
-  }
-  return hash;
-}
-
-template <typename T>
-size_t gvn_hash_value(const v8::internal::ZoneVector<T>& vector) {
-  size_t hash = base::hash_value(vector.size());
-  for (auto e : vector) {
-    hash = fast_hash_combine(hash, gvn_hash_value(e));
-  }
-  return hash;
-}
-
-template <typename... Args>
-size_t fast_hash_combine(size_t seed, Args&&... args) {
-  size_t hash = seed;
-  ([&] { hash = cse::fast_hash_combine(hash, cse::gvn_hash_value(args)); }(),
-   ...);
-  return hash;
-}
-
-template <size_t kInputCount, typename... Args>
-size_t fast_hash_combine(size_t seed,
-                         std::array<ValueNode*, kInputCount>& inputs) {
-  size_t hash = seed;
-  for (const auto& inp : inputs) {
-    hash = cse::fast_hash_combine(hash, base::hash_value(inp));
-  }
-  return hash;
-}
-}  // namespace cse
 
 template <typename BaseT>
 template <typename NodeT, typename Function, typename... Args>
@@ -125,6 +57,7 @@ template <typename NodeT, typename... Args>
 ReduceResult MaglevReducer<BaseT>::AddNewNode(
     std::initializer_list<ValueNode*> inputs, Args&&... args) {
   static_assert(IsFixedInputNode<NodeT>());
+  DCHECK_EQ(inputs.size(), NodeT::kInputCount);
   if constexpr (Node::participate_in_cse(Node::opcode_of<NodeT>) &&
                 ReducerBaseWithKNA<BaseT>) {
     if (v8_flags.maglev_cse) {
@@ -143,6 +76,7 @@ template <typename NodeT, typename... Args>
 NodeT* MaglevReducer<BaseT>::AddNewNodeNoInputConversion(
     std::initializer_list<ValueNode*> inputs, Args&&... args) {
   static_assert(IsFixedInputNode<NodeT>());
+  DCHECK_EQ(inputs.size(), NodeT::kInputCount);
   if constexpr (Node::participate_in_cse(Node::opcode_of<NodeT>) &&
                 ReducerBaseWithKNA<BaseT>) {
     if (v8_flags.maglev_cse) {
@@ -227,13 +161,7 @@ ReduceResult MaglevReducer<BaseT>::AddNewNodeOrGetEquivalent(
       }
       i++;
     }
-    if constexpr (IsCommutativeNode(Node::opcode_of<NodeT>)) {
-      static_assert(NodeT::kInputCount == 2);
-      if ((IsConstantNode(inputs[0]->opcode()) || inputs[0] > inputs[1]) &&
-          !IsConstantNode(inputs[1]->opcode())) {
-        std::swap(inputs[0], inputs[1]);
-      }
-    }
+    cse::CanonicalizeCommutative<NodeT>(inputs);
   }
 
   uint32_t hash = static_cast<uint32_t>(cse::fast_hash_combine(
@@ -243,11 +171,25 @@ ReduceResult MaglevReducer<BaseT>::AddNewNodeOrGetEquivalent(
       hash, inputs, std::forward<Args>(args)...);
   if (node) return node;
 
+  if constexpr (Node::opcode_of<NodeT> == Opcode::kLoadFixedArrayElement) {
+    if (LoadFixedArrayElement* cached =
+            known_node_aspects().TryFindTaggedKeyedProperty(inputs[0],
+                                                            inputs[1])) {
+      if (cached->options() ==
+          std::forward_as_tuple(std::forward<Args>(args)...)) {
+        return cached;
+      }
+    }
+  }
+
   node =
       NodeBase::New<NodeT>(zone(), inputs.size(), std::forward<Args>(args)...);
   SetNodeInputsNoConversion(node, inputs);
   DCHECK_EQ(node->options(), std::tuple{std::forward<Args>(args)...});
   known_node_aspects().AddExpression(hash, node);
+  if constexpr (Node::opcode_of<NodeT> == Opcode::kLoadFixedArrayElement) {
+    known_node_aspects().RecordTaggedKeyedProperty(inputs[0], inputs[1], node);
+  }
   return AttachExtraInfoAndAddToGraph(node);
 }
 
@@ -436,7 +378,11 @@ void MaglevReducer<BaseT>::MarkForInt32Truncation(NodeT* node) {
   if constexpr (NodeT::template opcode_of<NodeT> ==
                     Opcode::kInt32AddWithOverflow ||
                 NodeT::template opcode_of<NodeT> ==
-                    Opcode::kInt32SubtractWithOverflow) {
+                    Opcode::kInt32SubtractWithOverflow ||
+                NodeT::template opcode_of<NodeT> ==
+                    Opcode::kInt32MultiplyWithOverflow ||
+                NodeT::template opcode_of<NodeT> ==
+                    Opcode::kChangeInt32ToFloat64) {
     node->set_can_truncate_to_int32(true);
   }
 }
@@ -498,18 +444,18 @@ std::optional<ValueNode*> MaglevReducer<BaseT>::TryGetConstantAlternative(
 }
 
 template <typename BaseT>
-ReduceResult MaglevReducer<BaseT>::BuildLoadTaggedField(ValueNode* object,
-                                                        uint32_t offset,
-                                                        NodeType type,
-                                                        bool is_const,
-                                                        PropertyKey key) {
+ReduceResult MaglevReducer<BaseT>::BuildLoadTaggedField(
+    ValueNode* object, uint32_t offset, NodeType type, bool is_const,
+    PropertyKey key, IsArrayLength is_array_length,
+    compiler::OptionalMapRef stable_field_map) {
   if constexpr (ReducerBaseWithAllocationTracking<BaseT>) {
     if (std::optional<ValueNode*> val =
             base_->TryBuildLoadTaggedFieldFromAllocation(object, offset)) {
       return *val;
     }
   }
-  return AddNewNode<LoadTaggedField>({object}, offset, type, is_const, key);
+  return AddNewNode<LoadTaggedField>({object}, offset, type, is_const, key,
+                                     is_array_length, stable_field_map);
 }
 
 template <typename BaseT>
@@ -589,8 +535,9 @@ ReduceResult MaglevReducer<BaseT>::BuildStoreTrustedPointerField(
 template <typename BaseT>
 bool MaglevReducer<BaseT>::CanElideWriteBarrier(ValueNode* object,
                                                 ValueNode* value) {
+  DCHECK(!IsEmptyNodeType(GetType(value)));
   if (value->Is<RootConstant>() || value->Is<ConsStringMap>()) return true;
-  if (!IsEmptyNodeType(GetType(value)) && CheckType(value, NodeType::kSmi)) {
+  if (CheckType(value, NodeType::kSmi)) {
     return true;
   }
 
@@ -656,12 +603,16 @@ ReduceResult MaglevReducer<BaseT>::BuildStoreMap(ValueNode* object,
   NodeType object_type = StaticTypeForMap(map, broker());
   NodeInfo* node_info = GetOrCreateInfoFor(object);
   if (map.is_stable()) {
-    node_info->SetPossibleMaps(PossibleMaps{map}, false, object_type, broker(),
-                               known_node_aspects());
+    if (!node_info->SetPossibleMaps(PossibleMaps{map}, false, object_type,
+                                    broker(), known_node_aspects())) {
+      return EmitUnconditionalDeopt(DeoptimizeReason::kWrongValue);
+    }
     broker()->dependencies()->DependOnStableMap(map);
   } else {
-    node_info->SetPossibleMaps(PossibleMaps{map}, true, object_type, broker(),
-                               known_node_aspects());
+    if (!node_info->SetPossibleMaps(PossibleMaps{map}, true, object_type,
+                                    broker(), known_node_aspects())) {
+      return EmitUnconditionalDeopt(DeoptimizeReason::kWrongValue);
+    }
     known_node_aspects().MarkSideEffectsRequireInvalidation();
   }
   return ReduceResult::Done();
@@ -841,11 +792,7 @@ void MaglevReducer<BaseT>::AddNonEscapingUses(InlinedAllocation* allocation,
 template <typename BaseT>
 ReduceResult MaglevReducer<BaseT>::BuildInlinedAllocation(
     VirtualObject* vobject, AllocationType allocation_type) {
-  known_node_aspects().virtual_objects().Add(vobject);
-  InlinedAllocation* allocation;
-
-  using ValueAndDesc = std::pair<ValueNode*, vobj::Field>;
-  SmallZoneVector<ValueAndDesc, 8> values(zone());
+  SmallZoneVector<std::pair<ValueNode*, vobj::Field>, 8> values(zone());
   bool result =
       vobject->ForEachSlot([&](ValueNode* node, vobj::Field desc) -> bool {
         CHECK_NE(node, VirtualObject::kUninitializedSlotValue);
@@ -870,7 +817,7 @@ ReduceResult MaglevReducer<BaseT>::BuildInlinedAllocation(
   if (!result) {
     return ReduceResult::DoneWithAbort();
   }
-  allocation =
+  InlinedAllocation* allocation =
       ExtendOrReallocateCurrentAllocationBlock(allocation_type, vobject);
   AddNonEscapingUses(allocation, static_cast<int>(values.size()));
   StoreTaggedMode store_mode = StoreTaggedMode::kInitializing;
@@ -906,6 +853,7 @@ ReduceResult MaglevReducer<BaseT>::BuildInlinedAllocation(
   if (v8_flags.maglev_allocation_folding < 2) {
     ClearCurrentAllocationBlock();
   }
+  known_node_aspects().virtual_objects().Add(vobject);
   return allocation;
 }
 
@@ -930,6 +878,173 @@ inline bool CanInlineArrayIteratingBuiltin(compiler::JSHeapBroker* broker,
     }
   }
   return true;
+}
+
+template <typename BaseT>
+ReduceResult MaglevReducer<BaseT>::BuildLoadJSArrayLength(
+    ValueNode* js_array, NodeType length_type) {
+  // TODO(leszeks): JSArray.length is known to be non-constant, don't bother
+  // searching the constant values.
+  MaybeReduceResult known_length =
+      TryReuseKnownPropertyLoad(js_array, broker()->length_string());
+  if (known_length.IsDone()) {
+    DCHECK(known_length.IsDoneWithValue());
+    return known_length.value();
+  }
+
+  ValueNode* length;
+  GET_VALUE_OR_ABORT(
+      length, BuildLoadTaggedField(
+                  js_array, offsetof(JSArray, length_), length_type, false,
+                  broker()->length_string(), IsArrayLength::kYes));
+  RecordKnownProperty(js_array, broker()->length_string(), length, false,
+                      compiler::AccessMode::kLoad);
+  return length;
+}
+
+template <typename BaseT>
+template <typename ReducerCb>
+MaybeReduceResult MaglevReducer<BaseT>::TryWithFastArrayElements(
+    const char* builtin_name, CallArguments& args, ReducerCb Reducer) {
+  if (!CanSpeculateCall()) return {};
+
+  ValueNode* receiver = args.receiver();
+  if (!receiver) return {};
+
+  MapInference<MaglevReducer<BaseT>> inference(this, receiver);
+  auto possible_maps = inference.TryGetPossibleMaps();
+  if (!possible_maps) {
+    FAIL("to reduce " << builtin_name << " - receiver map is unknown");
+  }
+
+  ElementsKind elements_kind;
+  // TODO(42204525): Support polymorphism. I.e., DOUBLE_ELEMENTS and ELEMENTS
+  // together.
+  if (!CanInlineArrayIteratingBuiltin(broker(), *possible_maps,
+                                      &elements_kind)) {
+    FAIL("to reduce " << builtin_name
+                      << " - doesn't support fast array iteration or "
+                         "incompatible maps");
+  }
+
+  if (IsHoleyElementsKind(elements_kind) &&
+      !broker()->dependencies()->DependOnNoElementsProtector()) {
+    FAIL("to reduce " << builtin_name
+                      << " - invalidated no elements protector");
+  }
+
+  RETURN_IF_ABORT(inference.InsertMapChecks(zone()));
+
+  ValueNode* length;
+  GET_VALUE_OR_ABORT(length, BuildLoadJSArrayLength(receiver));
+
+  ValueNode* elements;
+  GET_VALUE_OR_ABORT(elements, BuildLoadElements(receiver, elements_kind));
+
+  ReduceResult res = Reducer(elements_kind, elements, length);
+  return res;
+}
+
+template <typename BaseT>
+template <typename ReducerCb>
+MaybeReduceResult MaglevReducer<BaseT>::TryWithArrayIterationArgs(
+    const char* builtin_name, CallArguments& args, ReducerCb Reducer) {
+  return TryWithFastArrayElements(
+      builtin_name, args,
+      [&](ElementsKind elements_kind, ValueNode* elements, ValueNode* length) {
+        ValueNode* search_element =
+            args.count() > 0 ? args[0]
+                             : GetRootConstant(RootIndex::kUndefinedValue);
+
+        ValueNode* from_index = GetInt32Constant(0);
+        if (args.count() > 1) {
+          GET_VALUE_OR_ABORT(from_index, GetInt32(args[1]));
+          GET_VALUE_OR_ABORT(
+              from_index,
+              Select(
+                  [&](BranchBuilder& builder) {
+                    return BuildBranchIfInt32Compare(
+                        builder, Operation::kLessThan, from_index,
+                        GetInt32Constant(0));
+                  },
+                  [&]() -> ReduceResult {
+                    ValueNode* adjusted;
+                    GET_VALUE_OR_ABORT(
+                        adjusted, AddNewNode<Int32Add>({length, from_index}));
+                    return BuildInt32Max(adjusted, GetInt32Constant(0));
+                  },
+                  [&]() -> ReduceResult {
+                    return BuildInt32Min(from_index, length);
+                  }));
+        }
+
+        return Reducer(elements_kind, elements, search_element, length,
+                       from_index);
+      });
+}
+
+template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReduceArrayIncludes(
+    compiler::JSFunctionRef target, CallArguments& args) {
+  return TryWithArrayIterationArgs(
+      "Array.prototype.includes", args,
+      [&](ElementsKind elements_kind, ValueNode* elements,
+          ValueNode* search_element, ValueNode* length, ValueNode* from_index) {
+        ValueNode* context = GetConstant(broker()->target_native_context());
+        switch (elements_kind) {
+          case PACKED_SMI_ELEMENTS:
+          case HOLEY_SMI_ELEMENTS:
+            return BuildCallBuiltinWithTaggedInputs<Builtin::kArrayIncludesSmi>(
+                context, {elements, search_element, length, from_index});
+          case PACKED_ELEMENTS:
+          case HOLEY_ELEMENTS:
+            return BuildCallBuiltinWithTaggedInputs<
+                Builtin::kArrayIncludesSmiOrObject>(
+                context, {elements, search_element, length, from_index});
+          case PACKED_DOUBLE_ELEMENTS:
+            return BuildCallBuiltinWithTaggedInputs<
+                Builtin::kArrayIncludesPackedDoubles>(
+                context, {elements, search_element, length, from_index});
+          case HOLEY_DOUBLE_ELEMENTS:
+            return BuildCallBuiltinWithTaggedInputs<
+                Builtin::kArrayIncludesHoleyDoubles>(
+                context, {elements, search_element, length, from_index});
+          default:
+            UNREACHABLE();
+        }
+      });
+}
+
+template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReduceArrayIndexOf(
+    compiler::JSFunctionRef target, CallArguments& args) {
+  return TryWithArrayIterationArgs(
+      "Array.prototype.indexOf", args,
+      [&](ElementsKind elements_kind, ValueNode* elements,
+          ValueNode* search_element, ValueNode* length, ValueNode* from_index) {
+        ValueNode* context = GetConstant(broker()->target_native_context());
+        switch (elements_kind) {
+          case PACKED_SMI_ELEMENTS:
+          case HOLEY_SMI_ELEMENTS:
+            return BuildCallBuiltinWithTaggedInputs<Builtin::kArrayIndexOfSmi>(
+                context, {elements, search_element, length, from_index});
+          case PACKED_ELEMENTS:
+          case HOLEY_ELEMENTS:
+            return BuildCallBuiltinWithTaggedInputs<
+                Builtin::kArrayIndexOfSmiOrObject>(
+                context, {elements, search_element, length, from_index});
+          case PACKED_DOUBLE_ELEMENTS:
+            return BuildCallBuiltinWithTaggedInputs<
+                Builtin::kArrayIndexOfPackedDoubles>(
+                context, {elements, search_element, length, from_index});
+          case HOLEY_DOUBLE_ELEMENTS:
+            return BuildCallBuiltinWithTaggedInputs<
+                Builtin::kArrayIndexOfHoleyDoubles>(
+                context, {elements, search_element, length, from_index});
+          default:
+            UNREACHABLE();
+        }
+      });
 }
 
 template <typename BaseT>
@@ -1025,113 +1140,87 @@ ReduceResult MaglevReducer<BaseT>::BuildAssumeMapForElements(
 template <typename BaseT>
 MaybeReduceResult MaglevReducer<BaseT>::TryReduceArrayPrototypeAt(
     compiler::JSFunctionRef target, CallArguments& args) {
-  if (!CanSpeculateCall()) return {};
+  return TryWithFastArrayElements(
+      "Array.prototype.at", args,
+      [&](ElementsKind elements_kind, ValueNode* elements, ValueNode* length) {
+        ValueNode* index = nullptr;
+        if (args.count() == 0) {
+          // Index is the undefined object. ToIntegerOrInfinity(undefined) = 0.
+          index = GetInt32Constant(0);
+        } else {
+          GET_VALUE_OR_ABORT(
+              index, Select(
+                         [&](auto& branch) -> BranchResult {
+                           return BuildBranchIfInt32Compare(
+                               branch, Operation::kLessThan, args[0],
+                               GetInt32Constant(0));
+                         },
+                         [&]() -> ReduceResult {
+                           return AddNewNode<Int32Add>({args[0], length});
+                         },
+                         [&]() -> ReduceResult { return args[0]; }));
+        }
 
-  if (!broker()->dependencies()->DependOnNoElementsProtector()) {
-    TRACE(TraceColor::kRed << "! Failed to reduce Array.prototype.at - "
-                              "NoElementsProtector invalidated");
-    return {};
-  }
-
-  ValueNode* receiver = GetValueOrUndefined(args.receiver());
-  MapInference<MaglevReducer<BaseT>> inference(this, receiver);
-  auto possible_maps = inference.TryGetPossibleMaps();
-  ElementsKind elements_kind = NO_ELEMENTS;
-  // TODO(42204525): Support polymorphism. I.e., DOUBLE_ELEMENTS and ELEMENTS
-  // together.
-  if (!possible_maps || !CanInlineArrayIteratingBuiltin(
-                            broker(), *possible_maps, &elements_kind)) {
-    return {};
-  }
-  RETURN_IF_ABORT(inference.InsertMapChecks(zone()));
-
-  ValueNode* length;
-  if (ValueNode* loaded_property = known_node_aspects().TryFindLoadedProperty(
-          receiver, broker()->length_string())) {
-    length = loaded_property;
-  } else {
-    GET_VALUE_OR_ABORT(
-        length, BuildLoadTaggedField(receiver, offsetof(JSArray, length_),
-                                     NodeType::kUnknown, false,
-                                     broker()->length_string()));
-    RecordKnownProperty(receiver, broker()->length_string(), length, false,
-                        compiler::AccessMode::kLoad);
-  }
-
-  ValueNode* index = nullptr;
-  if (args.count() == 0) {
-    // Index is the undefined object. ToIntegerOrInfinity(undefined) = 0.
-    index = GetInt32Constant(0);
-  } else {
-    GET_VALUE_OR_ABORT(index,
-                       Select(
-                           [&](auto& sg, auto* label) -> BranchResult {
-                             return BuildBranchIfInt32Compare(
-                                 sg, label, Operation::kLessThan, args[0],
-                                 GetInt32Constant(0));
-                           },
-                           [&]() -> ReduceResult {
-                             return AddNewNode<Int32Add>({args[0], length});
-                           },
-                           [&]() -> ReduceResult { return args[0]; }));
-  }
-
-  ValueNode* elements;
-  GET_VALUE_OR_ABORT(elements, BuildLoadElements(receiver, elements_kind));
-
-  return Select(
-      [&](auto& sg, auto* label) -> BranchResult {
-        return BuildBranchIfInt32Compare(sg, label,
-                                         Operation::kGreaterThanOrEqual, index,
-                                         GetInt32Constant(0));
-      },
-      [&]() {
         return Select(
-            [&](auto& sg, auto* label) -> BranchResult {
-              return BuildBranchIfInt32Compare(sg, label, Operation::kLessThan,
-                                               index, length);
+            [&](auto& branch) -> BranchResult {
+              return BuildBranchIfInt32Compare(branch,
+                                               Operation::kGreaterThanOrEqual,
+                                               index, GetInt32Constant(0));
             },
-            [&]() -> ReduceResult {
-              ValueNode* element;
-              if (elements_kind == HOLEY_DOUBLE_ELEMENTS) {
-                GET_VALUE_OR_ABORT(element,
-                                   AddNewNode<LoadHoleyFixedDoubleArrayElement>(
+            [&]() {
+              return Select(
+                  [&](auto& branch) -> BranchResult {
+                    return BuildBranchIfInt32Compare(
+                        branch, Operation::kLessThan, index, length);
+                  },
+                  [&]() -> ReduceResult {
+                    ValueNode* element;
+                    if (elements_kind == HOLEY_DOUBLE_ELEMENTS) {
+                      GET_VALUE_OR_ABORT(
+                          element, AddNewNode<LoadHoleyFixedDoubleArrayElement>(
                                        {elements, index}));
-              } else if (elements_kind == PACKED_DOUBLE_ELEMENTS) {
-                GET_VALUE_OR_ABORT(
-                    element, BuildLoadFixedDoubleArrayElement(elements, index));
-              } else {
-                LoadType type = elements_kind == PACKED_SMI_ELEMENTS
-                                    ? LoadType::kSmi
-                                    : LoadType::kUnknown;
-                if (auto constant = TryGetInt32Constant(index)) {
-                  auto const_res = TryBuildLoadFixedArrayElementConstantIndex(
-                      elements, constant.value(), type);
-                  if (const_res.IsDone()) {
-                    element = const_res.value();
-                  } else {
-                    GET_VALUE_OR_ABORT(element,
-                                       AddNewNode<LoadFixedArrayElement>(
-                                           {elements, index}, type));
-                  }
-                } else {
-                  GET_VALUE_OR_ABORT(element, AddNewNode<LoadFixedArrayElement>(
-                                                  {elements, index}, type));
-                }
-              }
-              if (IsHoleyElementsKind(elements_kind)) {
-                GET_VALUE_OR_ABORT(
-                    element, AddNewNode<ConvertHoleToUndefined>({element}));
-              }
+                    } else if (elements_kind == PACKED_DOUBLE_ELEMENTS) {
+                      GET_VALUE_OR_ABORT(
+                          element,
+                          BuildLoadFixedDoubleArrayElement(elements, index));
+                    } else {
+                      LoadType type = elements_kind == PACKED_SMI_ELEMENTS
+                                          ? LoadType::kSmi
+                                          : LoadType::kUnknown;
+                      if (auto constant = TryGetInt32Constant(index)) {
+                        std::optional<ValueNode*> maybe_element;
+                        GET_OPTVALUE_OR_ABORT(
+                            maybe_element,
+                            TryBuildLoadFixedArrayElementConstantIndex(
+                                elements, constant.value(), type));
+                        if (maybe_element) {
+                          element = *maybe_element;
+                        } else {
+                          GET_VALUE_OR_ABORT(element,
+                                             AddNewNode<LoadFixedArrayElement>(
+                                                 {elements, index}, type));
+                        }
+                      } else {
+                        GET_VALUE_OR_ABORT(element,
+                                           AddNewNode<LoadFixedArrayElement>(
+                                               {elements, index}, type));
+                      }
+                    }
+                    if (IsHoleyElementsKind(elements_kind)) {
+                      GET_VALUE_OR_ABORT(
+                          element,
+                          AddNewNode<ConvertHoleToUndefined>({element}));
+                    }
 
-              return element;
+                    return element;
+                  },
+                  [&]() -> ReduceResult {
+                    return GetRootConstant(RootIndex::kUndefinedValue);
+                  });
             },
             [&]() -> ReduceResult {
               return GetRootConstant(RootIndex::kUndefinedValue);
             });
-      },
-      [&]() -> ReduceResult {
-        return GetRootConstant(RootIndex::kUndefinedValue);
       });
 }
 
@@ -1560,17 +1649,8 @@ ReduceResult MaglevReducer<BaseT>::GetTruncatedInt32ForToNumber(
   switch (representation) {
     case ValueRepresentation::kTagged: {
       NodeType old_type;
-      // TODO(dmercadier): make EnsureType return a 3-value enum, something like
-      // kAlreadyTargetType, kNeedsCheck, and kImpossible, and handle
-      // kImpossible by emitting an unconditional deopt, instead of having to
-      // check after EnsureType whether its input now has type kNone or not.
-      RecordType(value, allowed_input_type, &old_type);
-
-      // Check for the empty type first, so that we don't emit unsafe conversion
-      // nodes below.
-      if (IsEmptyNodeType(old_type) || IsEmptyNodeType(value)) {
-        return EmitUnconditionalDeopt(DeoptimizeReason::kWrongValue);
-      }
+      RETURN_IF_ABORT(EnsureType(value, allowed_input_type,
+                                 DeoptimizeReason::kWrongValue, &old_type));
 
       if (NodeTypeIsSmi(old_type)) {
         // Smi untagging can be cached as an int32 alternative, not just a
@@ -2012,7 +2092,8 @@ void MaglevReducer<BaseT>::FlushNodesToBlock() {
 template <typename BaseT>
 bool MaglevReducer<BaseT>::CanInlineCall(
     const MaglevCompilationUnit* current_unit,
-    compiler::SharedFunctionInfoRef shared, float call_frequency) {
+    compiler::SharedFunctionInfoRef shared, float call_frequency,
+    base::Vector<ValueNode*> arguments, UseRepresentationSet use_repr_hints) {
   auto tracer_ = tracer();
   if (static_cast<int>(graph()->inlined_functions().size()) >=
       SourcePosition::MaxInliningId()) {
@@ -2033,7 +2114,10 @@ bool MaglevReducer<BaseT>::CanInlineCall(
   }
   compiler::BytecodeArrayRef bytecode = shared.GetBytecodeArray(broker());
   const CompilationFlags& flags = graph()->compilation_info()->flags();
-  if (call_frequency < flags.min_inlining_frequency) {
+  bool is_small =
+      IsSmallFunction(bytecode.length(), arguments, use_repr_hints, flags);
+
+  if (!is_small && call_frequency < flags.min_inlining_frequency) {
     TRACE_CANNOT_INLINE("call frequency ("
                         << call_frequency << ") < minimum threshold ("
                         << flags.min_inlining_frequency << ")");
@@ -2094,7 +2178,8 @@ MaybeReduceResult
 MaglevReducer<BaseT>::TryBuildLoadFixedArrayElementConstantIndex(
     ValueNode* elements, int32_t index, LoadType type) {
   if (index < 0 || static_cast<uint32_t>(index) >= FixedArray::kMaxLength) {
-    return {};
+    // Has to be unreachable because of an earlier check.
+    return BuildAbort(AbortReason::kUnreachable);
   }
   if (compiler::OptionalFixedArrayRef fixed_array_ref =
           TryGetConstant<FixedArray>(elements)) {
@@ -2109,7 +2194,7 @@ MaglevReducer<BaseT>::TryBuildLoadFixedArrayElementConstantIndex(
   int offset = FixedArray::OffsetOfElementAt(index);
   return AddNewNodeNoInputConversion<LoadTaggedField>(
       {elements}, offset, NodeTypeFromLoadType(type), false,
-      PropertyKey::None());
+      PropertyKey::None(), IsArrayLength::kNo, compiler::OptionalMapRef{});
 }
 
 template <typename BaseT>
@@ -2143,7 +2228,11 @@ ReduceResult MaglevReducer<BaseT>::BuildCheckMaps(
                                           GetCheckType(known_info->type())));
   }
 
-  merger.UpdateKnownNodeAspects(object, known_node_aspects());
+  if (!merger.UpdateKnownNodeAspects(object, known_node_aspects())) {
+    // If the type is empty, it means that the Check inserted above will deopt.
+    // From here on, the code is dead.
+    return BuildAbort(AbortReason::kUnreachable);
+  }
   return ReduceResult::Done();
 }
 
@@ -2210,8 +2299,14 @@ MaybeReduceResult MaglevReducer<BaseT>::TryFoldTestUndetectable(
   }
 
   NodeType node_type;
-  if (CheckType(value, NodeType::kSmi, &node_type)) {
+  if (CheckType(value, NodeType::kNotUndetectable, &node_type)) {
     return GetBooleanConstant(false);
+  }
+
+  if (broker()->dependencies()->DependOnNoUndetectableObjectsProtector()) {
+    if (CheckType(value, NodeType::kJSReceiver, &node_type)) {
+      return GetBooleanConstant(false);
+    }
   }
 
   MapInference<MaglevReducer<BaseT>> inference(
@@ -2343,8 +2438,11 @@ MaybeReduceResult MaglevReducer<BaseT>::TryFoldCheckMaps(
     return EmitUnconditionalDeopt(DeoptimizeReason::kWrongMap);
   }
 
-  // If the known maps are the subset of the maps to check, we are done.
-  if (merger.known_maps_are_subset_of_requested_maps()) {
+  // If the known maps are the subset of the maps to check and the check cannot
+  // fail on a Smi, we are done.
+  if (merger.known_maps_are_subset_of_requested_maps() &&
+      (NodeTypeIs(GetType(object), NodeType::kAnyHeapObject) ||
+       merger.RequestedMapsAdmitSmis())) {
     // The node type of known_info can get out of sync with the possible maps.
     // For instance after merging with an effectively dead branch (i.e., check
     // contradicting all possible maps).
@@ -2378,34 +2476,37 @@ MaglevReducer<BaseT>::InferHasInPrototypeChain(
     ValueNode* receiver, compiler::HeapObjectRef prototype) {
   MapInference<MaglevReducer<BaseT>> inference(this, receiver);
   auto possible_maps = inference.TryGetPossibleMaps();
-  // If the map set is not found, then we don't know anything about the map of
-  // the receiver, so bail.
-  if (!possible_maps) {
+  // Since we only consider fresh maps, it is not necessary to emit map checks.
+  bool all_maps_are_fresh = false;
+  ZoneVector<compiler::MapRef> receiver_map_refs(zone());
+  if (possible_maps) {
+    // If the set of possible maps is empty, then there's no possible map for
+    // this receiver, therefore this path is unreachable at runtime. We're
+    // unlikely to ever hit this case, BuildCheckMaps should already
+    // unconditionally deopt, but check it in case another checking operation
+    // fails to statically unconditionally deopt.
+    if (possible_maps->is_empty()) {
+      // TODO(leszeks): Add an unreachable assert here.
+      return kIsNotInPrototypeChain;
+    }
+    all_maps_are_fresh = inference.all_maps_are_fresh();
+    for (compiler::MapRef map : *possible_maps) {
+      receiver_map_refs.push_back(map);
+    }
+  } else if (compiler::OptionalHeapObjectRef constant =
+                 TryGetConstant<HeapObject>(receiver)) {
+    receiver_map_refs.push_back(constant->map(broker()));
+  } else {
+    // We don't know anything about the map of the receiver, so bail.
     return kMayBeInPrototypeChain;
   }
-
-  // If the set of possible maps is empty, then there's no possible map for this
-  // receiver, therefore this path is unreachable at runtime. We're unlikely to
-  // ever hit this case, BuildCheckMaps should already unconditionally deopt,
-  // but check it in case another checking operation fails to statically
-  // unconditionally deopt.
-  if (possible_maps->is_empty()) {
-    // TODO(leszeks): Add an unreachable assert here.
-    return kIsNotInPrototypeChain;
-  }
-
-  // Since we only consider fresh maps, it is not necessary to emit map checks.
-  const bool all_maps_are_fresh = inference.all_maps_are_fresh();
-
-  ZoneVector<compiler::MapRef> receiver_map_refs(zone());
 
   // Try to determine either that all of the {receiver_maps} have the given
   // {prototype} in their chain, or that none do. If we can't tell, return
   // kMayBeInPrototypeChain.
   bool all = true;
   bool none = true;
-  for (compiler::MapRef map : *possible_maps) {
-    receiver_map_refs.push_back(map);
+  for (compiler::MapRef map : receiver_map_refs) {
     if (!all_maps_are_fresh && !map.is_stable()) {
       return kMayBeInPrototypeChain;
     }
@@ -2506,7 +2607,7 @@ MaybeReduceResult MaglevReducer<BaseT>::TryBuildFastOrdinaryHasInstance(
     compiler::HeapObjectRef prototype =
         broker()->dependencies()->DependOnPrototypeProperty(function);
     RETURN_IF_DONE(TryBuildFastHasInPrototypeChain(object, prototype));
-    return AddNewNode<HasInPrototypeChain>({object}, prototype);
+    return AddNewNode<HasInPrototypeChain>({object, GetConstant(prototype)});
   }
 
   return {};
@@ -2618,8 +2719,11 @@ MaybeReduceResult MaglevReducer<BaseT>::TryBuildFastInstanceOf(
           has_instance_field->AsJSFunction().shared(broker());
       if (shared.HasBuiltinId() &&
           shared.builtin_id() == Builtin::kFunctionPrototypeHasInstance) {
-        return BuildOrdinaryHasInstance(context, object, callable,
-                                        callable_node_if_not_constant);
+        // The CheckValueByReference above pinned {callable_node} to
+        // {callable}, so we can treat the callable as a compile-time constant
+        // from here on, which lets BuildOrdinaryHasInstance take its fast
+        // path instead of calling the OrdinaryHasInstance builtin.
+        return BuildOrdinaryHasInstance(context, object, callable, nullptr);
       }
     }
 
@@ -2682,14 +2786,175 @@ MaybeReduceResult MaglevReducer<BaseT>::TryBuildFastInstanceOfWithFeedback(
 }
 
 template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReduceFunctionPrototypeHasInstance(
+    compiler::JSFunctionRef target, CallArguments& args) {
+  // We can't reduce Function#hasInstance when there is no receiver function.
+  if (args.receiver_mode() == ConvertReceiverMode::kNullOrUndefined) {
+    return {};
+  }
+  if (args.count() != 1) {
+    return {};
+  }
+  compiler::OptionalJSObjectRef maybe_receiver_constant =
+      TryGetConstant<JSObject>(args.receiver());
+  if (!maybe_receiver_constant) {
+    return {};
+  }
+  if (!maybe_receiver_constant->map(broker()).is_callable()) {
+    return {};
+  }
+  return BuildOrdinaryHasInstance(GetConstant(target.context(broker())),
+                                  args[0], maybe_receiver_constant.value(),
+                                  nullptr);
+}
+
+template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReduceObjectPrototypeIsPrototypeOf(
+    compiler::JSFunctionRef target, CallArguments& args) {
+  if (args.receiver_mode() == ConvertReceiverMode::kNullOrUndefined) {
+    return {};
+  }
+  // The receiver must be known to be a JSReceiver, so that the ToObject step
+  // of Object.prototype.isPrototypeOf is a no-op (and cannot throw). The
+  // argument needs no checks: primitive values have null as their prototype,
+  // so the prototype chain walk immediately aborts and yields false.
+  ValueNode* receiver = args.receiver();
+  ValueNode* value =
+      args.count() == 0 ? GetRootConstant(RootIndex::kUndefinedValue) : args[0];
+  if (compiler::OptionalJSReceiverRef receiver_constant =
+          TryGetConstant<JSReceiver>(receiver)) {
+    RETURN_IF_DONE(TryBuildFastHasInPrototypeChain(value, *receiver_constant));
+    return AddNewNode<HasInPrototypeChain>(
+        {value, GetConstant(*receiver_constant)});
+  }
+  if (!CheckType(receiver, NodeType::kJSReceiver)) return {};
+  return AddNewNode<HasInPrototypeChain>({value, receiver});
+}
+
+template <typename BaseT>
+ReduceResult MaglevReducer<BaseT>::BuildTaggedEqual(ValueNode* lhs,
+                                                    ValueNode* rhs) {
+  ValueNode* tagged_lhs;
+  GET_VALUE_OR_ABORT(tagged_lhs, GetTaggedValue(lhs));
+  ValueNode* tagged_rhs;
+  GET_VALUE_OR_ABORT(tagged_rhs, GetTaggedValue(rhs));
+  if (tagged_lhs == tagged_rhs) {
+    return GetBooleanConstant(true);
+  }
+  if (HaveDisjointTypes(tagged_lhs, tagged_rhs)) {
+    return GetBooleanConstant(false);
+  }
+  // TODO(victorgomes): We could retrieve the HeapObjectRef in HeapConstant and
+  // compare them.
+  if (IsConstantNode(tagged_lhs->opcode()) &&
+      !tagged_lhs->template Is<HeapConstant>() &&
+      tagged_lhs->opcode() == tagged_rhs->opcode()) {
+    // Constants nodes are canonicalized, except for the node holding
+    // HeapObjectRef, so equal constants should have been handled above.
+    return GetBooleanConstant(false);
+  }
+  return AddNewNodeNoInputConversion<TaggedEqual>({tagged_lhs, tagged_rhs});
+}
+
+template <typename BaseT>
+ReduceResult MaglevReducer<BaseT>::BuildTaggedEqual(ValueNode* lhs,
+                                                    RootIndex rhs_index) {
+  return BuildTaggedEqual(lhs, GetRootConstant(rhs_index));
+}
+
+template <typename BaseT>
+bool MaglevReducer<BaseT>::IsNeitherNaNNorZero(ValueNode* node) {
+  if (auto constant = TryGetFloat64OrHoleyFloat64Constant(
+          UseRepresentation::kFloat64, node,
+          TaggedToFloat64ConversionType::kOnlyNumber)) {
+    double value = constant->get_scalar();
+    // Note that `value != 0` rules out both +0 and -0.
+    return !std::isnan(value) && value != 0;
+  }
+  return false;
+}
+
+template <typename BaseT>
+ReduceResult MaglevReducer<BaseT>::BuildNumberSameValue(ValueNode* lhs,
+                                                        ValueNode* rhs) {
+  DCHECK(CheckType(lhs, NodeType::kNumber));
+  DCHECK(CheckType(rhs, NodeType::kNumber));
+  ValueNode* int32_lhs = TryGetInt32(lhs);
+  ValueNode* int32_rhs = TryGetInt32(rhs);
+  if (int32_lhs != nullptr && int32_rhs != nullptr) {
+    return AddNewNodeNoInputConversion<Int32Compare>({int32_lhs, int32_rhs},
+                                                     Operation::kEqual);
+  }
+  // Narrowing a holey float64 to a float64 emits an eager deopt check, so only
+  // do that when the call may speculate.
+  auto needs_hole_check = [](ValueNode* node) {
+    return node->value_representation() == ValueRepresentation::kHoleyFloat64;
+  };
+  if (!CanSpeculateCall() && (needs_hole_check(lhs) || needs_hole_check(rhs))) {
+    return BuildCallBuiltinWithTaggedInputs<Builtin::kSameValue>({lhs, rhs});
+  }
+  ValueNode* float64_lhs;
+  GET_VALUE_OR_ABORT(float64_lhs, GetFloat64(lhs));
+  ValueNode* float64_rhs;
+  GET_VALUE_OR_ABORT(float64_rhs, GetFloat64(rhs));
+  // SameValue and numeric equality disagree only when both sides are NaN, or
+  // when one is +0 and the other -0. A side that is neither NaN nor zero rules
+  // both out.
+  if (IsNeitherNaNNorZero(lhs) || IsNeitherNaNNorZero(rhs)) {
+    return AddNewNodeNoInputConversion<Float64Compare>(
+        {float64_lhs, float64_rhs}, Operation::kEqual);
+  }
+  return AddNewNodeNoInputConversion<Float64SameValue>(
+      {float64_lhs, float64_rhs});
+}
+
+template <typename BaseT>
+ReduceResult MaglevReducer<BaseT>::BuildSameValue(ValueNode* lhs,
+                                                  ValueNode* rhs) {
+  // SameValue is reflexive, including for NaN.
+  if (lhs == rhs) return GetBooleanConstant(true);
+
+  // Values of disjoint types are never SameValue, with one exception: kSmi and
+  // kHeapNumber are disjoint but can hold the same number.
+  NodeType lhs_type = GetType(lhs);
+  NodeType rhs_type = GetType(rhs);
+  if (IsEmptyNodeType(IntersectType(lhs_type, rhs_type)) &&
+      !(NodeTypeCanBe(lhs_type, NodeType::kNumber) &&
+        NodeTypeCanBe(rhs_type, NodeType::kNumber))) {
+    return GetBooleanConstant(false);
+  }
+
+  // No value can be SameValue to a JSReceiver, a Symbol or an Oddball without
+  // being that very object, so knowing one of the sides is enough here.
+  const NodeType kReferenceEqual = UnionType(
+      NodeType::kJSReceiver, UnionType(NodeType::kSymbol, NodeType::kOddball));
+
+  if (NodeTypeIs(lhs_type, NodeType::kNumber) &&
+      NodeTypeIs(rhs_type, NodeType::kNumber)) {
+    return BuildNumberSameValue(lhs, rhs);
+  } else if (NodeTypeIs(lhs_type, kReferenceEqual) ||
+             NodeTypeIs(rhs_type, kReferenceEqual)) {
+    return BuildTaggedEqual(lhs, rhs);
+  } else if (NodeTypeIs(lhs_type, NodeType::kString) &&
+             NodeTypeIs(rhs_type, NodeType::kString)) {
+    return AddNewNode<StringEqual>({lhs, rhs},
+                                   StringEqualInputMode::kOnlyStrings);
+  }
+
+  return BuildCallBuiltinWithTaggedInputs<Builtin::kSameValue>({lhs, rhs});
+}
+
+template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReduceObjectIs(
+    compiler::JSFunctionRef target, CallArguments& args) {
+  return BuildSameValue(GetValueOrUndefined(args[0]),
+                        GetValueOrUndefined(args[1]));
+}
+
+template <typename BaseT>
 ReduceResult MaglevReducer<BaseT>::BuildCheckSmi(ValueNode* object) {
   if (object->StaticTypeIs(broker(), NodeType::kSmi)) return object;
-  // Check for the empty type first so that we catch the case where
-  // GetType(object) is already empty.
-  if (IsEmptyNodeType(IntersectType(GetType(object), NodeType::kSmi))) {
-    return EmitUnconditionalDeopt(DeoptimizeReason::kSmi);
-  }
-  if (EnsureType(object, NodeType::kSmi)) return object;
+  RETURN_IF_DONE(EnsureType(object, NodeType::kSmi, DeoptimizeReason::kSmi));
   // For non-tagged constants, we may be able to skip the runtime check: every
   // non-tagged arm of the switch below emits a value-range check, which is
   // exactly what `Smi::IsValid` proves. For tagged inputs the runtime check
@@ -2734,14 +2999,75 @@ ReduceResult MaglevReducer<BaseT>::BuildSmiUntag(ValueNode* node) {
   // This is called when converting inputs in AddNewNode. We might already have
   // an empty type for `node` here. Make sure we don't add unsafe conversion
   // nodes in that case by checking for the empty node type explicitly.
-  if (IsEmptyNodeType(node) || !NodeTypeCanBe(GetType(node), NodeType::kSmi)) {
+  EnsureTypeResult ensure_res =
+      known_node_aspects().EnsureType(broker(), node, NodeType::kSmi);
+  if (ensure_res == EnsureTypeResult::kContradiction) {
     return EmitUnconditionalDeopt(DeoptimizeReason::kNotASmi);
-  }
-  if (EnsureType(node, NodeType::kSmi)) {
+  } else if (ensure_res == EnsureTypeResult::kAlreadyHadType) {
     return AddNewNodeNoInputConversion<UnsafeSmiUntag>({node});
   } else {
     return AddNewNodeNoInputConversion<CheckedSmiUntag>({node});
   }
+}
+
+template <typename BaseT>
+ReduceResult MaglevReducer<BaseT>::BuildCheckString(ValueNode* object) {
+  NodeType known_type;
+  RETURN_IF_DONE(EnsureType(object, NodeType::kString,
+                            DeoptimizeReason::kNotAString, &known_type));
+  return AddNewNode<CheckString>({object}, GetCheckType(known_type));
+}
+
+namespace detail {
+inline bool CheckConditionIn32(int32_t lhs, int32_t rhs,
+                               AssertCondition condition) {
+  switch (condition) {
+    case AssertCondition::kEqual:
+      return lhs == rhs;
+    case AssertCondition::kNotEqual:
+      return lhs != rhs;
+    case AssertCondition::kLessThan:
+      return lhs < rhs;
+    case AssertCondition::kLessThanEqual:
+      return lhs <= rhs;
+    case AssertCondition::kGreaterThan:
+      return lhs > rhs;
+    case AssertCondition::kGreaterThanEqual:
+      return lhs >= rhs;
+    case AssertCondition::kUnsignedLessThan:
+      return static_cast<uint32_t>(lhs) < static_cast<uint32_t>(rhs);
+    case AssertCondition::kUnsignedLessThanEqual:
+      return static_cast<uint32_t>(lhs) <= static_cast<uint32_t>(rhs);
+    case AssertCondition::kUnsignedGreaterThan:
+      return static_cast<uint32_t>(lhs) > static_cast<uint32_t>(rhs);
+    case AssertCondition::kUnsignedGreaterThanEqual:
+      return static_cast<uint32_t>(lhs) >= static_cast<uint32_t>(rhs);
+  }
+  UNREACHABLE();
+}
+}  // namespace detail
+
+template <typename BaseT>
+ReduceResult MaglevReducer<BaseT>::TryBuildCheckInt32Condition(
+    ValueNode* lhs, ValueNode* rhs, AssertCondition condition,
+    DeoptimizeReason reason) {
+  if (auto result = TryFoldInt32Condition(condition, lhs, rhs)) {
+    if (result.value()) {
+      return ReduceResult::Done();
+    }
+    return EmitUnconditionalDeopt(reason);
+  }
+  return AddNewNode<CheckInt32Condition>({lhs, rhs}, condition, reason);
+}
+
+template <typename BaseT>
+compiler::OptionalObjectRef MaglevReducer<BaseT>::TryFoldLoadConstantDataField(
+    compiler::JSObjectRef holder,
+    compiler::PropertyAccessInfo const& access_info) {
+  DCHECK(!access_info.field_representation().IsDouble());
+  return holder.GetOwnFastConstantDataProperty(
+      broker(), access_info.field_representation(), access_info.field_index(),
+      broker()->dependencies());
 }
 
 template <typename BaseT>
@@ -2752,7 +3078,12 @@ ReduceResult MaglevReducer<BaseT>::BuildNumberOrOddballToFloat64OrHoleyFloat64(
   NodeType old_type;
   TaggedToFloat64ConversionType conversion_type =
       GetTaggedToFloat64ConversionType(allowed_input_type);
-  if (EnsureType(node, allowed_input_type, &old_type)) {
+  EnsureTypeResult ensure_res = known_node_aspects().EnsureType(
+      broker(), node, allowed_input_type, &old_type);
+  if (ensure_res == EnsureTypeResult::kContradiction) {
+    return EmitUnconditionalDeopt(DeoptimizeReason::kWrongValue);
+  }
+  if (ensure_res == EnsureTypeResult::kAlreadyHadType) {
     if (old_type == NodeType::kSmi) {
       ValueNode* untagged_smi;
       GET_VALUE_OR_ABORT(untagged_smi, BuildSmiUntag(node));
@@ -3200,7 +3531,7 @@ MaybeReduceResult MaglevReducer<BaseT>::TryFoldInt32BinaryOperation(
         // TODO(victorgomes): This should actually be NodeType::kInt32, but we
         // don't have it. The idea here is that the value is either 0 or 1, so
         // we can cast Uint32 to Int32 without a check.
-        RecordType(sign_bit, NodeType::kSmi);
+        RETURN_IF_ABORT(RecordType(sign_bit, NodeType::kSmi));
         ValueNode* result;
         GET_VALUE_OR_ABORT(result,
                            AddNewNode<Int32Add>({shifted_quot, sign_bit}));
@@ -3321,6 +3652,34 @@ bool MaglevReducer<BaseT>::TryFoldInt32CompareOperation(Operation op,
     default:
       UNREACHABLE();
   }
+}
+
+template <typename BaseT>
+std::optional<bool> MaglevReducer<BaseT>::TryFoldInt32Condition(
+    AssertCondition condition, ValueNode* left, ValueNode* right) {
+  if (left == right) {
+    switch (condition) {
+      case AssertCondition::kEqual:
+      case AssertCondition::kLessThanEqual:
+      case AssertCondition::kGreaterThanEqual:
+      case AssertCondition::kUnsignedLessThanEqual:
+      case AssertCondition::kUnsignedGreaterThanEqual:
+        return true;
+      case AssertCondition::kNotEqual:
+      case AssertCondition::kLessThan:
+      case AssertCondition::kGreaterThan:
+      case AssertCondition::kUnsignedLessThan:
+      case AssertCondition::kUnsignedGreaterThan:
+        return false;
+    }
+  }
+  const auto lhs_const = TryGetInt32Constant(left);
+  const auto rhs_const = TryGetInt32Constant(right);
+  if (lhs_const.has_value() && rhs_const.has_value()) {
+    return detail::CheckConditionIn32(lhs_const.value(), rhs_const.value(),
+                                      condition);
+  }
+  return {};
 }
 
 template <typename BaseT>
@@ -3572,39 +3931,25 @@ MaybeReduceResult MaglevReducer<BaseT>::TryFoldFloat64Max(ValueNode* lhs,
   return GetFloat64Constant(rhs_scalar);
 }
 
-#ifdef V8_USE_LIBM_TRIG_FUNCTIONS
-#define IF_LIBM(Macro, ...) Macro(__VA_ARGS__)
-#define IF_NOT_LIBM(Macro, ...)
-#else
-#define IF_LIBM(Macro, ...)
-#define IF_NOT_LIBM(Macro, ...) Macro(__VA_ARGS__)
-#endif  // V8_USE_LIBM_TRIG_FUNCTIONS
-
-#define IEEE_754_FUNCTION_MAPPER(V)                                       \
-  V(Acos, base::ieee754::acos)                                            \
-  V(Acosh, base::ieee754::acosh)                                          \
-  V(Asin, base::ieee754::asin)                                            \
-  V(Asinh, base::ieee754::asinh)                                          \
-  V(Atan, base::ieee754::atan)                                            \
-  V(Atanh, base::ieee754::atanh)                                          \
-  V(Cbrt, base::ieee754::cbrt)                                            \
-  IF_LIBM(V, Cos,                                                         \
-          (v8_flags.use_libm_trig_functions ? base::ieee754::libm_cos     \
-                                            : base::ieee754::fdlibm_cos)) \
-  IF_NOT_LIBM(V, Cos, base::ieee754::cos)                                 \
-  V(Cosh, base::ieee754::cosh)                                            \
-  V(Exp, base::ieee754::exp)                                              \
-  V(Expm1, base::ieee754::expm1)                                          \
-  V(Log, base::ieee754::log)                                              \
-  V(Log1p, base::ieee754::log1p)                                          \
-  V(Log10, base::ieee754::log10)                                          \
-  V(Log2, base::ieee754::log2)                                            \
-  IF_LIBM(V, Sin,                                                         \
-          (v8_flags.use_libm_trig_functions ? base::ieee754::libm_sin     \
-                                            : base::ieee754::fdlibm_sin)) \
-  IF_NOT_LIBM(V, Sin, base::ieee754::sin)                                 \
-  V(Sinh, base::ieee754::sinh)                                            \
-  V(Tan, base::ieee754::tan)                                              \
+#define IEEE_754_FUNCTION_MAPPER(V) \
+  V(Acos, base::ieee754::acos)      \
+  V(Acosh, base::ieee754::acosh)    \
+  V(Asin, base::ieee754::asin)      \
+  V(Asinh, base::ieee754::asinh)    \
+  V(Atan, base::ieee754::atan)      \
+  V(Atanh, base::ieee754::atanh)    \
+  V(Cbrt, base::ieee754::cbrt)      \
+  V(Cos, base::ieee754::cos)        \
+  V(Cosh, base::ieee754::cosh)      \
+  V(Exp, base::ieee754::exp)        \
+  V(Expm1, base::ieee754::expm1)    \
+  V(Log, base::ieee754::log)        \
+  V(Log1p, base::ieee754::log1p)    \
+  V(Log10, base::ieee754::log10)    \
+  V(Log2, base::ieee754::log2)      \
+  V(Sin, base::ieee754::sin)        \
+  V(Sinh, base::ieee754::sinh)      \
+  V(Tan, base::ieee754::tan)        \
   V(Tanh, base::ieee754::tanh)
 
 template <typename BaseT>
@@ -3696,6 +4041,71 @@ MaybeReduceResult MaglevReducer<BaseT>::TryFoldLogicalNot(ValueNode* input) {
 
   return {};
 }
+
+template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryFoldTestTypeOf(
+    ValueNode* value, interpreter::TestTypeOfFlags::LiteralFlag literal) {
+  // TODO(v8:7700): Add a branch version of TestTypeOf that does not need to
+  // materialise the boolean value.
+  const auto node_type = GetType(value);
+  if (node_type == NodeType::kNone) {
+    return BuildAbort(AbortReason::kUnreachable);
+  }
+
+  const auto check_type = [&](NodeType match_type,
+                              NodeType can_be_type) -> MaybeReduceResult {
+    if (NodeTypeIs(node_type, match_type)) {
+      return GetBooleanConstant(true);
+    }
+    if (!NodeTypeCanBe(node_type, can_be_type)) {
+      return GetBooleanConstant(false);
+    }
+    return MaybeReduceResult::Fail();
+  };
+
+  using LiteralFlag = interpreter::TestTypeOfFlags::LiteralFlag;
+  switch (literal) {
+    case LiteralFlag::kNumber:
+      return check_type(NodeType::kNumber, NodeType::kNumber);
+    case LiteralFlag::kString:
+      return check_type(NodeType::kString, NodeType::kString);
+    case LiteralFlag::kSymbol:
+      return check_type(NodeType::kSymbol, NodeType::kSymbol);
+    case LiteralFlag::kBoolean:
+      return check_type(NodeType::kBoolean, NodeType::kBoolean);
+    case LiteralFlag::kBigInt:
+      return check_type(NodeType::kBigInt, NodeType::kBigInt);
+
+    case LiteralFlag::kUndefined:
+      return check_type(NodeType::kUndefined,
+                        UnionType(NodeType::kUndefined, NodeType::kJSReceiver));
+
+    case LiteralFlag::kFunction:
+      return check_type(NodeType::kJSFunction, NodeType::kCallable);
+
+    case LiteralFlag::kObject: {
+      constexpr NodeType kObjectTypes = UnionType(
+          NodeType::kNull,
+          UnionType(NodeType::kJSArray, UnionType(NodeType::kStringWrapper,
+                                                  NodeType::kJSDataView)));
+      if (NodeTypeIs(node_type, kObjectTypes)) {
+        return GetBooleanConstant(true);
+      }
+      if (!NodeTypeCanBe(node_type,
+                         UnionType(NodeType::kJSReceiver, NodeType::kNull)) ||
+          NodeTypeIs(node_type, NodeType::kCallable)) {
+        return GetBooleanConstant(false);
+      }
+      return {};
+    }
+
+    case LiteralFlag::kOther:
+      return GetBooleanConstant(false);
+  }
+
+  UNREACHABLE();
+}
+
 template <typename BaseT>
 bool MaglevReducer<BaseT>::IsTheHoleConstant(ValueNode* node) {
   if (node != nullptr) {
@@ -3747,7 +4157,8 @@ ReduceResult MaglevReducer<BaseT>::Select(
 
   Label else_branch(&sg, /*predecessor_count=*/1);
 
-  BranchResult br = cond(sg, &else_branch);
+  BranchBuilder builder(&sg, BranchType::kBranchIfFalse, &else_branch);
+  BranchResult br = cond(builder);
   switch (br) {
     case BranchResult::kAbort:
       return ReduceResult::DoneWithAbort();
@@ -3772,8 +4183,7 @@ ReduceResult MaglevReducer<BaseT>::Select(
   if (t.IsDoneWithAbort() && f.IsDoneWithAbort()) {
     return ReduceResult::DoneWithAbort();
   }
-  CHECK(f.IsDoneWithValue());
-  sg.set(v, f.value());
+  if (f.IsDoneWithValue()) sg.set(v, f.value());
   sg.GotoOrTrim(&done);
 
   RETURN_IF_ABORT(sg.TrimPredecessorsAndBind(&done));
@@ -3781,37 +4191,128 @@ ReduceResult MaglevReducer<BaseT>::Select(
 }
 
 template <typename BaseT>
-template <typename Sub>
-BranchResult MaglevReducer<BaseT>::BuildBranchIfInt32Compare(
-    Sub& sg, typename Sub::Label* false_target, Operation op, ValueNode* lhs,
-    ValueNode* rhs) {
-  if (auto cl = TryGetInt32Constant(lhs)) {
-    if (auto cr = TryGetInt32Constant(rhs)) {
-      return CompareInt32(*cl, *cr, op) ? BranchResult::kAlwaysTrue
-                                        : BranchResult::kAlwaysFalse;
-    }
-  }
-  ReduceResult r = sg.template GotoIfFalse<BranchIfInt32Compare>(
-      false_target, {lhs, rhs}, op);
-  if (r.IsDoneWithAbort()) return BranchResult::kAbort;
+template <typename ControlNodeT, typename... Args>
+BranchResult MaglevReducer<BaseT>::BranchBuilder::Build(
+    std::initializer_list<ValueNode*> control_inputs, Args&&... args) {
+  static_assert(IsConditionalControlNode(Node::opcode_of<ControlNodeT>));
+  ReduceResult r =
+      this->jump_type_ == BranchType::kBranchIfFalse
+          ? sub_->template GotoIfFalse<ControlNodeT>(
+                label_, control_inputs, std::forward<Args>(args)...)
+          : sub_->template GotoIfTrue<ControlNodeT>(
+                label_, control_inputs, std::forward<Args>(args)...);
+  if (r.IsDoneWithAbort()) return this->Abort();
   return BranchResult::kDefault;
 }
 
 template <typename BaseT>
-template <typename Sub>
-BranchResult MaglevReducer<BaseT>::BuildBranchIfUint32Compare(
-    Sub& sg, typename Sub::Label* false_target, Operation op, ValueNode* lhs,
-    ValueNode* rhs) {
-  if (auto cl = TryGetUint32Constant(lhs)) {
-    if (auto cr = TryGetUint32Constant(rhs)) {
-      return CompareUint32(*cl, *cr, op) ? BranchResult::kAlwaysTrue
-                                         : BranchResult::kAlwaysFalse;
+BranchResult MaglevReducer<BaseT>::BuildBranchIfInt32Compare(BranchBuilder& b,
+                                                             Operation op,
+                                                             ValueNode* lhs,
+                                                             ValueNode* rhs) {
+  if (auto cl = TryGetInt32Constant(lhs)) {
+    if (auto cr = TryGetInt32Constant(rhs)) {
+      return b.FromBool(CompareInt32(*cl, *cr, op));
     }
   }
-  ReduceResult r = sg.template GotoIfFalse<BranchIfUint32Compare>(
-      false_target, {lhs, rhs}, op);
-  if (r.IsDoneWithAbort()) return BranchResult::kAbort;
-  return BranchResult::kDefault;
+  return b.template Build<BranchIfInt32Compare>({lhs, rhs}, op);
+}
+
+template <typename BaseT>
+BranchResult MaglevReducer<BaseT>::BuildBranchIfUint32Compare(BranchBuilder& b,
+                                                              Operation op,
+                                                              ValueNode* lhs,
+                                                              ValueNode* rhs) {
+  if (auto cl = TryGetUint32Constant(lhs)) {
+    if (auto cr = TryGetUint32Constant(rhs)) {
+      return b.FromBool(CompareUint32(*cl, *cr, op));
+    }
+  }
+  return b.template Build<BranchIfUint32Compare>({lhs, rhs}, op);
+}
+
+template <typename BaseT>
+template <typename BranchBuilderT>
+BranchResult MaglevReducer<BaseT>::BuildBranchIfInt32ToBooleanTrue(
+    BranchBuilderT& b, ValueNode* node) {
+  return b.template Build<BranchIfInt32ToBooleanTrue>({node});
+}
+
+template <typename BaseT>
+template <typename BranchBuilderT>
+BranchResult MaglevReducer<BaseT>::BuildBranchIfIntPtrToBooleanTrue(
+    BranchBuilderT& b, ValueNode* node) {
+  return b.template Build<BranchIfIntPtrToBooleanTrue>({node});
+}
+
+template <typename BaseT>
+template <typename BranchBuilderT>
+BranchResult MaglevReducer<BaseT>::BuildBranchIfFloat64ToBooleanTrue(
+    BranchBuilderT& b, ValueNode* node) {
+  return b.template Build<BranchIfFloat64ToBooleanTrue>({node});
+}
+
+template <typename BaseT>
+template <typename BranchBuilderT>
+BranchResult MaglevReducer<BaseT>::BuildBranchIfHoleyFloat64ToBooleanTrue(
+    BranchBuilderT& b, ValueNode* node) {
+  return b.template Build<BranchIfHoleyFloat64ToBooleanTrue>({node});
+}
+
+template <typename BaseT>
+template <typename BranchBuilderT>
+BranchResult MaglevReducer<BaseT>::BuildBranchIfFloat64IsHole(BranchBuilderT& b,
+                                                              ValueNode* node) {
+  return b.template Build<BranchIfFloat64IsHole>({node});
+}
+
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+template <typename BaseT>
+template <typename BranchBuilderT>
+BranchResult MaglevReducer<BaseT>::BuildBranchIfFloat64IsUndefinedOrHole(
+    BranchBuilderT& b, ValueNode* node) {
+  return b.template Build<BranchIfFloat64IsUndefinedOrHole>({node});
+}
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
+
+template <typename BaseT>
+template <typename BranchBuilderT>
+BranchResult MaglevReducer<BaseT>::BuildBranchIfJSReceiver(BranchBuilderT& b,
+                                                           ValueNode* value) {
+  if (!value->is_tagged() && !value->is_holey_float64()) {
+    return b.AlwaysFalse();
+  }
+  if (CheckType(value, NodeType::kJSReceiver)) {
+    return b.AlwaysTrue();
+  } else if (HasDisjointType(value, NodeType::kJSReceiver)) {
+    return b.AlwaysFalse();
+  }
+  return b.template Build<BranchIfJSReceiver>({value});
+}
+
+template <typename BaseT>
+template <typename BranchBuilderT>
+BranchResult MaglevReducer<BaseT>::BuildBranchIfUndefinedOrNull(
+    BranchBuilderT& b, ValueNode* node) {
+  compiler::OptionalHeapObjectRef maybe_constant =
+      TryGetConstant<HeapObject>(node);
+  if (maybe_constant.has_value()) {
+    return b.FromBool(maybe_constant->IsNullOrUndefined());
+  }
+  if (!node->is_tagged()) {
+    if (node->is_holey_float64()) {
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+      return BuildBranchIfFloat64IsUndefinedOrHole(b, node);
+#else
+      return BuildBranchIfFloat64IsHole(b, node);
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
+    }
+    return b.AlwaysFalse();
+  }
+  if (HasDisjointType(node, NodeType::kOddball)) {
+    return b.AlwaysFalse();
+  }
+  return b.template Build<BranchIfUndefinedOrNull>({node});
 }
 
 template <typename BaseT>
@@ -3822,8 +4323,8 @@ ReduceResult MaglevReducer<BaseT>::BuildInt32Max(ValueNode* a, ValueNode* b) {
     }
   }
   return Select(
-      [&](auto& sg, auto* label) -> BranchResult {
-        return BuildBranchIfInt32Compare(sg, label, Operation::kLessThan, a, b);
+      [&](auto& branch) -> BranchResult {
+        return BuildBranchIfInt32Compare(branch, Operation::kLessThan, a, b);
       },
       [&]() -> ReduceResult { return b; }, [&]() -> ReduceResult { return a; });
 }
@@ -3836,10 +4337,50 @@ ReduceResult MaglevReducer<BaseT>::BuildInt32Min(ValueNode* a, ValueNode* b) {
     }
   }
   return Select(
-      [&](auto& sg, auto* label) -> BranchResult {
-        return BuildBranchIfInt32Compare(sg, label, Operation::kLessThan, a, b);
+      [&](auto& branch) -> BranchResult {
+        return BuildBranchIfInt32Compare(branch, Operation::kLessThan, a, b);
       },
       [&]() -> ReduceResult { return a; }, [&]() -> ReduceResult { return b; });
+}
+
+template <typename BaseT>
+ReduceResult MaglevReducer<BaseT>::BuildInt32Sign(ValueNode* value) {
+  return Select(
+      [&](auto& branch) -> BranchResult {
+        return BuildBranchIfInt32Compare(branch, Operation::kLessThan, value,
+                                         GetInt32Constant(0));
+      },
+      [&]() -> ReduceResult { return GetInt32Constant(-1); },
+      [&]() -> ReduceResult {
+        return Select(
+            [&](auto& branch) -> BranchResult {
+              return BuildBranchIfInt32Compare(branch, Operation::kLessThan,
+                                               GetInt32Constant(0), value);
+            },
+            [&]() -> ReduceResult { return GetInt32Constant(1); },
+            [&]() -> ReduceResult { return GetInt32Constant(0); });
+      });
+}
+
+template <typename BaseT>
+ReduceResult MaglevReducer<BaseT>::BuildFloat64Sign(ValueNode* value) {
+  return Select(
+      [&](auto& branch) -> BranchResult {
+        return branch.template Build<BranchIfFloat64Compare>(
+            {value, GetFloat64Constant(0.0)}, Operation::kLessThan);
+      },
+      [&]() -> ReduceResult { return GetFloat64Constant(-1.0); },
+      [&]() -> ReduceResult {
+        return Select(
+            [&](auto& branch) -> BranchResult {
+              return branch.template Build<BranchIfFloat64Compare>(
+                  {GetFloat64Constant(0.0), value}, Operation::kLessThan);
+            },
+            [&]() -> ReduceResult { return GetFloat64Constant(1.0); },
+            // Returning the input rather than zero is what makes NaN, +0 and -0
+            // pass through unchanged.
+            [&]() -> ReduceResult { return value; });
+      });
 }
 
 template <typename BaseT>
@@ -3984,6 +4525,56 @@ MaybeReduceResult MaglevReducer<BaseT>::TryReduceMathAbs(
       UNREACHABLE();
   }
   return {};
+}
+
+template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReduceMathSign(
+    compiler::JSFunctionRef target, CallArguments& args) {
+  if (args.count() == 0) {
+    return GetRootConstant(RootIndex::kNanValue);
+  }
+  ValueNode* arg = args[0];
+
+  if (auto cst = TryGetFloat64OrHoleyFloat64Constant(
+          UseRepresentation::kFloat64, arg,
+          TaggedToFloat64ConversionType::kNumberOrOddball)) {
+    double value = cst.value().get_scalar();
+    // NaN, +0 and -0 are returned unchanged.
+    return GetFloat64Constant(value > 0 ? 1.0 : (value < 0 ? -1.0 : value));
+  }
+
+  if (!CanSpeculateCall() && !CheckType(arg, NodeType::kNumber)) {
+    return {};
+  }
+
+  switch (arg->value_representation()) {
+    case ValueRepresentation::kInt32:
+      return BuildInt32Sign(arg);
+    case ValueRepresentation::kTagged:
+      if (CheckType(arg, NodeType::kSmi)) {
+        ValueNode* int32_value;
+        GET_VALUE_OR_ABORT(int32_value, GetInt32(arg));
+        return BuildInt32Sign(int32_value);
+      }
+      break;
+    case ValueRepresentation::kHoleyFloat64:
+      arg = AddNewNodeNoInputConversion<UnsafeHoleyFloat64ToFloat64>({arg});
+      break;
+    // TODO(victorgomes): Uint32 and IntPtr only need a single comparison
+    // against zero.
+    case ValueRepresentation::kUint32:
+    case ValueRepresentation::kIntPtr:
+    case ValueRepresentation::kFloat64:
+      break;
+    case ValueRepresentation::kRawPtr:
+    case ValueRepresentation::kNone:
+      UNREACHABLE();
+  }
+
+  ValueNode* float64_value;
+  GET_VALUE_OR_ABORT(float64_value,
+                     GetFloat64ForToNumber(arg, NodeType::kNumberOrOddball));
+  return BuildFloat64Sign(float64_value);
 }
 
 template <typename BaseT>
@@ -4176,14 +4767,8 @@ ReduceResult MaglevReducer<BaseT>::BuildCheckInstanceType(ValueNode* object,
                                                           InstanceType first,
                                                           InstanceType last) {
   NodeType known_type;
-  // Check for the empty type first so that we catch the case where
-  // GetType(object) is already empty or disjoint.
-  if (IsEmptyNodeType(IntersectType(GetType(object), target_type))) {
-    return EmitUnconditionalDeopt(DeoptimizeReason::kWrongInstanceType);
-  }
-  if (EnsureType(object, target_type, &known_type)) {
-    return ReduceResult::Done();
-  }
+  RETURN_IF_DONE(EnsureType(object, target_type,
+                            DeoptimizeReason::kWrongInstanceType, &known_type));
   return AddNewNode<CheckInstanceType>({object}, GetCheckType(known_type),
                                        first, last);
 }
@@ -4235,6 +4820,24 @@ ReduceResult MaglevReducer<BaseT>::GetInt32ElementIndex(ValueNode* object) {
 }
 
 template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReuseKnownPropertyLoad(
+    ValueNode* lookup_start_object, compiler::NameRef name) {
+  if (ValueNode* property = known_node_aspects().TryFindLoadedProperty(
+          lookup_start_object, name)) {
+    TRACE("  * Reusing non-constant loaded property "
+          << PrintNodeLabel(property) << ": " << PrintNode(property));
+    return property;
+  }
+  if (ValueNode* property = known_node_aspects().TryFindLoadedConstantProperty(
+          lookup_start_object, name)) {
+    TRACE("  * Reusing constant loaded property "
+          << PrintNodeLabel(property) << ": " << PrintNode(property));
+    return property;
+  }
+  return {};
+}
+
+template <typename BaseT>
 void MaglevReducer<BaseT>::RecordKnownProperty(
     ValueNode* lookup_start_object, PropertyKey key, ValueNode* value,
     bool is_const, compiler::AccessMode access_mode) {
@@ -4282,11 +4885,11 @@ void MaglevReducer<BaseT>::RecordKnownProperty(
 template <typename BaseT>
 ReduceResult MaglevReducer<BaseT>::BuildLoadJSDataViewByteLength(
     ValueNode* js_data_view) {
+  bool is_const = !v8_flags.track_array_buffer_views;
   // Note: We can't use broker()->byte_length_string() here, because it could
   // conflict with redefinitions of the ArrayBufferView byteLength property.
-  if (ValueNode* byte_length =
-          known_node_aspects().TryFindLoadedConstantProperty(
-              js_data_view, PropertyKey::ArrayBufferViewByteLength())) {
+  if (ValueNode* byte_length = known_node_aspects().TryFindLoadedProperty(
+          js_data_view, PropertyKey::ArrayBufferViewByteLength(), is_const)) {
     return byte_length;
   }
 
@@ -4294,16 +4897,16 @@ ReduceResult MaglevReducer<BaseT>::BuildLoadJSDataViewByteLength(
   GET_VALUE_OR_ABORT(result,
                      AddNewNode<LoadDataViewByteLength>({js_data_view}));
   RecordKnownProperty(js_data_view, PropertyKey::ArrayBufferViewByteLength(),
-                      result, true, compiler::AccessMode::kLoad);
+                      result, is_const, compiler::AccessMode::kLoad);
   return result;
 }
 
 template <typename BaseT>
 ReduceResult MaglevReducer<BaseT>::BuildLoadJSDataViewDataPointer(
     ValueNode* js_data_view) {
-  if (ValueNode* backing_store =
-          known_node_aspects().TryFindLoadedConstantProperty(
-              js_data_view, PropertyKey::ArrayBufferViewDataPointer())) {
+  bool is_const = !v8_flags.track_array_buffer_views;
+  if (ValueNode* backing_store = known_node_aspects().TryFindLoadedProperty(
+          js_data_view, PropertyKey::ArrayBufferViewDataPointer(), is_const)) {
     return backing_store;
   }
 
@@ -4311,7 +4914,7 @@ ReduceResult MaglevReducer<BaseT>::BuildLoadJSDataViewDataPointer(
   GET_VALUE_OR_ABORT(result,
                      AddNewNode<LoadDataViewDataPointer>({js_data_view}));
   RecordKnownProperty(js_data_view, PropertyKey::ArrayBufferViewDataPointer(),
-                      result, true, compiler::AccessMode::kLoad);
+                      result, is_const, compiler::AccessMode::kLoad);
   return result;
 }
 
@@ -4725,6 +5328,10 @@ ReduceResult MaglevReducer<BaseT>::GetSmiValue(
 
   NodeInfo* node_info = GetOrCreateInfoFor(value);
 
+  if (!NodeTypeCanBe(GetType(value), NodeType::kSmi)) {
+    return EmitUnconditionalDeopt(DeoptimizeReason::kNotASmi);
+  }
+
   ValueRepresentation representation =
       value->properties().value_representation();
   if (representation == ValueRepresentation::kTagged) {
@@ -5001,7 +5608,7 @@ VirtualObject* MaglevReducer<BaseT>::CreateFixedDoubleArray(
 template <typename BaseT>
 VirtualObject* MaglevReducer<BaseT>::CreateContext(
     compiler::MapRef map, int length, compiler::ScopeInfoRef scope_info,
-    ValueNode* previous_context, std::optional<ValueNode*> extension) {
+    ValueNode* previous_context, ValueNode* extension) {
   using Shape = ContextShape;
   SBXCHECK_GE(length, Context::MIN_CONTEXT_SLOTS);
   DCHECK_EQ(Context::SizeFor(length) % FieldSizeOf(Shape::kBodyFieldType), 0);
@@ -5019,17 +5626,15 @@ VirtualObject* MaglevReducer<BaseT>::CreateContext(
   vobj->set(Context::OffsetOfElementAt(Context::PREVIOUS_INDEX),
             previous_context);
   int index = Context::PREVIOUS_INDEX + 1;
-  if (extension.has_value()) {
+  if (extension != nullptr) {
     SBXCHECK_GE(length, Context::MIN_CONTEXT_EXTENDED_SLOTS);
-    vobj->set(Context::OffsetOfElementAt(Context::EXTENSION_INDEX),
-              extension.value());
+    vobj->set(Context::OffsetOfElementAt(Context::EXTENSION_INDEX), extension);
     index++;
   }
   for (; index < length; index++) {
     vobj->set(Context::OffsetOfElementAt(index),
               GetRootConstant(RootIndex::kUndefinedValue));
   }
-  RecordType(vobj, NodeType::kContext);
   return vobj;
 }
 
@@ -5137,6 +5742,8 @@ VirtualObject* MaglevReducer<BaseT>::CreateJSGeneratorObject(
             GetInt32Constant(JSGeneratorObject::kGeneratorExecuting));
   vobj->set(offsetof(JSGeneratorObject, parameters_and_registers_),
             register_file);
+  vobj->set(offsetof(JSGeneratorObject, yielded_value_),
+            GetRootConstant(RootIndex::kUndefinedValue));
   if (is_async) {
     vobj->set(offsetof(JSAsyncGeneratorObject, queue_),
               GetRootConstant(RootIndex::kUndefinedValue));
@@ -5156,7 +5763,7 @@ VirtualObject* MaglevReducer<BaseT>::CreateJSAsyncFunctionObject(
       &VirtualJSAsyncFunctionObjectShape::kObjectLayout;
 
   constexpr int slot_count = sizeof(JSAsyncFunctionObject) / kTaggedSize;
-  static_assert(slot_count == 13,
+  static_assert(slot_count == 14,
                 "If the number of slots in JSAsyncFunctionObject changes, then "
                 "the additional slots need to be initialized below");
 
@@ -5182,6 +5789,8 @@ VirtualObject* MaglevReducer<BaseT>::CreateJSAsyncFunctionObject(
   vobj->set(offsetof(JSAsyncFunctionObject, await_resolve_closure_),
             GetRootConstant(RootIndex::kUndefinedValue));
   vobj->set(offsetof(JSAsyncFunctionObject, await_reject_closure_),
+            GetRootConstant(RootIndex::kUndefinedValue));
+  vobj->set(offsetof(JSAsyncFunctionObject, yielded_value_),
             GetRootConstant(RootIndex::kUndefinedValue));
 
   return vobj;
@@ -5272,6 +5881,308 @@ VirtualObject* MaglevReducer<BaseT>::CreateJSStringIterator(
   vobj->set(offsetof(JSStringIterator, string_), string);
   vobj->set(offsetof(JSStringIterator, index_), GetInt32Constant(0));
   return vobj;
+}
+
+template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReducePromisePrototypeThen(
+    compiler::JSFunctionRef target, CallArguments& args) {
+  if (!CanSpeculateCall()) return {};
+  if (args.mode() != CallArguments::kDefault) return {};
+  if (args.receiver_mode() == ConvertReceiverMode::kNullOrUndefined) {
+    TRACE(TraceColor::kRed
+          << "! Failed to reduce Promise.prototype.then - no receiver");
+    return {};
+  }
+  ValueNode* receiver = GetValueOrUndefined(args.receiver());
+
+  compiler::JSObjectRef promise_prototype =
+      broker()->target_native_context().promise_prototype(broker());
+  MapInference<MaglevReducer<BaseT>> inference(this, receiver);
+  auto possible_maps = inference.TryGetPossibleMaps();
+  if (!possible_maps) {
+    TRACE(TraceColor::kRed << "! Failed to reduce Promise.prototype.then - "
+                              "unknown receiver map");
+    return {};
+  }
+  if (possible_maps->is_empty()) {
+    return ReduceResult::DoneWithAbort();
+  }
+  for (compiler::MapRef map : *possible_maps) {
+    if (!map.IsJSPromiseMap() ||
+        !map.prototype(broker()).equals(promise_prototype)) {
+      TRACE(TraceColor::kRed << "! Failed to reduce Promise.prototype.then - "
+                                "not an initial-prototype JSPromise map");
+      return {};
+    }
+  }
+
+  // Non-callable reactions behave like undefined; the fast path only covers
+  // arguments that are statically callable or undefined.
+  ValueNode* undefined_value = GetRootConstant(RootIndex::kUndefinedValue);
+  ValueNode* on_fulfilled =
+      args.count() > 0 ? args[0]->UnwrapIdentities() : undefined_value;
+  ValueNode* on_rejected =
+      args.count() > 1 ? args[1]->UnwrapIdentities() : undefined_value;
+  auto is_callable_or_undefined = [&](ValueNode* value) {
+    return value == undefined_value || CheckType(value, NodeType::kCallable);
+  };
+  if (!is_callable_or_undefined(on_fulfilled)) {
+    TRACE(TraceColor::kRed << "! Failed to reduce Promise.prototype.then - "
+                              "on_fulfilled not callable");
+    return {};
+  }
+  if (!is_callable_or_undefined(on_rejected)) {
+    TRACE(TraceColor::kRed << "! Failed to reduce Promise.prototype.then - "
+                              "on_rejected not callable");
+    return {};
+  }
+
+  // No PromiseThenProtector needed here: unlike Promise.prototype.catch/finally
+  // (which desugar to a `then` lookup), this builtin never reads the "then"
+  // property, so a monkeypatched `then` dispatches elsewhere and never reaches
+  // this reduction. The map checks above only establish an initial-prototype
+  // JSPromise for the species/hook assumptions below.
+  if (!broker()->dependencies()->DependOnPromiseHookProtector()) {
+    TRACE(TraceColor::kRed << "! Failed to reduce Promise.prototype.then - "
+                              "promise hook protector");
+    return {};
+  }
+  if (!broker()->dependencies()->DependOnPromiseSpeciesProtector()) {
+    TRACE(TraceColor::kRed << "! Failed to reduce Promise.prototype.then - "
+                              "species protector");
+    return {};
+  }
+
+  RETURN_IF_ABORT(inference.InsertMapChecks(zone()));
+
+  VirtualObject* result_vobj = CreateJSPromiseObject();
+  ValueNode* result_promise;
+  GET_VALUE_OR_ABORT(result_promise, BuildInlinedAllocation(
+                                         result_vobj, AllocationType::kYoung));
+
+  ValueNode* context = GetConstant(broker()->target_native_context());
+  return BuildCallBuiltin<Builtin::kPerformPromiseThen>(
+      context, {receiver, on_fulfilled, on_rejected, result_promise});
+}
+
+// Like JSNativeContextSpecialization::ReduceJSResolvePromise: returns true
+// if {value} provably has no "then" property, in which case ResolvePromise
+// can be strength-reduced to FulfillPromise.
+template <typename BaseT>
+bool MaglevReducer<BaseT>::CanElideResolvePromiseThenLookup(ValueNode* value) {
+  SmallZoneVector<compiler::MapRef, 4> maps(zone());
+  compiler::OptionalMapRef constant_stable_map;
+  if (compiler::OptionalHeapObjectRef c = TryGetConstant<HeapObject>(value)) {
+    compiler::MapRef map = c->map(broker());
+    if (!map.is_stable()) return false;
+    constant_stable_map = map;
+    maps.push_back(map);
+  } else {
+    MapInference<MaglevReducer<BaseT>> inference(
+        this, value, MapInference<MaglevReducer<BaseT>>::kOnlyFresh);
+    auto possible_maps = inference.TryGetPossibleMaps();
+    if (!possible_maps.has_value() || possible_maps->is_empty()) return false;
+    for (compiler::MapRef map : *possible_maps) {
+      maps.push_back(map);
+    }
+  }
+
+  // Callers use a successful elision to also skip identity-based spec steps
+  // (the self-resolution cycle check in ResolvePromise, PromiseResolve's
+  // identity return in Promise.resolve), reasoning that a promise resolution
+  // would have "then". That does not hold for a JSPromise whose prototype
+  // chain was mutated, so refuse promise values explicitly; instance types
+  // are immutable per object, so this needs no map stability.
+  ZoneVector<compiler::PropertyAccessInfo> access_infos(zone());
+  compiler::AccessInfoFactory access_info_factory(broker(), zone());
+  for (compiler::MapRef map : maps) {
+    if (map.IsJSPromiseMap()) return false;
+    // No map check protects us here, so a deprecated map could still show up
+    // at runtime.
+    if (map.is_deprecated()) return false;
+    access_infos.push_back(broker()->GetPropertyAccessInfo(
+        map, broker()->then_string(), compiler::AccessMode::kLoad));
+  }
+  compiler::PropertyAccessInfo access_info =
+      access_info_factory.FinalizePropertyAccessInfosAsOne(
+          access_infos, compiler::AccessMode::kLoad);
+
+  // TODO(v8:11457) Support dictionary mode prototypes here.
+  if (access_info.IsInvalid() || access_info.HasDictionaryHolder()) {
+    return false;
+  }
+  if (!access_info.IsNotFound()) return false;
+
+  if (constant_stable_map.has_value()) {
+    broker()->dependencies()->DependOnStableMap(*constant_stable_map);
+  }
+  broker()->dependencies()->DependOnStablePrototypeChains(
+      access_info.lookup_start_object_maps(), kStartAtPrototype);
+  return true;
+}
+
+template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReduceRegExpPrototypeTest(
+    compiler::JSFunctionRef target, CallArguments& args) {
+  if (!CanSpeculateCall()) return {};
+  if (v8_flags.force_slow_path) return {};
+
+  if (args.receiver_mode() == ConvertReceiverMode::kNullOrUndefined) {
+    TRACE(TraceColor::kRed
+          << "! Failed to reduce RegExp.prototype.test - no receiver");
+    return {};
+  }
+  if (args.count() < 1) {
+    TRACE(TraceColor::kRed << "! Failed to reduce RegExp.prototype.test - "
+                              "no search argument");
+    return {};
+  }
+
+  compiler::NativeContextRef native_context = broker()->target_native_context();
+  compiler::MapRef regexp_initial_map =
+      native_context.regexp_function(broker()).initial_map(broker());
+
+  ValueNode* receiver = args.receiver();
+  MapInference<MaglevReducer<BaseT>> inference(this, receiver);
+  auto possible_receiver_maps = inference.TryGetPossibleMaps();
+  if (!possible_receiver_maps) {
+    TRACE(TraceColor::kRed << "! Failed to reduce RegExp.prototype.test - "
+                              "unknown receiver map");
+    return {};
+  }
+  if (possible_receiver_maps->is_empty()) {
+    return ReduceResult::DoneWithAbort();
+  }
+  if (possible_receiver_maps->size() != 1 ||
+      !possible_receiver_maps->at(0).equals(regexp_initial_map)) {
+    TRACE(TraceColor::kRed << "! Failed to reduce RegExp.prototype.test - "
+                              "not the initial RegExp map");
+    return {};
+  }
+
+  compiler::PropertyAccessInfo exec_access_info =
+      broker()->GetPropertyAccessInfo(regexp_initial_map,
+                                      broker()->exec_string(),
+                                      compiler::AccessMode::kLoad);
+  if (exec_access_info.IsInvalid()) {
+    TRACE(TraceColor::kRed << "! Failed to reduce RegExp.prototype.test - "
+                              "no exec access info");
+    return {};
+  }
+  if (!exec_access_info.IsFastDataConstant()) {
+    TRACE(TraceColor::kRed << "! Failed to reduce RegExp.prototype.test - "
+                              "exec is not a constant");
+    return {};
+  }
+  compiler::OptionalJSObjectRef holder = exec_access_info.holder();
+  if (!holder.has_value()) {
+    TRACE(TraceColor::kRed << "! Failed to reduce RegExp.prototype.test - "
+                              "exec is not on the prototype");
+    return {};
+  }
+  if (exec_access_info.field_representation().IsDouble()) {
+    TRACE(TraceColor::kRed << "! Failed to reduce RegExp.prototype.test - "
+                              "exec has double representation");
+    return {};
+  }
+  compiler::OptionalObjectRef exec =
+      TryFoldLoadConstantDataField(holder.value(), exec_access_info);
+  if (!exec.has_value() ||
+      !exec->equals(native_context.regexp_exec_function(broker()))) {
+    TRACE(TraceColor::kRed << "! Failed to reduce RegExp.prototype.test - "
+                              "exec was replaced");
+    return {};
+  }
+  broker()->dependencies()->DependOnStablePrototypeChains(
+      exec_access_info.lookup_start_object_maps(), kStartAtPrototype,
+      holder.value());
+
+  RETURN_IF_ABORT(inference.InsertMapChecks(zone()));
+
+  ValueNode* search_string = args[0];
+  RETURN_IF_ABORT(BuildCheckString(search_string));
+
+  ValueNode* last_index;
+  GET_VALUE_OR_ABORT(
+      last_index, BuildLoadTaggedField(receiver, JSRegExp::kLastIndexOffset));
+  // RegExpPrototypeTestFast requires lastIndex to be a positive Smi.
+  RETURN_IF_ABORT(BuildCheckSmi(last_index));
+  // Virtual object tracking might return an Int32Constant, which cannot be
+  // untagged.
+  ValueNode* last_index_int32;
+  GET_VALUE_OR_ABORT(last_index_int32, GetInt32(last_index));
+  RETURN_IF_ABORT(TryBuildCheckInt32Condition(
+      last_index_int32, GetInt32Constant(0), AssertCondition::kGreaterThanEqual,
+      DeoptimizeReason::kNotASmi));
+
+  return BuildCallBuiltin<Builtin::kRegExpPrototypeTestFast>(
+      GetConstant(native_context), {receiver, search_string});
+}
+
+template <typename BaseT>
+MaybeReduceResult MaglevReducer<BaseT>::TryReducePromiseResolveTrampoline(
+    compiler::JSFunctionRef target, CallArguments& args) {
+  // Ports JSCallReducer::ReducePromiseResolveTrampoline combined with
+  // JSNativeContextSpecialization::ReduceJSPromiseResolve: Promise.resolve
+  // on the %Promise% constructor itself, with a value that provably has no
+  // "then" property (which also rules out JSPromise values), produces a
+  // fresh fulfilled promise. Allocate it inline instead of going through
+  // the PromiseResolveTrampoline and PromiseResolve builtins.
+  if (args.mode() != CallArguments::kDefault) return {};
+  if (args.receiver_mode() == ConvertReceiverMode::kNullOrUndefined) {
+    TRACE(TraceColor::kRed << "! Failed to reduce Promise.resolve - no "
+                              "receiver");
+    return {};
+  }
+
+  // Only the %Promise% function itself: then the result gets the initial
+  // promise map without consulting @@species.
+  ValueNode* receiver = GetValueOrUndefined(args.receiver());
+  compiler::NativeContextRef native_context = broker()->target_native_context();
+  compiler::OptionalHeapObjectRef receiver_constant =
+      TryGetConstant<HeapObject>(receiver);
+  if (!receiver_constant.has_value() ||
+      !receiver_constant->equals(native_context.promise_function(broker()))) {
+    TRACE(TraceColor::kRed << "! Failed to reduce Promise.resolve - receiver "
+                              "is not the Promise function");
+    return {};
+  }
+
+  ValueNode* value;
+  if (args.count() > 0) {
+    GET_VALUE_OR_ABORT(value, GetTaggedValue(args[0]));
+  } else {
+    value = GetRootConstant(RootIndex::kUndefinedValue);
+  }
+
+  // The fast path covers values that cannot participate in the implicit
+  // "then" chaining: primitives, and objects provably without a "then"
+  // property. Thenables stay on the builtin path, and so do promises (the
+  // elision helper refuses JSPromise maps), which PromiseResolve would have
+  // to return by identity (spec step 1).
+  if (!NodeTypeIs(GetType(value), NodeType::kJSPrimitive) &&
+      !CanElideResolvePromiseThenLookup(value)) {
+    TRACE(TraceColor::kRed << "! Failed to reduce Promise.resolve - value "
+                              "could be thenable or a promise");
+    return {};
+  }
+
+  // Only now that the reduction is committed do we take the promise-hook
+  // dependency, so a bail above leaves no dead dependency. This skips the
+  // builtin's promise hook and debug notifications.
+  if (!broker()->dependencies()->DependOnPromiseHookProtector()) {
+    TRACE(TraceColor::kRed << "! Failed to reduce Promise.resolve - promise "
+                              "hook protector");
+    return {};
+  }
+
+  // Allocate the result promise directly in the fulfilled state; a fresh
+  // promise has no reactions to trigger.
+  VirtualObject* promise = CreateJSPromiseObject();
+  promise->set(offsetof(JSPromise, reactions_or_result_), value->Unwrap());
+  promise->set(offsetof(JSPromise, flags_),
+               GetSmiConstant(v8::Promise::kFulfilled));
+  return BuildInlinedAllocation(promise, AllocationType::kYoung);
 }
 
 template <typename BaseT>
@@ -5385,10 +6296,40 @@ ReduceResult SubgraphBase<DerivedT, BaseT>::TrimPredecessorsAndBind(
   return ReduceResult::Done();
 }
 
+inline bool IsSmallFunction(int bytecode_length,
+                            base::Vector<ValueNode*> arguments,
+                            UseRepresentationSet use_repr_hints,
+                            const CompilationFlags& flags) {
+  // TruncatedInt32 uses do not necessarily mean that the input is a
+  // HeapNumber, but when emitted operation that truncate their inputs to
+  // Int32, Maglev doesn't distinguish between Smis and HeapNumbers.
+  // TODO(dmercadier): distinguish between Smis and HeapNumbers in the graph
+  // builder for operations that truncate their inputs, and then in turn, make
+  // sure that we're not setting {has_heapnumber_input_output} to true for a
+  // function that has so far only returned Smis.
+  constexpr UseRepresentationSet kHeapNumRepresentations{
+      UseRepresentation::kFloat64, UseRepresentation::kHoleyFloat64,
+      UseRepresentation::kTruncatedInt32};
+
+  const bool has_heapnumber_input_output =
+      use_repr_hints.contains_any(kHeapNumRepresentations) ||
+      std::ranges::any_of(arguments, [](ValueNode* input) {
+        return input->UnwrapIdentities()->is_float64_or_holey_float64();
+      });
+
+  const int limit =
+      has_heapnumber_input_output
+          ? flags.max_inlined_bytecode_size_small_with_heapnum_in_out
+          : flags.max_inlined_bytecode_size_small;
+
+  return bytecode_length <= limit;
+}
+
 }  // namespace maglev
 }  // namespace internal
 }  // namespace v8
 
 #undef TRACE
+#undef FAIL
 
 #endif  // V8_MAGLEV_MAGLEV_REDUCER_INL_H_

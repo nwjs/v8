@@ -6409,6 +6409,9 @@ Reduction JSCallReducer::ReduceJSConstructForwardAllArgs(Node* node) {
   if (outer_info.type() == FrameStateType::kInlinedExtraArguments) {
     frame_state = outer_state;
   }
+  if (frame_state.parameters()->opcode() == IrOpcode::kDeadValue) {
+    return NoChange();
+  }
 
   int argc = 0;
   StateValuesAccess parameters_access(frame_state.parameters());
@@ -7131,6 +7134,8 @@ Reduction JSCallReducer::ReduceArrayIterator(Node* node,
   }
 
   if (array_kind == ArrayIteratorKind::kTypedArray) {
+    DCHECK(!inference.AnyOfInstanceTypesAre(
+        InstanceType::JS_DETACHED_TYPED_ARRAY_TYPE));
     // Make sure we deopt when the JSArrayBuffer is detached.
     if (!dependencies()->DependOnArrayBufferDetachingProtector()) {
       CallParameters const& p = CallParametersOf(node->op());
@@ -7416,6 +7421,9 @@ Reduction JSCallReducer::ReduceArrayIteratorPrototypeNext(Node* node) {
       return inference.NoChange();
     }
     for (MapRef iterated_object_map : iterated_object_maps) {
+      if (iterated_object_map.instance_type() == JS_DETACHED_TYPED_ARRAY_TYPE) {
+        return inference.NoChange();
+      }
       if (iterated_object_map.elements_kind() != elements_kind) {
         return inference.NoChange();
       }

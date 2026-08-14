@@ -6,8 +6,10 @@
 
 #include "src/ast/ast-source-ranges.h"
 #include "src/ast/ast.h"
+#include "src/base/strong-alias.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
+#include "src/common/synchronization-point-support.h"
 #include "src/execution/local-isolate.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/factory.h"
@@ -16,7 +18,6 @@
 #include "src/heap/local-factory-inl.h"
 #include "src/heap/local-heap-inl.h"
 #include "src/heap/read-only-heap.h"
-#include "src/init/isolate-group.h"
 #include "src/logging/log.h"
 #include "src/objects/arguments-inl.h"
 #include "src/objects/instance-type.h"
@@ -89,11 +90,12 @@ Handle<Code> FactoryBase<Impl>::NewCode(const NewCodeOptions& options) {
   Tagged<Code> code = TrustedCast<Code>(
       AllocateRawWithImmortalMap(size, AllocationType::kTrusted, map));
   DisallowGarbageCollection no_gc;
-  // Allocates the Code object's self-indirect pointer directly inside the
-  // Code Pointer Table (CPT). This does not actually publish the JIT entrypoint
-  // yet as the CPT entry is natively initialized with
-  // kUninitializedEntrypointTag.
-  code->InitAndPublish(isolate());
+  // Allocates the Code object's self-indirect pointer in the Trusted Pointer
+  // Table (TPT) in an unpublished state. Due to the split initialization of
+  // Code and InstructionStream, publication is deferred to
+  // InstructionStream::Finalize() (if a stream exists) once cross-object
+  // invariants (such as instruction_start) are established.
+  code->InitDontPublish(isolate());
   code->initialize_flags(options.kind, options.is_context_specialized,
                          options.is_turbofanned);
   code->set_builtin_id(options.builtin);
@@ -155,13 +157,15 @@ Handle<Code> FactoryBase<Impl>::NewCode(const NewCodeOptions& options) {
     // object. See `InstructionStream::Finalize()` for the actual finalization
     // sequence.
     code->set_raw_instruction_stream(*istream);
+    code->set_instruction_start(isolate(), kNullAddress);
   } else {
     DCHECK_NE(options.instruction_start, kNullAddress);
     code->set_raw_instruction_stream(Smi::zero(), SKIP_WRITE_BARRIER);
     code->SetInstructionStartForOffHeapBuiltin(isolate(),
                                                options.instruction_start);
+    code->Publish(isolate());
+    wrapper->set_code(code);
   }
-  wrapper->set_code(code);
   code->set_wrapper(*wrapper);
   code->clear_padding();
   return handle(code, isolate());
@@ -201,9 +205,9 @@ Handle<TrustedFixedArray> FactoryBase<Impl>::NewTrustedFixedArray(
 
 template <typename Impl>
 Handle<ProtectedFixedArray> FactoryBase<Impl>::NewProtectedFixedArray(
-    uint32_t length, SharedFlag shared) {
+    uint32_t length) {
   if (length == 0) return empty_protected_fixed_array();
-  return ProtectedFixedArray::New(isolate(), length, shared);
+  return ProtectedFixedArray::New(isolate(), length);
 }
 
 template <typename Impl>
@@ -345,9 +349,7 @@ Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
     int length, const uint8_t* raw_bytecodes, int frame_size,
     uint16_t parameter_count, uint16_t max_arguments,
     DirectHandle<TrustedFixedArray> constant_pool,
-    DirectHandle<TrustedByteArray> handler_table, AllocationType allocation) {
-  DCHECK(allocation == AllocationType::kTrusted ||
-         allocation == AllocationType::kSharedTrusted);
+    DirectHandle<TrustedByteArray> handler_table) {
   if (length < 0 || length > BytecodeArray::kMaxLength) {
     base::FatalNoSecurityImpact("Fatal JavaScript invalid size error %d",
                                 length);
@@ -356,7 +358,7 @@ Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
   DirectHandle<BytecodeWrapper> wrapper = NewBytecodeWrapper();
   int size = BytecodeArray::SizeFor(length);
   Tagged<HeapObject> result = AllocateRawWithImmortalMap(
-      size, allocation, read_only_roots().bytecode_array_map());
+      size, AllocationType::kTrusted, read_only_roots().bytecode_array_map());
   DisallowGarbageCollection no_gc;
   Tagged<BytecodeArray> instance = TrustedCast<BytecodeArray>(result);
   // BytecodeArrays are initially unpublished and are only published to the
@@ -651,13 +653,10 @@ Handle<SharedFunctionInfo> FactoryBase<Impl>::NewSharedFunctionInfo(
   raw->CalculateConstructAsBuiltin();
   raw->set_kind(kind);
 
-  switch (adapt) {
-    case AdaptArguments::kYes:
-      raw->set_formal_parameter_count(JSParameterCount(len));
-      break;
-    case AdaptArguments::kNo:
-      raw->DontAdaptArguments();
-      break;
+  if (adapt) {
+    raw->set_formal_parameter_count(JSParameterCount(len));
+  } else {
+    raw->DontAdaptArguments();
   }
   raw->set_length(len);
 
@@ -1021,7 +1020,7 @@ Handle<String> FactoryBase<Impl>::NewConsString(DirectHandle<String> left,
                                                 DirectHandle<String> right,
                                                 int length, bool one_byte,
                                                 AllocationType allocation) {
-  SYNCHRONIZATION_POINT_FOR_TESTING("NewConsString");
+  SYNCHRONIZATION_POINT("NewConsString");
   DCHECK_GE(length, ConsString::kMinLength);
   DCHECK_LE(length, String::kMaxLength);
 
@@ -1276,22 +1275,9 @@ Handle<DescriptorArray> FactoryBase<Impl>::NewDescriptorArray(
       size, allocation, read_only_roots().descriptor_array_map());
   Tagged<DescriptorArray> array = Cast<DescriptorArray>(obj);
 
-  auto raw_gc_state = DescriptorArrayMarkingState::kInitialGCState;
-  if (allocation != AllocationType::kYoung &&
-      allocation != AllocationType::kReadOnly) {
-    auto* local_heap = allocation == AllocationType::kSharedOld
-                           ? isolate()->shared_space_isolate()->heap()
-                           : isolate()->heap();
-    Heap* heap = local_heap->AsHeap();
-    if (heap->incremental_marking()->IsMajorMarking()) {
-      // Black allocation: We must create a full marked state.
-      raw_gc_state = DescriptorArrayMarkingState::GetFullyMarkedState(
-          heap->mark_compact_collector()->epoch(), number_of_descriptors);
-    }
-  }
   array->Initialize(read_only_roots().empty_enum_cache(),
                     read_only_roots().undefined_value(), number_of_descriptors,
-                    slack, raw_gc_state);
+                    slack);
   return handle(array, isolate());
 }
 

@@ -14,7 +14,6 @@
 #include "src/base/ieee754.h"
 #include "src/base/logging.h"
 #include "src/base/overflowing-math.h"
-#include "src/builtins/builtins.h"
 #include "src/compiler/diamond.h"
 #include "src/compiler/js-operator.h"
 #include "src/compiler/machine-graph.h"
@@ -790,7 +789,7 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kFloat64Cos: {
       Float64Matcher m(node->InputAt(0));
       if (m.HasResolvedValue()) {
-        return ReplaceFloat64(COS_IMPL(m.ScalarValue()));
+        return ReplaceFloat64(base::ieee754::cos(m.ScalarValue()));
       }
       break;
     }
@@ -863,7 +862,7 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kFloat64Sin: {
       Float64Matcher m(node->InputAt(0));
       if (m.HasResolvedValue()) {
-        return ReplaceFloat64(SIN_IMPL(m.ScalarValue()));
+        return ReplaceFloat64(base::ieee754::sin(m.ScalarValue()));
       }
       break;
     }

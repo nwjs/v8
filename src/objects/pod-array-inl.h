@@ -49,26 +49,26 @@ Handle<PodArray<T>> PodArray<T>::New(LocalIsolate* isolate, uint32_t length,
 
 // static
 template <class T>
-DirectHandle<TrustedPodArray<T>> TrustedPodArray<T>::New(
-    Isolate* isolate, uint32_t length, AllocationType allocation_type) {
+DirectHandle<TrustedPodArray<T>> TrustedPodArray<T>::New(Isolate* isolate,
+                                                         uint32_t length) {
   uint32_t byte_length;
   base::internal::CheckedNumeric<uint32_t> checked_byte_length = length;
   checked_byte_length *= sizeof(T);
   CHECK(checked_byte_length.AssignIfValid(&byte_length));
   return TrustedCast<TrustedPodArray<T>>(
-      isolate->factory()->NewTrustedByteArray(byte_length, allocation_type));
+      isolate->factory()->NewTrustedByteArray(byte_length));
 }
 
 // static
 template <class T>
-DirectHandle<TrustedPodArray<T>> TrustedPodArray<T>::New(
-    LocalIsolate* isolate, uint32_t length, AllocationType allocation_type) {
+DirectHandle<TrustedPodArray<T>> TrustedPodArray<T>::New(LocalIsolate* isolate,
+                                                         uint32_t length) {
   uint32_t byte_length;
   base::internal::CheckedNumeric<uint32_t> checked_byte_length = length;
   checked_byte_length *= sizeof(T);
   CHECK(checked_byte_length.AssignIfValid(&byte_length));
   return TrustedCast<TrustedPodArray<T>>(
-      isolate->factory()->NewTrustedByteArray(byte_length, allocation_type));
+      isolate->factory()->NewTrustedByteArray(byte_length));
 }
 
 }  // namespace v8::internal

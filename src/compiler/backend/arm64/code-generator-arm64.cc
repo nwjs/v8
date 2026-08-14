@@ -4449,7 +4449,9 @@ void CodeGenerator::AssembleConstructFrame() {
     }
 
 #if V8_ENABLE_WEBASSEMBLY
-    if (info()->IsWasm() && required_slots * kSystemPointerSize > 4 * KB) {
+    int32_t stack_space =
+        required_slots * kSystemPointerSize + GetStackCheckOffset();
+    if (info()->IsWasm() && stack_space > 4 * KB) {
       // For WebAssembly functions with big frames we have to do the stack
       // overflow check before we construct the frame. Otherwise we may not
       // have enough space on the stack to call the runtime for the stack
@@ -4458,11 +4460,11 @@ void CodeGenerator::AssembleConstructFrame() {
       // If the frame is bigger than the stack, we throw the stack overflow
       // exception unconditionally. Thereby we can avoid the integer overflow
       // check in the condition code.
-      if (required_slots * kSystemPointerSize < v8_flags.stack_size * KB) {
+      if (stack_space < v8_flags.stack_size * KB) {
         UseScratchRegisterScope temps(masm());
         Register stack_limit = temps.AcquireX();
         __ LoadStackLimit(stack_limit, StackLimitKind::kRealStackLimit);
-        __ Add(stack_limit, stack_limit, required_slots * kSystemPointerSize);
+        __ Add(stack_limit, stack_limit, stack_space);
         __ Cmp(sp, stack_limit);
         __ B(hs, &done);
       }
@@ -4479,8 +4481,7 @@ void CodeGenerator::AssembleConstructFrame() {
           fp_regs_to_save.Combine(reg.Q());
         }
         __ PushCPURegList(fp_regs_to_save);
-        __ Mov(WasmHandleStackOverflowDescriptor::GapRegister(),
-               required_slots * kSystemPointerSize);
+        __ Mov(WasmHandleStackOverflowDescriptor::GapRegister(), stack_space);
         __ Add(
             WasmHandleStackOverflowDescriptor::FrameBaseRegister(), fp,
             Operand(call_descriptor->ParameterSlotCount() * kSystemPointerSize +

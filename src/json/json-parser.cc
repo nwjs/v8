@@ -792,14 +792,114 @@ template <typename Char>
 template <bool should_track_json_source>
 Handle<JSObject> JsonParser<Char>::BuildJsonObject(const JsonContinuation& cont,
                                                    DirectHandle<Map> feedback) {
+  bool feedback_was_deprecated = false;
   if (!feedback.is_null() && feedback->is_deprecated()) {
     feedback = Map::Update(isolate_, feedback);
+    feedback_was_deprecated = true;
   }
   size_t start = cont.index();
   DCHECK_LE(start, property_stack_.size());
   int length = static_cast<int>(property_stack_.size() - start);
   int named_length = length - cont.elements;
   DCHECK_LE(0, named_length);
+
+  // Fast path for homogeneous object arrays:
+  // If ParseJsonObjectProperties<FastIterableState::kJsonFast> matched all
+  // property keys against the feedback map in exact sequence without any
+  // trailing properties (fast_keys_matched == true) and the object contains no
+  // indexed array elements (cont.elements == 0), we can bypass
+  // JSDataObjectBuilder entirely.
+  //
+  // Note:
+  // 1. If the original feedback map was deprecated, we must skip the fast path
+  //    because fast_keys_matched was verified against the old map and the
+  //    updated map may have a different descriptor layout or be a dictionary
+  //    map.
+  // 2. IsFastElementsKind(feedback->elements_kind()) is required because we
+  //    initialize object->set_elements(empty_fixed_array()). An empty fixed
+  //    array is a valid backing store for any fast elements kind when element
+  //    capacity is 0, but is invalid for dictionary elements maps.
+  if (cont.fast_keys_matched && cont.elements == 0 && !feedback.is_null() &&
+      !feedback_was_deprecated &&
+      IsFastElementsKind(feedback->elements_kind())) {
+    // fast_keys_matched guarantees exact descriptor count alignment.
+    DCHECK_EQ(length, feedback->NumberOfOwnDescriptors());
+    bool fast_path_valid = true;
+    DirectHandle<DescriptorArray> descriptors(feedback->instance_descriptors(),
+                                              isolate_);
+
+    // Verify that every parsed property value satisfies the representation and
+    // field type expected by the feedback map's descriptors.
+    uint32_t extra_heap_numbers_needed = 0;
+    for (int i = 0; i < length; i++) {
+      InternalIndex descriptor_index(i);
+      PropertyDetails details = descriptors->GetDetails(descriptor_index);
+      // Fast iterable keys (kJsonFast) are guaranteed to be in-object data
+      // fields.
+      DCHECK_EQ(details.kind(), PropertyKind::kData);
+      DCHECK_EQ(details.location(), PropertyLocation::kField);
+      Tagged<Object> value = *property_stack_[start + i].value;
+      Representation rep = details.representation();
+      if (!Object::FitsRepresentation(value, rep)) {
+        fast_path_valid = false;
+        break;
+      }
+      if (rep.IsHeapObject() &&
+          !FieldType::NowContains(descriptors->GetFieldType(descriptor_index),
+                                  value)) {
+        fast_path_valid = false;
+        break;
+      }
+      if (rep.IsDouble()) {
+        if (IsSmi(value) || should_track_json_source) {
+          extra_heap_numbers_needed++;
+        }
+      }
+    }
+
+    if (fast_path_valid) {
+      // Create a folded mutable HeapNumber allocation area before allocating
+      // the object -- this ensures that there is no allocation between the
+      // object allocation and its initial fields being initialized, where the
+      // verifier would see invalid double field state.
+      FoldedMutableHeapNumberAllocation hn_allocation(
+          isolate_, extra_heap_numbers_needed);
+
+      Handle<JSObject> object = factory()->NewJSObjectFromMap(
+          feedback, AllocationType::kYoung,
+          DirectHandle<AllocationSite>::null(),
+          NewJSObjectType::kNoEmbedderFieldsAndNoApiWrapper);
+
+      DisallowGarbageCollection no_gc;
+      Tagged<JSObject> raw_object = *object;
+      ReadOnlyRoots roots(isolate_);
+
+      raw_object->set_elements(roots.empty_fixed_array());
+
+      FoldedMutableHeapNumberAllocator hn_allocator(isolate_, &hn_allocation,
+                                                    no_gc);
+      int current_property_offset = raw_object->GetInObjectPropertyOffset(0);
+      for (int i = 0; i < length; i++) {
+        Tagged<Object> value = *property_stack_[start + i].value;
+        PropertyDetails details = descriptors->GetDetails(InternalIndex(i));
+        if (details.representation().IsDouble()) {
+          if (IsSmi(value)) {
+            value = hn_allocator.AllocateNext(
+                roots, Float64::FromMaybeNaN(Smi::ToInt(value)));
+          } else if constexpr (should_track_json_source) {
+            value = hn_allocator.AllocateNext(
+                roots, Float64::FromMaybeNaN(Object::NumberValue(value)));
+          }
+        }
+        FieldIndex index = FieldIndex::ForInObjectOffset(
+            current_property_offset, FieldIndex::kTagged);
+        raw_object->RawFastInobjectPropertyAtPut(index, value,
+                                                 SKIP_WRITE_BARRIER);
+        current_property_offset += kTaggedSize;
+      }
+      return object;
+    }
+  }
 
   Handle<FixedArrayBase> elements;
   ElementsKind elements_kind = HOLEY_ELEMENTS;
@@ -1154,16 +1254,24 @@ bool JsonParser<Char>::ParseJsonObjectProperties(
         ++idx;
       }
     } while (idx < descriptors_end && Check<JsonToken::COMMA>());
-    if constexpr (fast_iterable_state == FastIterableState::kUnknown) {
-      if (idx == InternalIndex(descriptors->number_of_descriptors())) {
-        descriptors->set_fast_iterable_if(FastIterableState::kJsonFast,
-                                          FastIterableState::kUnknown);
-      }
-    }
     // Additional, unknown properties. Scan them slow.
     if (Check<JsonToken::COMMA>()) {
       return ParseJsonObjectProperties<FastIterableState::kJsonSlow>(
           cont, first_token_msg, descriptors, nof_descriptors);
+    }
+    if constexpr (fast_iterable_state == FastIterableState::kJsonFast) {
+      // If we matched every descriptor in the feedback map and there are no
+      // trailing properties, signal to BuildJsonObject that keys matched the
+      // map's layout in exact sequence.
+      if (idx == descriptors_end) {
+        cont->fast_keys_matched = true;
+      }
+    } else if constexpr (fast_iterable_state == FastIterableState::kUnknown) {
+      // All properties are fast iterable. Update DescriptorArray flags.
+      if (idx == InternalIndex(descriptors->number_of_descriptors())) {
+        descriptors->set_fast_iterable_if(FastIterableState::kJsonFast,
+                                          FastIterableState::kUnknown);
+      }
     }
   }
 

@@ -196,11 +196,6 @@ transitioning macro WasmToJSWrapper(data: WasmImportData): WasmToJSResult {
   const result = CallVarargs(
       context, target, 0, Convert<int32>(numStackParams), outParams);
 
-  // Put a marker on the stack to indicate to the frame iterator that the call
-  // to JavaScript is finished. For asm.js source positions it is important to
-  // know if an exception happened in the call to JS, or in the ToNumber
-  // conversion afterwards.
-  *GetRefAt<intptr>(sigSlot, 0) = -1;
   let resultFixedArray: FixedArray;
   if (returnCount > 1) {
     resultFixedArray =

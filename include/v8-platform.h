@@ -770,6 +770,51 @@ class PageAllocator {
 };
 
 /**
+ * An allocator interface for managing memory explicitly.
+ *
+ * Implementations of this interface must be thread-safe as V8 will
+ * invoke these methods concurrently from multiple threads.
+ */
+class Allocator {
+ public:
+  virtual ~Allocator() = default;
+
+  /**
+   * Allocates zero-initialized memory.
+   *
+   * \param size The number of bytes to allocate.
+   * \returns Pointer to the allocated memory or nullptr on failure.
+   */
+  virtual void* Allocate(size_t size) = 0;
+
+  /**
+   * Allocates uninitialized memory.
+   *
+   * \param size The number of bytes to allocate.
+   * \returns Pointer to the allocated memory or nullptr on failure.
+   */
+  virtual void* AllocateUninitialized(size_t size) = 0;
+
+  /**
+   * Allocates uninitialized memory.
+   *
+   * \param size The number of bytes to allocate.
+   * \returns Pointer to the allocated memory. Crashes on failure (e.g. OOM).
+   * This is intended for critical allocations where failure means the process
+   * cannot continue.
+   */
+  virtual void* AllocateUninitializedOrCrash(size_t size) = 0;
+
+  /**
+   * Frees memory that was acquired with one of the allocation methods.
+   *
+   * \param ptr Pointer to the memory to free. If ptr is nullptr, no operation
+   * is performed.
+   */
+  virtual void Free(void* ptr) = 0;
+};
+
+/**
  * An allocator that uses per-thread permissions to protect the memory.
  *
  * The implementation is platform/hardware specific, e.g. using pkeys on x64.

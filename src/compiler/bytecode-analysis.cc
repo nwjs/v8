@@ -477,7 +477,7 @@ class BytecodeAnalysis::BytecodeAnalysisImpl {
   inline void AnalyzeBCInLoop(int current_offset, LoopInfo* current_loop_info) {
   }
 
-  void PushLoop(int loop_header, int loop_end) {
+  void PushLoop(int loop_header, int loop_end, int jump_loop_offset) {
     DCHECK_LT(loop_header, loop_end);
     DCHECK_LT(loop_stack_.top().header_offset, loop_header);
     DCHECK_EQ(res_.end_to_header_.find(loop_end), res_.end_to_header_.end());
@@ -489,6 +489,7 @@ class BytecodeAnalysis::BytecodeAnalysisImpl {
 
     res_.end_to_header_.insert({loop_end, loop_header});
     loop_infos_.emplace_back(parent_offset, loop_header, loop_end,
+                             jump_loop_offset,
                              bytecode_array()->parameter_count(),
                              bytecode_array()->register_count(), zone());
 
@@ -570,7 +571,7 @@ void BytecodeAnalysis::BytecodeAnalysisImpl::Analyze() {
       // instruction is considered part of the loop, set loop end accordingly.
       int loop_end = current_offset + iterator_.current_bytecode_size();
       int loop_header = iterator_.GetJumpTargetOffset();
-      PushLoop(loop_header, loop_end);
+      PushLoop(loop_header, loop_end, current_offset);
 
       if (current_offset == osr_loop_end_offset_) {
         res_.osr_entry_point_ = loop_header;

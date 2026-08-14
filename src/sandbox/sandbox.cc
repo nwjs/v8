@@ -4,7 +4,10 @@
 
 #include "src/sandbox/sandbox.h"
 
+#include <memory>
+
 #include "include/v8-internal.h"
+#include "include/v8-platform.h"
 #include "src/base/bits.h"
 #include "src/base/bounded-page-allocator.h"
 #include "src/base/cpu/cpu.h"
@@ -43,6 +46,194 @@ void ExcludeReservationFromCoreDump(Address base, size_t size) {
   // Best-effort: ignore failures (e.g. old kernels without MADV_DONTDUMP).
   madvise(reinterpret_cast<void*>(base), size, MADV_DONTDUMP);
 #endif
+}
+
+// Default in-sandbox allocator that is shared by all ArraybufferAllocator
+// default implementations and the per-IsolateGroup in-sandbox allocator.
+//
+// This allocator is not optimized for performance! See
+// `v8::V8::SetInSandboxAllocator()` to set a different allocator.
+//
+// The allocator only lazily initializes itself on first operation as it is
+// assumed that it is replaced with a different allocator for production use.
+class DefaultInSandboxAllocator final : public v8::Allocator {
+ public:
+  explicit DefaultInSandboxAllocator(Sandbox* sandbox);
+  ~DefaultInSandboxAllocator();
+
+  DefaultInSandboxAllocator(const DefaultInSandboxAllocator&) = delete;
+  DefaultInSandboxAllocator& operator=(const DefaultInSandboxAllocator&) =
+      delete;
+
+  void* Allocate(size_t length) override;
+  void* AllocateUninitialized(size_t length) override;
+  void* AllocateUninitializedOrCrash(size_t length) override;
+  void Free(void* data) override;
+
+ private:
+  // Use a region allocator with a "page size" of 128 bytes as a reasonable
+  // compromise between the number of regions it has to manage and the amount
+  // of memory wasted due to rounding allocation sizes up to the page size.
+  static constexpr size_t kAllocationGranularity = 128;
+  // The backing memory's accessible region is grown in chunks of this size.
+  static constexpr size_t kChunkSize = 1 * MB;
+
+  V8_NOINLINE V8_PRESERVE_MOST void LazyInitialize();
+
+  bool is_initialized() const { return static_cast<bool>(region_alloc_); }
+
+  std::unique_ptr<base::RegionAllocator> region_alloc_;
+  size_t end_of_accessible_region_ = 0;
+  Sandbox* sandbox_ = nullptr;
+  base::Mutex mutex_;
+};
+
+DefaultInSandboxAllocator::DefaultInSandboxAllocator(Sandbox* sandbox)
+    : sandbox_(sandbox) {}
+
+void DefaultInSandboxAllocator::LazyInitialize() {
+  CHECK(sandbox_->is_initialized());
+  constexpr size_t max_backing_memory_size = 8ULL * GB;
+  constexpr size_t min_backing_memory_size = 1ULL * GB;
+  size_t backing_memory_size = max_backing_memory_size;
+  Address backing_memory_base = 0;
+  while (!backing_memory_base &&
+         backing_memory_size >= min_backing_memory_size) {
+    backing_memory_base = sandbox_->address_space()->AllocatePages(
+        VirtualAddressSpace::kNoHint, backing_memory_size, kChunkSize,
+        PagePermissions::kNoAccess);
+    if (!backing_memory_base) {
+      backing_memory_size /= 2;
+    }
+  }
+  if (!backing_memory_base) {
+    V8::FatalProcessOutOfMemory(
+        nullptr, "Could not reserve backing memory for ArrayBufferAllocators");
+  }
+  DCHECK(IsAligned(backing_memory_base, kChunkSize));
+
+  region_alloc_ = std::make_unique<base::RegionAllocator>(
+      backing_memory_base, backing_memory_size, kAllocationGranularity);
+  end_of_accessible_region_ = region_alloc_->begin();
+
+  // Install an on-merge callback to discard or decommit unused pages.
+  region_alloc_->set_on_merge_callback([this](Address start, size_t size) {
+    mutex_.AssertHeld();
+    Address end = start + size;
+    if (end == region_alloc_->end() &&
+        start <= end_of_accessible_region_ - kChunkSize) {
+      // Can shrink the accessible region.
+      Address new_end_of_accessible_region = RoundUp(start, kChunkSize);
+      size_t size_to_decommit =
+          end_of_accessible_region_ - new_end_of_accessible_region;
+      if (!sandbox_->address_space()->DecommitPages(
+              new_end_of_accessible_region, size_to_decommit)) {
+        V8::FatalProcessOutOfMemory(nullptr, "SandboxedArrayBufferAllocator()");
+      }
+      end_of_accessible_region_ = new_end_of_accessible_region;
+    } else if (size >= 2 * kChunkSize) {
+      // Can discard pages. The pages stay accessible, so the size of the
+      // accessible region doesn't change.
+      Address chunk_start = RoundUp(start, kChunkSize);
+      Address chunk_end = RoundDown(start + size, kChunkSize);
+      if (!sandbox_->address_space()->DiscardSystemPages(
+              chunk_start, chunk_end - chunk_start)) {
+        V8::FatalProcessOutOfMemory(nullptr, "SandboxedArrayBufferAllocator()");
+      }
+    }
+  });
+}
+
+DefaultInSandboxAllocator::~DefaultInSandboxAllocator() {
+  // The sandbox may already have been torn down, in which case there's no
+  // need to free any memory.
+  if (is_initialized() && sandbox_->is_initialized()) {
+    sandbox_->address_space()->FreePages(region_alloc_->begin(),
+                                         region_alloc_->size());
+  }
+  sandbox_ = nullptr;
+  region_alloc_.reset(nullptr);
+}
+
+void* DefaultInSandboxAllocator::Allocate(size_t length) {
+  base::MutexGuard guard(&mutex_);
+
+  if (!is_initialized()) [[unlikely]] {
+    LazyInitialize();
+  }
+
+  length = RoundUp(length, kAllocationGranularity);
+  Address region = region_alloc_->AllocateRegion(length);
+  if (region == base::RegionAllocator::kAllocationFailure) return nullptr;
+
+  // Check if the memory is inside the accessible region. If not, grow it.
+  Address end = region + length;
+  size_t length_to_memset = length;
+  if (end > end_of_accessible_region_) {
+    Address new_end_of_accessible_region = RoundUp(end, kChunkSize);
+    size_t size = new_end_of_accessible_region - end_of_accessible_region_;
+    if (!sandbox_->address_space()->SetPagePermissions(
+            end_of_accessible_region_, size, PagePermissions::kReadWrite)) {
+      if (!region_alloc_->FreeRegion(region)) {
+        V8::FatalProcessOutOfMemory(
+            nullptr, "SandboxedArrayBufferAllocator::Allocate()");
+      }
+      return nullptr;
+    }
+
+    // The pages that were inaccessible are guaranteed to be zeroed, so only
+    // memset until the previous end of the accessible region.
+    length_to_memset = end_of_accessible_region_ - region;
+    end_of_accessible_region_ = new_end_of_accessible_region;
+  }
+
+  void* mem = reinterpret_cast<void*>(region);
+  memset(mem, 0, length_to_memset);
+  return mem;
+}
+
+void* DefaultInSandboxAllocator::AllocateUninitialized(size_t length) {
+  return Allocate(length);
+}
+
+void* DefaultInSandboxAllocator::AllocateUninitializedOrCrash(size_t length) {
+  base::MutexGuard guard(&mutex_);
+
+  if (!is_initialized()) [[unlikely]] {
+    LazyInitialize();
+  }
+
+  length = RoundUp(length, kAllocationGranularity);
+  Address region = region_alloc_->AllocateRegion(length);
+  if (region == base::RegionAllocator::kAllocationFailure) {
+    V8::FatalProcessOutOfMemory(
+        nullptr,
+        "SandboxedArrayBufferAllocator::AllocateUninitializedOrCrash()");
+  }
+
+  // Check if the memory is inside the accessible region. If not, grow it.
+  Address end = region + length;
+  if (end > end_of_accessible_region_) {
+    Address new_end_of_accessible_region = RoundUp(end, kChunkSize);
+    size_t size = new_end_of_accessible_region - end_of_accessible_region_;
+    if (!sandbox_->address_space()->SetPagePermissions(
+            end_of_accessible_region_, size, PagePermissions::kReadWrite)) {
+      V8::FatalProcessOutOfMemory(
+          nullptr,
+          "SandboxedArrayBufferAllocator::AllocateUninitializedOrCrash()");
+    }
+    end_of_accessible_region_ = new_end_of_accessible_region;
+  }
+
+  return reinterpret_cast<void*>(region);
+}
+
+void DefaultInSandboxAllocator::Free(void* data) {
+  if (!data) return;
+
+  base::MutexGuard guard(&mutex_);
+  CHECK(is_initialized());
+  region_alloc_->FreeRegion(reinterpret_cast<Address>(data));
 }
 
 }  // namespace
@@ -296,6 +487,7 @@ bool Sandbox::Initialize(v8::Platform* platform, v8::VirtualAddressSpace* vas,
   sandbox_page_allocator_ =
       std::make_unique<base::VirtualAddressSpacePageAllocator>(
           address_space_.get());
+  in_sandbox_allocator_ = std::make_shared<DefaultInSandboxAllocator>(this);
 
   if (use_guard_regions) {
     Address front = reservation_base_;
@@ -397,6 +589,7 @@ bool Sandbox::InitializeAsPartiallyReservedSandbox(v8::Platform* platform,
   sandbox_page_allocator_ =
       std::make_unique<base::VirtualAddressSpacePageAllocator>(
           address_space_.get());
+  in_sandbox_allocator_ = std::make_shared<DefaultInSandboxAllocator>(this);
 
   FinishInitialization();
 
@@ -451,6 +644,9 @@ void Sandbox::TearDown() {
     SandboxTesting::UnregisterSafeMemoryRegion(address_space_->base());
 #endif
 
+    // This could be an allocator passed over the API. Destroy it with
+    // everything else still being intact.
+    in_sandbox_allocator_.reset();
     // This destroys the sub space and frees the underlying reservation.
     address_space_.reset();
     sandbox_page_allocator_.reset();
@@ -496,6 +692,10 @@ Sandbox* Sandbox::New(v8::Platform* platform, v8::VirtualAddressSpace* vas) {
   sandbox->Initialize(platform, vas);
   CHECK(!v8_flags.sandbox_testing && !v8_flags.sandbox_fuzzing);
   return sandbox;
+}
+
+void Sandbox::set_in_sandbox_allocator(std::shared_ptr<Allocator> allocator) {
+  in_sandbox_allocator_ = std::move(allocator);
 }
 
 #endif  // V8_ENABLE_SANDBOX

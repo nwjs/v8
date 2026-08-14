@@ -11,7 +11,6 @@
 #include "src/base/division-by-constant.h"
 #include "src/base/ieee754.h"
 #include "src/base/overflowing-math.h"
-#include "src/builtins/builtins.h"
 #include "src/common/globals.h"
 #include "src/compiler/backend/instruction-selector.h"
 #include "src/compiler/js-graph.h"
@@ -2940,7 +2939,7 @@ TEST_F(MachineOperatorReducerTest, Float64CosWithConstant) {
         Reduce(graph()->NewNode(machine()->Float64Cos(), Float64Constant(x)));
     ASSERT_TRUE(r.Changed());
     EXPECT_THAT(r.replacement(),
-                IsFloat64Constant(NanSensitiveDoubleEq(COS_IMPL(x))));
+                IsFloat64Constant(NanSensitiveDoubleEq(base::ieee754::cos(x))));
   }
 }
 
@@ -3038,7 +3037,7 @@ TEST_F(MachineOperatorReducerTest, Float64SinWithConstant) {
         Reduce(graph()->NewNode(machine()->Float64Sin(), Float64Constant(x)));
     ASSERT_TRUE(r.Changed());
     EXPECT_THAT(r.replacement(),
-                IsFloat64Constant(NanSensitiveDoubleEq(SIN_IMPL(x))));
+                IsFloat64Constant(NanSensitiveDoubleEq(base::ieee754::sin(x))));
   }
 }
 

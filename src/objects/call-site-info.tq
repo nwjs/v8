@@ -5,10 +5,8 @@
 @cppScope('CallSiteInfo')
 bitfield struct CallSiteInfoFlags extends uint31 {
   is_wasm: bool: 1 bit;
-  is_asm_js_wasm: bool: 1 bit;  // Implies that is_wasm bit is set.
   is_strict: bool: 1 bit;
   is_constructor: bool: 1 bit;
-  is_asm_js_at_number_conversion: bool: 1 bit;
   is_async: bool: 1 bit;
   is_builtin: bool: 1 bit;
 

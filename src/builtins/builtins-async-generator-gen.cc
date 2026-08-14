@@ -723,7 +723,8 @@ TF_BUILTIN(AsyncGeneratorReturn, AsyncGeneratorBuiltinsAssembler) {
   {
     compiler::ScopedExceptionHandler handler(this, &await_exception,
                                              &var_exception);
-    Await(context, generator, value, outer_promise, MakeClosures);
+    Await(context, generator, value, outer_promise, MakeClosures,
+          AwaitBehavior::kNormal);
   }
   Goto(&done);
 

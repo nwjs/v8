@@ -107,15 +107,12 @@ bool CppHeapPointerTableEntry::HasEvacuationEntry() const {
   return payload.ContainsEvacuationEntry();
 }
 
-void CppHeapPointerTableEntry::Evacuate(CppHeapPointerTableEntry& dest) {
+void CppHeapPointerTableEntry::Evacuate(CppHeapPointerTableEntry& dest,
+                                        EvacuateMarkMode mode) {
   auto payload = payload_.load(std::memory_order_relaxed);
   // We expect to only evacuate entries containing external pointers.
   DCHECK(payload.ContainsPointer());
-  // Currently, evacuation only happens during table compaction. In that case,
-  // the marking bit must be unset as the entry has already been visited by the
-  // sweeper (which clears the marking bit). If this ever changes, we'll need
-  // to let the caller specify what to do with the marking bit during
-  // evacuation.
+  DCHECK_EQ(mode, EvacuateMarkMode::kLeaveUnmarked);
   DCHECK(!payload.HasMarkBitSet());
 
   dest.payload_.store(payload, std::memory_order_relaxed);
@@ -209,6 +206,37 @@ bool CppHeapPointerTable::Contains(Space* space,
   DCHECK(space->BelongsTo(this));
   return space->Contains(HandleToIndex(handle));
 }
+
+void CppHeapPointerTable::Space::NotifyCppHeapPointerFieldInvalidated(
+    Address field_address) {
+#ifdef DEBUG
+  CppHeapPointerHandle handle = base::AsAtomic32::Acquire_Load(
+      reinterpret_cast<CppHeapPointerHandle*>(field_address));
+  DCHECK(Contains(HandleToIndex(handle)));
+#endif
+  AddInvalidatedField(field_address);
+}
+
+inline bool ExternalEntityTableCompactionTraits<
+    CppHeapPointerTableEntry>::IsValidHandle(Handle handle) {
+  return CppHeapPointerTable::IsValidHandle(handle);
+}
+inline uint32_t ExternalEntityTableCompactionTraits<
+    CppHeapPointerTableEntry>::HandleToIndex(Handle handle) {
+  return CppHeapPointerTable::HandleToIndex(handle);
+}
+inline CppHeapPointerHandle ExternalEntityTableCompactionTraits<
+    CppHeapPointerTableEntry>::IndexToHandle(uint32_t index) {
+  return CppHeapPointerTable::IndexToHandle(index);
+}
+template <typename Table>
+void ExternalEntityTableCompactionTraits<CppHeapPointerTableEntry>::FreeEntry(
+    Table* base_table, uint32_t index) {}
+template <typename Table>
+void ExternalEntityTableCompactionTraits<
+    CppHeapPointerTableEntry>::RelocateAuxiliaryEntryData(Table* base_table,
+                                                          uint32_t old_index,
+                                                          uint32_t new_index) {}
 
 }  // namespace internal
 }  // namespace v8

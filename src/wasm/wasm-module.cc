@@ -24,7 +24,7 @@
 
 namespace v8::internal::wasm {
 
-void UpdateComputedInformation(WasmMemory* memory, ModuleOrigin origin) {
+void UpdateComputedInformation(WasmMemory* memory) {
   const uintptr_t platform_max_pages =
       memory->is_memory64() ? wasm::max_mem64_pages() : wasm::max_mem32_pages();
   memory->min_memory_size = static_cast<uintptr_t>(std::min<uint64_t>(
@@ -38,9 +38,6 @@ void UpdateComputedInformation(WasmMemory* memory, ModuleOrigin origin) {
     memory->bounds_checks = kNoBoundsChecks;
   } else if (v8_flags.wasm_enforce_bounds_checks) {
     // Explicit bounds checks requested via flag (for testing).
-    memory->bounds_checks = kExplicitBoundsChecks;
-  } else if (origin != kWasmOrigin) {
-    // Asm.js modules can't use trap handling.
     memory->bounds_checks = kExplicitBoundsChecks;
   } else if (memory->is_memory64() && !v8_flags.wasm_memory64_trap_handling) {
     memory->bounds_checks = kExplicitBoundsChecks;
@@ -155,65 +152,6 @@ void LazilyGeneratedNames::AddForTesting(int function_index,
   function_names_.Put(function_index, name);
 }
 
-AsmJsOffsetInformation::AsmJsOffsetInformation(
-    base::Vector<const uint8_t> encoded_offsets)
-    : encoded_offsets_(base::OwnedCopyOf(encoded_offsets)) {}
-
-AsmJsOffsetInformation::~AsmJsOffsetInformation() = default;
-
-int AsmJsOffsetInformation::GetSourcePosition(int declared_func_index,
-                                              int byte_offset,
-                                              bool is_at_number_conversion) {
-  EnsureDecodedOffsets();
-
-  DCHECK_LE(0, declared_func_index);
-  DCHECK_GT(decoded_offsets_->functions.size(), declared_func_index);
-  std::vector<AsmJsOffsetEntry>& function_offsets =
-      decoded_offsets_->functions[declared_func_index].entries;
-
-  auto byte_offset_less = [](const AsmJsOffsetEntry& a,
-                             const AsmJsOffsetEntry& b) {
-    return a.byte_offset < b.byte_offset;
-  };
-  SLOW_DCHECK(std::is_sorted(function_offsets.begin(), function_offsets.end(),
-                             byte_offset_less));
-  // If there are no positions recorded, map offset 0 (for function entry) to
-  // position 0.
-  if (function_offsets.empty() && byte_offset == 0) return 0;
-  auto it =
-      std::lower_bound(function_offsets.begin(), function_offsets.end(),
-                       AsmJsOffsetEntry{byte_offset, 0, 0}, byte_offset_less);
-  // The byte_offset is untrusted (from the sandbox heap) and could be
-  // corrupted. Ensure it maps to a valid entry to prevent OOB reads.
-  SBXCHECK_NE(function_offsets.end(), it);
-  SBXCHECK_EQ(byte_offset, it->byte_offset);
-  return is_at_number_conversion ? it->source_position_number_conversion
-                                 : it->source_position_call;
-}
-
-std::pair<int, int> AsmJsOffsetInformation::GetFunctionOffsets(
-    int declared_func_index) {
-  EnsureDecodedOffsets();
-
-  DCHECK_LE(0, declared_func_index);
-  DCHECK_GT(decoded_offsets_->functions.size(), declared_func_index);
-  AsmJsOffsetFunctionEntries& function_info =
-      decoded_offsets_->functions[declared_func_index];
-
-  return {function_info.start_offset, function_info.end_offset};
-}
-
-void AsmJsOffsetInformation::EnsureDecodedOffsets() {
-  base::MutexGuard mutex_guard(&mutex_);
-  DCHECK_EQ(encoded_offsets_ == nullptr, decoded_offsets_ != nullptr);
-
-  if (decoded_offsets_) return;
-  AsmJsOffsetsResult result =
-      wasm::DecodeAsmJsOffsets(encoded_offsets_.as_vector());
-  decoded_offsets_ = std::make_unique<AsmJsOffsets>(std::move(result).value());
-  encoded_offsets_.ReleaseData();
-}
-
 // Get a string stored in the module bytes representing a name.
 WasmName ModuleWireBytes::GetNameOrNull(WireBytesRef ref) const {
   if (!ref.is_set()) return {nullptr, 0};  // no name.
@@ -242,7 +180,7 @@ std::ostream& operator<<(std::ostream& os, const WasmFunctionName& name) {
   return os;
 }
 
-WasmModule::WasmModule(ModuleOrigin origin) : origin(origin) {}
+WasmModule::WasmModule() = default;
 
 uint64_t WasmModule::signature_hash(const TypeCanonicalizer* type_canonicalizer,
                                     uint32_t function_index) const {
@@ -376,7 +314,7 @@ DirectHandle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
     JSObject::AddProperty(isolate, object, maximum_string, max, NONE);
   }
   JSObject::AddProperty(isolate, object, shared_string,
-                        factory->ToBoolean(shared == SharedFlag::kYes), NONE);
+                        factory->ToBoolean(shared.value()), NONE);
 
   JSObject::AddProperty(
       isolate, object, address_string,
@@ -616,7 +554,7 @@ DirectHandle<JSArray> GetCustomSections(
     size_t size = section.payload.length();
     MaybeDirectHandle<JSArrayBuffer> result =
         isolate->factory()->NewJSArrayBufferAndBackingStore(
-            size, InitializedFlag::kUninitialized);
+            size, InitializedFlag{false});
     DirectHandle<JSArrayBuffer> array_buffer;
     if (!result.ToHandle(&array_buffer)) {
       thrower->RangeError("out of memory allocating custom section data");
@@ -646,29 +584,19 @@ DirectHandle<JSArray> GetCustomSections(
 }
 
 // Get the source position from a given function index and wire bytes offset
-// (relative to the function entry), for either asm.js or pure Wasm modules.
+// (relative to the function entry).
 int GetSourcePosition(const WasmModule* module, uint32_t func_index,
-                      uint32_t byte_offset, bool is_at_number_conversion) {
-  DCHECK_EQ(is_asmjs_module(module),
-            module->asm_js_offset_information != nullptr);
-  if (!is_asmjs_module(module)) {
-    // For non-asm.js modules, we just add the function's start offset
-    // to make a module-relative position.
-    return byte_offset + GetWasmFunctionOffset(module, func_index);
-  }
-
-  // asm.js modules have an additional offset table that must be searched.
-  return module->asm_js_offset_information->GetSourcePosition(
-      declared_function_index(module, func_index), byte_offset,
-      is_at_number_conversion);
+                      uint32_t byte_offset) {
+  // Add the function's start offset to make a module-relative position.
+  return byte_offset + GetWasmFunctionOffset(module, func_index);
 }
 
 size_t WasmModule::EstimateStoredSize() const {
   UPDATE_WHEN_CLASS_CHANGES(WasmModule,
 #if V8_ENABLE_DRUMBRAKE
-                            912
+                            896
 #else   // V8_ENABLE_DRUMBRAKE
-                            880
+                            864
 #endif  // V8_ENABLE_DRUMBRAKE
   );
   return sizeof(WasmModule) +                            // --
@@ -745,9 +673,9 @@ size_t TypeFeedbackStorage::EstimateCurrentMemoryConsumption() const {
 size_t WasmModule::EstimateCurrentMemoryConsumption() const {
   UPDATE_WHEN_CLASS_CHANGES(WasmModule,
 #if V8_ENABLE_DRUMBRAKE
-                            912
+                            896
 #else   // V8_ENABLE_DRUMBRAKE
-                            880
+                            864
 #endif  // V8_ENABLE_DRUMBRAKE
   );
   size_t result = EstimateStoredSize();

@@ -93,13 +93,6 @@ TNode<NativeContext> WasmBuiltinsAssembler::LoadContextFromInstanceData(
                           kHeapObjectTag)));
 }
 
-TNode<WasmTrustedInstanceData>
-WasmBuiltinsAssembler::LoadSharedPartFromInstanceData(
-    TNode<WasmTrustedInstanceData> trusted_data) {
-  return LoadProtectedPointerField<WasmTrustedInstanceData>(
-      trusted_data, WasmTrustedInstanceData::kProtectedSharedPartOffset);
-}
-
 TNode<FixedArray> WasmBuiltinsAssembler::LoadTablesFromInstanceData(
     TNode<WasmTrustedInstanceData> trusted_data) {
   return LoadObjectField<FixedArray>(trusted_data,

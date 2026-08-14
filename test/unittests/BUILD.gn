@@ -409,6 +409,7 @@ v8_cluster_source_set("v8_unittests_sources") {
     "heap/object-stats-unittest.cc",
     "heap/page-casting-unittest.cc",
     "heap/page-promotion-unittest.cc",
+    "heap/pending-allocations-unittest.cc",
     "heap/persistent-handles-unittest.cc",
     "heap/pool-unittest.cc",
     "heap/safepoint-unittest.cc",
@@ -457,6 +458,7 @@ v8_cluster_source_set("v8_unittests_sources") {
     "maglev/hamt-unittest.cc",
     "maglev/maglev-assembler-unittest.cc",
     "maglev/maglev-graph-builder-unittest.cc",
+    "maglev/maglev-graph-processor-unittest.cc",
     "maglev/maglev-test.cc",
     "maglev/maglev-test.h",
     "maglev/node-type-unittest.cc",
@@ -514,6 +516,7 @@ v8_cluster_source_set("v8_unittests_sources") {
     "run-all-unittests.cc",
     "runtime/runtime-debug-unittest.cc",
     "sandbox/bytecode-verifier-unittest.cc",
+    "sandbox/generated-code-validator-unittest.cc",
     "sandbox/libcxx-hardening-unittest.cc",
     "sandbox/pointer-table-unittest.cc",
     "sandbox/sandbox-crash-filter-unittest.cc",
@@ -679,8 +682,6 @@ v8_cluster_source_set("v8_unittests_sources") {
     sources += [
       "../../test/common/wasm/wasm-macro-gen.h",
       "api/api-wasm-unittest.cc",
-      "asmjs/asm-scanner-unittest.cc",
-      "asmjs/asm-types-unittest.cc",
       "compiler/int64-lowering-unittest.cc",
       "compiler/turboshaft/wasm-simd-unittest.cc",
       "compiler/wasm-address-reassociation-unittest.cc",
@@ -773,8 +774,10 @@ v8_cluster_source_set("v8_unittests_sources") {
       "execution/simulator-arm64-unittest.cc",
     ]
     if (v8_enable_turbofan) {
-      sources +=
-          [ "compiler/arm64/turboshaft-instruction-selector-arm64-unittest.cc" ]
+      sources += [
+        "compiler/arm64/turboshaft-instruction-scheduler-arm64-unittest.cc",
+        "compiler/arm64/turboshaft-instruction-selector-arm64-unittest.cc",
+      ]
     }
   } else if (v8_current_cpu == "x86") {
     sources += [

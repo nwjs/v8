@@ -31,9 +31,8 @@ WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
   DCHECK_GE(func_index_, static_cast<int>(env->module->num_imported_functions));
   const WasmFunction* func = &env->module->functions[func_index_];
   base::Vector<const uint8_t> code = wire_bytes_storage->GetCode(func->code);
-  SharedFlag is_shared = env->module->type(func->sig_index).is_shared;
   wasm::FunctionBody func_body{func->sig, func->code.offset(), code.begin(),
-                               code.end(), is_shared};
+                               code.end()};
 
   base::ElapsedTimer compile_timer;
   if (base::TimeTicks::IsHighResolution()) compile_timer.Start();
@@ -48,7 +47,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
   // In the rare case when we create both a Liftoff and a Turbofan compilation
   // task up front, we currently validate twice; this is not expected to occur
   // in production.
-  if (validation_ == Validation::kMustValidate) {
+  if (validation_ == kMustValidate) {
     Zone validation_zone{GetWasmEngine()->allocator(), ZONE_NAME};
     if (ValidateFunctionBody(&validation_zone, env->enabled_features,
                              env->module, detected, func_body)
@@ -149,9 +148,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
     base::TimeDelta compile_time = compile_timer.Elapsed();
     if (func_body.end - func_body.start >= 100 * KB) {
       DelayedCounterUpdates::GetHistogramFn huge_size_histogram =
-          is_asmjs_module(env->module)
-              ? &Counters::wasm_asm_huge_function_size_bytes
-              : &Counters::wasm_wasm_huge_function_size_bytes;
+          &Counters::wasm_wasm_huge_function_size_bytes;
       counter_updates->AddSample(
           huge_size_histogram,
           static_cast<int>(func_body.end - func_body.start));
@@ -159,9 +156,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
           &Counters::wasm_compile_huge_function_time, compile_time);
     }
     DelayedCounterUpdates::GetTimedHistogramFn compile_time_histogram =
-        is_asmjs_module(env->module)
-            ? &Counters::wasm_compile_asm_function_time
-            : &Counters::wasm_compile_wasm_function_time;
+        &Counters::wasm_compile_wasm_function_time;
     counter_updates->AddTimedSample(compile_time_histogram, compile_time);
   }
   return result;
@@ -173,17 +168,14 @@ void WasmCompilationUnit::CompileWasmFunction(NativeModule* native_module,
                                               const WasmFunction* function,
                                               ExecutionTier tier) {
   ModuleWireBytes wire_bytes(native_module->wire_bytes());
-  SharedFlag is_shared =
-      native_module->module()->type(function->sig_index).is_shared;
   FunctionBody function_body{function->sig, function->code.offset(),
                              wire_bytes.start() + function->code.offset(),
-                             wire_bytes.start() + function->code.end_offset(),
-                             is_shared};
+                             wire_bytes.start() + function->code.end_offset()};
 
   DCHECK_LE(native_module->num_imported_functions(), function->func_index);
   DCHECK_LT(function->func_index, native_module->num_functions());
   WasmCompilationUnit unit(function->func_index, tier, kNotForDebugging,
-                           Validation::kAlreadyValidated);
+                           kAlreadyValidated);
   CompilationEnv env = CompilationEnv::ForModule(native_module);
   base::FlushDenormalsScope disable_denormals(
       tier == ExecutionTier::kTurbofan &&

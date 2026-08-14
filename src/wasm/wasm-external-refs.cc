@@ -55,6 +55,10 @@
 
 namespace v8::internal::wasm {
 
+#if V8_OS_WIN
+thread_local uintptr_t central_stack_limit = 0;
+#endif
+
 using base::ReadUnalignedValue;
 using base::WriteUnalignedValue;
 
@@ -1043,9 +1047,9 @@ V8_INLINE void ResumeStack(Isolate* isolate, wasm::StackMemory* from,
   isolate->SwitchStacks<JumpBuffer::Inactive, JumpBuffer::Suspended>(
       from, to, sp, fp, pc);
   DCHECK(!to->jmpbuf()->is_on_central_stack);
-#if V8_TARGET_OS_WIN
+#if V8_OS_WIN
   if (from->jmpbuf()->is_on_central_stack) {
-    base::Stack::SaveStackLimit();
+    central_stack_limit = base::Stack::GetCommittedStackLimit();
   }
   base::Stack::SetCurrentThreadStackBounds(to->limit(), to->base());
 #endif
@@ -1057,9 +1061,9 @@ V8_INLINE void SuspendStack(Isolate* isolate, wasm::StackMemory* from,
   isolate->SwitchStacks<JumpBuffer::Suspended, JumpBuffer::Inactive>(
       from, to, sp, fp, pc);
   DCHECK(!from->jmpbuf()->is_on_central_stack);
-#if V8_TARGET_OS_WIN
+#if V8_OS_WIN
   if (to->jmpbuf()->is_on_central_stack) {
-    base::Stack::SetCurrentThreadStackBounds(base::Stack::GetStackLimit(),
+    base::Stack::SetCurrentThreadStackBounds(central_stack_limit,
                                              base::Stack::GetStackStart());
   } else {
     base::Stack::SetCurrentThreadStackBounds(to->limit(), to->base());
@@ -1071,9 +1075,9 @@ V8_INLINE void ReturnStack(Isolate* isolate, wasm::StackMemory* from,
                            wasm::StackMemory* to) {
   isolate->SwitchStacks<JumpBuffer::Retired, JumpBuffer::Inactive>(
       from, to, kNullAddress, kNullAddress, kNullAddress);
-#if V8_TARGET_OS_WIN
+#if V8_OS_WIN
   if (to->jmpbuf()->is_on_central_stack) {
-    base::Stack::SetCurrentThreadStackBounds(base::Stack::GetStackLimit(),
+    base::Stack::SetCurrentThreadStackBounds(central_stack_limit,
                                              base::Stack::GetStackStart());
   } else {
     base::Stack::SetCurrentThreadStackBounds(to->limit(), to->base());
@@ -1364,17 +1368,13 @@ intptr_t switch_to_the_central_stack(Isolate* isolate, uintptr_t current_sp) {
   ThreadLocalTop* thread_local_top = isolate->thread_local_top();
   StackGuard* stack_guard = isolate->stack_guard();
 
-  auto secondary_stack_limit = stack_guard->real_jslimit();
-
   stack_guard->SetStackLimitForStackSwitching(
       thread_local_top->central_stack_limit_);
-#if V8_TARGET_OS_WIN
-  base::Stack::SetCurrentThreadStackBounds(base::Stack::GetStackLimit(),
+#if V8_OS_WIN
+  base::Stack::SetCurrentThreadStackBounds(central_stack_limit,
                                            base::Stack::GetStackStart());
 #endif
 
-  thread_local_top->secondary_stack_limit_ = secondary_stack_limit;
-  thread_local_top->secondary_stack_sp_ = current_sp;
   thread_local_top->is_on_central_stack_flag_ = true;
 
   auto counter = isolate->wasm_switch_to_the_central_stack_counter();
@@ -1386,21 +1386,19 @@ intptr_t switch_to_the_central_stack(Isolate* isolate, uintptr_t current_sp) {
 
 void switch_from_the_central_stack(Isolate* isolate) {
   ThreadLocalTop* thread_local_top = isolate->thread_local_top();
-  CHECK_NE(thread_local_top->secondary_stack_sp_, 0);
-  CHECK_NE(thread_local_top->secondary_stack_limit_, 0);
+  wasm::StackMemory* active_stack = isolate->isolate_data()->active_stack();
+  CHECK_NE(thread_local_top->c_entry_fp_, 0);
 
-  auto secondary_stack_limit = thread_local_top->secondary_stack_limit_;
-  thread_local_top->secondary_stack_limit_ = 0;
-  thread_local_top->secondary_stack_sp_ = 0;
+  auto secondary_stack_limit =
+      reinterpret_cast<uintptr_t>(active_stack->jslimit());
   thread_local_top->is_on_central_stack_flag_ = false;
 
   StackGuard* stack_guard = isolate->stack_guard();
   stack_guard->SetStackLimitForStackSwitching(secondary_stack_limit);
-#if V8_TARGET_OS_WIN
+#if V8_OS_WIN
   // The Windows stack limit may have changed after running on the central
   // stack, record it.
-  base::Stack::SaveStackLimit();
-  wasm::StackMemory* active_stack = isolate->isolate_data()->active_stack();
+  central_stack_limit = base::Stack::GetCommittedStackLimit();
   base::Stack::SetCurrentThreadStackBounds(active_stack->limit(),
                                            active_stack->base());
 #endif
@@ -1415,8 +1413,8 @@ intptr_t switch_to_the_central_stack_for_js(Isolate* isolate, Address fp) {
   stack->set_stack_switch_info(fp, central_stack_sp);
   stack_guard->SetStackLimitForStackSwitching(
       thread_local_top->central_stack_limit_);
-#if V8_TARGET_OS_WIN
-  base::Stack::SetCurrentThreadStackBounds(base::Stack::GetStackLimit(),
+#if V8_OS_WIN
+  base::Stack::SetCurrentThreadStackBounds(central_stack_limit,
                                            base::Stack::GetStackStart());
 #endif
   thread_local_top->is_on_central_stack_flag_ = true;
@@ -1432,10 +1430,10 @@ void switch_from_the_central_stack_for_js(Isolate* isolate) {
   StackGuard* stack_guard = isolate->stack_guard();
   stack_guard->SetStackLimitForStackSwitching(
       reinterpret_cast<uintptr_t>(stack->jslimit()));
-#if V8_TARGET_OS_WIN
+#if V8_OS_WIN
   // The Windows stack limit may have changed after running on the central
   // stack, record it.
-  base::Stack::SaveStackLimit();
+  central_stack_limit = base::Stack::GetCommittedStackLimit();
   base::Stack::SetCurrentThreadStackBounds(stack->limit(), stack->base());
 #endif
 }
@@ -1443,14 +1441,14 @@ void switch_from_the_central_stack_for_js(Isolate* isolate) {
 // frame_size includes param slots area and extra frame slots above FP.
 Address grow_stack(Isolate* isolate, void* current_sp, size_t frame_size,
                    size_t gap, Address current_fp) {
+  if (isolate->IsOnCentralStack()) {
+    // Should not grow the central stack.
+    return 0;
+  }
   // Check if this is a real stack overflow.
   StackLimitCheck check(isolate);
-  if (check.WasmHasOverflowed(gap)) {
+  if (check.WasmGrowableStackHasOverflowed(gap)) {
     wasm::StackMemory* active_stack = isolate->isolate_data()->active_stack();
-    if (isolate->IsOnCentralStack()) {
-      // Should not grow the central stack.
-      return 0;
-    }
     DCHECK(active_stack->IsActive());
     // Grow by at least the new frame size plus the stack limit margin.
     size_t min =

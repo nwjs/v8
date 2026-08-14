@@ -1028,6 +1028,16 @@ void SharedMacroAssemblerBase::I64x2ShrS(XMMRegister dst, XMMRegister src,
   DCHECK_GT(64, shift);
   DCHECK_NE(xmm_tmp, dst);
   DCHECK_NE(xmm_tmp, src);
+  // Optimization for shift == 63, replicating the sign bit across the vector.
+  // This is a common pattern for sign extension.
+  if (shift == 63) {
+    // Broadcast the sign bit (high dword) of each qword to both dwords.
+    Pshufd(dst, src, uint8_t(0xf5));
+    // Arithmetic shift to fill the entire lane with the sign bit.
+    Psrad(dst, uint8_t(31));
+    return;
+  }
+
   // Use logical right shift to emulate arithmetic right shifts:
   // Given:
   // signed >> c

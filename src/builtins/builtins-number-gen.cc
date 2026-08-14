@@ -95,48 +95,46 @@ DEF_BINOP(ShiftRightLogical_WithFeedback,
           Generate_ShiftRightLogicalWithFeedback)
 #undef DEF_BINOP
 
-#define DEF_BINOP(Name, Generator, RhsIsSmi)                                   \
-  TF_BUILTIN(Name, CodeStubAssembler) {                                        \
+#define DEF_BINOP(BuiltinPrefix, Op, RhsKnownSmi)                              \
+  TF_BUILTIN(BuiltinPrefix##_Generic_Baseline, CodeStubAssembler) {            \
     auto lhs = Parameter<Object>(Descriptor::kLeft);                           \
     auto rhs = Parameter<Object>(Descriptor::kRight);                          \
     auto feedback_offset =                                                     \
         UncheckedParameter<IntPtrT>(Descriptor::kFeedbackOffset);              \
                                                                                \
     BinaryOpAssembler binop_asm(state());                                      \
-    TNode<Object> result = binop_asm.Generator(                                \
+    TNode<Object> result = binop_asm.Generate_##Op##WithFeedback(              \
         [&]() { return LoadContextFromBaseline(); }, lhs, rhs,                 \
         binop_asm.MakeEmbeddedFeedbackUpdater(LoadBytecodeArrayFromBaseline(), \
                                               feedback_offset),                \
-        RhsIsSmi);                                                             \
+        RhsKnownSmi);                                                          \
                                                                                \
     Return(result);                                                            \
   }
-DEF_BINOP(Add_Baseline, Generate_AddWithFeedback, false)
-DEF_BINOP(Subtract_Baseline, Generate_SubtractWithFeedback, false)
-DEF_BINOP(Multiply_Baseline, Generate_MultiplyWithFeedback, false)
-DEF_BINOP(Divide_Baseline, Generate_DivideWithFeedback, false)
-DEF_BINOP(Modulus_Baseline, Generate_ModulusWithFeedback, false)
-DEF_BINOP(Exponentiate_Baseline, Generate_ExponentiateWithFeedback, false)
-DEF_BINOP(BitwiseOr_Baseline, Generate_BitwiseOrWithFeedback, false)
-DEF_BINOP(BitwiseXor_Baseline, Generate_BitwiseXorWithFeedback, false)
-DEF_BINOP(BitwiseAnd_Baseline, Generate_BitwiseAndWithFeedback, false)
-DEF_BINOP(ShiftLeft_Baseline, Generate_ShiftLeftWithFeedback, false)
-DEF_BINOP(ShiftRight_Baseline, Generate_ShiftRightWithFeedback, false)
-DEF_BINOP(ShiftRightLogical_Baseline, Generate_ShiftRightLogicalWithFeedback,
-          false)
-DEF_BINOP(AddSmi_Baseline, Generate_AddWithFeedback, true)
-DEF_BINOP(SubtractSmi_Baseline, Generate_SubtractWithFeedback, true)
-DEF_BINOP(MultiplySmi_Baseline, Generate_MultiplyWithFeedback, true)
-DEF_BINOP(DivideSmi_Baseline, Generate_DivideWithFeedback, true)
-DEF_BINOP(ModulusSmi_Baseline, Generate_ModulusWithFeedback, true)
-DEF_BINOP(ExponentiateSmi_Baseline, Generate_ExponentiateWithFeedback, true)
-DEF_BINOP(BitwiseOrSmi_Baseline, Generate_BitwiseOrWithFeedback, true)
-DEF_BINOP(BitwiseXorSmi_Baseline, Generate_BitwiseXorWithFeedback, true)
-DEF_BINOP(BitwiseAndSmi_Baseline, Generate_BitwiseAndWithFeedback, true)
-DEF_BINOP(ShiftLeftSmi_Baseline, Generate_ShiftLeftWithFeedback, true)
-DEF_BINOP(ShiftRightSmi_Baseline, Generate_ShiftRightWithFeedback, true)
-DEF_BINOP(ShiftRightLogicalSmi_Baseline, Generate_ShiftRightLogicalWithFeedback,
-          true)
+DEF_BINOP(Add, Add, false)
+DEF_BINOP(Subtract, Subtract, false)
+DEF_BINOP(Multiply, Multiply, false)
+DEF_BINOP(Divide, Divide, false)
+DEF_BINOP(Modulus, Modulus, false)
+DEF_BINOP(Exponentiate, Exponentiate, false)
+DEF_BINOP(BitwiseOr, BitwiseOr, false)
+DEF_BINOP(BitwiseXor, BitwiseXor, false)
+DEF_BINOP(BitwiseAnd, BitwiseAnd, false)
+DEF_BINOP(ShiftLeft, ShiftLeft, false)
+DEF_BINOP(ShiftRight, ShiftRight, false)
+DEF_BINOP(ShiftRightLogical, ShiftRightLogical, false)
+DEF_BINOP(AddSmi, Add, true)
+DEF_BINOP(SubtractSmi, Subtract, true)
+DEF_BINOP(MultiplySmi, Multiply, true)
+DEF_BINOP(DivideSmi, Divide, true)
+DEF_BINOP(ModulusSmi, Modulus, true)
+DEF_BINOP(ExponentiateSmi, Exponentiate, true)
+DEF_BINOP(BitwiseOrSmi, BitwiseOr, true)
+DEF_BINOP(BitwiseXorSmi, BitwiseXor, true)
+DEF_BINOP(BitwiseAndSmi, BitwiseAnd, true)
+DEF_BINOP(ShiftLeftSmi, ShiftLeft, true)
+DEF_BINOP(ShiftRightSmi, ShiftRight, true)
+DEF_BINOP(ShiftRightLogicalSmi, ShiftRightLogical, true)
 #undef DEF_BINOP
 
 #define DEF_UNOP(Name, Generator)                                \
@@ -570,6 +568,138 @@ DEF_TYPED_RELATIONAL_COMPARE(LessThanOrEqual)
 DEF_TYPED_RELATIONAL_COMPARE(GreaterThan)
 DEF_TYPED_RELATIONAL_COMPARE(GreaterThanOrEqual)
 #undef DEF_TYPED_RELATIONAL_COMPARE
+
+// TODO(yuheng): The *Smi version bytecodes reuse these typed stubs instead of a
+// dedicated typed *Smi family for smaller code size, but this will introduce
+// one unnecessary rhs Smi check. Adding a parallel typed *Smi family is a
+// possible future experiment to remove that extra branch.
+#define DEF_TYPED_BINOP(OpName)                                             \
+  TF_BUILTIN(OpName##AndTryPatchCode, CodeStubAssembler) {                  \
+    auto lhs = Parameter<Object>(Descriptor::kLeft);                        \
+    auto rhs = Parameter<Object>(Descriptor::kRight);                       \
+    auto current_feedback =                                                 \
+        UncheckedParameter<Int32T>(Descriptor::kCurrentFeedback);           \
+    auto feedback_offset =                                                  \
+        UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);          \
+    GenerateBinaryOpAndTryPatchCode(Operation::k##OpName, lhs, rhs,         \
+                                    current_feedback, feedback_offset);     \
+  }                                                                         \
+                                                                            \
+  TF_BUILTIN(OpName##_None_Baseline, CodeStubAssembler) {                   \
+    auto lhs = Parameter<Object>(Descriptor::kLeft);                        \
+    auto rhs = Parameter<Object>(Descriptor::kRight);                       \
+    auto feedback_offset =                                                  \
+        UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);          \
+    TailCallBuiltin(Builtin::k##OpName##AndTryPatchCode,                    \
+                    LoadContextFromBaseline(), lhs, rhs,                    \
+                    Int32Constant(static_cast<int32_t>(                     \
+                        BinaryOperationFeedback::TypeIndex::kNone)),        \
+                    feedback_offset);                                       \
+  }                                                                         \
+                                                                            \
+  TF_BUILTIN(OpName##_SignedSmall_Baseline, CodeStubAssembler) {            \
+    auto lhs = Parameter<Object>(Descriptor::kLeft);                        \
+    auto rhs = Parameter<Object>(Descriptor::kRight);                       \
+    auto feedback_offset =                                                  \
+        UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);          \
+    GenerateSmiBinaryOp(Operation::k##OpName, lhs, rhs, feedback_offset,    \
+                        Builtin::k##OpName##AndTryPatchCode);               \
+  }                                                                         \
+                                                                            \
+  TF_BUILTIN(OpName##_Number_Baseline, CodeStubAssembler) {                 \
+    auto lhs = Parameter<Object>(Descriptor::kLeft);                        \
+    auto rhs = Parameter<Object>(Descriptor::kRight);                       \
+    auto feedback_offset =                                                  \
+        UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);          \
+    GenerateNumberBinaryOp(Operation::k##OpName, lhs, rhs, feedback_offset, \
+                           Builtin::k##OpName##AndTryPatchCode);            \
+  }
+DEF_TYPED_BINOP(Add)
+DEF_TYPED_BINOP(Subtract)
+DEF_TYPED_BINOP(Multiply)
+DEF_TYPED_BINOP(Divide)
+DEF_TYPED_BINOP(Modulus)
+#undef DEF_TYPED_BINOP
+
+TF_BUILTIN(Add_String_Baseline, CodeStubAssembler) {
+  auto lhs = Parameter<Object>(Descriptor::kLeft);
+  auto rhs = Parameter<Object>(Descriptor::kRight);
+  auto feedback_offset =
+      UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);
+  GenerateStringAdd(lhs, rhs, feedback_offset, Builtin::kAddAndTryPatchCode);
+}
+
+TF_BUILTIN(ExponentiateAndTryPatchCode, CodeStubAssembler) {
+  auto lhs = Parameter<Object>(Descriptor::kLeft);
+  auto rhs = Parameter<Object>(Descriptor::kRight);
+  auto current_feedback =
+      UncheckedParameter<Int32T>(Descriptor::kCurrentFeedback);
+  auto feedback_offset =
+      UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);
+  GenerateBinaryOpAndTryPatchCode(Operation::kExponentiate, lhs, rhs,
+                                  current_feedback, feedback_offset);
+}
+
+TF_BUILTIN(Exponentiate_None_Baseline, CodeStubAssembler) {
+  auto lhs = Parameter<Object>(Descriptor::kLeft);
+  auto rhs = Parameter<Object>(Descriptor::kRight);
+  auto feedback_offset =
+      UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);
+  TailCallBuiltin(Builtin::kExponentiateAndTryPatchCode,
+                  LoadContextFromBaseline(), lhs, rhs,
+                  Int32Constant(static_cast<int32_t>(
+                      BinaryOperationFeedback::TypeIndex::kNone)),
+                  feedback_offset);
+}
+
+TF_BUILTIN(Exponentiate_Number_Baseline, CodeStubAssembler) {
+  auto lhs = Parameter<Object>(Descriptor::kLeft);
+  auto rhs = Parameter<Object>(Descriptor::kRight);
+  auto feedback_offset =
+      UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);
+  GenerateNumberBinaryOp(Operation::kExponentiate, lhs, rhs, feedback_offset,
+                         Builtin::kExponentiateAndTryPatchCode);
+}
+
+#define DEF_TYPED_BITWISE_BINOP(OpName)                                  \
+  TF_BUILTIN(OpName##AndTryPatchCode, CodeStubAssembler) {               \
+    auto lhs = Parameter<Object>(Descriptor::kLeft);                     \
+    auto rhs = Parameter<Object>(Descriptor::kRight);                    \
+    auto current_feedback =                                              \
+        UncheckedParameter<Int32T>(Descriptor::kCurrentFeedback);        \
+    auto feedback_offset =                                               \
+        UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);       \
+    GenerateBinaryOpAndTryPatchCode(Operation::k##OpName, lhs, rhs,      \
+                                    current_feedback, feedback_offset);  \
+  }                                                                      \
+                                                                         \
+  TF_BUILTIN(OpName##_None_Baseline, CodeStubAssembler) {                \
+    auto lhs = Parameter<Object>(Descriptor::kLeft);                     \
+    auto rhs = Parameter<Object>(Descriptor::kRight);                    \
+    auto feedback_offset =                                               \
+        UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);       \
+    TailCallBuiltin(Builtin::k##OpName##AndTryPatchCode,                 \
+                    LoadContextFromBaseline(), lhs, rhs,                 \
+                    Int32Constant(static_cast<int32_t>(                  \
+                        BinaryOperationFeedback::TypeIndex::kNone)),     \
+                    feedback_offset);                                    \
+  }                                                                      \
+                                                                         \
+  TF_BUILTIN(OpName##_SignedSmall_Baseline, CodeStubAssembler) {         \
+    auto lhs = Parameter<Object>(Descriptor::kLeft);                     \
+    auto rhs = Parameter<Object>(Descriptor::kRight);                    \
+    auto feedback_offset =                                               \
+        UncheckedParameter<UintPtrT>(Descriptor::kFeedbackOffset);       \
+    GenerateSmiBinaryOp(Operation::k##OpName, lhs, rhs, feedback_offset, \
+                        Builtin::k##OpName##AndTryPatchCode);            \
+  }
+DEF_TYPED_BITWISE_BINOP(BitwiseOr)
+DEF_TYPED_BITWISE_BINOP(BitwiseXor)
+DEF_TYPED_BITWISE_BINOP(BitwiseAnd)
+DEF_TYPED_BITWISE_BINOP(ShiftLeft)
+DEF_TYPED_BITWISE_BINOP(ShiftRight)
+DEF_TYPED_BITWISE_BINOP(ShiftRightLogical)
+#undef DEF_TYPED_BITWISE_BINOP
 
 #endif  // V8_ENABLE_SPARKPLUG_PLUS
 

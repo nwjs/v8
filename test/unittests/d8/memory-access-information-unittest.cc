@@ -15,13 +15,14 @@ namespace {
 TEST(MemoryAccessInformationTest, ParseInstructionWidthAndExtension) {
   struct user_regs_struct regs = {};
 
-  // Test 8-bit zero-extending read.
+  // Test 8-bit zero-extending read into a 32-bit register.
   {
     MemoryAccessInformation info =
         ParseMemoryAccessInformationFromInstruction("movzxbl eax,[rbx]", regs);
     EXPECT_EQ(MemoryAccessInformation::kRead, info.kind);
     EXPECT_EQ(&regs.rax, info.result_reg);
     EXPECT_EQ(1, info.access_width);
+    EXPECT_EQ(4, info.dest_width);
     EXPECT_EQ(MemoryAccessInformation::kZeroExtend, info.extension);
   }
 
@@ -42,6 +43,7 @@ TEST(MemoryAccessInformationTest, ParseInstructionWidthAndExtension) {
     EXPECT_EQ(MemoryAccessInformation::kRead, info.kind);
     EXPECT_EQ(&regs.rax, info.result_reg);
     EXPECT_EQ(4, info.access_width);
+    EXPECT_EQ(4, info.dest_width);
     EXPECT_EQ(MemoryAccessInformation::kZeroExtend, info.extension);
   }
 
@@ -52,6 +54,29 @@ TEST(MemoryAccessInformationTest, ParseInstructionWidthAndExtension) {
     EXPECT_EQ(MemoryAccessInformation::kRead, info.kind);
     EXPECT_EQ(&regs.rax, info.result_reg);
     EXPECT_EQ(4, info.access_width);
+    EXPECT_EQ(8, info.dest_width);
+    EXPECT_EQ(MemoryAccessInformation::kSignExtend, info.extension);
+  }
+
+  // Test sign-extending byte reads: the destination width comes from the last
+  // mnemonic char, not the source-width suffix. movsxbl sign-extends within a
+  // 32-bit register (upper 32 bits zeroed), movsxbq within a 64-bit register.
+  {
+    MemoryAccessInformation info =
+        ParseMemoryAccessInformationFromInstruction("movsxbl eax,[rbx]", regs);
+    EXPECT_EQ(MemoryAccessInformation::kRead, info.kind);
+    EXPECT_EQ(&regs.rax, info.result_reg);
+    EXPECT_EQ(1, info.access_width);
+    EXPECT_EQ(4, info.dest_width);
+    EXPECT_EQ(MemoryAccessInformation::kSignExtend, info.extension);
+  }
+  {
+    MemoryAccessInformation info =
+        ParseMemoryAccessInformationFromInstruction("movsxbq rax,[rbx]", regs);
+    EXPECT_EQ(MemoryAccessInformation::kRead, info.kind);
+    EXPECT_EQ(&regs.rax, info.result_reg);
+    EXPECT_EQ(1, info.access_width);
+    EXPECT_EQ(8, info.dest_width);
     EXPECT_EQ(MemoryAccessInformation::kSignExtend, info.extension);
   }
 
@@ -90,6 +115,24 @@ TEST(MemoryAccessInformationTest, ParseInstructionWidthAndExtension) {
     EXPECT_EQ(1, info.xmm_reg_index);
   }
 
+  // Test lddqu instruction.
+  {
+    MemoryAccessInformation info =
+        ParseMemoryAccessInformationFromInstruction("lddqu xmm0,[rdi]", regs);
+    EXPECT_EQ(MemoryAccessInformation::kRead, info.kind);
+    EXPECT_EQ(0, info.xmm_reg_index);
+    EXPECT_EQ(16, info.access_width);
+  }
+
+  // Test vlddqu instruction.
+  {
+    MemoryAccessInformation info =
+        ParseMemoryAccessInformationFromInstruction("vlddqu xmm1,[rsi]", regs);
+    EXPECT_EQ(MemoryAccessInformation::kRead, info.kind);
+    EXPECT_EQ(1, info.xmm_reg_index);
+    EXPECT_EQ(16, info.access_width);
+  }
+
   // Test 3-operand SIMD instruction reading memory.
   {
     MemoryAccessInformation info = ParseMemoryAccessInformationFromInstruction(
@@ -97,6 +140,28 @@ TEST(MemoryAccessInformationTest, ParseInstructionWidthAndExtension) {
     EXPECT_EQ(MemoryAccessInformation::kRead, info.kind);
     EXPECT_EQ(1, info.xmm_reg_index);
     EXPECT_EQ(1, info.access_width);
+  }
+
+  // Test AVX-512 mask register read (vpcmpeqb k0,xmm16,[rdi],0x0).
+  {
+    MemoryAccessInformation info = ParseMemoryAccessInformationFromInstruction(
+        "vpcmpeqb k0,xmm16,[rdi],0x0", regs);
+    EXPECT_EQ(MemoryAccessInformation::kRead, info.kind);
+    EXPECT_EQ(0, info.k_reg_index);
+    EXPECT_EQ(-1, info.xmm_reg_index);
+  }
+
+  // Test repeating string instructions (rep/repne).
+  {
+    MemoryAccessInformation info =
+        ParseMemoryAccessInformationFromInstruction("rep movsb", regs);
+    EXPECT_EQ(MemoryAccessInformation::kRepMovs, info.kind);
+    EXPECT_EQ(1, info.access_width);
+  }
+  {
+    MemoryAccessInformation info =
+        ParseMemoryAccessInformationFromInstruction("repne cmpsb", regs);
+    EXPECT_EQ(MemoryAccessInformation::kWrite, info.kind);
   }
 }
 

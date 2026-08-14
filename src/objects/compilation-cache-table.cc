@@ -8,7 +8,14 @@
 
 #include "src/codegen/script-details.h"
 #include "src/common/assert-scope.h"
+#include "src/heap/read-only-heap-inl.h"
 #include "src/objects/compilation-cache-table-inl.h"
+#include "src/objects/fixed-array-inl.h"
+#include "src/objects/hole.h"
+#include "src/objects/js-regexp-inl.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/scope-info.h"
+#include "src/objects/shared-function-info-inl.h"
 
 namespace v8 {
 namespace internal {

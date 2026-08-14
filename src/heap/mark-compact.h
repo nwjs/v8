@@ -149,9 +149,6 @@ class MarkCompactCollector final {
 
   V8_INLINE void AddTransitionArray(Tagged<TransitionArray> array);
 
-  void RecordStrongDescriptorArraysForWeakening(
-      GlobalHandleVector<DescriptorArray> strong_descriptor_arrays);
-
 #ifdef DEBUG
   // Checks whether performing mark-compact collection.
   bool in_use() { return state_ > PREPARE_GC; }
@@ -322,7 +319,6 @@ class MarkCompactCollector final {
                               Tagged<DescriptorArray> descriptors);
   bool TransitionArrayNeedsCompaction(Tagged<TransitionArray> transitions,
                                       int num_transitions);
-  void WeakenStrongDescriptorArrays();
 
   // After all reachable objects have been marked those weak map entries
   // with an unreachable key are removed from all encountered weak maps.
@@ -419,9 +415,6 @@ class MarkCompactCollector final {
   std::unique_ptr<WeakObjects::Local> local_weak_objects_;
   NativeContextInferrer native_context_inferrer_;
   NativeContextStats native_context_stats_;
-
-  std::vector<GlobalHandleVector<DescriptorArray>> strong_descriptor_arrays_;
-  base::Mutex strong_descriptor_arrays_mutex_;
 
   // Candidates for pages that should be evacuated.
   std::vector<NormalPage*> evacuation_candidates_;

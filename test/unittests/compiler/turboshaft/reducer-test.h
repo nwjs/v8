@@ -292,6 +292,41 @@ class ReducerTest : public TestWithNativeContextAndZone {
                                          builder, isolate(), zone(), context);
   }
 
+  template <typename Builder>
+  TestInstance CreateFromGraph(
+      base::Vector<const RegisterRepresentation> parameter_reps,
+      const Builder& builder, bool is_wasm) {
+    Initialize(is_wasm);
+    Handle<Context> context = indirect_handle(native_context());
+    return TestInstance::CreateFromGraph(pipeline_data_.get(), parameter_reps,
+                                         builder, isolate(), zone(), context);
+  }
+
+#if V8_ENABLE_WEBASSEMBLY
+  template <typename Builder>
+  TestInstance CreateFromGraph(
+      base::Vector<const RegisterRepresentation> parameter_reps,
+      const Builder& builder, const wasm::WasmModule* module,
+      const wasm::FunctionSig* sig) {
+    Initialize(true);
+    pipeline_data_->SetIsWasmFunction(module, sig);
+    Handle<Context> context = indirect_handle(native_context());
+    return TestInstance::CreateFromGraph(pipeline_data_.get(), parameter_reps,
+                                         builder, isolate(), zone(), context);
+  }
+
+  template <typename Builder>
+  TestInstance CreateFromGraph(int parameter_count, const Builder& builder,
+                               const wasm::WasmModule* module,
+                               const wasm::FunctionSig* sig) {
+    Initialize(true);
+    pipeline_data_->SetIsWasmFunction(module, sig);
+    Handle<Context> context = indirect_handle(native_context());
+    return TestInstance::CreateFromGraph(pipeline_data_.get(), parameter_count,
+                                         builder, isolate(), zone(), context);
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
+
  private:
   void Initialize(bool is_wasm) {
     const testing::TestInfo* test_info =

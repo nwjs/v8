@@ -153,11 +153,12 @@ void IC::TraceIC(const char* type, DirectHandle<Object> name, State old_state,
   JavaScriptStackFrameIterator it(isolate());
   JavaScriptFrame* frame = it.frame();
 
+  auto ic_stats = ICStats::instance();
+  if (!ic_stats->Begin()) return;
+
   DisallowGarbageCollection no_gc;
   Tagged<JSFunction> function = frame->function();
-
-  ICStats::instance()->Begin();
-  ICInfo& ic_info = ICStats::instance()->Current();
+  ICInfo& ic_info = ic_stats->Current();
   ic_info.type = keyed_prefix ? "Keyed" : "";
   ic_info.type += type;
 
@@ -184,7 +185,7 @@ void IC::TraceIC(const char* type, DirectHandle<Object> name, State old_state,
     ic_info.map = nullptr;
   }
   // TODO(lpy) Add name as key field in ICStats.
-  ICStats::instance()->End();
+  ic_stats->End();
 }
 
 IC::IC(Isolate* isolate, Handle<FeedbackVector> vector, FeedbackSlot slot,

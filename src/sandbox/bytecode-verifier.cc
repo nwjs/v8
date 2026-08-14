@@ -281,6 +281,14 @@ bool BytecodeVerifier::IsAllowedRuntimeFunction(Runtime::FunctionId id) {
     case Runtime::kBytecodeBudgetInterrupt_Sparkplug:
     case Runtime::kBytecodeBudgetInterruptWithStackCheck_Maglev:
     case Runtime::kBytecodeBudgetInterrupt_Maglev:
+    case Runtime::kPatchLoadICUninitializedBaseline:
+    case Runtime::kLoadIC_Miss_FromBaseline:
+#if V8_ENABLE_SPARKPLUG_PLUS
+    case Runtime::kPatchCompareOpBaselineCode:
+    case Runtime::kPatchCompareOpBaselineCodeAndThrow:
+    case Runtime::kPatchBinopBaselineCode:
+    case Runtime::kPatchBinopBaselineCodeAndThrow:
+#endif  // V8_ENABLE_SPARKPLUG_PLUS
       return false;
 #if V8_ENABLE_WEBASSEMBLY
 #define CASE_WASM_INTRINSIC(Name, ...) case Runtime::k##Name:

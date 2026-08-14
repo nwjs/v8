@@ -349,20 +349,20 @@ class DisassemblerX64 {
   bool rex_b() { return (rex_ & 0x01) != 0; }
 
   // Actual number of base register given the low bits and the rex.b state.
-  int base_reg(int low_bits) { return low_bits | ((rex_ & 0x01) << 3); }
+  int base_reg(int low_bits) const { return low_bits | ((rex_ & 0x01) << 3); }
 
-  bool rex_x() { return (rex_ & 0x02) != 0; }
+  bool rex_x() const { return (rex_ & 0x02) != 0; }
 
-  bool rex_r() { return (rex_ & 0x04) != 0; }
+  bool rex_r() const { return (rex_ & 0x04) != 0; }
 
-  bool rex_w() { return (rex_ & 0x08) != 0; }
+  bool rex_w() const { return (rex_ & 0x08) != 0; }
 
-  bool vex_w() {
+  bool vex_w() const {
     DCHECK(vex_byte0_ == VEX3_PREFIX || vex_byte0_ == VEX2_PREFIX);
     return vex_byte0_ == VEX3_PREFIX ? (vex_byte2_ & 0x80) != 0 : false;
   }
 
-  bool vex_128() {
+  bool vex_128() const {
     DCHECK(vex_byte0_ == VEX3_PREFIX || vex_byte0_ == VEX2_PREFIX);
     uint8_t checked = vex_byte0_ == VEX3_PREFIX ? vex_byte2_ : vex_byte1_;
     return (checked & 4) == 0;
@@ -374,76 +374,79 @@ class DisassemblerX64 {
     return (checked & 4) != 0;
   }
 
-  bool vex_none() {
+  bool vex_none() const {
     DCHECK(vex_byte0_ == VEX3_PREFIX || vex_byte0_ == VEX2_PREFIX);
     uint8_t checked = vex_byte0_ == VEX3_PREFIX ? vex_byte2_ : vex_byte1_;
     return (checked & 3) == 0;
   }
 
-  bool vex_66() {
+  bool vex_66() const {
     DCHECK(vex_byte0_ == VEX3_PREFIX || vex_byte0_ == VEX2_PREFIX);
     uint8_t checked = vex_byte0_ == VEX3_PREFIX ? vex_byte2_ : vex_byte1_;
     return (checked & 3) == 1;
   }
 
-  bool vex_f3() {
+  bool vex_f3() const {
     DCHECK(vex_byte0_ == VEX3_PREFIX || vex_byte0_ == VEX2_PREFIX);
     uint8_t checked = vex_byte0_ == VEX3_PREFIX ? vex_byte2_ : vex_byte1_;
     return (checked & 3) == 2;
   }
 
-  bool vex_f2() {
+  bool vex_f2() const {
     DCHECK(vex_byte0_ == VEX3_PREFIX || vex_byte0_ == VEX2_PREFIX);
     uint8_t checked = vex_byte0_ == VEX3_PREFIX ? vex_byte2_ : vex_byte1_;
     return (checked & 3) == 3;
   }
 
-  bool vex_0f() {
+  bool vex_0f() const {
     if (vex_byte0_ == VEX2_PREFIX) return true;
     return (vex_byte1_ & 3) == 1;
   }
 
-  bool vex_0f38() {
+  bool vex_0f38() const {
     if (vex_byte0_ == VEX2_PREFIX) return false;
     return (vex_byte1_ & 3) == 2;
   }
 
-  bool vex_0f3a() {
+  bool vex_0f3a() const {
     if (vex_byte0_ == VEX2_PREFIX) return false;
     return (vex_byte1_ & 3) == 3;
   }
 
-  int vex_vreg() {
+  int vex_vreg() const {
     DCHECK(vex_byte0_ == VEX3_PREFIX || vex_byte0_ == VEX2_PREFIX);
     uint8_t checked = vex_byte0_ == VEX3_PREFIX ? vex_byte2_ : vex_byte1_;
     return ~(checked >> 3) & 0xF;
   }
 
   // EVEX helpers.
-  bool is_evex() { return evex_byte0_ == EVEX_PREFIX; }
-  bool evex_map4() { return (evex_byte1_ & 0x07) == 4; }
+  bool is_evex() const { return evex_byte0_ == EVEX_PREFIX; }
+  bool evex_map1() const { return (evex_byte1_ & 0x07) == 1; }
+  bool evex_map2() const { return (evex_byte1_ & 0x07) == 2; }
+  bool evex_map3() const { return (evex_byte1_ & 0x07) == 3; }
+  bool evex_map4() const { return (evex_byte1_ & 0x07) == 4; }
 
-  bool evex_w() { return (evex_byte2_ & 0x80) != 0; }
-  int evex_pp() { return evex_byte2_ & 0x3; }
-  bool evex_pp_none() { return evex_pp() == 0; }
-  bool evex_pp_66() { return evex_pp() == 1; }
-  bool evex_pp_f3() { return evex_pp() == 2; }
-  bool evex_pp_f2() { return evex_pp() == 3; }
-  int evex_vvvv() { return (~evex_byte2_ >> 3) & 0xF; }
+  bool evex_w() const { return (evex_byte2_ & 0x80) != 0; }
+  int evex_pp() const { return evex_byte2_ & 0x3; }
+  bool evex_pp_none() const { return evex_pp() == 0; }
+  bool evex_pp_66() const { return evex_pp() == 1; }
+  bool evex_pp_f3() const { return evex_pp() == 2; }
+  bool evex_pp_f2() const { return evex_pp() == 3; }
+  int evex_vvvv() const { return (~evex_byte2_ >> 3) & 0xF; }
 
-  bool evex_nd() { return (evex_byte3_ & 0x10) != 0; }
-  bool evex_nf() { return (evex_byte3_ & 0x04) == 0; }
-  int evex_scc() { return evex_byte3_ & 0x0F; }
-  int evex_v4() { return (evex_byte3_ & 0x08) != 0 ? 0 : 16; }
-  int evex_ndd_reg() { return evex_vvvv() | evex_v4(); }
+  bool evex_nd() const { return (evex_byte3_ & 0x10) != 0; }
+  bool evex_nf() const { return (evex_byte3_ & 0x04) == 0; }
+  int evex_scc() const { return evex_byte3_ & 0x0F; }
+  int evex_v4() const { return (evex_byte3_ & 0x08) != 0 ? 0 : 16; }
+  int evex_ndd_reg() const { return evex_vvvv() | evex_v4(); }
 
-  int evex_reg(int modrm_regop) {
+  int evex_reg(int modrm_regop) const {
     int r3 = (evex_byte1_ & 0x80) ? 0 : 8;
     int r4 = (evex_byte1_ & 0x10) ? 0 : 16;
     return (modrm_regop & 0x7) | r3 | r4;
   }
 
-  int evex_rm(int modrm_rm) {
+  int evex_rm(int modrm_rm) const {
     int b3 = (evex_byte1_ & 0x20) ? 0 : 8;
     int b4 = (evex_byte1_ & 0x08) ? 16 : 0;
     return (modrm_rm & 0x7) | b3 | b4;
@@ -496,11 +499,19 @@ class DisassemblerX64 {
   }
 
   const char* NameOfAVXRegister(int reg) const {
-    if (vex_256()) {
+    if (!is_evex() && vex_256()) {
       return NameOfYMMRegister(reg);
     } else {
       return converter_.NameOfXMMRegister(reg);
     }
+  }
+
+  const char* NameOfKRegister(int reg) const {
+    DCHECK_GE(reg, 0);
+    DCHECK_LT(reg, 8);
+    static const char* k_regs[] = {"k0", "k1", "k2", "k3",
+                                   "k4", "k5", "k6", "k7"};
+    return k_regs[reg];
   }
 
   const char* NameOfAddress(uint8_t* addr) const {
@@ -578,6 +589,11 @@ int DisassemblerX64::PrintRightOperandHelper(
   get_modrm(*modrmp, &mod, &regop, &rm);
   RegisterNameMapping register_name =
       (mod == 3) ? direct_register_name : &DisassemblerX64::NameOfCPURegister;
+  if (is_evex() && mod == 3 &&
+      (register_name == &DisassemblerX64::NameOfAVXRegister ||
+       register_name == &DisassemblerX64::NameOfXMMRegister)) {
+    rm = evex_rm(rm);
+  }
   switch (mod) {
     case 0:
       if ((rm & 7) == 5) {
@@ -1331,6 +1347,16 @@ int DisassemblerX64::AVXInstruction(uint8_t* data) {
         current += PrintRightAVXOperand(current);
         AppendToBuffer(",(%s)", cmp_pseudo_op[*current]);
         current += 1;
+        break;
+      case 0x92:
+        AppendToBuffer("kmovd %s,%s", NameOfKRegister(regop & 0x7),
+                       NameOfCPURegister(rm));
+        current++;
+        break;
+      case 0x93:
+        AppendToBuffer("kmovd %s,%s", NameOfCPURegister(rm),
+                       NameOfKRegister(regop & 0x7));
+        current++;
         break;
 #define DISASM_SSE2_INSTRUCTION_LIST_SD(instruction, _1, _2, opcode)     \
   case 0x##opcode:                                                       \
@@ -2460,6 +2486,14 @@ int DisassemblerX64::APXInstruction(uint8_t* data) {
       opcode == 0x80 || opcode == 0x81 || opcode == 0x83 || opcode == 0x84 ||
       opcode == 0x85 || opcode == 0xF6 || opcode == 0xF7;
 
+  if (evex_map3() && opcode == 0x3F) {
+    AppendToBuffer("vpcmpeqb %s,%s,", NameOfKRegister(full_regop & 0x7),
+                   NameOfAVXRegister(evex_vvvv() | evex_v4()));
+    data += PrintRightAVXOperand(data);
+    AppendToBuffer(",0x%x", *data++);
+    return static_cast<int>(data - start);
+  }
+
   if (!has_nd && is_ccmp_ctest_opcode) {
     int scc = evex_scc();
     const char* cc_suffix = conditional_code_suffix[scc];
@@ -3377,14 +3411,16 @@ static constexpr const char* const byte_cpu_regs[]{
     "al",  "cl",  "dl",   "bl",   "spl",  "bpl",  "sil",  "dil",
     "r8l", "r9l", "r10l", "r11l", "r12l", "r13l", "r14l", "r15l"};
 
-static constexpr const char* const xmm_regs[]{DOUBLE_REGISTERS(MAKE_REG_NAME)};
+static constexpr const char* const xmm_regs[]{
+    DOUBLE_REGISTERS_AVX512(MAKE_REG_NAME)};
 
-static constexpr const char* const ymm_regs[]{YMM_REGISTERS(MAKE_REG_NAME)};
+static constexpr const char* const ymm_regs[]{
+    YMM_REGISTERS_AVX512(MAKE_REG_NAME)};
 
 static_assert(arraysize(cpu_regs) == 16);
 static_assert(arraysize(byte_cpu_regs) == 16);
-static_assert(arraysize(xmm_regs) == 16);
-static_assert(arraysize(ymm_regs) == 16);
+static_assert(arraysize(xmm_regs) == 32);
+static_assert(arraysize(ymm_regs) == 32);
 
 #undef MAKE_REG_NAME
 
@@ -3408,12 +3444,12 @@ const char* NameConverter::NameOfByteCPURegister(int reg) const {
 }
 
 const char* NameConverter::NameOfXMMRegister(int reg) const {
-  if (0 <= reg && reg < 16) return xmm_regs[reg];
+  if (0 <= reg && reg < 32) return xmm_regs[reg];
   return "noxmmreg";
 }
 
 const char* NameOfYMMRegister(int reg) {
-  if (0 <= reg && reg < 16) return ymm_regs[reg];
+  if (0 <= reg && reg < 32) return ymm_regs[reg];
   return "noymmreg";
 }
 

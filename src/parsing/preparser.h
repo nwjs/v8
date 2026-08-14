@@ -991,7 +991,6 @@ class PreParser : public ParserBase<PreParser> {
   V8_INLINE void SetLanguageMode(Scope* scope, LanguageMode mode) {
     scope->SetLanguageMode(mode);
   }
-  V8_INLINE void SetAsmModule() {}
 
   V8_INLINE void PrepareGeneratorVariables() {}
 
@@ -1507,9 +1506,10 @@ class PreParser : public ParserBase<PreParser> {
     return PreParserExpression::FromIdentifier(name);
   }
 
-  PreParserExpression ExpressionFromIdentifier(
-      const PreParserIdentifier& name, int start_position,
-      InferName infer = InferName::kYes) {
+  PreParserExpression ExpressionFromIdentifier(const PreParserIdentifier& name,
+                                               int start_position,
+                                               InferName infer = InferName{
+                                                   true}) {
     expression_scope()->NewVariable(name.string_, start_position);
     return PreParserExpression::FromIdentifier(name);
   }

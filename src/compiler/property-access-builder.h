@@ -72,9 +72,10 @@ class PropertyAccessBuilder {
   // Builds the actual load for dictionary field properties.
   Node* BuildLoadDictionaryField(NameRef name,
                                  PropertyAccessInfo const& access_info,
-                                 Node* lookup_start_object, Node** effect,
-                                 Node** control, FeedbackSource const& source,
-                                 Node* context, Node* frame_state);
+                                 Node* lookup_start_object, Node* receiver,
+                                 Node** effect, Node** control,
+                                 FeedbackSource const& source, Node* context,
+                                 Node* frame_state);
 
   static MachineRepresentation ConvertRepresentation(
       Representation representation);

@@ -795,6 +795,24 @@ class V8_NODISCARD SharedObjectSafePublishGuard final {
   }
 };
 
+// Like `SharedObjectsSafePublishGuard`, but only applies the fence
+// if `apply_fence_` is shared.
+class V8_NODISCARD SharedObjectConditionalSafePublishGuard final {
+ public:
+  explicit SharedObjectConditionalSafePublishGuard(SharedFlag apply_fence)
+      : apply_fence_(apply_fence) {}
+  explicit SharedObjectConditionalSafePublishGuard(AllocationType allocation)
+      : apply_fence_(IsSharedAllocationType(allocation)) {}
+  ~SharedObjectConditionalSafePublishGuard() {
+    if (apply_fence_) {
+      std::atomic_thread_fence(std::memory_order_release);
+    }
+  }
+
+ private:
+  SharedFlag apply_fence_;
+};
+
 }  // namespace internal
 }  // namespace v8
 

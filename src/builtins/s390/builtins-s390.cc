@@ -3153,7 +3153,10 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
   __ Jump(ip);
 }
 
-void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
+namespace {
+enum class DebugBreakKind { kBreak, kTrap };
+
+void Generate_WasmDebugBreakOrTrap(MacroAssembler* masm, DebugBreakKind kind) {
   HardAbortScope hard_abort(masm);  // Avoid calls to Abort.
   {
     FrameAndConstantPoolScope scope(masm, StackFrame::WASM_DEBUG_BREAK);
@@ -3163,16 +3166,41 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
     __ MultiPush(WasmDebugBreakFrameConstants::kPushedGpRegs);
     __ MultiPushF64OrV128(WasmDebugBreakFrameConstants::kPushedFpRegs, ip);
 
-    // Initialize the JavaScript context with 0. CEntry will use it to
-    // set the current context on the isolate.
-    __ LoadSmiLiteral(cp, Smi::zero());
-    __ CallRuntime(Runtime::kWasmDebugBreak, 0);
+    // Load instance data.
+    __ LoadU64(r3, MemOperand(fp, 0));
+    __ LoadU64(kWasmImplicitArgRegister,
+               MemOperand(r3, WasmFrameConstants::kWasmInstanceDataOffset));
+    __ LoadTaggedField(
+        cp, FieldMemOperand(kWasmImplicitArgRegister,
+                            WasmTrustedInstanceData::kNativeContextOffset));
 
-    // Restore registers.
-    __ MultiPopF64OrV128(WasmDebugBreakFrameConstants::kPushedFpRegs, ip);
-    __ MultiPop(WasmDebugBreakFrameConstants::kPushedGpRegs);
+    if (kind == DebugBreakKind::kTrap) {
+      // Reason was pushed before the frame.
+      // [fp+16]=reason, [fp+8]=saved lr (r14), [fp+0]=saved fp,
+      // [fp-8]=frame type marker.
+      __ LoadU64(r2, MemOperand(fp, 2 * kSystemPointerSize));
+      __ Push(r2);
+      __ CallRuntime(Runtime::kThrowWasmError, 1);
+      __ stop();
+    } else {
+      DCHECK_EQ(DebugBreakKind::kBreak, kind);
+      __ CallRuntime(Runtime::kWasmDebugBreak, 0);
+
+      // Restore registers.
+      __ MultiPopF64OrV128(WasmDebugBreakFrameConstants::kPushedFpRegs, ip);
+      __ MultiPop(WasmDebugBreakFrameConstants::kPushedGpRegs);
+    }
   }
-  __ Ret();
+  if (kind == DebugBreakKind::kBreak) __ Ret();
+}
+}  // namespace
+
+void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
+  Generate_WasmDebugBreakOrTrap(masm, DebugBreakKind::kBreak);
+}
+
+void Builtins::Generate_WasmDebugTrap(MacroAssembler* masm) {
+  Generate_WasmDebugBreakOrTrap(masm, DebugBreakKind::kTrap);
 }
 
 namespace {

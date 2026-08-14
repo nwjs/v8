@@ -8,9 +8,12 @@
 #include "src/objects/api-callbacks.h"
 // Include the non-inl header before the rest of the headers.
 
+#include <algorithm>
+
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/heap-write-barrier.h"
 #include "src/objects/foreign-inl.h"
+#include "src/objects/heap-object-field-inl.h"
 #include "src/objects/js-objects-inl.h"
 #include "src/objects/name.h"
 #include "src/objects/oddball.h"
@@ -137,8 +140,8 @@ void AccessorInfo::RestoreCallbackRedirectionAfterDeserialization(
 
 void AccessorInfo::clear_padding() {
   if (FIELD_SIZE(kOptionalPaddingOffset) == 0) return;
-  Memset(reinterpret_cast<uint8_t*>(address() + kOptionalPaddingOffset), 0,
-         FIELD_SIZE(kOptionalPaddingOffset));
+  std::fill_n(reinterpret_cast<uint8_t*>(address() + kOptionalPaddingOffset),
+              FIELD_SIZE(kOptionalPaddingOffset), 0);
 }
 
 // For the purpose of checking whether the respective callback field is
@@ -155,6 +158,9 @@ INTERCEPTOR_INFO_HAS_GETTER(definer)
 INTERCEPTOR_INFO_HAS_GETTER(enumerator)
 
 bool InterceptorInfo::has_index_of() const { return has_indexed_index_of(); }
+bool InterceptorInfo::has_iterable_to_list() const {
+  return has_indexed_iterable_to_list();
+}
 
 #undef INTERCEPTOR_INFO_HAS_GETTER
 
@@ -225,6 +231,12 @@ LAZY_EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST_CHECKED2(
     offsetof(InterceptorInfo, index_of_), kApiIndexedPropertyIndexOfCallbackTag,
     !is_named(), !is_named() && (value != kNullAddress))
 
+LAZY_EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST_CHECKED2(
+    InterceptorInfo, indexed_iterable_to_list, Address,
+    offsetof(InterceptorInfo, iterable_to_list_),
+    kApiIndexedPropertyIterableToListCallbackTag, !is_named(),
+    !is_named() && (value != kNullAddress))
+
 BOOL_ACCESSORS(InterceptorInfo, flags, can_intercept_symbols,
                CanInterceptSymbolsBit::kShift)
 BOOL_ACCESSORS(InterceptorInfo, flags, non_masking, NonMaskingBit::kShift)
@@ -254,8 +266,8 @@ void InterceptorInfo::RestoreCallbackRedirectionAfterDeserialization(
 
 void InterceptorInfo::clear_padding() {
   if (FIELD_SIZE(kOptionalPaddingOffset) == 0) return;
-  Memset(reinterpret_cast<uint8_t*>(address() + kOptionalPaddingOffset), 0,
-         FIELD_SIZE(kOptionalPaddingOffset));
+  std::fill_n(reinterpret_cast<uint8_t*>(address() + kOptionalPaddingOffset),
+              FIELD_SIZE(kOptionalPaddingOffset), 0);
 }
 
 // Returns holder object suitable for Api callbacks - in case the holder is

@@ -481,6 +481,28 @@ class MemoryContentTable
     }
   }
 
+  void InvalidateEverything() {
+    for (auto& base_keys : base_keys_) {
+      for (auto it = base_keys.second.with_offsets.begin();
+           it != base_keys.second.with_offsets.end();) {
+        Key key = *it;
+        // It's important to remove with RemoveAt before Setting the key to
+        // invalid, otherwise OnKeyChange will remove {key} from {base_keys},
+        // which will invalidate {it}.
+        it = base_keys.second.with_offsets.RemoveAt(it);
+        TRACE(">>> Invalidating " << key.data().mem);
+        Set(key, OpIndex::Invalid());
+      }
+      for (auto it = base_keys.second.with_indices.begin();
+           it != base_keys.second.with_indices.end();) {
+        Key key = *it;
+        it = base_keys.second.with_indices.RemoveAt(it);
+        TRACE(">>> Invalidating " << key.data().mem);
+        Set(key, OpIndex::Invalid());
+      }
+    }
+  }
+
   OpIndex Find(const LoadOp& load) {
     OpIndex base = ResolveBase(load.base());
     OptionalOpIndex index = load.index();
@@ -586,6 +608,32 @@ class MemoryContentTable
     }
   }
 
+  void InvalidateAtOffset(int32_t offset, OpIndex base) {
+    MapMaskAndOr base_maps = object_maps_.Get(base);
+    auto offset_keys = offset_keys_.find(offset);
+    if (offset_keys == offset_keys_.end()) return;
+    for (auto it = offset_keys->second.begin();
+         it != offset_keys->second.end();) {
+      Key key = *it;
+      DCHECK_EQ(offset, key.data().mem.offset);
+      // It can overwrite previous stores to any base (except non-aliasing
+      // ones).
+      if (non_aliasing_objects_.Get(key.data().mem.base)) {
+        ++it;
+        continue;
+      }
+      if (!BasesCouldAlias(base, base_maps, key)) {
+        TRACE(">>>> InvalidateAtOffset: not invalidating thanks for maps: "
+              << key.data().mem);
+        ++it;
+        continue;
+      }
+      it = offset_keys->second.RemoveAt(it);
+      TRACE(">>>> InvalidateAtOffset: invalidating " << key.data().mem);
+      Set(key, OpIndex::Invalid());
+    }
+  }
+
  private:
   // To avoid pathological execution times, we cap the maximum number of
   // keys we track. This is safe, because *not* tracking objects (even
@@ -654,32 +702,6 @@ class MemoryContentTable
     all_keys_.insert({mem, key});
     // Call `SetNoNotify` to avoid calls to `OnNewKey` and `OnValueChanged`.
     SetNoNotify(key, value);
-  }
-
-  void InvalidateAtOffset(int32_t offset, OpIndex base) {
-    MapMaskAndOr base_maps = object_maps_.Get(base);
-    auto offset_keys = offset_keys_.find(offset);
-    if (offset_keys == offset_keys_.end()) return;
-    for (auto it = offset_keys->second.begin();
-         it != offset_keys->second.end();) {
-      Key key = *it;
-      DCHECK_EQ(offset, key.data().mem.offset);
-      // It can overwrite previous stores to any base (except non-aliasing
-      // ones).
-      if (non_aliasing_objects_.Get(key.data().mem.base)) {
-        ++it;
-        continue;
-      }
-      if (!BasesCouldAlias(base, base_maps, key)) {
-        TRACE(">>>> InvalidateAtOffset: not invalidating thanks for maps: "
-              << key.data().mem);
-        ++it;
-        continue;
-      }
-      it = offset_keys->second.RemoveAt(it);
-      TRACE(">>>> InvalidateAtOffset: invalidating " << key.data().mem);
-      Set(key, OpIndex::Invalid());
-    }
   }
 
   bool BasesCouldAlias(OpIndex base, MapMaskAndOr base_maps, Key other) {
@@ -818,6 +840,9 @@ class V8_EXPORT_PRIVATE LateLoadEliminationAnalyzer {
   void ProcessCall(OpIndex op_idx, const CallOp& op);
   void ProcessAssumeMap(OpIndex op_idx, const AssumeMapOp& op);
   void ProcessChange(OpIndex op_idx, const ChangeOp& change);
+#ifdef V8_ENABLE_WEBASSEMBLY
+  void ProcessWasmStackCheck(OpIndex op_idx, const WasmStackCheckOp& op);
+#endif
 
   void DcheckWordBinop(OpIndex op_idx, const WordBinopOp& binop);
 

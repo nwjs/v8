@@ -22,6 +22,7 @@
  */
 namespace v8 {
 
+class Allocator;
 class PageAllocator;
 class Platform;
 template <class K, class V, class T>
@@ -293,6 +294,19 @@ class V8_EXPORT V8 {
    * address space than what has actually been reserved.
    */
   static size_t GetSandboxReservationSizeInBytes();
+
+  /**
+   * Sets an allocator that is used for allocating memory inside the sandbox.
+   *
+   * This is useful to provide a fast memory allocator based on sandbox
+   * reservation memory. The idea is that an embedder can use
+   * `GetSandboxAddressSpace()` to get ahold of the sandbox address space and
+   * then implement an allocator on top.
+   *
+   * This must be invoked after V8 is initialized but before the first Isolate
+   * is created.
+   */
+  static void SetInSandboxAllocator(std::shared_ptr<Allocator> allocator);
 #endif  // V8_ENABLE_SANDBOX
 
   enum class WasmMemoryType {

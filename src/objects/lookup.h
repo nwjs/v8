@@ -7,6 +7,7 @@
 
 #include <optional>
 
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
@@ -254,9 +255,9 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   inline DirectHandle<InterceptorInfo> GetInterceptor() const;
   DirectHandle<InterceptorInfo> GetInterceptorForFailedAccessCheck() const;
   Handle<Object> GetStringPropertyValue(
-      AllowAllocation allow_allocation = AllowAllocation::kYes) const;
+      AllowAllocation allow_allocation = AllowAllocation{true}) const;
   Handle<Object> GetDataValue(
-      AllowAllocation allow_allocation = AllowAllocation::kYes) const;
+      AllowAllocation allow_allocation = AllowAllocation{true}) const;
   void WriteDataValue(DirectHandle<Object> value, bool initializing_store);
   DirectHandle<Object> GetDataValue(SeqCstAccessTag tag) const;
   void WriteDataValue(DirectHandle<Object> value, SeqCstAccessTag tag);
@@ -345,7 +346,7 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   template <bool is_element>
   void RestartInternal(InterceptorState interceptor_state);
   DirectHandle<Object> FetchValue(
-      AllowAllocation allow_allocation = AllowAllocation::kYes) const;
+      AllowAllocation allow_allocation = AllowAllocation{true}) const;
   bool CanStayConst(Tagged<Object> value) const;
   bool DictCanStayConst(Tagged<Object> value) const;
 

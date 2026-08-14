@@ -275,8 +275,15 @@ int Builtins::GetFormalParameterCount(Builtin builtin) {
     return Builtins::GetStackParameterCount(builtin);
 
   } else if (kind == ASM || kind == TFC) {
-    // At the moment, all ASM builtins are varargs builtins. This is verified
-    // in CheckFormalParameterCount.
+#if V8_ENABLE_WEBASSEMBLY
+    // WasmResume and WasmReject have fixed stack cleanup for the receiver and
+    // one explicit argument.
+    if (builtin == Builtin::kWasmResume || builtin == Builtin::kWasmReject) {
+      return JSParameterCount(1);
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
+    // Other ASM and TFC builtins with JS linkage are varargs builtins. This is
+    // verified in CheckFormalParameterCount.
     return kDontAdaptArgumentsSentinel;
 
   } else if (kind == CPP) {
@@ -317,13 +324,10 @@ bool Builtins::IsJSTrampoline(Builtin builtin) {
     case Builtin::kIllegal:
     case Builtin::kCompileLazy:
     case Builtin::kInterpreterEntryTrampoline:
-    case Builtin::kInstantiateAsmJs:
     case Builtin::kDebugBreakTrampoline:
 #ifdef V8_ENABLE_WEBASSEMBLY
     case Builtin::kJSToWasmWrapper:
     case Builtin::kWasmPromising:
-    case Builtin::kWasmResume:
-    case Builtin::kWasmReject:
 #if V8_ENABLE_DRUMBRAKE
     case Builtin::kJSToWasmInterpreterWrapper:
 #endif

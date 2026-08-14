@@ -6,6 +6,7 @@
 #define V8_BUILTINS_BUILTINS_DEFINITIONS_H_
 
 #include "builtins-generated/bytecodes-builtins-list.h"
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
 
 // include generated header
@@ -141,12 +142,34 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TYPED_EQUAL_HANDLER_HELPER(V, Receiver)           \
   TYPED_EQUAL_HANDLER_HELPER(V, SignedSmall)        \
   TYPED_EQUAL_HANDLER_HELPER(V, None)
-#endif
 
 #define GENERATE_BUILTIN_TYPED_RELATIONAL_COMPARE_HANDLER(V, OP) \
   TYPED_COMPARE_OPERATION_HANDLER_HELPER(V, OP, Number)          \
   TYPED_COMPARE_OPERATION_HANDLER_HELPER(V, OP, SignedSmall)     \
   TYPED_COMPARE_OPERATION_HANDLER_HELPER(V, OP, None)
+
+#define TYPED_BINOP_HANDLER_HELPER(V, OPERATION, TYPE) \
+  V(OPERATION##_##TYPE##_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)
+
+#define GENERATE_BUILTIN_TYPED_BINOP_HANDLER(V, OP) \
+  TYPED_BINOP_HANDLER_HELPER(V, OP, None)           \
+  TYPED_BINOP_HANDLER_HELPER(V, OP, SignedSmall)    \
+  TYPED_BINOP_HANDLER_HELPER(V, OP, Number)
+
+#define GENERATE_BUILTIN_TYPED_ADD_HANDLER(V)     \
+  TYPED_BINOP_HANDLER_HELPER(V, Add, None)        \
+  TYPED_BINOP_HANDLER_HELPER(V, Add, SignedSmall) \
+  TYPED_BINOP_HANDLER_HELPER(V, Add, Number)      \
+  TYPED_BINOP_HANDLER_HELPER(V, Add, String)
+
+#define GENERATE_BUILTIN_TYPED_EXP_HANDLER(V, OP) \
+  TYPED_BINOP_HANDLER_HELPER(V, OP, None)         \
+  TYPED_BINOP_HANDLER_HELPER(V, OP, Number)
+
+#define GENERATE_BUILTIN_TYPED_BITWISE_HANDLER(V, OP) \
+  TYPED_BINOP_HANDLER_HELPER(V, OP, None)             \
+  TYPED_BINOP_HANDLER_HELPER(V, OP, SignedSmall)
+#endif
 
 /* Tiering related builtins
  *
@@ -295,7 +318,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   ASM(JSConstructStubGeneric, ConstructStub)                                   \
   ASM(JSBuiltinsConstructStub, ConstructStub)                                  \
   TFC(FastNewObject, FastNewObject)                                            \
-  TFS(FastNewClosure, NeedsContext::kYes, kSharedFunctionInfo, kFeedbackCell)  \
+  TFS(FastNewClosure, NeedsContext{true}, kSharedFunctionInfo, kFeedbackCell)  \
   /* ES6 section 9.5.14 [[Construct]] ( argumentsList, newTarget) */           \
   TFC(ConstructProxy, JSTrampoline)                                            \
                                                                                \
@@ -308,6 +331,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   /* Construct a JSValue. */                                                   \
   ASM(JSConstructEntryTrampoline, JSEntry)                                     \
   ASM(ResumeGeneratorTrampoline, ResumeGenerator)                              \
+  TFC(ResumeGeneratorTrampoline_WithCatch, ResumeGenerator)                    \
                                                                                \
   /* String helpers */                                                         \
   IF_TSA(TFC_TSA, TFC, StringFromCodePointAt, StringAtAsString)                \
@@ -322,7 +346,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFC(StringSubstring, StringSubstring)                                        \
                                                                                \
   /* OrderedHashTable helpers */                                               \
-  TFS(OrderedHashTableHealIndex, NeedsContext::kYes, kTable, kIndex)           \
+  TFS(OrderedHashTableHealIndex, NeedsContext{true}, kTable, kIndex)           \
                                                                                \
   /* Interpreter */                                                            \
   /* InterpreterEntryTrampoline dispatches to the interpreter to run a */      \
@@ -359,7 +383,6 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
                                                                                \
   /* Code life-cycle */                                                        \
   TFC(CompileLazy, JSTrampoline)                                               \
-  TFC(InstantiateAsmJs, JSTrampoline)                                          \
   ASM(NotifyDeoptimized, Void)                                                 \
                                                                                \
   BUILTIN_LIST_BASE_TIERING(TFC)                                               \
@@ -411,7 +434,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFC(NewHeapNumber, NewHeapNumber)                                            \
                                                                                \
   /* TurboFan support builtins */                                              \
-  TFS(CopyFastSmiOrObjectElements, NeedsContext::kNo, kObject)                 \
+  TFS(CopyFastSmiOrObjectElements, NeedsContext{false}, kObject)               \
   TFC(GrowFastDoubleElements, GrowArrayElements)                               \
   TFC(GrowFastSmiOrObjectElements, GrowArrayElements)                          \
                                                                                \
@@ -476,17 +499,17 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFH(HasIndexedInterceptorIC, LoadWithVector)                                 \
                                                                                \
   /* Microtask helpers */                                                      \
-  TFS(EnqueueMicrotask, NeedsContext::kYes, kMicrotask)                        \
+  TFS(EnqueueMicrotask, NeedsContext{true}, kMicrotask)                        \
   TFJ(GlobalQueueMicrotask, kJSArgcReceiverSlots + 1, kReceiver, kCallback)    \
   ASM(RunMicrotasksTrampoline, RunMicrotasksEntry)                             \
   TFC(RunMicrotasks, RunMicrotasks)                                            \
                                                                                \
   /* Object property helpers */                                                \
-  TFS(HasProperty, NeedsContext::kYes, kObject, kKey)                          \
-  TFS(DeleteProperty, NeedsContext::kYes, kObject, kKey, kLanguageMode)        \
-  TFS(CopyDataProperties, NeedsContext::kYes, kTarget, kSource)                \
-  TFS(SetDataProperties, NeedsContext::kYes, kTarget, kSource)                 \
-  TFS(ProxyGetPropertyFastPath, NeedsContext::kYes, kProxy, kName, kReceiver,  \
+  TFS(HasProperty, NeedsContext{true}, kObject, kKey)                          \
+  TFS(DeleteProperty, NeedsContext{true}, kObject, kKey, kLanguageMode)        \
+  TFS(CopyDataProperties, NeedsContext{true}, kTarget, kSource)                \
+  TFS(SetDataProperties, NeedsContext{true}, kTarget, kSource)                 \
+  TFS(ProxyGetPropertyFastPath, NeedsContext{true}, kProxy, kName, kReceiver,  \
       kHandler)                                                                \
   TFC(CopyDataPropertiesWithExcludedPropertiesOnStack,                         \
       CopyDataPropertiesWithExcludedPropertiesOnStack)                         \
@@ -548,22 +571,22 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFC(ArrayNArgumentsConstructor, ArrayNArgumentsConstructor)                  \
   CPP(ArrayConcat, kDontAdaptArgumentsSentinel)                                \
   CPP(ArrayPrototypeFill, kDontAdaptArgumentsSentinel)                         \
-  TFS(ArrayIncludesSmi, NeedsContext::kYes, kElements, kSearchElement,         \
+  TFS(ArrayIncludesSmi, NeedsContext{true}, kElements, kSearchElement,         \
       kLength, kFromIndex)                                                     \
-  TFS(ArrayIncludesSmiOrObject, NeedsContext::kYes, kElements, kSearchElement, \
+  TFS(ArrayIncludesSmiOrObject, NeedsContext{true}, kElements, kSearchElement, \
       kLength, kFromIndex)                                                     \
-  TFS(ArrayIncludesPackedDoubles, NeedsContext::kYes, kElements,               \
+  TFS(ArrayIncludesPackedDoubles, NeedsContext{true}, kElements,               \
       kSearchElement, kLength, kFromIndex)                                     \
-  TFS(ArrayIncludesHoleyDoubles, NeedsContext::kYes, kElements,                \
+  TFS(ArrayIncludesHoleyDoubles, NeedsContext{true}, kElements,                \
       kSearchElement, kLength, kFromIndex)                                     \
   TFJ(ArrayIncludes, kDontAdaptArgumentsSentinel)                              \
-  TFS(ArrayIndexOfSmi, NeedsContext::kYes, kElements, kSearchElement, kLength, \
+  TFS(ArrayIndexOfSmi, NeedsContext{true}, kElements, kSearchElement, kLength, \
       kFromIndex)                                                              \
-  TFS(ArrayIndexOfSmiOrObject, NeedsContext::kYes, kElements, kSearchElement,  \
+  TFS(ArrayIndexOfSmiOrObject, NeedsContext{true}, kElements, kSearchElement,  \
       kLength, kFromIndex)                                                     \
-  TFS(ArrayIndexOfPackedDoubles, NeedsContext::kYes, kElements,                \
+  TFS(ArrayIndexOfPackedDoubles, NeedsContext{true}, kElements,                \
       kSearchElement, kLength, kFromIndex)                                     \
-  TFS(ArrayIndexOfHoleyDoubles, NeedsContext::kYes, kElements, kSearchElement, \
+  TFS(ArrayIndexOfHoleyDoubles, NeedsContext{true}, kElements, kSearchElement, \
       kLength, kFromIndex)                                                     \
   TFJ(ArrayIndexOf, kDontAdaptArgumentsSentinel)                               \
   CPP(ArrayPop, kDontAdaptArgumentsSentinel)                                   \
@@ -573,12 +596,12 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(ArrayShift, kDontAdaptArgumentsSentinel)                                 \
   CPP(ArrayUnshift, kDontAdaptArgumentsSentinel)                               \
   /* Support for Array.from and other array-copying idioms */                  \
-  TFS(CloneFastJSArray, NeedsContext::kYes, kSource)                           \
-  TFS(CloneFastJSArrayFillingHoles, NeedsContext::kYes, kSource)               \
-  TFS(ExtractFastJSArray, NeedsContext::kYes, kSource, kBegin, kCount)         \
-  TFS(CreateArrayFromSlowBoilerplate, NeedsContext::kYes, kFeedbackVector,     \
+  TFS(CloneFastJSArray, NeedsContext{true}, kSource)                           \
+  TFS(CloneFastJSArrayFillingHoles, NeedsContext{true}, kSource)               \
+  TFS(ExtractFastJSArray, NeedsContext{true}, kSource, kBegin, kCount)         \
+  TFS(CreateArrayFromSlowBoilerplate, NeedsContext{true}, kFeedbackVector,     \
       kSlot, kBoilerplateDescriptor, kFlags)                                   \
-  TFS(CreateObjectFromSlowBoilerplate, NeedsContext::kYes, kFeedbackVector,    \
+  TFS(CreateObjectFromSlowBoilerplate, NeedsContext{true}, kFeedbackVector,    \
       kSlot, kBoilerplateDescriptor, kFlags)                                   \
   TFC(CreateArrayFromSlowBoilerplateHelper, CreateFromSlowBoilerplateHelper)   \
   TFC(CreateObjectFromSlowBoilerplateHelper, CreateFromSlowBoilerplateHelper)  \
@@ -598,11 +621,11 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(ArrayBufferPrototypeSliceToImmutable, JSParameterCount(2))               \
                                                                                \
   /* AsyncFunction */                                                          \
-  TFS(AsyncFunctionEnter, NeedsContext::kYes, kClosure, kReceiver)             \
-  TFS(AsyncFunctionReject, NeedsContext::kYes, kAsyncFunctionObject, kReason)  \
-  TFS(AsyncFunctionResolve, NeedsContext::kYes, kAsyncFunctionObject, kValue)  \
+  TFS(AsyncFunctionEnter, NeedsContext{true}, kClosure, kReceiver)             \
+  TFS(AsyncFunctionReject, NeedsContext{true}, kAsyncFunctionObject, kReason)  \
+  TFS(AsyncFunctionResolve, NeedsContext{true}, kAsyncFunctionObject, kValue)  \
   TFC(AsyncFunctionLazyDeoptContinuation, AsyncFunctionStackParameter)         \
-  TFS(AsyncFunctionAwait, NeedsContext::kYes, kAsyncFunctionObject, kValue)    \
+  TFS(AsyncFunctionAwait, NeedsContext{true}, kAsyncFunctionObject, kValue)    \
   TFJ(AsyncFunctionAwaitRejectClosure, kJSArgcReceiverSlots + 1, kReceiver,    \
       kSentError)                                                              \
   TFJ(AsyncFunctionAwaitResolveClosure, kJSArgcReceiverSlots + 1, kReceiver,   \
@@ -762,10 +785,10 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
       CPP, FunctionPrototypeLegacyCallerSetter, JSParameterCount(1))           \
                                                                                \
   /* Belongs to Objects but is a dependency of GeneratorPrototypeResume */     \
-  TFS(CreateIterResultObject, NeedsContext::kYes, kValue, kDone)               \
+  TFS(CreateIterResultObject, NeedsContext{true}, kValue, kDone)               \
                                                                                \
   /* Generator and Async */                                                    \
-  TFS(CreateGeneratorObject, NeedsContext::kYes, kClosure, kReceiver)          \
+  TFS(CreateGeneratorObject, NeedsContext{true}, kClosure, kReceiver)          \
   CPP(GeneratorFunctionConstructor, kDontAdaptArgumentsSentinel)               \
   TFJ(GeneratorPrototypeNext, kDontAdaptArgumentsSentinel)                     \
   TFJ(GeneratorPrototypeReturn, kDontAdaptArgumentsSentinel)                   \
@@ -874,20 +897,20 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
       AddStringConstantInternalizeTrampoline)                                  \
                                                                                \
   /* IterableToList */                                                         \
-  TFS(IterableToList, NeedsContext::kYes, kIterable, kIteratorFn)              \
-  TFS(IterableToFixedArray, NeedsContext::kYes, kIterable, kIteratorFn)        \
-  TFS(IterableToListWithSymbolLookup, NeedsContext::kYes, kIterable)           \
-  TFS(IterableToFixedArrayWithSymbolLookupSlow, NeedsContext::kYes, kIterable) \
-  TFS(IterableToListMayPreserveHoles, NeedsContext::kYes, kIterable,           \
+  TFS(IterableToList, NeedsContext{true}, kIterable, kIteratorFn)              \
+  TFS(IterableToFixedArray, NeedsContext{true}, kIterable, kIteratorFn)        \
+  TFS(IterableToListWithSymbolLookup, NeedsContext{true}, kIterable)           \
+  TFS(IterableToFixedArrayWithSymbolLookupSlow, NeedsContext{true}, kIterable) \
+  TFS(IterableToListMayPreserveHoles, NeedsContext{true}, kIterable,           \
       kIteratorFn)                                                             \
-  TFS(IterableToListConvertHoles, NeedsContext::kYes, kIterable, kIteratorFn)  \
-  IF_WASM(TFS, IterableToFixedArrayForWasm, NeedsContext::kYes, kIterable,     \
+  TFS(IterableToListConvertHoles, NeedsContext{true}, kIterable, kIteratorFn)  \
+  IF_WASM(TFS, IterableToFixedArrayForWasm, NeedsContext{true}, kIterable,     \
           kExpectedLength)                                                     \
                                                                                \
-  TFS(StringListFromIterable, NeedsContext::kYes, kIterable)                   \
+  TFS(StringListFromIterable, NeedsContext{true}, kIterable)                   \
                                                                                \
   /* Map */                                                                    \
-  TFS(FindOrderedHashMapEntry, NeedsContext::kYes, kTable, kKey)               \
+  TFS(FindOrderedHashMapEntry, NeedsContext{true}, kTable, kKey)               \
   TFJ(MapConstructor, kDontAdaptArgumentsSentinel)                             \
   TFJ(MapPrototypeSet, kJSArgcReceiverSlots + 2, kReceiver, kKey, kValue)      \
   TFJ(MapPrototypeDelete, kJSArgcReceiverSlots + 1, kReceiver, kKey)           \
@@ -904,7 +927,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFJ(MapPrototypeKeys, kJSArgcReceiverSlots, kReceiver)                       \
   TFJ(MapPrototypeValues, kJSArgcReceiverSlots, kReceiver)                     \
   TFJ(MapIteratorPrototypeNext, kJSArgcReceiverSlots, kReceiver)               \
-  TFS(MapIteratorToList, NeedsContext::kYes, kSource)                          \
+  TFS(MapIteratorToList, NeedsContext{true}, kSource)                          \
                                                                                \
   CPP(NumberPrototypeToExponential, kDontAdaptArgumentsSentinel)               \
   CPP(NumberPrototypeToFixed, kDontAdaptArgumentsSentinel)                     \
@@ -915,30 +938,69 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFC(SameValueNumbersOnly, CompareNoContext)                                  \
                                                                                \
   /* Binary ops with embedded feedback */                                      \
-  TFC(Add_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                       \
-  TFC(AddSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                    \
-  TFC(Subtract_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                  \
-  TFC(SubtractSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)               \
-  TFC(Multiply_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                  \
-  TFC(MultiplySmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)               \
-  TFC(Divide_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                    \
-  TFC(DivideSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                 \
-  TFC(Modulus_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                   \
-  TFC(ModulusSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                \
-  TFC(Exponentiate_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)              \
-  TFC(ExponentiateSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)           \
-  TFC(BitwiseAnd_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                \
-  TFC(BitwiseAndSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)             \
-  TFC(BitwiseOr_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                 \
-  TFC(BitwiseOrSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)              \
-  TFC(BitwiseXor_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                \
-  TFC(BitwiseXorSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)             \
-  TFC(ShiftLeft_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                 \
-  TFC(ShiftLeftSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)              \
-  TFC(ShiftRight_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)                \
-  TFC(ShiftRightSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)             \
-  TFC(ShiftRightLogical_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)         \
-  TFC(ShiftRightLogicalSmi_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)      \
+  TFC(Add_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)               \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_ADD_HANDLER, TFC)                   \
+  IF_SPARKPLUG_PLUS(TFC, AddAndTryPatchCode, BinaryOpAndTryPatchCode)          \
+                                                                               \
+  TFC(Subtract_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)          \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BINOP_HANDLER, TFC, Subtract)       \
+  IF_SPARKPLUG_PLUS(TFC, SubtractAndTryPatchCode, BinaryOpAndTryPatchCode)     \
+                                                                               \
+  TFC(Multiply_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)          \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BINOP_HANDLER, TFC, Multiply)       \
+  IF_SPARKPLUG_PLUS(TFC, MultiplyAndTryPatchCode, BinaryOpAndTryPatchCode)     \
+                                                                               \
+  TFC(Divide_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)            \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BINOP_HANDLER, TFC, Divide)         \
+  IF_SPARKPLUG_PLUS(TFC, DivideAndTryPatchCode, BinaryOpAndTryPatchCode)       \
+                                                                               \
+  TFC(Modulus_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)           \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BINOP_HANDLER, TFC, Modulus)        \
+  IF_SPARKPLUG_PLUS(TFC, ModulusAndTryPatchCode, BinaryOpAndTryPatchCode)      \
+                                                                               \
+  TFC(Exponentiate_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)      \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_EXP_HANDLER, TFC, Exponentiate)     \
+  IF_SPARKPLUG_PLUS(TFC, ExponentiateAndTryPatchCode, BinaryOpAndTryPatchCode) \
+                                                                               \
+  TFC(BitwiseAnd_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)        \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BITWISE_HANDLER, TFC, BitwiseAnd)   \
+  IF_SPARKPLUG_PLUS(TFC, BitwiseAndAndTryPatchCode, BinaryOpAndTryPatchCode)   \
+                                                                               \
+  TFC(BitwiseOr_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)         \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BITWISE_HANDLER, TFC, BitwiseOr)    \
+  IF_SPARKPLUG_PLUS(TFC, BitwiseOrAndTryPatchCode, BinaryOpAndTryPatchCode)    \
+                                                                               \
+  TFC(BitwiseXor_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)        \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BITWISE_HANDLER, TFC, BitwiseXor)   \
+  IF_SPARKPLUG_PLUS(TFC, BitwiseXorAndTryPatchCode, BinaryOpAndTryPatchCode)   \
+                                                                               \
+  TFC(ShiftLeft_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)         \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BITWISE_HANDLER, TFC, ShiftLeft)    \
+  IF_SPARKPLUG_PLUS(TFC, ShiftLeftAndTryPatchCode, BinaryOpAndTryPatchCode)    \
+                                                                               \
+  TFC(ShiftRight_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)        \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BITWISE_HANDLER, TFC, ShiftRight)   \
+  IF_SPARKPLUG_PLUS(TFC, ShiftRightAndTryPatchCode, BinaryOpAndTryPatchCode)   \
+                                                                               \
+  TFC(ShiftRightLogical_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset) \
+  IF_SPARKPLUG_PLUS(GENERATE_BUILTIN_TYPED_BITWISE_HANDLER, TFC,               \
+                    ShiftRightLogical)                                         \
+  IF_SPARKPLUG_PLUS(TFC, ShiftRightLogicalAndTryPatchCode,                     \
+                    BinaryOpAndTryPatchCode)                                   \
+                                                                               \
+  TFC(AddSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)            \
+  TFC(SubtractSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)       \
+  TFC(MultiplySmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)       \
+  TFC(DivideSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)         \
+  TFC(ModulusSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)        \
+  TFC(ExponentiateSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)   \
+  TFC(BitwiseAndSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)     \
+  TFC(BitwiseOrSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)      \
+  TFC(BitwiseXorSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)     \
+  TFC(ShiftLeftSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)      \
+  TFC(ShiftRightSmi_Generic_Baseline, BinaryOp_WithEmbeddedFeedbackOffset)     \
+  TFC(ShiftRightLogicalSmi_Generic_Baseline,                                   \
+      BinaryOp_WithEmbeddedFeedbackOffset)                                     \
                                                                                \
   IF_TSA(TFC_TSA, TFC, Add_WithFeedback, BinaryOp_WithEmbeddedFeedback)        \
   TFC(Subtract_WithFeedback, BinaryOp_WithEmbeddedFeedback)                    \
@@ -1033,7 +1095,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(ObjectPrototypeGetProto, JSParameterCount(0))                            \
   CPP(ObjectPrototypeSetProto, JSParameterCount(1))                            \
   CPP(ObjectSeal, kDontAdaptArgumentsSentinel)                                 \
-  TFS(ObjectToString, NeedsContext::kYes, kReceiver)                           \
+  TFS(ObjectToString, NeedsContext{true}, kReceiver)                           \
   TFJ(ObjectValues, kJSArgcReceiverSlots + 1, kReceiver, kObject)              \
                                                                                \
   /* instanceof */                                                             \
@@ -1043,9 +1105,9 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFC(InstanceOf_Baseline, Compare_Baseline)                                   \
                                                                                \
   /* for-in */                                                                 \
-  TFS(ForInEnumerate, NeedsContext::kYes, kReceiver)                           \
+  TFS(ForInEnumerate, NeedsContext{true}, kReceiver)                           \
   TFC(ForInPrepare, ForInPrepare)                                              \
-  TFS(ForInFilter, NeedsContext::kYes, kKey, kObject)                          \
+  TFS(ForInFilter, NeedsContext{true}, kKey, kObject)                          \
                                                                                \
   /* Reflect */                                                                \
   ASM(ReflectApply, JSTrampoline)                                              \
@@ -1078,13 +1140,13 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(RegExpEscape, JSParameterCount(1))                                       \
                                                                                \
   /* RegExp helpers */                                                         \
-  TFS(RegExpExecAtom, NeedsContext::kYes, kRegExp, kString, kLastIndex,        \
+  TFS(RegExpExecAtom, NeedsContext{true}, kRegExp, kString, kLastIndex,        \
       kMatchInfo)                                                              \
   ASM(RegExpInterpreterTrampoline, RegExpTrampoline)                           \
   ASM(RegExpExperimentalTrampoline, RegExpTrampoline)                          \
                                                                                \
   /* Set */                                                                    \
-  TFS(FindOrderedHashSetEntry, NeedsContext::kYes, kTable, kKey)               \
+  TFS(FindOrderedHashSetEntry, NeedsContext{true}, kTable, kKey)               \
   TFJ(SetConstructor, kDontAdaptArgumentsSentinel)                             \
   TFJ(SetPrototypeHas, kJSArgcReceiverSlots + 1, kReceiver, kKey)              \
   TFJ(SetPrototypeAdd, kJSArgcReceiverSlots + 1, kReceiver, kKey)              \
@@ -1095,11 +1157,11 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFJ(SetPrototypeForEach, kDontAdaptArgumentsSentinel)                        \
   TFJ(SetPrototypeValues, kJSArgcReceiverSlots, kReceiver)                     \
   TFJ(SetIteratorPrototypeNext, kJSArgcReceiverSlots, kReceiver)               \
-  TFS(SetOrSetIteratorToList, NeedsContext::kYes, kSource)                     \
+  TFS(SetOrSetIteratorToList, NeedsContext{true}, kSource)                     \
                                                                                \
   /* ShadowRealm */                                                            \
   CPP(ShadowRealmConstructor, kDontAdaptArgumentsSentinel)                     \
-  TFS(ShadowRealmGetWrappedValue, NeedsContext::kYes, kCreationContext,        \
+  TFS(ShadowRealmGetWrappedValue, NeedsContext{true}, kCreationContext,        \
       kTargetContext, kValue)                                                  \
   CPP(ShadowRealmPrototypeEvaluate, JSParameterCount(1))                       \
   TFJ(ShadowRealmPrototypeImportValue, kJSArgcReceiverSlots + 2, kReceiver,    \
@@ -1143,7 +1205,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFJ(StringPrototypeSplit, kDontAdaptArgumentsSentinel)                       \
   CPP(StringRaw, kDontAdaptArgumentsSentinel)                                  \
   /*SELECT_TSA_LEVEL(IGNORE_BUILTIN, TFC_TSA, IGNORE_BUILTIN, ToString,        \
-   * ToString)*/                                                               \
+    ToString)*/                                                                \
                                                                                \
   /* Symbol */                                                                 \
   CPP(SymbolConstructor, kDontAdaptArgumentsSentinel)                          \
@@ -1404,6 +1466,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   IF_WASM(ASM, WasmCompileLazy, WasmDummy)                                     \
   IF_WASM(ASM, WasmLiftoffFrameSetup, WasmDummy)                               \
   IF_WASM(ASM, WasmDebugBreak, WasmDummy)                                      \
+  IF_WASM(ASM, WasmDebugTrap, WasmDummy)                                       \
   IF_WASM(ASM, WasmOnStackReplace, WasmDummy)                                  \
   IF_WASM(ASM, WasmHandleStackOverflow, WasmHandleStackOverflow)               \
   IF_WASM(TFC, WasmFloat32ToNumber, WasmFloat32ToNumber)                       \
@@ -1413,7 +1476,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
                                                                                \
   /* WeakMap */                                                                \
   TFJ(WeakMapConstructor, kDontAdaptArgumentsSentinel)                         \
-  TFS(WeakMapLookupHashIndex, NeedsContext::kYes, kTable, kKey)                \
+  TFS(WeakMapLookupHashIndex, NeedsContext{true}, kTable, kKey)                \
   TFJ(WeakMapPrototypeGet, kJSArgcReceiverSlots + 1, kReceiver, kKey)          \
   TFJ(WeakMapPrototypeHas, kJSArgcReceiverSlots + 1, kReceiver, kKey)          \
   TFJ(WeakMapPrototypeSet, kJSArgcReceiverSlots + 2, kReceiver, kKey, kValue)  \
@@ -1430,8 +1493,8 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFJ(WeakSetPrototypeDelete, kJSArgcReceiverSlots + 1, kReceiver, kValue)     \
                                                                                \
   /* WeakSet / WeakMap Helpers */                                              \
-  TFS(WeakCollectionDelete, NeedsContext::kYes, kCollection, kKey)             \
-  TFS(WeakCollectionSet, NeedsContext::kYes, kCollection, kKey, kValue)        \
+  TFS(WeakCollectionDelete, NeedsContext{true}, kCollection, kKey)             \
+  TFS(WeakCollectionSet, NeedsContext{true}, kCollection, kKey, kValue)        \
                                                                                \
   /* JS Structs and friends */                                                 \
   CPP(SharedSpaceJSObjectHasInstance, kDontAdaptArgumentsSentinel)             \
@@ -1452,11 +1515,11 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
                                                                                \
   /* AsyncGenerator */                                                         \
                                                                                \
-  TFS(AsyncGeneratorResolve, NeedsContext::kYes, kGenerator, kValue, kDone)    \
-  TFS(AsyncGeneratorReject, NeedsContext::kYes, kGenerator, kValue)            \
-  TFS(AsyncGeneratorYieldWithAwait, NeedsContext::kYes, kGenerator, kValue)    \
-  TFS(AsyncGeneratorReturn, NeedsContext::kYes, kGenerator, kValue)            \
-  TFS(AsyncGeneratorResumeNext, NeedsContext::kYes, kGenerator)                \
+  TFS(AsyncGeneratorResolve, NeedsContext{true}, kGenerator, kValue, kDone)    \
+  TFS(AsyncGeneratorReject, NeedsContext{true}, kGenerator, kValue)            \
+  TFS(AsyncGeneratorYieldWithAwait, NeedsContext{true}, kGenerator, kValue)    \
+  TFS(AsyncGeneratorReturn, NeedsContext{true}, kGenerator, kValue)            \
+  TFS(AsyncGeneratorResumeNext, NeedsContext{true}, kGenerator)                \
                                                                                \
   /* AsyncGeneratorFunction( p1, p2, ... pn, body ) */                         \
   CPP(AsyncGeneratorFunctionConstructor, kDontAdaptArgumentsSentinel)          \
@@ -1468,7 +1531,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFJ(AsyncGeneratorPrototypeThrow, kDontAdaptArgumentsSentinel)               \
                                                                                \
   /* specific to Async Generators. Internal / Not exposed to JS code. */       \
-  TFS(AsyncGeneratorAwait, NeedsContext::kYes, kAsyncGeneratorObject, kValue)  \
+  TFS(AsyncGeneratorAwait, NeedsContext{true}, kAsyncGeneratorObject, kValue)  \
   TFJ(AsyncGeneratorAwaitResolveClosure, kJSArgcReceiverSlots + 1, kReceiver,  \
       kValue)                                                                  \
   TFJ(AsyncGeneratorAwaitRejectClosure, kJSArgcReceiverSlots + 1, kReceiver,   \
@@ -1502,22 +1565,22 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   ASM(DirectCEntry, CEntryDummy)                                               \
                                                                                \
   /* String helpers */                                                         \
-  TFS(StringAdd_NoMapCheck, NeedsContext::kYes, kLeft, kRight)                 \
-  IF_WASM(TFS, WasmStringAdd_NoMapCheck, NeedsContext::kYes, kLeft, kRight)    \
-  TFS(SubString, NeedsContext::kYes, kString, kFrom, kTo)                      \
+  TFS(StringAdd_NoMapCheck, NeedsContext{true}, kLeft, kRight)                 \
+  IF_WASM(TFS, WasmStringAdd_NoMapCheck, NeedsContext{true}, kLeft, kRight)    \
+  TFS(SubString, NeedsContext{true}, kString, kFrom, kTo)                      \
                                                                                \
   /* Miscellaneous */                                                          \
   ASM(DoubleToI, Void)                                                         \
   TFC(GetProperty, GetProperty)                                                \
-  TFS(GetPropertyWithReceiver, NeedsContext::kYes, kObject, kKey, kReceiver,   \
+  TFS(GetPropertyWithReceiver, NeedsContext{true}, kObject, kKey, kReceiver,   \
       kOnNonExistent)                                                          \
-  TFS(SetProperty, NeedsContext::kYes, kReceiver, kKey, kValue)                \
-  TFS(CreateDataProperty, NeedsContext::kYes, kReceiver, kKey, kValue)         \
-  TFS(GetOwnPropertyDescriptor, NeedsContext::kYes, kReceiver, kKey)           \
+  TFS(SetProperty, NeedsContext{true}, kReceiver, kKey, kValue)                \
+  TFS(CreateDataProperty, NeedsContext{true}, kReceiver, kKey, kValue)         \
+  TFS(GetOwnPropertyDescriptor, NeedsContext{true}, kReceiver, kKey)           \
   TFC(FindNonDefaultConstructorOrConstruct,                                    \
       FindNonDefaultConstructorOrConstruct)                                    \
-  TFS(OrdinaryGetOwnPropertyDescriptor, NeedsContext::kYes, kReceiver, kKey)   \
-  TFS(CheckMaglevType, NeedsContext::kNo, kObject, kType)                      \
+  TFS(OrdinaryGetOwnPropertyDescriptor, NeedsContext{true}, kReceiver, kKey)   \
+  TFS(CheckMaglevType, NeedsContext{false}, kObject, kType)                    \
   IF_SHADOW_STACK(ASM, AdaptShadowStackForDeopt, Void)                         \
                                                                                \
   /* Trace */                                                                  \
@@ -1894,8 +1957,8 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(StringPrototypeToLocaleUpperCase, kDontAdaptArgumentsSentinel)           \
   TFJ(StringPrototypeToLowerCaseIntl, kJSArgcReceiverSlots, kReceiver)         \
   CPP(StringPrototypeToUpperCaseIntl, kDontAdaptArgumentsSentinel)             \
-  TFS(StringToLowerCaseIntl, NeedsContext::kYes, kString)                      \
-  IF_WASM(TFS, WasmStringToLowerCaseIntl, NeedsContext::kYes, kString)         \
+  TFS(StringToLowerCaseIntl, NeedsContext{true}, kString)                      \
+  IF_WASM(TFS, WasmStringToLowerCaseIntl, NeedsContext{true}, kString)         \
                                                                                \
   CPP(V8BreakIteratorConstructor, kDontAdaptArgumentsSentinel)                 \
   CPP(V8BreakIteratorInternalAdoptText, JSParameterCount(1))                   \

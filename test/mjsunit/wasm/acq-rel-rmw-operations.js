@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-acquire-release
+// Flags: --wasm-acquire-release
 
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
@@ -17,56 +17,56 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   builder.addFunction('i32_atomic_add_acq_rel', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,  // address and value
-      kAtomicPrefix, kExprI32AtomicAdd, 0x22, kAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicAdd, 0x12, kAcqRel, 0
     ])
     .exportFunc();
 
   builder.addFunction('i32_atomic_add8_u_acq_rel', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicAdd8U, 0x20, kAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicAdd8U, 0x10, kAcqRel, 0
     ])
     .exportFunc();
 
   builder.addFunction('i32_atomic_add16_u_acq_rel', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicAdd16U, 0x21, kAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicAdd16U, 0x11, kAcqRel, 0
     ])
     .exportFunc();
 
   builder.addFunction('i32_atomic_sub_acq_rel', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicSub, 0x22, kAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicSub, 0x12, kAcqRel, 0
     ])
     .exportFunc();
 
   builder.addFunction('i32_atomic_and_acq_rel', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicAnd, 0x22, kAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicAnd, 0x12, kAcqRel, 0
     ])
     .exportFunc();
 
   builder.addFunction('i32_atomic_or_acq_rel', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicOr, 0x22, kAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicOr, 0x12, kAcqRel, 0
     ])
     .exportFunc();
 
   builder.addFunction('i32_atomic_xor_acq_rel', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicXor, 0x22, kAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicXor, 0x12, kAcqRel, 0
     ])
     .exportFunc();
 
   builder.addFunction('i32_atomic_xchg_acq_rel', kSig_i_ii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI32AtomicExchange, 0x22, kAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicExchange, 0x12, kAcqRel, 0
     ])
     .exportFunc();
 
@@ -75,7 +75,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
       kExprLocalGet, 0, // address
       kExprLocalGet, 1, // expected
       kExprLocalGet, 2, // new_value
-      kAtomicPrefix, kExprI32AtomicCompareExchange, 0x22, kAcqRel, 0
+      kAtomicPrefix, kExprI32AtomicCompareExchange, 0x12, kAcqRel, 0
     ])
     .exportFunc();
 
@@ -138,61 +138,61 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   builder.addFunction('i64_atomic_add_acq_rel', kSig_l_il)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicAdd, 0x23, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicAdd, 0x13, kAcqRel, 0
     ]).exportFunc();
 
   builder.addFunction('i64_atomic_add8_u_acq_rel', kSig_l_il)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicAdd8U, 0x20, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicAdd8U, 0x10, kAcqRel, 0
     ]).exportFunc();
 
   builder.addFunction('i64_atomic_add16_u_acq_rel', kSig_l_il)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicAdd16U, 0x21, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicAdd16U, 0x11, kAcqRel, 0
     ]).exportFunc();
 
   builder.addFunction('i64_atomic_add32_u_acq_rel', kSig_l_il)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicAdd32U, 0x22, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicAdd32U, 0x12, kAcqRel, 0
     ]).exportFunc();
 
   builder.addFunction('i64_atomic_sub_acq_rel', kSig_l_il)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicSub, 0x23, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicSub, 0x13, kAcqRel, 0
     ]).exportFunc();
 
   builder.addFunction('i64_atomic_and_acq_rel', kSig_l_il)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicAnd, 0x23, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicAnd, 0x13, kAcqRel, 0
     ]).exportFunc();
 
   builder.addFunction('i64_atomic_or_acq_rel', kSig_l_il)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicOr, 0x23, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicOr, 0x13, kAcqRel, 0
     ]).exportFunc();
 
   builder.addFunction('i64_atomic_xor_acq_rel', kSig_l_il)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicXor, 0x23, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicXor, 0x13, kAcqRel, 0
     ]).exportFunc();
 
   builder.addFunction('i64_atomic_xchg_acq_rel', kSig_l_il)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kAtomicPrefix, kExprI64AtomicExchange, 0x23, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicExchange, 0x13, kAcqRel, 0
     ]).exportFunc();
 
   builder.addFunction('i64_atomic_cmpxchg_acq_rel', kSig_l_ill)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1, kExprLocalGet, 2,
-      kAtomicPrefix, kExprI64AtomicCompareExchange, 0x23, kAcqRel, 0
+      kAtomicPrefix, kExprI64AtomicCompareExchange, 0x13, kAcqRel, 0
     ]).exportFunc();
 
   let instance = builder.instantiate();

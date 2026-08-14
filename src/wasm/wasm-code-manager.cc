@@ -303,23 +303,7 @@ void WasmCode::LogCode(Isolate* isolate, const char* source_url,
   WasmName name = base::VectorOf(fn_name);
 
   if (native_module_) {
-    const WasmModule* module = native_module_->module();
-    const WasmDebugSymbols& symbol =
-        module->debug_symbols[WasmDebugSymbols::Type::SourceMap];
-    auto load_wasm_source_map = isolate->wasm_load_source_map_callback();
-    auto source_map = native_module_->GetWasmSourceMap();
-    if (!source_map && symbol.type == WasmDebugSymbols::Type::SourceMap &&
-        !symbol.external_url.is_empty() && load_wasm_source_map) {
-      ModuleWireBytes wire_bytes(native_module_->wire_bytes());
-      WasmName external_url = wire_bytes.GetNameOrNull(symbol.external_url);
-      std::string external_url_string(external_url.data(), external_url.size());
-      HandleScope scope(isolate);
-      v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
-      Local<v8::String> source_map_str =
-          load_wasm_source_map(v8_isolate, external_url_string.c_str());
-      native_module_->SetWasmSourceMap(
-          std::make_unique<WasmModuleSourceMap>(v8_isolate, source_map_str));
-    }
+    TryLoadSourceMap(isolate);
   }
 
   // Record source positions before adding code, otherwise when code is added,
@@ -424,6 +408,31 @@ void WasmCode::Validate() const {
     }
   }
 #endif
+}
+
+void WasmCode::TryLoadSourceMap(Isolate* isolate) const {
+  auto load_wasm_source_map = isolate->wasm_load_source_map_callback();
+  if (!load_wasm_source_map) return;
+
+  if (native_module_->GetWasmSourceMap()) return;
+
+  const WasmModule* module = native_module_->module();
+  const WasmDebugSymbols& symbol =
+      module->debug_symbols[WasmDebugSymbols::Type::SourceMap];
+  if (symbol.type != WasmDebugSymbols::Type::SourceMap) return;
+  if (symbol.external_url.is_empty()) return;
+
+  ModuleWireBytes wire_bytes(native_module_->wire_bytes());
+  WasmName external_url = wire_bytes.GetNameOrNull(symbol.external_url);
+  std::string external_url_string(external_url.data(), external_url.size());
+  HandleScope scope(isolate);
+  v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
+  Local<v8::String> source_map_str =
+      load_wasm_source_map(v8_isolate, external_url_string.c_str());
+  if (source_map_str.IsEmpty()) return;
+
+  native_module_->SetWasmSourceMap(
+      std::make_unique<WasmModuleSourceMap>(v8_isolate, source_map_str));
 }
 
 void WasmCode::MaybePrint() const {
@@ -1473,7 +1482,7 @@ void NativeModule::UpdateWellKnownImports(
   base::RecursiveMutexGuard lock(&allocation_mutex_);
   WellKnownImportsList::UpdateResult result =
       module_->type_feedback.well_known_imports.Update(entries);
-  if (result == WellKnownImportsList::UpdateResult::kFoundIncompatibility) {
+  if (result == WellKnownImportsList::kFoundIncompatibility) {
     RemoveCompiledCode(NativeModule::RemoveFilter::kRemoveTurbofanCode);
   }
 }
@@ -2220,8 +2229,8 @@ WasmCodeManager::WasmCodeManager()
 {
   // Check that --wasm-max-code-space-size-mb is not set bigger than the default
   // value. Otherwise we run into DCHECKs or other crashes later.
-  CHECK_GE(kDefaultMaxWasmCodeSpaceSizeMb,
-           v8_flags.wasm_max_code_space_size_mb);
+  CHECK_NO_SECURITY_IMPACT(kDefaultMaxWasmCodeSpaceSizeMb >=
+                           v8_flags.wasm_max_code_space_size_mb);
 }
 
 WasmCodeManager::~WasmCodeManager() {
@@ -2461,8 +2470,8 @@ size_t WasmCodeManager::EstimateNativeModuleCodeSize(
   // The size for the jump table and far jump table is added later, per code
   // space (see {OverheadPerCodeSpace}). We still need to add the overhead for
   // the lazy compile table once, though. There are configurations where we do
-  // not need it (non-asm.js, no dynamic tiering and no lazy compilation), but
-  // we ignore this here as most of the time we will need it.
+  // not need it (no dynamic tiering and no lazy compilation), but we ignore
+  // this here as most of the time we will need it.
   const size_t lazy_compile_table_size =
       JumpTableAssembler::SizeForNumberOfLazyFunctions(num_functions);
 
@@ -2473,8 +2482,6 @@ size_t WasmCodeManager::EstimateNativeModuleCodeSize(
 
   const size_t overhead_per_function_liftoff =
       kLiftoffFunctionOverhead + kCodeAlignment / 2;
-  // Note: For asm.js we do not have Liftoff support, but this corner case is
-  // being ignored here.
   size_t size_of_liftoff =
       v8_flags.liftoff ? overhead_per_function_liftoff * num_functions +
                              kLiftoffCodeSizeMultiplier * code_section_length
@@ -2691,10 +2698,9 @@ void NativeModule::SampleCodeSize(Counters* counters) const {
     metadata_histogram->AddSample(metadata_size_kb);
   }
   // If this is a wasm module of >= 2MB, also sample the freed code size,
-  // absolute and relative. Code GC does not happen on asm.js
-  // modules, and small modules will never trigger GC anyway.
+  // absolute and relative. Small modules are unlikely to trigger GC anyway.
   size_t generated_size = code_allocator_.generated_code_size();
-  if (generated_size >= 2 * MB && module()->origin == kWasmOrigin) {
+  if (generated_size >= 2 * MB) {
     size_t freed_size = code_allocator_.freed_code_size();
     DCHECK_LE(freed_size, generated_size);
     int freed_percent = static_cast<int>(100 * freed_size / generated_size);
@@ -2816,9 +2822,6 @@ std::vector<UnpublishedWasmCode> NativeModule::AddCompiledCode(
 }
 
 void NativeModule::SetDebugState(DebugState new_debug_state) {
-  // Do not tier down asm.js (just never change the tiering state).
-  if (module()->origin != kWasmOrigin) return;
-
   base::RecursiveMutexGuard lock(&allocation_mutex_);
   debug_state_ = new_debug_state;
 }

@@ -84,8 +84,12 @@
 !/third_party/antlr4
 !/third_party/colorama
 /third_party/colorama/src
+!/third_party/disarm
+/third_party/disarm/src
 !/third_party/dragonbox
 /third_party/dragonbox/src
+!/third_party/fadec
+/third_party/fadec/src
 !/third_party/fast_float
 /third_party/fast_float/src
 !/third_party/glibc

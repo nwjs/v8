@@ -24,7 +24,6 @@
 #include "src/base/small-vector.h"
 #include "src/base/template-utils.h"
 #include "src/base/vector.h"
-#include "src/builtins/builtins.h"
 #include "src/codegen/machine-type.h"
 #include "src/compiler/backend/instruction.h"
 #include "src/compiler/compilation-dependencies.h"
@@ -410,8 +409,8 @@ class MachineOptimizationReducer : public Next {
         CONSTANT_F32_CASE(kSqrt, std::sqrt(f32_k))
         CONSTANT_F32_CASE(kExp, base::ieee754::exp(f32_k))
         CONSTANT_F32_CASE(kExpm1, base::ieee754::expm1(f32_k))
-        CONSTANT_F32_CASE(kSin, SIN_IMPL(f32_k))
-        CONSTANT_F32_CASE(kCos, COS_IMPL(f32_k))
+        CONSTANT_F32_CASE(kSin, base::ieee754::sin(f32_k))
+        CONSTANT_F32_CASE(kCos, base::ieee754::cos(f32_k))
         CONSTANT_F32_CASE(kSinh, base::ieee754::sinh(f32_k))
         CONSTANT_F32_CASE(kCosh, base::ieee754::cosh(f32_k))
         CONSTANT_F32_CASE(kAcos, base::ieee754::acos(f32_k))
@@ -452,8 +451,8 @@ class MachineOptimizationReducer : public Next {
         CONSTANT_F64_CASE(kSqrt, std::sqrt(f64_k))
         CONSTANT_F64_CASE(kExp, base::ieee754::exp(f64_k))
         CONSTANT_F64_CASE(kExpm1, base::ieee754::expm1(f64_k))
-        CONSTANT_F64_CASE(kSin, SIN_IMPL(f64_k))
-        CONSTANT_F64_CASE(kCos, COS_IMPL(f64_k))
+        CONSTANT_F64_CASE(kSin, base::ieee754::sin(f64_k))
+        CONSTANT_F64_CASE(kCos, base::ieee754::cos(f64_k))
         CONSTANT_F64_CASE(kSinh, base::ieee754::sinh(f64_k))
         CONSTANT_F64_CASE(kCosh, base::ieee754::cosh(f64_k))
         CONSTANT_F64_CASE(kAcos, base::ieee754::acos(f64_k))
@@ -1226,15 +1225,14 @@ class MachineOptimizationReducer : public Next {
       const OpIndex child = children.back();
       children.pop_back();
       if (const WordBinopOp* child_binop =
-              matcher_.Get(child).template TryCast<WordBinopOp>();
+              matcher_.template TryCast<WordBinopOp>(child);
           child_binop && child_binop->kind == WordBinopOp::Kind::kAdd) {
         // explore add's children too
         children.push_back(child_binop->left());
         children.push_back(child_binop->right());
         continue;
       } else if (const Simd128ExtractLaneOp* child_extract =
-                     matcher_.Get(child)
-                         .template TryCast<Simd128ExtractLaneOp>();
+                     matcher_.template TryCast<Simd128ExtractLaneOp>(child);
                  child_extract &&
                  child_extract->kind == Simd128ExtractLaneOp::Kind::kI32x4) {
         // check extract, and record to check future ones against
@@ -2028,23 +2026,25 @@ class MachineOptimizationReducer : public Next {
           // Mixed logical/arithmetic: skip for safety.
         }
       }
-      if (rep == WordRepresentation::Word32() &&
-          SupportedOperations::word32_shift_is_safe()) {
-        // Remove the explicit 'and' with 0x1F if the shift provided by the
-        // machine instruction matcher_.Matches that required by JavaScript.
-        if (V<Word32> a, b; matcher_.MatchBitwiseAnd(
-                right, &a, &b, WordRepresentation::Word32())) {
-#if defined(__clang__)
-          static_assert(0x1f == WordRepresentation::Word32().bit_width() - 1);
-#endif
-          if (uint32_t b_value;
-              matcher_.MatchIntegralWord32Constant(b, &b_value) &&
-              b_value == 0x1f) {
-            return __ Shift(left, a, kind, rep);
-          }
-        }
+    }
+    // Drop an explicit mask of the shift amount when the machine instruction
+    // masks it the same way anyway:  x << (y & 31)  =>  x << y.  Any mask that
+    // keeps the low five bits works, not just 0x1f exactly: the extra bits it
+    // leaves set are discarded by the machine's own masking.
+    if (rep == WordRepresentation::Word32() &&
+        SupportedOperations::word32_shift_is_safe()) {
+      constexpr uint64_t kShiftMask =
+          WordRepresentation::Word32().bit_width() - 1;
+      static_assert(kShiftMask == 0x1f);
+      V<Word32> amount;
+      uint64_t mask;
+      if (matcher_.MatchBitwiseAndWithConstant(right, &amount, &mask,
+                                               WordRepresentation::Word32()) &&
+          (mask & kShiftMask) == kShiftMask) {
+        return __ Shift(left, amount, kind, rep);
       }
     }
+
     return Next::ReduceShift(left, right, kind, rep);
   }
 
@@ -2339,6 +2339,78 @@ class MachineOptimizationReducer : public Next {
       return Next::ReduceSimd128Binop(left, right, kind);
     }
     if (ShouldSkipOptimizationStep()) goto no_change;
+
+#ifdef V8_TARGET_ARCH_ARM64
+    if (CpuFeatures::IsSupported(DOTPROD) &&
+        kind == Simd128BinopOp::Kind::kI32x4Add) {
+      // The following almost looks like a pairwise dot-product, except for the
+      // root addition:
+      // I32x4Add(I32xExtAddPairwise(I16x8ExtMulLowI8x16S(x, y)),
+      //          I32x4ExtAddPairwise(I16x8ExtMulHighI8x16S(x, y)))
+      // To use the dot-product instruction, the root needs to be converted to
+      // I32x4AddPairwise.
+      //
+      // So, for input A and B:
+      // A = A0, A1, A2, A3, ...
+      // B = B0, B1, B2, B3, ...
+      //
+      // Two ExtMuls create two vector products:
+      // ExtMulLow(A, B)  = AB0, AB1, AB2, AB3, ...
+      // ExtMulHigh(A, B) = AB8, AB9, AB10, AB11, ...
+      //
+      // Which are then partially reduced:
+      // ExtAddPairwise(ExtMulLow)  = AB0 + AB1, AB2 + AB3, AB4 + AB5
+      // ExtAddPairwise(ExtMulHigh) = AB8 + AB9, AB10 + AB11, AB12 + AB13
+      //
+      // And then those two partial sums are combined:
+      // I32x4Add = AB0 + AB1 + AB8 + AB9, AB2 + AB3 + AB10 + AB11
+      //
+      // But to use a pairwise add we need to ensure the correct elements are
+      // adjacent to each other:
+      // I32x4Add = AB0 + AB1 + AB8 + AB9, AB2 + AB3 + AB10 + AB11
+      //                ^           ^
+      //            keep 0 and 1 adjacent, but 8 and 9 need to be moved.
+      // We can shuffle the inputs to give the correct order using this pattern:
+      // 0, 1, 8, 9, 2, 3, 10, 11, 4, 5, 12, 13, 6, 7, 14, 15,
+      // Which, with 16-bit lanes, is equivalent to: 0, 4, 1, 5, 2, 6, 3, 7
+
+      auto TryCastExtMul = [this](V<Simd128> node) -> const Simd128BinopOp* {
+        if (auto* unop = matcher_.template TryCast<Simd128UnaryOp>(node)) {
+          if (unop->kind == Simd128UnaryOp::Kind::kI32x4ExtAddPairwiseI16x8S) {
+            if (auto* binop =
+                    matcher_.template TryCast<Simd128BinopOp>(unop->input())) {
+              if (binop->kind == Simd128BinopOp::Kind::kI16x8ExtMulLowI8x16S ||
+                  binop->kind == Simd128BinopOp::Kind::kI16x8ExtMulHighI8x16S) {
+                return binop;
+              }
+            }
+          }
+        }
+        return nullptr;
+      };
+
+      const Simd128BinopOp* mul_left = TryCastExtMul(left);
+      const Simd128BinopOp* mul_right = TryCastExtMul(right);
+      if (mul_left && mul_right && mul_left->kind != mul_right->kind &&
+          mul_left->left() == mul_right->left() &&
+          mul_left->right() == mul_right->right()) {
+        // Using 16-bit elements, the top half is interleaved into the odd
+        // lanes and the bottom half is placed into the even lanes. So, when
+        // we perform the second pairwise addition it is equivalent to the
+        // original lane-wise addition.
+        uint8_t shuffle[16] = {
+            0, 1, 8, 9, 2, 3, 10, 11, 4, 5, 12, 13, 6, 7, 14, 15,
+        };
+        auto shuffle_kind = Simd128ShuffleOp::Kind::kI8x16;
+        V<Simd128> shuffle_left = __ Simd128Shuffle(
+            mul_left->left(), mul_left->left(), shuffle_kind, shuffle);
+        V<Simd128> shuffle_right = __ Simd128Shuffle(
+            mul_right->right(), mul_right->right(), shuffle_kind, shuffle);
+        return __ Simd128Binop(shuffle_left, shuffle_right,
+                               Simd128BinopOp::Kind::kI32x4DotI8x16S);
+      }
+    }
+#endif  // V8_TARGET_ARCH_ARM64
 
     if (kind != Simd128BinopOp::Kind::kI32x4DotI16x8S) goto no_change;
 

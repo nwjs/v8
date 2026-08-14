@@ -565,5 +565,65 @@ TEST_F(InspectorTest, NoUAFWhenResettingContextGroupDuringArgumentWrapping) {
   // Verify that reportToFrontend was aborted and did not send the notification.
   CHECK(!channel.consoleAPICalled());
 }
+
+TEST_F(InspectorTest, WrapObjectWithCustomPreviewNoPreview) {
+  v8::Isolate* isolate = v8_isolate();
+  v8::HandleScope handle_scope(isolate);
+
+  v8_inspector::V8InspectorClient default_client;
+  std::unique_ptr<V8Inspector> inspector =
+      V8Inspector::create(isolate, &default_client);
+  V8ContextInfo context_info(v8_context(), 1, toStringView(""));
+  inspector->contextCreated(context_info);
+
+  UAFTriggerChannel channel(isolate, inspector.get(), 1, v8_context(),
+                            "Runtime.consoleAPICalled");
+  std::unique_ptr<V8InspectorSession> session =
+      inspector->connect(1, &channel, toStringView("{}"),
+                         v8_inspector::V8Inspector::kFullyTrusted);
+
+  // Enable Runtime agent.
+  session->dispatchProtocolMessage(toStringView(R"({
+    "id": 1,
+    "method": "Runtime.enable"
+  })"));
+  session->dispatchProtocolMessage(toStringView(R"({
+    "id": 2,
+    "method": "Runtime.setCustomObjectFormatterEnabled",
+    "params": {
+      "enabled": true
+    }
+  })"));
+
+  TryRunJS(R"(
+    this.devtoolsFormatters = [{
+      header: (x) => {
+        console.log(new Error("FAILED: custom preview logic executed"));
+        return ['span', {}, 'custom_preview_header'];
+      },
+      hasBody: (x) => false,
+    }];
+    this.obj = { a: 1 };
+  )");
+
+  v8::Local<v8::Value> obj = v8_context()
+                                 ->Global()
+                                 ->Get(v8_context(), NewString("obj"))
+                                 .ToLocalChecked();
+
+  std::unique_ptr<v8_inspector::protocol::Runtime::API::RemoteObject>
+      remote_object_api =
+          session->wrapObject(v8_context(), obj, toStringView("testGroup"),
+                              /*generatePreview=*/false);
+
+  CHECK(remote_object_api);
+  auto* remote_object =
+      static_cast<v8_inspector::protocol::Runtime::RemoteObject*>(
+          remote_object_api.get());
+
+  EXPECT_FALSE(remote_object->hasPreview());
+  EXPECT_FALSE(remote_object->hasCustomPreview());
+  EXPECT_EQ(channel.triggerCount(), 0);
+}
 }  // namespace internal
 }  // namespace v8

@@ -82,6 +82,8 @@
   'regress-7770': [SKIP],
   # Bug(v8:11922)
   'localematcher/bestfit-supplemental-files': [SKIP],
+  # https://crbug.com/522092467
+  'regress-10960': [SKIP],
 }],  # 'system == android'
 
 ################################################################################

@@ -34,6 +34,7 @@
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/minor-mark-sweep.h"
 #include "src/heap/mutable-page.h"
+#include "src/heap/pending-allocations.h"
 #include "src/heap/safepoint.h"
 #include "src/init/v8.h"
 #include "src/logging/runtime-call-stats-scope.h"
@@ -264,6 +265,7 @@ void IncrementalMarking::StartMarkingMajor() {
   // this for correctness, we want to avoid creating additional work for
   // evacuation.
   heap_->FreeLinearAllocationAreas();
+  heap_->young_pending_allocations()->ResetVersion();
 
   is_compacting_ = major_collector_->StartCompaction(
       MarkCompactCollector::StartCompactionMode::kIncremental);
@@ -327,6 +329,9 @@ void IncrementalMarking::StartMarkingMinor() {
     isolate()->PrintWithTimestamp(
         "[IncrementalMarking] (MinorMS) Start marking\n");
   }
+
+  heap_->FreeLinearAllocationAreas();
+  heap_->young_pending_allocations()->ResetVersion();
 
   // We only reach this code if Heap::ShouldUseBackgroundThreads() returned
   // true. So we can force the use of background threads here.

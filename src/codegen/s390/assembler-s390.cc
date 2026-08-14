@@ -668,8 +668,13 @@ void Assembler::stop(Condition cond, int32_t code, CRegister cr) {
     Label skip;
     b(NegateCondition(cond), &skip, Label::kNear);
     bkpt(0);
+    // The first bkpt may be caught by the V8 SIGILL handler, which is
+    // installed with SA_RESETHAND. Emit a second bkpt so the process
+    // dies after the handler resets to SIG_DFL.
+    bkpt(0);
     bind(&skip);
   } else {
+    bkpt(0);
     bkpt(0);
   }
 }

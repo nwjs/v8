@@ -400,6 +400,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
     kWord64ReverseBits,
     kFloat32Select,
     kFloat64Select,
+    kFloat64MinMax,
     kInt32AbsWithOverflow,
     kInt64AbsWithOverflow,
     kWord32Rol,

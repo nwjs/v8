@@ -427,13 +427,6 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
     flags_ = IsWrappedFunctionField::update(flags_, true);
   }
 
-#if V8_ENABLE_WEBASSEMBLY
-  bool IsAsmModule() const;
-  // Returns true if this scope or any inner scopes that might be eagerly
-  // compiled are asm modules.
-  bool ContainsAsmModule() const;
-#endif  // V8_ENABLE_WEBASSEMBLY
-
   bool is_hoisted_in_context() const {
     return IsHoistedInContextField::decode(flags_);
   }
@@ -1143,13 +1136,6 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
     scope_info_ = scope_info;
   }
 
-#if V8_ENABLE_WEBASSEMBLY
-  bool is_asm_module() const { return IsAsmModuleField::decode(flags_); }
-  void set_is_asm_module(bool value) {
-    flags_ = IsAsmModuleField::update(flags_, value);
-  }
-#endif  // V8_ENABLE_WEBASSEMBLY
-
   bool should_ban_arguments() const {
     return IsClassInitializerFunction(function_kind());
   }
@@ -1460,11 +1446,6 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
       HasThisDeclarationField::Next<bool, 1>;
   using ClassScopeHasPrivateBrandField =
       NeedsPrivateNameContextChainRecalcField::Next<bool, 1>;
-
-#if V8_ENABLE_WEBASSEMBLY
-  // This scope contains an "use asm" annotation.
-  using IsAsmModuleField = ClassScopeHasPrivateBrandField::Next<bool, 1>;
-#endif  // V8_ENABLE_WEBASSEMBLY
 
 #if DEBUG
   bool is_being_lazily_parsed_;

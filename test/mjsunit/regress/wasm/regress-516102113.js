@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-acquire-release
+// Flags: --wasm-acquire-release
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
@@ -25,7 +25,7 @@ builder.addFunction("go", kSig_i_i).exportFunc()
     kExprLocalSet, 2,
     kExprLocalGet, 2,
     kExprLocalGet, 1,
-    kAtomicPrefix, kExprI64AtomicStore8U, 32, kAtomicAcqRel, 0,
+    kAtomicPrefix, kExprI64AtomicStore8U, 16, kAtomicAcqRel, 0,
     kExprLocalGet, 0,
   ]);
 

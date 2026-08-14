@@ -305,19 +305,20 @@ CheckMapsParameters const& CheckMapsParametersOf(Operator const* op) {
 bool operator==(LoadDictionaryFieldParameters const& lhs,
                 LoadDictionaryFieldParameters const& rhs) {
   return lhs.dictionary_index() == rhs.dictionary_index() &&
-         lhs.name() == rhs.name() && lhs.feedback() == rhs.feedback();
+         lhs.name() == rhs.name() && lhs.feedback() == rhs.feedback() &&
+         lhs.is_super() == rhs.is_super();
 }
 
 size_t hash_value(LoadDictionaryFieldParameters const& p) {
   FeedbackSource::Hash feedback_hash;
   return base::hash_combine(p.dictionary_index().raw_value(), p.name(),
-                            feedback_hash(p.feedback()));
+                            feedback_hash(p.feedback()), p.is_super());
 }
 
 std::ostream& operator<<(std::ostream& os,
                          LoadDictionaryFieldParameters const& p) {
   return os << p.dictionary_index().raw_value() << ", " << p.name() << ", "
-            << p.feedback();
+            << p.feedback() << ", is_super: " << p.is_super();
 }
 
 LoadDictionaryFieldParameters const& LoadDictionaryFieldParametersOf(
@@ -1641,11 +1642,12 @@ GET_FROM_CACHE(StringLocaleCompareIntl)
 
 const Operator* SimplifiedOperatorBuilder::LoadDictionaryField(
     InternalIndex dictionary_index, NameRef name,
-    const FeedbackSource& feedback) {
+    const FeedbackSource& feedback, bool is_super) {
   return zone()->New<Operator1<LoadDictionaryFieldParameters>>(
       IrOpcode::kLoadDictionaryField, Operator::kNoProperties,
-      "LoadDictionaryField", 3, 1, 1, 1, 1, 2,
-      LoadDictionaryFieldParameters(dictionary_index, name, feedback));
+      "LoadDictionaryField", 4, 1, 1, 1, 1, 2,
+      LoadDictionaryFieldParameters(dictionary_index, name, feedback,
+                                    is_super));
 }
 
 const Operator* SimplifiedOperatorBuilder::FindOrderedCollectionEntry(
@@ -2392,7 +2394,7 @@ const Operator* SimplifiedOperatorBuilder::TypedArrayLength(
       IrOpcode::kTypedArrayLength,                                   // opcode
       Operator::kNoWrite | Operator::kNoThrow | Operator::kNoDeopt,  // flags
       "TypedArrayLength",                                            // name
-      1, 0, 0, 1, 0, 0,                                              // counts
+      1, 1, 1, 1, 1, 0,                                              // counts
       elements_kind);  // parameter
 }
 

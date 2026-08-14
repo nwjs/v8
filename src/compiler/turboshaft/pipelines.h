@@ -9,6 +9,7 @@
 
 #include "src/base/logging.h"
 #include "src/codegen/optimized-compilation-info.h"
+#include "src/common/synchronization-point-support.h"
 #include "src/compiler/backend/register-allocator-verifier.h"
 #include "src/compiler/basic-block-call-graph-profiler.h"
 #include "src/compiler/pipeline-statistics.h"
@@ -20,6 +21,7 @@
 #include "src/compiler/turboshaft/decompression-optimization-phase.h"
 #include "src/compiler/turboshaft/instruction-selection-phase.h"
 #include "src/compiler/turboshaft/load-elimination-phase.h"
+#include "src/compiler/turboshaft/loop-optimization-phase.h"
 #include "src/compiler/turboshaft/loop-peeling-phase.h"
 #include "src/compiler/turboshaft/loop-unrolling-phase.h"
 #include "src/compiler/turboshaft/machine-lowering-phase.h"
@@ -33,7 +35,6 @@
 #include "src/compiler/turboshaft/turbolev-graph-builder.h"
 #include "src/compiler/turboshaft/type-assertions-phase.h"
 #include "src/compiler/turboshaft/typed-optimizations-phase.h"
-#include "src/init/isolate-group.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/compiler/turboshaft/wasm-gc-optimize-phase.h"
@@ -104,7 +105,7 @@ class V8_EXPORT_PRIVATE Pipeline {
     using result_t =
         decltype(phase.Run(data_, temp_zone, std::forward<Args>(args)...));
 
-    SYNCHRONIZATION_POINT_FOR_TESTING(Phase::synchronization_point_name());
+    SYNCHRONIZATION_POINT(Phase::synchronization_point_name());
 
     if constexpr (std::is_same_v<result_t, void>) {
       phase.Run(data_, temp_zone, std::forward<Args>(args)...);
@@ -179,6 +180,10 @@ class V8_EXPORT_PRIVATE Pipeline {
       return false;
     }
 
+    data_->info()->set_inlined_bytecode_size(
+        (*maglev_graph)->total_inlined_bytecode_size() +
+        (*maglev_graph)->total_inlined_bytecode_size_small());
+
     std::optional<BailoutReason> bailout =
         Run<turboshaft::TurbolevGraphBuildingPhase>(*maglev_graph);
     if (bailout.has_value()) {
@@ -217,6 +222,10 @@ class V8_EXPORT_PRIVATE Pipeline {
       }
     }
 #endif  // !V8_ENABLE_WEBASSEMBLY
+
+    if (V8_UNLIKELY(v8_flags.turboshaft_loop_optimization)) {
+      RUN_MAYBE_ABORT(turboshaft::LoopOptimizationPhase);
+    }
 
     RUN_MAYBE_ABORT(turboshaft::MachineLoweringPhase);
 
