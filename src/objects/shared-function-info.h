@@ -283,7 +283,6 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
       PropertiesAreFinalBit::Next<bool, 1>;
   using IsHoistedInContextBit =
       PrivateNameLookupSkipsOuterClassBit::Next<bool, 1>;
-  using LiveEditedBit = IsHoistedInContextBit::Next<bool, 1>;
   // Bit positions in |flags2|.
   using ClassScopeHasPrivateBrandBit = base::BitField<bool, 0, 1, uint8_t>;
   using HasStaticPrivateMethodsOrAccessorsBit =
@@ -396,9 +395,6 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
   // Start position of this function in the script source.
   V8_EXPORT_PRIVATE int StartPosition() const;
 
-  V8_EXPORT_PRIVATE void UpdateFromFunctionLiteralForLiveEdit(
-      IsolateForSandbox isolate, FunctionLiteral* lit);
-
   // [outer scope info | feedback metadata] Shared storage for outer scope info
   // (on uncompiled functions) and feedback metadata (on compiled functions).
   DECL_ACCESSORS(raw_outer_scope_info_or_feedback_metadata,
@@ -408,6 +404,8 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
   // Get the outer scope info whether this function is compiled or not.
   inline bool HasOuterScopeInfo() const;
   inline Tagged<ScopeInfo> GetOuterScopeInfo() const;
+  inline Tagged<ScopeInfo> TryGetScopeInfoForMerge() const;
+  inline Tagged<ScopeInfo> TryGetOuterScopeInfo() const;
 
   // [feedback metadata] Metadata template for feedback vectors of instances of
   // this function.
@@ -698,9 +696,6 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
   // Indicates that the private name lookups inside the function skips the
   // closest outer class scope.
   DECL_BOOLEAN_ACCESSORS(private_name_lookup_skips_outer_class)
-
-  // Indicates that the shared function info was live-edited.
-  DECL_BOOLEAN_ACCESSORS(live_edited)
 
   // Indicates that the function is a hoisted-in-context declaration.
   DECL_BOOLEAN_ACCESSORS(is_hoisted_in_context)

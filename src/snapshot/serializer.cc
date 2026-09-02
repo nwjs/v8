@@ -712,17 +712,11 @@ void Serializer::ObjectSerializer::SerializeExternalString() {
   if (serializer_->external_reference_encoder_.TryEncode(resource).To(
           &reference)) {
     DCHECK(reference.is_from_api());
-#ifdef V8_ENABLE_SANDBOX
-    uint32_t external_pointer_entry =
-        string->GetResourceRefForDeserialization();
-#endif
-    string->SetResourceRefForSerialization(reference.index());
+    // The string stays live in this isolate, so both external pointer fields
+    // have to be put back once it has been serialized.
+    auto refs = string->SetResourceRefForSerialization(reference.index());
     SerializeObject();
-#ifdef V8_ENABLE_SANDBOX
-    string->SetResourceRefForSerialization(external_pointer_entry);
-#else
-    string->set_address_as_resource(isolate(), resource);
-#endif
+    string->RestoreResourceRefs(isolate(), refs);
   } else {
     SerializeExternalStringAsSequentialString();
   }
@@ -1141,12 +1135,13 @@ void Serializer::ObjectSerializer::VisitCppHeapPointer(
 
   PtrComprCageBase cage_base(isolate());
   // Currently there's only very limited support for CppHeapPointerSlot
-  // serialization as it's only used for API wrappers.
+  // serialization.
   //
   // We serialize the slot as initialized-but-unused slot.  The actual API
   // wrapper serialization is implemented in
   // `ContextSerializer::SerializeApiWrapperFields()`.
-  DCHECK(IsJSApiWrapperObjectMap(object_->map()) || IsNativeContext(*object_));
+  DCHECK(IsJSApiWrapperObjectMap(object_->map()) || IsNativeContext(*object_) ||
+         IsCppGCManagedBase(*object_));
   static_assert(kCppHeapPointerSlotSize % kTaggedSize == 0);
   sink_->Put(
       FixedRawDataWithSize::Encode(kCppHeapPointerSlotSize >> kTaggedSizeLog2),

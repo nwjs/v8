@@ -22,6 +22,7 @@
 #include "src/objects/feedback-cell-inl.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/instance-type-inl.h"
+#include "src/objects/object-conversions-inl.h"
 #include "src/objects/object-predicates-inl.h"
 #include "src/objects/objects.h"
 #include "src/roots/roots.h"
@@ -1593,10 +1594,13 @@ void JSFunction::ClearAllTypeFeedbackInfoForTesting(Isolate* isolate) {
               it.current_bytecode())) {
         continue;
       }
-      bytecode_array->set(
-          it.GetEmbeddedFeedbackOffset(kEmbeddedFeedbackOperandIndex) +
-              kHeapObjectTag - BytecodeArray::kHeaderSize,
-          kUninitializedEmbeddedFeedback);
+      int operand_index = interpreter::Bytecodes::IsUnaryOpWithEmbeddedFeedback(
+                              it.current_bytecode())
+                              ? kUnaryEmbeddedFeedbackOperandIndex
+                              : kEmbeddedFeedbackOperandIndex;
+      bytecode_array->set(it.GetEmbeddedFeedbackOffset(operand_index) +
+                              kHeapObjectTag - BytecodeArray::kHeaderSize,
+                          kUninitializedEmbeddedFeedback);
     }
   }
 }

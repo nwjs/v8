@@ -633,11 +633,7 @@ V8_OBJECT class String : public Name {
 
       // Check aligned words.
       static_assert(unibrow::Latin1::kMaxChar == 0xFF);
-#ifdef V8_TARGET_LITTLE_ENDIAN
       const uintptr_t non_one_byte_mask = kUintptrAllBitsSet / 0xFFFF * 0xFF00;
-#else
-      const uintptr_t non_one_byte_mask = kUintptrAllBitsSet / 0xFFFF * 0x00FF;
-#endif
       while (chars + sizeof(uintptr_t) <= limit) {
         if (*reinterpret_cast<const uintptr_t*>(chars) & non_one_byte_mask) {
           break;
@@ -1246,7 +1242,14 @@ V8_OBJECT class ExternalString : public UncachedExternalString {
   inline Address resource_as_address() const;
   inline void set_address_as_resource(Isolate* isolate, Address address);
   inline uint32_t GetResourceRefForDeserialization();
-  inline void SetResourceRefForSerialization(uint32_t ref);
+  // The previous contents of the external pointer fields, as returned by
+  // SetResourceRefForSerialization() and put back by RestoreResourceRefs().
+  struct ResourceRefs {
+    ExternalPointer_t resource;
+    ExternalPointer_t resource_data;
+  };
+  inline ResourceRefs SetResourceRefForSerialization(uint32_t ref);
+  inline void RestoreResourceRefs(Isolate* isolate, ResourceRefs refs);
 
   // Disposes string's resource object if it has not already been disposed.
   inline void DisposeResource(Isolate* isolate);

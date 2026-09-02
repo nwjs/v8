@@ -78,7 +78,6 @@ void BodyDescriptorBase::IterateJSObjectBodyImpl(Tagged<Map> map,
                                                  int start_offset,
                                                  int end_offset,
                                                  ObjectVisitor* v) {
-#ifdef V8_COMPRESS_POINTERS
   static_assert(kEmbedderDataSlotSize == 2 * kTaggedSize);
   int header_end_offset = JSObject::GetHeaderSize(map);
   int inobject_fields_start_offset = map->GetInObjectPropertyOffset(0);
@@ -100,11 +99,6 @@ void BodyDescriptorBase::IterateJSObjectBodyImpl(Tagged<Map> map,
     // Proceed processing inobject properties.
     start_offset = inobject_fields_start_offset;
   }
-#else
-  // We store raw aligned pointers as Smis, so it's safe to iterate the whole
-  // embedder field area as tagged slots.
-  static_assert(kEmbedderDataSlotSize == kTaggedSize);
-#endif
   IteratePointers(obj, start_offset, end_offset, v);
 }
 
@@ -963,6 +957,20 @@ class Foreign::BodyDescriptor final : public BodyDescriptorBase {
 
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
     return sizeof(Foreign);
+  }
+};
+
+class CppGCManagedBase::BodyDescriptor final : public BodyDescriptorBase {
+ public:
+  template <typename ObjectVisitor>
+  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
+                                 int object_size, ObjectVisitor* v) {
+    Tagged<CppGCManagedBase> managed = UncheckedCast<CppGCManagedBase>(obj);
+    v->VisitCppHeapPointer(obj, CppHeapPointerSlot(&managed->cpp_gc_wrapper_));
+  }
+
+  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
+    return CppGCManagedBase::kSize;
   }
 };
 
@@ -1888,7 +1896,6 @@ class EmbedderDataArray::BodyDescriptor final : public BodyDescriptorBase {
   template <typename ObjectVisitor>
   static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
                                  int object_size, ObjectVisitor* v) {
-#ifdef V8_COMPRESS_POINTERS
     static_assert(kEmbedderDataSlotSize == 2 * kTaggedSize);
     for (int offset = EmbedderDataArray::OffsetOfElementAt(0);
          offset < object_size; offset += kEmbedderDataSlotSize) {
@@ -1898,13 +1905,6 @@ class EmbedderDataArray::BodyDescriptor final : public BodyDescriptorBase {
                    offset + EmbedderDataSlot::kExternalPointerOffset,
                    {kFirstEmbedderDataTag, kLastEmbedderDataTag}));
     }
-
-#else
-    // We store raw aligned pointers as Smis, so it's safe to iterate the whole
-    // array.
-    static_assert(kEmbedderDataSlotSize == kTaggedSize);
-    IteratePointers(obj, sizeof(EmbedderDataArray), object_size, v);
-#endif
   }
 
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {

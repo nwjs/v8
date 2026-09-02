@@ -654,6 +654,7 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
     case Builtin::kFunctionLogNextExecution:
     case Builtin::kMarkReoptimizeLazyDeoptimized:
     case Builtin::kMarkLazyDeoptimized:
+    case Builtin::kMarkFlushed:
     // All *DeoptContinuation builtins.
     case Builtin::kArrayEveryLoopEagerDeoptContinuation:
     case Builtin::kArrayEveryLoopLazyDeoptContinuation:
@@ -968,7 +969,7 @@ void Builtins::VerifyGetJSBuiltinState(bool allow_non_initial_state) {
   // JSFunctions.
   for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    if (IsAnyHole(obj)) continue;
+    if (IsInaccessible(obj)) continue;
 
     Tagged<JSFunction> func;
     if (!TryCast(obj, &func)) continue;

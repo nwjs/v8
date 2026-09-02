@@ -41,7 +41,6 @@
 #include "src/numbers/conversions.h"
 #include "src/numbers/hash-seed-inl.h"
 #include "src/objects/allocation-site-inl.h"
-#include "src/objects/allocation-site-scopes.h"
 #include "src/objects/api-callbacks.h"
 #include "src/objects/arguments-inl.h"
 #include "src/objects/bigint.h"
@@ -2352,7 +2351,7 @@ DirectHandle<WasmExportedFunctionData> Factory::NewWasmExportedFunctionData(
 }
 
 DirectHandle<WasmCapiFunctionData> Factory::NewWasmCapiFunctionData(
-    Address call_target, DirectHandle<Foreign> embedder_data,
+    Address call_target, DirectHandle<CppGCManagedBase> embedder_data,
     DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
     const wasm::CanonicalSig* sig) {
   DirectHandle<WasmImportData> import_data =
@@ -2384,6 +2383,8 @@ DirectHandle<WasmCapiFunctionData> Factory::NewWasmCapiFunctionData(
 
 Tagged<WasmArray> Factory::NewWasmArrayUninitialized(
     uint32_t length, DirectHandle<Map> map, AllocationType allocation) {
+  DCHECK_LE(length, static_cast<uint32_t>(WasmArray::MaxLength(
+                        WasmArray::DecodeElementSizeFromMap(*map))));
   const bool is_shared = allocation == AllocationType::kSharedOld;
   DCHECK_EQ(is_shared, HeapLayout::InAnySharedSpace(*map));
   Tagged<HeapObject> raw =
@@ -3391,6 +3392,16 @@ Handle<CppHeapExternalObject> Factory::NewCppHeapExternal(
                                     DirectHandle<AllocationSite>::null()));
   CppHeapObjectWrapper(external).InitializeCppHeapWrapper();
   return handle(external, isolate());
+}
+
+Handle<CppGCManagedBase> Factory::NewCppGCManagedBase(
+    AllocationType allocation_type) {
+  Tagged<CppGCManagedBase> managed = Cast<CppGCManagedBase>(
+      AllocateRawWithAllocationSite(cpp_gc_managed_base_map(), allocation_type,
+                                    DirectHandle<AllocationSite>::null()));
+  managed->SetupLazilyInitializedCppHeapPointerField(
+      offsetof(CppGCManagedBase, cpp_gc_wrapper_));
+  return handle(managed, isolate());
 }
 
 DirectHandle<Code> Factory::NewCodeObjectForEmbeddedBuiltin(
@@ -4594,15 +4605,28 @@ Handle<StackTraceInfo> Factory::NewStackTraceInfo(
   return handle(info, isolate());
 }
 
+Handle<DebugScriptScopeInfo> Factory::NewDebugScriptScopeInfo(
+    DirectHandle<ByteArray> numeric_data,
+    DirectHandle<FixedArray> string_table) {
+  Tagged<DebugScriptScopeInfo> info = NewStructInternal<DebugScriptScopeInfo>(
+      DEBUG_SCRIPT_SCOPE_INFO_TYPE, AllocationType::kOld);
+  DisallowGarbageCollection no_gc;
+  info->set_numeric_data(*numeric_data);
+  info->set_string_table(*string_table);
+  return handle(info, isolate());
+}
+
 Handle<JSObject> Factory::NewArgumentsObject(DirectHandle<JSFunction> callee,
                                              int length) {
   bool strict_mode_callee = is_strict(callee->shared()->language_mode()) ||
                             !callee->shared()->has_simple_parameters();
-  DirectHandle<Map> map = strict_mode_callee
-                              ? isolate()->strict_arguments_map()
-                              : isolate()->sloppy_arguments_map();
-  AllocationSiteUsageContext context(isolate(), Handle<AllocationSite>(),
-                                     false);
+  return strict_mode_callee ? NewStrictArgumentsObject(callee, length)
+                            : NewSloppyArgumentsObject(callee, length);
+}
+
+Handle<JSObject> Factory::NewStrictArgumentsObject(
+    DirectHandle<JSFunction> callee, int length) {
+  DirectHandle<Map> map = isolate()->strict_arguments_map();
   DCHECK(!isolate()->has_exception());
   Handle<JSObject> result = NewJSObjectFromMap(map);
   DirectHandle<Smi> value(Smi::FromInt(length), isolate());
@@ -4610,12 +4634,23 @@ Handle<JSObject> Factory::NewArgumentsObject(DirectHandle<JSFunction> callee,
                       StoreOrigin::kMaybeKeyed,
                       Just(ShouldThrow::kThrowOnError))
       .Assert();
-  if (!strict_mode_callee) {
-    Object::SetProperty(isolate(), result, callee_string(), callee,
-                        StoreOrigin::kMaybeKeyed,
-                        Just(ShouldThrow::kThrowOnError))
-        .Assert();
-  }
+  return result;
+}
+
+Handle<JSObject> Factory::NewSloppyArgumentsObject(
+    DirectHandle<JSFunction> callee, int length) {
+  DirectHandle<Map> map = isolate()->sloppy_arguments_map();
+  DCHECK(!isolate()->has_exception());
+  Handle<JSObject> result = NewJSObjectFromMap(map);
+  DirectHandle<Smi> value(Smi::FromInt(length), isolate());
+  Object::SetProperty(isolate(), result, length_string(), value,
+                      StoreOrigin::kMaybeKeyed,
+                      Just(ShouldThrow::kThrowOnError))
+      .Assert();
+  Object::SetProperty(isolate(), result, callee_string(), callee,
+                      StoreOrigin::kMaybeKeyed,
+                      Just(ShouldThrow::kThrowOnError))
+      .Assert();
   return result;
 }
 
@@ -4750,8 +4785,7 @@ DirectHandle<RegExpData> Factory::NewAtomRegExpData(
   instance->set_escaped_source(*escaped_source);
   instance->set_flags(flags);
   instance->set_pattern(*pattern);
-  instance->set_quick_check_mask(0);
-  instance->set_quick_check_value(0);
+  instance->clear_quick_check();
   Tagged<RegExpDataWrapper> raw_wrapper = *wrapper;
   instance->set_wrapper(raw_wrapper);
   instance->InitAndPublish(isolate());
@@ -4786,8 +4820,7 @@ DirectHandle<RegExpData> Factory::NewIrRegExpData(
   instance->set_ticks_until_tier_up(ticks_until_tier_up);
   instance->set_backtrack_limit(backtrack_limit);
   instance->set_bit_field(bit_field);
-  instance->set_quick_check_mask(0);
-  instance->set_quick_check_value(0);
+  instance->clear_quick_check();
   Tagged<RegExpDataWrapper> raw_wrapper = *wrapper;
   instance->set_wrapper(raw_wrapper);
   instance->InitAndPublish(isolate());
@@ -4825,8 +4858,7 @@ DirectHandle<RegExpData> Factory::NewExperimentalRegExpData(
   instance->set_ticks_until_tier_up(JSRegExp::kUninitializedValue);
   instance->set_backtrack_limit(JSRegExp::kUninitializedValue);
   instance->set_bit_field(0);
-  instance->set_quick_check_mask(0);
-  instance->set_quick_check_value(0);
+  instance->clear_quick_check();
   Tagged<RegExpDataWrapper> raw_wrapper = *wrapper;
   instance->set_wrapper(raw_wrapper);
   instance->InitAndPublish(isolate());
@@ -5451,7 +5483,8 @@ Handle<JSFunction> Factory::JSFunctionBuilder::BuildRaw(
       // needed and maybe find some alternative to initialize it correctly
       // from the beginning.
       if (old_code->is_builtin()) {
-        jdt.SetCodeNoWriteBarrier(dispatch_handle, *code, isolate);
+        jdt.SetCodeKeepTieringRequest(dispatch_handle, *code, function, isolate,
+                                      mode);
         function->set_dispatch_handle(dispatch_handle, mode);
       } else {
         // On a transition of a feedback cell from one closure to many, make
@@ -5459,7 +5492,8 @@ Handle<JSFunction> Factory::JSFunctionBuilder::BuildRaw(
         // specialized, and if it was, eagerly re-optimize.
         if (cell_transition == FeedbackCell::kOneToMany &&
             old_code->is_context_specialized()) {
-          jdt.SetCodeNoWriteBarrier(dispatch_handle, *code, isolate);
+          jdt.SetCodeKeepTieringRequest(dispatch_handle, *code, function,
+                                        isolate, mode);
           function->set_dispatch_handle(dispatch_handle, mode);
           DCHECK(old_code->kind() == CodeKind::MAGLEV ||
                  old_code->kind() == CodeKind::TURBOFAN_JS);

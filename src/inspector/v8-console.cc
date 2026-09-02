@@ -67,10 +67,9 @@ class ConsoleHelper {
   int groupId() const { return m_inspector->contextGroupId(contextId()); }
 
   InjectedScript* injectedScript(int sessionId) {
-    std::shared_ptr<InspectedContext> context =
-        m_inspector->getContext(groupId(), contextId());
-    if (!context) return nullptr;
-    return context->getInjectedScript(sessionId);
+    m_inspectedContext = m_inspector->getContext(groupId(), contextId());
+    if (!m_inspectedContext) return nullptr;
+    return m_inspectedContext->getInjectedScript(sessionId);
   }
 
   V8InspectorSessionImpl* session(int sessionId) {
@@ -210,6 +209,7 @@ class ConsoleHelper {
   const v8::debug::ConsoleCallArguments& m_info;
   const v8::debug::ConsoleContext& m_consoleContext;
   V8InspectorImpl* m_inspector;
+  std::shared_ptr<InspectedContext> m_inspectedContext;
 };
 
 void createBoundFunctionProperty(
@@ -389,7 +389,9 @@ void V8Console::Profile(const v8::debug::ConsoleCallArguments& info,
   String16 title =
       toProtocolString(m_inspector->isolate(), helper.firstArgToString());
   helper.forEachSession([&title](V8InspectorSessionImpl* session) {
-    session->profilerAgent()->consoleProfile(title);
+    if (session->profilerAgent()) {
+      session->profilerAgent()->consoleProfile(title);
+    }
   });
   TRACE_EVENT_END(TRACE_DISABLED_BY_DEFAULT("v8.inspector"), "title",
                   title.utf8().c_str());
@@ -403,7 +405,9 @@ void V8Console::ProfileEnd(const v8::debug::ConsoleCallArguments& info,
   String16 title =
       toProtocolString(m_inspector->isolate(), helper.firstArgToString());
   helper.forEachSession([&title](V8InspectorSessionImpl* session) {
-    session->profilerAgent()->consoleProfileEnd(title);
+    if (session->profilerAgent()) {
+      session->profilerAgent()->consoleProfileEnd(title);
+    }
   });
   TRACE_EVENT_END(TRACE_DISABLED_BY_DEFAULT("v8.inspector"), "title",
                   title.utf8().c_str());

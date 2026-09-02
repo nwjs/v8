@@ -55,6 +55,7 @@
 #include "src/objects/js-shadow-realm.h"
 #include "src/objects/js-shared-array.h"
 #include "src/objects/js-struct.h"
+#include "src/objects/object-conversions-inl.h"
 #include "src/objects/property-details.h"
 #ifdef V8_TEMPORAL_SUPPORT
 #include "src/objects/js-temporal-objects-inl.h"
@@ -139,6 +140,7 @@ Maybe<bool> JSReceiver::HasProperty(LookupIterator* it) {
           JSDeferredModuleNamespace::EvaluateModuleSync(it->isolate(), holder);
           RETURN_EXCEPTION_IF_EXCEPTION(it->isolate());
         }
+        JSModuleNamespace::MaybeCountMissingDefaultWithStarExport(it);
         continue;
       }
       case LookupIterator::ACCESSOR:
@@ -3035,6 +3037,9 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
     case CPP_HEAP_EXTERNAL_OBJECT_TYPE:
       accumulator->Add("<CppHeapExternalObject>");
       break;
+    case CPP_GCMANAGED_BASE_TYPE:
+      accumulator->Add("<CppGCManagedBase>");
+      break;
 
     default: {
       Tagged<Map> map_of_this = map();
@@ -3817,9 +3822,9 @@ Maybe<bool> JSObject::DefineOwnPropertyIgnoreAttributes(
         InterceptorResult result;
         if (semantics == EnforceDefineSemantics::kDefine) {
           PropertyDescriptor descriptor;
-          descriptor.set_configurable((attributes & DONT_DELETE) != 0);
-          descriptor.set_enumerable((attributes & DONT_ENUM) != 0);
-          descriptor.set_writable((attributes & READ_ONLY) != 0);
+          descriptor.set_configurable((attributes & DONT_DELETE) == 0);
+          descriptor.set_enumerable((attributes & DONT_ENUM) == 0);
+          descriptor.set_writable((attributes & READ_ONLY) == 0);
           descriptor.set_value(Cast<JSAny>(value));
           if (!DefinePropertyWithInterceptorInternal(it, it->GetInterceptor(),
                                                      should_throw, &descriptor)

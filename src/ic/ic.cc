@@ -38,6 +38,7 @@
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-proxy-inl.h"
 #include "src/objects/megadom-handler.h"
+#include "src/objects/object-conversions-inl.h"
 #include "src/objects/property-descriptor.h"
 #include "src/objects/prototype.h"
 #include "src/runtime/runtime.h"
@@ -83,6 +84,17 @@ char IC::TransitionMarkFromState(IC::State state) {
 }
 
 namespace {
+
+bool MayHaveTypedArrayInPrototypeChain(Isolate* isolate,
+                                       DirectHandle<JSObject> object) {
+  for (PrototypeIterator iter(isolate, *object); !iter.IsAtEnd();
+       iter.Advance()) {
+    // Be conservative, don't walk into proxies.
+    if (IsJSProxy(iter.GetCurrent())) return true;
+    if (IsJSTypedArray(iter.GetCurrent())) return true;
+  }
+  return false;
+}
 
 const char* GetModifier(KeyedAccessLoadMode mode) {
   switch (mode) {
@@ -234,6 +246,7 @@ static void LookupForRead(LookupIterator* it, bool is_has_property) {
         if (JSDeferredModuleNamespace::TriggersEvaluation(it)) {
           return;
         }
+        JSModuleNamespace::MaybeCountMissingDefaultWithStarExport(it);
         // Once a deferred module is evaluated, we will fallback to perform IC
         // as an ordinary module namespace. This way it can be either ACCESSOR
         // or NOT_FOUND state.
@@ -975,7 +988,8 @@ bool IC::TryHealMonomorphicIC(const MaybeObjectHandle& handler) {
   // The map/handler is already in the feedback, but we missed in baseline.
   // This means the baseline code was out of sync (still uninitialized).
   // We patch it to the monomorphic handler.
-  MaybePatchCode(FeedbackNexus::ic_handler(*feedback_handler, kind()));
+  MaybePatchCode(FeedbackNexus::ic_handler(*feedback_handler, kind(),
+                                           *lookup_start_object_map()));
   return true;
 }
 
@@ -993,7 +1007,8 @@ void IC::SetCache(DirectHandle<Name> name, const MaybeObjectHandle& handler) {
     case UNINITIALIZED: {
       UpdateMonomorphicIC(handler, name);
       if (v8_flags.sparkplug_plus) {
-        Builtin ic_handler = FeedbackNexus::ic_handler(*handler, kind());
+        Builtin ic_handler = FeedbackNexus::ic_handler(
+            *handler, kind(), *lookup_start_object_map());
         MaybePatchCode(ic_handler);
       }
       break;
@@ -2372,7 +2387,17 @@ MaybeDirectHandle<Object> StoreIC::Store(Handle<JSAny> object,
 void StoreIC::UpdateCaches(LookupIterator* lookup, DirectHandle<Object> value,
                            StoreOrigin store_origin) {
   MaybeObjectHandle handler;
-  if (LookupForWrite(lookup, value, store_origin)) {
+  if (lookup->IsElement() && !IsAnyDefineOwn() &&
+      IsJSObject(*lookup->GetReceiver()) &&
+      MayHaveTypedArrayInPrototypeChain(
+          isolate(), Cast<JSObject>(lookup->GetReceiver()))) {
+    // Make sure we don't handle this in IC if there's any JSTypedArray in
+    // the {receiver}'s prototype chain, since that prototype is going to
+    // swallow all stores that are out-of-bounds for said prototype, and we
+    // just let the runtime deal with the complexity of this.
+    set_slow_stub_reason("typed array in the prototype chain");
+    handler = MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));
+  } else if (LookupForWrite(lookup, value, store_origin)) {
     if (IsStoreGlobalIC()) {
       if (lookup->state() == LookupIterator::DATA &&
           lookup->GetReceiver().is_identical_to(lookup->GetHolder<Object>())) {
@@ -2987,17 +3012,6 @@ void KeyedStoreIC::StoreElementPolymorphicHandlers(
 }
 
 namespace {
-
-bool MayHaveTypedArrayInPrototypeChain(Isolate* isolate,
-                                       DirectHandle<JSObject> object) {
-  for (PrototypeIterator iter(isolate, *object); !iter.IsAtEnd();
-       iter.Advance()) {
-    // Be conservative, don't walk into proxies.
-    if (IsJSProxy(iter.GetCurrent())) return true;
-    if (IsJSTypedArray(iter.GetCurrent())) return true;
-  }
-  return false;
-}
 
 KeyedAccessStoreMode GetStoreMode(DirectHandle<JSObject> receiver,
                                   size_t index) {

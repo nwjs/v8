@@ -157,14 +157,6 @@ class BasicBlock {
     state_->phis()->Add(phi);
   }
 
-  ExceptionHandlerInfo::List& exception_handlers() {
-    return exception_handlers_;
-  }
-
-  void AddExceptionHandler(ExceptionHandlerInfo* handler) {
-    exception_handlers_.Add(handler);
-  }
-
   int predecessor_count() const {
     if (type_ == kEdgeSplit || type_ == kOther) {
       DCHECK_NOT_NULL(predecessor());
@@ -365,7 +357,7 @@ class BasicBlock {
     }
     bool has_register_merge = false;
 #ifdef V8_ENABLE_MAGLEV
-    if (!state()->register_state().is_initialized()) {
+    if (!state()->has_register_state()) {
       // This can happen when the graph has disconnected blocks; bail out and
       // don't jump thread them.
       return true;
@@ -400,7 +392,6 @@ class BasicBlock {
 
   ZoneVector<Node*> nodes_;
   ControlNode* control_node_;
-  ExceptionHandlerInfo::List exception_handlers_;
 
   union {
     MergePointInterpreterFrameState* state_;

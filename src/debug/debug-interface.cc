@@ -456,8 +456,8 @@ size_t ScriptSource::Length() const {
 size_t ScriptSource::Size() const {
   auto source = Utils::OpenDirectHandle(this);
 #if V8_ENABLE_WEBASSEMBLY
-  if (IsForeign(*source)) {
-    return i::Cast<i::Managed<i::wasm::NativeModule>>(*source)
+  if (i::Is<i::CppGCManaged<i::wasm::NativeModule>>(*source)) {
+    return i::Cast<i::CppGCManaged<i::wasm::NativeModule>>(*source)
         ->ptr()
         ->wire_bytes()
         .size();
@@ -478,8 +478,8 @@ MaybeLocal<String> ScriptSource::JavaScriptCode() const {
 Maybe<std::vector<uint8_t>> ScriptSource::GetWasmBytecode(
     size_t max_size) const {
   auto source = Utils::OpenDirectHandle(this);
-  if (!IsForeign(*source)) return {};
-  auto ptr = i::Cast<i::Managed<i::wasm::NativeModule>>(*source)->ptr();
+  if (!i::Is<i::CppGCManaged<i::wasm::NativeModule>>(*source)) return {};
+  auto ptr = i::Cast<i::CppGCManaged<i::wasm::NativeModule>>(*source)->ptr();
   base::Vector<const uint8_t> wire_bytes = ptr->wire_bytes();
   if (wire_bytes.size() > max_size) return Just(std::vector<uint8_t>());
   return Just(std::vector<uint8_t>(wire_bytes.begin(), wire_bytes.end()));
@@ -635,7 +635,7 @@ bool Script::GetPossibleBreakpoints(
   i::Handle<i::Script> script = Utils::OpenHandle(this);
 #if V8_ENABLE_WEBASSEMBLY
   if (script->type() == i::Script::Type::kWasm) {
-    i::Managed<i::wasm::NativeModule>::Ptr native_module =
+    i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
         script->wasm_native_module();
     return i::WasmScript::GetPossibleBreakpoints(native_module.raw(), start,
                                                  end, locations);
@@ -752,16 +752,6 @@ Location Script::GetSourceLocation(int offset) const {
   return Location(info.line, info.column);
 }
 
-bool Script::SetScriptSource(Local<String> newSource, bool preview,
-                             bool allow_top_frame_live_editing,
-                             LiveEditResult* result) const {
-  i::Handle<i::Script> script = Utils::OpenHandle(this);
-  i::Isolate* isolate = i::Isolate::Current();
-  return isolate->debug()->SetScriptSource(
-      script, Utils::OpenHandle(*newSource), preview,
-      allow_top_frame_live_editing, result);
-}
-
 bool Script::SetBreakpoint(Local<String> condition, Location* location,
                            BreakpointId* id) const {
   i::Handle<i::Script> script = Utils::OpenHandle(this);
@@ -854,7 +844,7 @@ std::vector<WasmScript::DebugSymbols> WasmScript::GetDebugSymbols() const {
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
 
   std::vector<WasmScript::DebugSymbols> debug_symbols;
-  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+  i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
       script->wasm_native_module();
   auto symbols = native_module->module()->debug_symbols;
   for (size_t i = 0; i < symbols.size(); ++i) {
@@ -875,7 +865,7 @@ int WasmScript::NumFunctions() const {
   i::DisallowGarbageCollection no_gc;
   auto script = Utils::OpenDirectHandle(this);
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
-  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+  i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
       script->wasm_native_module();
   const i::wasm::WasmModule* module = native_module->module();
   DCHECK_GE(i::kMaxInt, module->functions.size());
@@ -886,7 +876,7 @@ int WasmScript::NumImportedFunctions() const {
   i::DisallowGarbageCollection no_gc;
   auto script = Utils::OpenDirectHandle(this);
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
-  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+  i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
       script->wasm_native_module();
   const i::wasm::WasmModule* module = native_module->module();
   DCHECK_GE(i::kMaxInt, module->num_imported_functions);
@@ -897,7 +887,7 @@ std::pair<int, int> WasmScript::GetFunctionRange(int function_index) const {
   i::DisallowGarbageCollection no_gc;
   auto script = Utils::OpenDirectHandle(this);
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
-  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+  i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
       script->wasm_native_module();
   const i::wasm::WasmModule* module = native_module->module();
   DCHECK_LE(0, function_index);
@@ -913,7 +903,7 @@ int WasmScript::GetContainingFunction(int byte_offset) const {
   i::DisallowGarbageCollection no_gc;
   auto script = Utils::OpenDirectHandle(this);
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
-  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+  i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
       script->wasm_native_module();
   const i::wasm::WasmModule* module = native_module->module();
   DCHECK_LE(0, byte_offset);
@@ -926,7 +916,7 @@ void WasmScript::Disassemble(DisassemblyCollector* collector,
   i::DisallowGarbageCollection no_gc;
   auto script = Utils::OpenDirectHandle(this);
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
-  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+  i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
       script->wasm_native_module();
   const i::wasm::WasmModule* module = native_module->module();
   i::wasm::ModuleWireBytes wire_bytes(native_module->wire_bytes());
@@ -944,7 +934,7 @@ uint32_t WasmScript::GetFunctionHash(int function_index) {
   i::DisallowGarbageCollection no_gc;
   auto script = Utils::OpenDirectHandle(this);
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
-  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+  i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
       script->wasm_native_module();
   const i::wasm::WasmModule* module = native_module->module();
   DCHECK_LE(0, function_index);
@@ -963,7 +953,7 @@ Maybe<std::span<const uint8_t>> WasmScript::GetModuleBuildId() const {
   i::DisallowGarbageCollection no_gc;
   auto script = Utils::OpenDirectHandle(this);
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
-  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+  i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
       script->wasm_native_module();
   const i::wasm::WasmModule* wasm_module = native_module->module();
   const i::wasm::WireBytesRef& build_id = wasm_module->build_id;
@@ -978,7 +968,7 @@ Maybe<std::span<const uint8_t>> WasmScript::GetModuleBuildId() const {
 int WasmScript::CodeOffset() const {
   auto script = Utils::OpenDirectHandle(this);
   DCHECK_EQ(i::Script::Type::kWasm, script->type());
-  i::Managed<i::wasm::NativeModule>::Ptr native_module =
+  i::CppGCManaged<i::wasm::NativeModule>::Ptr native_module =
       script->wasm_native_module();
   const i::wasm::WasmModule* module = native_module->module();
 

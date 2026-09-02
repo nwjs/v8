@@ -51,9 +51,6 @@
   # is enabled.
   #'test-api-interceptors/Crash*': [FAIL, CRASH],
 
-  # This test always fails.  It tests that LiveEdit causes abort when turned off.
-  'test-debug/LiveEditDisabled': [FAIL],
-
   # This test always fails.  It tests that DisallowJavascriptExecutionScope
   # works as intended.
   'test-api/DisallowJavascriptExecutionScope': [FAIL],
@@ -161,6 +158,17 @@
   # into the handler after the stack has drifted from the context on the
   # signal.
   'test-cpu-profiler/*': [SKIP],
+
+  # Slow tests on TSAN
+  'test-heap/Regress8014': [SKIP],
+  'test-run-wasm/RunWasmTurbofan_Float32Add_Consts': [SKIP],
+  'test-run-wasm/RunWasmTurbofan_Float32Sub_Consts': [SKIP],
+  'test-run-wasm/RunWasmTurbofan_Float32Mul_Consts': [SKIP],
+  'test-run-wasm/RunWasmTurbofan_Float32Div_Consts': [SKIP],
+  'test-run-wasm/RunWasmLiftoff_Float32Add_Consts': [SKIP],
+  'test-run-wasm/RunWasmLiftoff_Float32Sub_Consts': [SKIP],
+  'test-run-wasm/RunWasmLiftoff_Float32Mul_Consts': [SKIP],
+  'test-run-wasm/RunWasmLiftoff_Float32Div_Consts': [SKIP],
 }],
 
 ##############################################################################
@@ -546,6 +554,15 @@
 ##############################################################################
 ['variant == stress_incremental_marking', {
   'test-heap-profiler/SamplingHeapProfiler': [SKIP],
+  # Tests time out in stress_incremental_marking.
+  'test-run-wasm/RunWasmTurbofan_Float32Add_Consts': [SKIP],
+  'test-run-wasm/RunWasmTurbofan_Float32Sub_Consts': [SKIP],
+  'test-run-wasm/RunWasmTurbofan_Float32Mul_Consts': [SKIP],
+  'test-run-wasm/RunWasmTurbofan_Float32Div_Consts': [SKIP],
+  'test-run-wasm/RunWasmLiftoff_Float32Add_Consts': [SKIP],
+  'test-run-wasm/RunWasmLiftoff_Float32Sub_Consts': [SKIP],
+  'test-run-wasm/RunWasmLiftoff_Float32Mul_Consts': [SKIP],
+  'test-run-wasm/RunWasmLiftoff_Float32Div_Consts': [SKIP],
 
   # BUG(https://crbug.com/v8/12999): Very slow test.
   'test-api/InternalFieldsSubclassing': [PASS, ['mode == debug and arch == ia32', SKIP]],
@@ -668,6 +685,7 @@
   'turboshaft-test-branch-combine/*': [SKIP],
   'turboshaft-test-compare-combine/*': [SKIP],
   'turboshaft-test-select-combine/*': [SKIP],
+  'turboshaft-test-simd-shift/*': [SKIP],
 
   'test-unwinder-code-pages/PCIsInV8_LargeCodeObject_CodePagesAPI': [SKIP],
   'test-heap-profiler/WeakReference': [SKIP],

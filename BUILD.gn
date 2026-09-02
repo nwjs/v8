@@ -71,6 +71,13 @@ declare_args() {
   # Enable compiler warnings when using V8_DEPRECATED apis.
   v8_deprecation_warnings = true
 
+  # Check that executing JavaScript inside API interrupt callbacks is
+  # disallowed.
+  # TODO(40067940): Ensure this does not break DevTools.
+  # TODO(node): Upstream issue https://github.com/nodejs/node/pull/65028
+  v8_disallow_js_in_api_interrupts_is_checked =
+      !(defined(build_with_node) && build_with_node)
+
   # Enable compiler warnings when using V8_DEPRECATE_SOON apis.
   v8_imminent_deprecation_warnings = false
 
@@ -103,6 +110,9 @@ declare_args() {
 
   # Sets -DV8_ENABLE_APX_F.
   v8_enable_apx_f = false
+
+  # Sets -DV8_ENABLE_AVX10_1.
+  v8_enable_avx10_1 = false
 
   # Sets -DENABLE_HUGEPAGE
   v8_enable_hugepage = false
@@ -1067,6 +1077,7 @@ external_v8_defines = [
   "V8_COMPRESS_ZONES",
   "V8_ENABLE_SANDBOX",
   "V8_DEPRECATION_WARNINGS",
+  "V8_DISALLOW_JS_IN_API_INTERRUPTS_IS_CHECKED",
   "V8_IMMINENT_DEPRECATION_WARNINGS",
   "V8_USE_PERFETTO",
   "V8_USE_PERFETTO_JSON_EXPORT",
@@ -1117,6 +1128,10 @@ if (v8_enable_sandbox) {
 }
 if (v8_deprecation_warnings) {
   enabled_external_v8_defines += [ "V8_DEPRECATION_WARNINGS" ]
+}
+if (v8_disallow_js_in_api_interrupts_is_checked) {
+  enabled_external_v8_defines +=
+      [ "V8_DISALLOW_JS_IN_API_INTERRUPTS_IS_CHECKED" ]
 }
 if (v8_imminent_deprecation_warnings) {
   enabled_external_v8_defines += [ "V8_IMMINENT_DEPRECATION_WARNINGS" ]
@@ -1347,6 +1362,9 @@ config("features") {
   }
   if (v8_enable_apx_f) {
     defines += [ "V8_ENABLE_APX_F" ]
+  }
+  if (v8_enable_avx10_1) {
+    defines += [ "V8_ENABLE_AVX10_1" ]
   }
   if (v8_enable_hugepage) {
     defines += [ "ENABLE_HUGEPAGE" ]
@@ -1962,10 +1980,10 @@ config("strict_warnings") {
         v8_current_cpu == "mips64el" || v8_current_cpu == "riscv64") {
       cflags += [ "-Wshorten-64-to-32" ]
     }
-    cflags += [ "-Wmissing-field-initializers" ]
-    if (v8_current_cpu != "ppc64" && v8_current_cpu != "s390x") {
-      cflags += [ "-Wunnecessary-virtual-specifier" ]
-    }
+    cflags += [
+      "-Wmissing-field-initializers",
+      "-Wunnecessary-virtual-specifier",
+    ]
   }
 }
 
@@ -2329,6 +2347,7 @@ torque_files = [
   "src/objects/js-struct.tq",
   "src/objects/js-weak-refs.tq",
   "src/objects/literal-objects.tq",
+  "src/objects/managed.tq",
   "src/objects/map.tq",
   "src/objects/megadom-handler.tq",
   "src/objects/microtask.tq",
@@ -3224,6 +3243,8 @@ generated_file("v8_generate_features_json") {
   output_conversion = "json"
   contents = {
     v8_deprecation_warnings = v8_deprecation_warnings
+    v8_disallow_js_in_api_interrupts_is_checked =
+        v8_disallow_js_in_api_interrupts_is_checked
     v8_enable_31bit_smis_on_64bit_arch = v8_enable_31bit_smis_on_64bit_arch
     v8_enable_direct_handle = v8_enable_direct_handle
     v8_enable_extensible_ro_snapshot = v8_enable_extensible_ro_snapshot
@@ -4078,8 +4099,6 @@ v8_header_set("v8_internal_headers") {
     "src/debug/debug-stack-trace-iterator.h",
     "src/debug/debug.h",
     "src/debug/interface-types.h",
-    "src/debug/liveedit-diff.h",
-    "src/debug/liveedit.h",
     "src/deoptimizer/deoptimize-reason.h",
     "src/deoptimizer/deoptimized-frame-info.h",
     "src/deoptimizer/deoptimizer.h",
@@ -4469,6 +4488,7 @@ v8_header_set("v8_internal_headers") {
     "src/objects/lookup-inl.h",
     "src/objects/lookup.h",
     "src/objects/managed-inl.h",
+    "src/objects/managed-type-id.h",
     "src/objects/managed.h",
     "src/objects/map-inl.h",
     "src/objects/map-updater.h",
@@ -4485,6 +4505,7 @@ v8_header_set("v8_internal_headers") {
     "src/objects/module.h",
     "src/objects/name-inl.h",
     "src/objects/name.h",
+    "src/objects/object-conversions-inl.h",
     "src/objects/object-list-macros.h",
     "src/objects/object-macros-undef.h",
     "src/objects/object-macros.h",
@@ -6032,8 +6053,6 @@ v8_cluster_source_set("v8_base_without_compiler") {
     "src/debug/debug-scopes.cc",
     "src/debug/debug-stack-trace-iterator.cc",
     "src/debug/debug.cc",
-    "src/debug/liveedit-diff.cc",
-    "src/debug/liveedit.cc",
     "src/deoptimizer/deoptimize-reason.cc",
     "src/deoptimizer/deoptimized-frame-info.cc",
     "src/deoptimizer/deoptimizer.cc",

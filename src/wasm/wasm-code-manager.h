@@ -641,7 +641,7 @@ class WasmCodeAllocator {
 
 class V8_EXPORT_PRIVATE NativeModule final {
  public:
-  static constexpr ExternalPointerTag kManagedTag = kWasmNativeModuleTag;
+  static constexpr ManagedTypeId kTypeID = ManagedTypeId::kWasmNativeModule;
 
 #if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_S390X || V8_TARGET_ARCH_ARM64 || \
     V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_LOONG64 ||                     \
@@ -1036,10 +1036,6 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // last.
   OperationsBarrier::Token engine_scope_;
 
-  // {WasmCodeAllocator} manages all code reservations and allocations for this
-  // {NativeModule}.
-  WasmCodeAllocator code_allocator_;
-
   // Features enabled for this module. We keep a copy of the features that
   // were enabled at the time of the creation of this native module,
   // to be consistent across asynchronous compilations later.
@@ -1131,6 +1127,12 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   std::unique_ptr<NamesProvider> names_provider_;
 
+  // {WasmCodeAllocator} manages all code reservations and allocations for this
+  // {NativeModule}. It must be declared after {owned_code_} so that its
+  // destructor runs before {owned_code_}, removing memory ranges from the
+  // global {WasmCodeManager::lookup_map_} before code objects are freed.
+  WasmCodeAllocator code_allocator_;
+
   DebugState debug_state_ = kNotDebugging;
 
   // End of fields protected by {allocation_mutex_}.
@@ -1178,14 +1180,19 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   static bool CanRegisterUnwindInfoForNonABICompliantCodeRange();
 #endif  // V8_OS_WIN64
 
+  // Returns the NativeModule that contains the given address. Note that the
+  // returned pointer is borrowed and not reference-counted. Callers MUST ensure
+  // that the target NativeModule is kept alive (e.g. by an active call stack,
+  // owning pointer, or WasmCodeRefScope).
   NativeModule* LookupNativeModule(Address pc) const;
-  // Returns the Wasm code that contains the given address. The result
-  // is cached. There is one cache per isolate for performance reasons
-  // (to avoid locking and reference counting). Note that the returned
-  // value is not reference counted. This should not be an issue since
-  // we expect that the code is currently being executed. If 'isolate'
-  // is nullptr, no caching occurs.
+  // Returns the Wasm code that contains the given address. The result is cached
+  // in the given isolate's lookup cache. Note that the returned pointer is
+  // borrowed and not reference-counted. The {isolate} must not be nullptr.
   WasmCode* LookupCode(Isolate* isolate, Address pc) const;
+  // Non-cached version of LookupCode for contexts where no Isolate is available
+  // (e.g., in the disassembler). The caller must have an active
+  // WasmCodeRefScope. Returns a borrowed pointer.
+  WasmCode* LookupCode(Address pc) const;
   // The referenced {SafepointEntry} is owned by the cache. The next call
   // to this function must be assumed to invalidate the reference.
   std::pair<WasmCode*, SafepointEntry&> LookupCodeAndSafepoint(Isolate* isolate,
@@ -1242,8 +1249,6 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
                         size_t committed_size);
 
   void AssignRange(base::AddressRegion, NativeModule*);
-
-  WasmCode* LookupCode(Address pc) const;
 
   const size_t max_committed_code_space_;
 

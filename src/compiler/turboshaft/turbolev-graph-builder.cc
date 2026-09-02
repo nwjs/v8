@@ -3549,35 +3549,6 @@ class GraphBuildingNodeProcessor {
                      __ ChangeInt32ToIntPtr(Map(node->IndexInput()))));
     return maglev::ProcessResult::kContinue;
   }
-  maglev::ProcessResult Process(
-      maglev::LoadHoleyFixedDoubleArrayElementCheckedNotHole* node,
-      const maglev::ProcessingState& state) {
-    GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
-    V<Float64> result = __ LoadFixedDoubleArrayElement(
-        Map(node->ElementsInput()),
-        __ ChangeInt32ToIntPtr(Map(node->IndexInput())));
-    __ DeoptimizeIf(__ Float64IsHole(result), frame_state,
-                    DeoptimizeReason::kHole,
-                    node->eager_deopt_info()->feedback_to_update());
-    SetMap(node, result);
-    return maglev::ProcessResult::kContinue;
-  }
-#ifdef V8_ENABLE_UNDEFINED_DOUBLE
-  maglev::ProcessResult Process(
-      maglev::LoadHoleyFixedDoubleArrayElementCheckedNotUndefinedOrHole* node,
-      const maglev::ProcessingState& state) {
-    GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
-    V<Float64> result = __ LoadFixedDoubleArrayElement(
-        Map(node->ElementsInput()),
-        __ ChangeInt32ToIntPtr(Map(node->IndexInput())));
-    __ DeoptimizeIf(__ Float64IsUndefinedOrHole(result), frame_state,
-                    DeoptimizeReason::kHole,
-                    node->eager_deopt_info()->feedback_to_update());
-    SetMap(node, result);
-    return maglev::ProcessResult::kContinue;
-  }
-#endif  // V8_ENABLE_UNDEFINED_DOUBLE
-
   // Maps a maglev static type to the memory representation of a tagged
   // field access.
   MemoryRepresentation TaggedMemoryRepresentation(maglev::NodeType type) {
@@ -3695,14 +3666,27 @@ class GraphBuildingNodeProcessor {
                               WriteBarrierKind::kFullWriteBarrier);
     return maglev::ProcessResult::kContinue;
   }
-  template <Either<maglev::StoreFixedDoubleArrayElement,
-                   maglev::StoreFixedHoleyDoubleArrayElement>
-                T>
-  maglev::ProcessResult Process(T* node, const maglev::ProcessingState& state) {
+  maglev::ProcessResult Process(maglev::StoreFixedDoubleArrayElement* node,
+                                const maglev::ProcessingState& state) {
     __ StoreFixedDoubleArrayElement(
         Map(node->ElementsInput()),
         __ ChangeInt32ToIntPtr(Map(node->IndexInput())),
         Map(node->ValueInput()));
+    return maglev::ProcessResult::kContinue;
+  }
+  maglev::ProcessResult Process(maglev::StoreFixedHoleyDoubleArrayElement* node,
+                                const maglev::ProcessingState& state) {
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+    ScopedVar<Float64, AssemblerT> value(this, Map(node->ValueInput()));
+    IF (__ Float64IsHole(value)) {
+      value = __ Float64Constant(internal::Float64::undefined_nan());
+    }
+#else
+    V<Float64> value = Map(node->ValueInput());
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
+    __ StoreFixedDoubleArrayElement(
+        Map(node->ElementsInput()),
+        __ ChangeInt32ToIntPtr(Map(node->IndexInput())), value);
     return maglev::ProcessResult::kContinue;
   }
   maglev::ProcessResult Process(maglev::StoreMap* node,
@@ -5138,27 +5122,34 @@ class GraphBuildingNodeProcessor {
                node->eager_deopt_info()->feedback_to_update()));
     return maglev::ProcessResult::kContinue;
   }
+  // The narrowest kind that still admits everything the conversion is allowed
+  // to assume about its input.
+  static ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind
+  JSPrimitiveKindFor(maglev::NodeType assumed_input_type) {
+    if (maglev::NodeTypeIs(assumed_input_type, maglev::NodeType::kNumber)) {
+      return ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::kNumber;
+    }
+    if (maglev::NodeTypeIs(assumed_input_type,
+                           maglev::NodeType::kNumberOrBoolean)) {
+      return ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::
+          kNumberOrBoolean;
+    }
+    if (maglev::NodeTypeIs(assumed_input_type,
+                           maglev::NodeType::kNumberOrUndefined)) {
+      return ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::
+          kNumberOrUndefined;
+    }
+    DCHECK(maglev::NodeTypeIs(assumed_input_type,
+                              maglev::NodeType::kNumberOrOddball));
+    return ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::
+        kNumberOrOddball;
+  }
+
   maglev::ProcessResult Process(maglev::CheckedNumberOrOddballToFloat64* node,
                                 const maglev::ProcessingState& state) {
     GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
-    ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind kind;
-    switch (node->conversion_type()) {
-      case maglev::TaggedToFloat64ConversionType::kOnlyNumber:
-        kind = ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::kNumber;
-        break;
-      case maglev::TaggedToFloat64ConversionType::kNumberOrUndefined:
-        kind = ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::
-            kNumberOrUndefined;
-        break;
-      case maglev::TaggedToFloat64ConversionType::kNumberOrBoolean:
-        kind = ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::
-            kNumberOrBoolean;
-        break;
-      case maglev::TaggedToFloat64ConversionType::kNumberOrOddball:
-        kind = ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::
-            kNumberOrOddball;
-        break;
-    }
+    ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind kind =
+        JSPrimitiveKindFor(node->assumed_input_type());
     SetMap(node,
            __ ConvertJSPrimitiveToUntaggedOrDeopt(
                Map(node->ValueInput()), frame_state, kind,
@@ -5171,24 +5162,8 @@ class GraphBuildingNodeProcessor {
       maglev::CheckedNumberOrOddballToHoleyFloat64* node,
       const maglev::ProcessingState& state) {
     GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
-    ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind kind;
-    switch (node->conversion_type()) {
-      case maglev::TaggedToFloat64ConversionType::kOnlyNumber:
-        kind = ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::kNumber;
-        break;
-      case maglev::TaggedToFloat64ConversionType::kNumberOrUndefined:
-        kind = ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::
-            kNumberOrUndefined;
-        break;
-      case maglev::TaggedToFloat64ConversionType::kNumberOrBoolean:
-        kind = ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::
-            kNumberOrBoolean;
-        break;
-      case maglev::TaggedToFloat64ConversionType::kNumberOrOddball:
-        kind = ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::
-            kNumberOrOddball;
-        break;
-    }
+    ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind kind =
+        JSPrimitiveKindFor(node->assumed_input_type());
     SetMap(
         node,
         __ ConvertJSPrimitiveToUntaggedOrDeopt(
@@ -5204,9 +5179,9 @@ class GraphBuildingNodeProcessor {
   }
   maglev::ProcessResult Process(maglev::UnsafeNumberToFloat64* node,
                                 const maglev::ProcessingState& state) {
-    // `node->conversion_type()` doesn't matter here, since for both HeapNumbers
-    // and Oddballs, the Float64 value is at the same index (and this node never
-    // deopts, regardless of its input).
+    // `node->assumed_input_type()` doesn't matter here, since for both
+    // HeapNumbers and Oddballs, the Float64 value is at the same index (and
+    // this node never deopts, regardless of its input).
     SetMap(node, __ ConvertJSPrimitiveToUntagged(
                      Map(node->ValueInput()),
                      ConvertJSPrimitiveToUntaggedOp::UntaggedKind::kFloat64,
@@ -5216,9 +5191,9 @@ class GraphBuildingNodeProcessor {
   }
   maglev::ProcessResult Process(maglev::UnsafeNumberOrOddballToFloat64* node,
                                 const maglev::ProcessingState& state) {
-    // `node->conversion_type()` doesn't matter here, since for both HeapNumbers
-    // and Oddballs, the Float64 value is at the same index (and this node never
-    // deopts, regardless of its input).
+    // `node->assumed_input_type()` doesn't matter here, since for both
+    // HeapNumbers and Oddballs, the Float64 value is at the same index (and
+    // this node never deopts, regardless of its input).
     SetMap(node, __ ConvertJSPrimitiveToUntagged(
                      Map(node->ValueInput()),
                      ConvertJSPrimitiveToUntaggedOp::UntaggedKind::kFloat64,
@@ -5229,9 +5204,9 @@ class GraphBuildingNodeProcessor {
   maglev::ProcessResult Process(
       maglev::UnsafeNumberOrOddballToHoleyFloat64* node,
       const maglev::ProcessingState& state) {
-    // `node->conversion_type()` doesn't matter here, since for both HeapNumbers
-    // and Oddballs, the Float64 value is at the same index (and this node never
-    // deopts, regardless of its input).
+    // `node->assumed_input_type()` doesn't matter here, since for both
+    // HeapNumbers and Oddballs, the Float64 value is at the same index (and
+    // this node never deopts, regardless of its input).
     SetMap(node,
            __ ConvertJSPrimitiveToUntagged(
                Map(node->ValueInput()),
@@ -5438,21 +5413,21 @@ class GraphBuildingNodeProcessor {
       maglev::TruncateCheckedNumberOrOddballToInt32* node,
       const maglev::ProcessingState& state) {
     TruncateJSPrimitiveToWord32OrDeoptOp::InputRequirement input_requirement;
-    switch (node->conversion_type()) {
-      case maglev::TaggedToFloat64ConversionType::kOnlyNumber:
-        input_requirement =
-            TruncateJSPrimitiveToWord32OrDeoptOp::InputRequirement::kNumber;
-        break;
-      case maglev::TaggedToFloat64ConversionType::kNumberOrUndefined:
-        UNREACHABLE();
-      case maglev::TaggedToFloat64ConversionType::kNumberOrBoolean:
-        input_requirement = TruncateJSPrimitiveToWord32OrDeoptOp::
-            InputRequirement::kNumberOrBoolean;
-        break;
-      case maglev::TaggedToFloat64ConversionType::kNumberOrOddball:
-        input_requirement = TruncateJSPrimitiveToWord32OrDeoptOp::
-            InputRequirement::kNumberOrOddball;
-        break;
+    if (maglev::NodeTypeIs(node->assumed_input_type(),
+                           maglev::NodeType::kNumber)) {
+      input_requirement =
+          TruncateJSPrimitiveToWord32OrDeoptOp::InputRequirement::kNumber;
+    } else if (maglev::NodeTypeIs(node->assumed_input_type(),
+                                  maglev::NodeType::kNumberOrBoolean)) {
+      input_requirement = TruncateJSPrimitiveToWord32OrDeoptOp::
+          InputRequirement::kNumberOrBoolean;
+    } else {
+      DCHECK(maglev::NodeTypeIs(node->assumed_input_type(),
+                                maglev::NodeType::kNumberOrOddball));
+      DCHECK_NE(node->assumed_input_type(),
+                maglev::NodeType::kNumberOrUndefined);
+      input_requirement = TruncateJSPrimitiveToWord32OrDeoptOp::
+          InputRequirement::kNumberOrOddball;
     }
     GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
     SetMap(node, __ TruncateJSPrimitiveToWord32OrDeopt(
@@ -5485,10 +5460,8 @@ class GraphBuildingNodeProcessor {
     return maglev::ProcessResult::kContinue;
   }
 
-  template <Either<maglev::Float64ToSilencedFloat64,
-                   maglev::HoleyFloat64ToSilencedFloat64>
-                T>
-  maglev::ProcessResult Process(T* node, const maglev::ProcessingState& state) {
+  maglev::ProcessResult Process(maglev::Float64ToSilencedFloat64* node,
+                                const maglev::ProcessingState& state) {
     SetMap(node, __ Float64SilenceNaN(Map(node->ValueInput())));
     return maglev::ProcessResult::kContinue;
   }
@@ -5498,21 +5471,6 @@ class GraphBuildingNodeProcessor {
     SetMap(node, __ Float64SilenceNaN(Map(node->ValueInput())));
     return maglev::ProcessResult::kContinue;
   }
-#ifdef V8_ENABLE_UNDEFINED_DOUBLE
-  maglev::ProcessResult Process(
-      maglev::HoleyFloat64ConvertHoleToUndefined* node,
-      const maglev::ProcessingState& state) {
-    V<Float64> input = Map(node->ValueInput());
-
-    ScopedVar<Float64, AssemblerT> result(this, input);
-    IF (__ Float64IsHole(input)) {
-      result = __ Float64Constant(internal::Float64::undefined_nan());
-    }
-
-    SetMap(node, result);
-    return maglev::ProcessResult::kContinue;
-  }
-#endif  // V8_ENABLE_UNDEFINED_DOUBLE
   maglev::ProcessResult Process(maglev::CheckedHoleyFloat64ToFloat64* node,
                                 const maglev::ProcessingState& state) {
     V<Float64> input = Map(node->ValueInput());
@@ -5857,11 +5815,6 @@ class GraphBuildingNodeProcessor {
     return maglev::ProcessResult::kContinue;
   }
 
-  maglev::ProcessResult Process(maglev::TryOnStackReplacement*,
-                                const maglev::ProcessingState&) {
-    // Turboshaft is the top tier compiler, so we never need to OSR from it.
-    return maglev::ProcessResult::kContinue;
-  }
   maglev::ProcessResult Process(maglev::ReduceInterruptBudgetForReturn*,
                                 const maglev::ProcessingState&) {
     // No need to update the interrupt budget once we reach Turboshaft.
@@ -6401,9 +6354,12 @@ class GraphBuildingNodeProcessor {
                   value->Cast<maglev::HeapConstant>()->ref().object()));
           break;
 
-        case maglev::Opcode::kFloat64Constant: {
+        case maglev::Opcode::kFloat64Constant:
+        case maglev::Opcode::kHoleyFloat64Constant: {
           i::Float64 value_as_float =
-              value->Cast<maglev::Float64Constant>()->value();
+              value->opcode() == maglev::Opcode::kFloat64Constant
+                  ? value->Cast<maglev::Float64Constant>()->value()
+                  : value->Cast<maglev::HoleyFloat64Constant>()->value();
           if (value_as_float.is_hole_nan()) {
             builder.AddInput(
                 MachineType::AnyTagged(),

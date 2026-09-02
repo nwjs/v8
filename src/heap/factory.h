@@ -41,6 +41,7 @@ class CallableTask;
 class CallbackTask;
 class CallSiteInfo;
 class CoverageInfo;
+class CppGCManagedBase;
 class DebugInfo;
 class DeoptimizationData;
 class DeoptimizationLiteralArray;
@@ -562,6 +563,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       int bytecode_offset_or_source_position,
       DirectHandle<String> function_name, bool is_constructor);
   Handle<StackTraceInfo> NewStackTraceInfo(DirectHandle<FixedArray> frames);
+  Handle<DebugScriptScopeInfo> NewDebugScriptScopeInfo(
+      DirectHandle<ByteArray> numeric_data,
+      DirectHandle<FixedArray> string_table);
 
   // Allocate various microtasks.
   DirectHandle<CallableTask> NewCallableTask(
@@ -737,6 +741,12 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<JSObject> NewArgumentsObject(DirectHandle<JSFunction> callee,
                                       int length);
 
+  Handle<JSObject> NewStrictArgumentsObject(DirectHandle<JSFunction> callee,
+                                            int length);
+
+  Handle<JSObject> NewSloppyArgumentsObject(DirectHandle<JSFunction> callee,
+                                            int length);
+
   // Allocates and initializes a new JavaScript object based on a
   // constructor.
   // JS objects are pretenured when allocated by the bootstrapper and
@@ -868,7 +878,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       DirectHandle<WasmInternalFunction> internal_function,
       DirectHandle<Map> rtt);
   DirectHandle<WasmCapiFunctionData> NewWasmCapiFunctionData(
-      Address call_target, DirectHandle<Foreign> embedder_data,
+      Address call_target, DirectHandle<CppGCManagedBase> embedder_data,
       DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
       const wasm::CanonicalSig* sig);
   DirectHandle<WasmExportedFunctionData> NewWasmExportedFunctionData(
@@ -1014,6 +1024,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   // Create a CppHeapExternal object for V8's external API.
   Handle<CppHeapExternalObject> NewCppHeapExternal(
+      AllocationType allocation = AllocationType::kYoung);
+
+  Handle<CppGCManagedBase> NewCppGCManagedBase(
       AllocationType allocation = AllocationType::kYoung);
 
   // Allocates a new code object and initializes it to point to the given

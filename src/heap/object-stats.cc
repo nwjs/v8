@@ -25,6 +25,7 @@
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-collection-inl.h"
 #include "src/objects/literal-objects-inl.h"
+#include "src/objects/object-conversions-inl.h"
 #include "src/objects/prototype-info.h"
 #include "src/objects/slots.h"
 #include "src/objects/templates.h"
@@ -955,6 +956,8 @@ void ObjectStatsCollectorImpl::CollectGlobalStatistics() {
                                  StatsEnum::NUMBER_STRING_CACHE_TYPE);
   RecordSimpleVirtualObjectStats({}, heap_->string_split_cache(),
                                  StatsEnum::STRING_SPLIT_CACHE_TYPE);
+  RecordSimpleVirtualObjectStats({}, heap_->regexp_split_cache(),
+                                 StatsEnum::STRING_SPLIT_CACHE_TYPE);
   RecordSimpleVirtualObjectStats({}, heap_->regexp_multiple_cache(),
                                  StatsEnum::REGEXP_MULTIPLE_CACHE_TYPE);
 
@@ -1272,6 +1275,7 @@ void IterateHeap(Heap* heap, ObjectStatsVisitor* visitor) {
   CombinedHeapObjectIterator iterator(heap);
   for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
+    if (IsInaccessible(obj)) continue;
     visitor->Visit(obj);
   }
 }

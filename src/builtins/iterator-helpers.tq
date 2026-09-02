@@ -1750,6 +1750,7 @@ transitioning macro IteratorZipHelperNextCommon(
           //    ii. Return ? IteratorCloseAll(openIters, result).
           iterators.objects[kIteratorRecordFieldCount * i] = TheHole;
           IteratorZipCloseAll(iterators, false);
+          MarkIteratorHelperAsExhausted(helper);
           goto DoneWithException(exception, message);
         } label IterDone {
           // d. If result is done, then
@@ -1809,6 +1810,7 @@ transitioning macro IteratorZipHelperNextCommon(
                 //      ii. Return ? IteratorCloseAll(openIters, open).
                 iterators.objects[kIteratorRecordFieldCount * k] = TheHole;
                 IteratorZipCloseAll(iterators, false);
+                MarkIteratorHelperAsExhausted(helper);
                 goto DoneWithException(e, message);
               } label InnerDone {
                 // v. If open is done, then

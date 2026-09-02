@@ -47,6 +47,7 @@
 #include "src/objects/arguments.h"
 #include "src/objects/heap-number.h"
 #include "src/objects/js-array-buffer.h"
+#include "src/objects/js-collection-iterator.h"
 #include "src/objects/js-collection.h"
 #include "src/objects/js-generator.h"
 #include "src/objects/js-promise.h"
@@ -322,8 +323,6 @@ class ExceptionHandlerInfo;
   V(LoadFixedArrayElement)                                            \
   V(LoadFixedDoubleArrayElement)                                      \
   V(LoadHoleyFixedDoubleArrayElement)                                 \
-  V(LoadHoleyFixedDoubleArrayElementCheckedNotHole)                   \
-  IF_UD(V, LoadHoleyFixedDoubleArrayElementCheckedNotUndefinedOrHole) \
   V(LoadSignedIntDataViewElement)                                     \
   V(LoadDoubleDataViewElement)                                        \
   V(LoadTypedArrayLength)                                             \
@@ -376,8 +375,6 @@ class ExceptionHandlerInfo;
   V(UnsafeHoleyFloat64ToFloat64)                                      \
   V(UnsafeFloat64ToHoleyFloat64)                                      \
   V(Float64ToSilencedFloat64)                                         \
-  V(HoleyFloat64ToSilencedFloat64)                                    \
-  IF_UD(V, HoleyFloat64ConvertHoleToUndefined)                        \
   IF_UD(V, HoleyFloat64IsUndefinedOrHole)                             \
   IF_NOT_UD(V, HoleyFloat64IsHole)                                    \
   V(LogicalNot)                                                       \
@@ -469,7 +466,6 @@ class ExceptionHandlerInfo;
   V(MajorGCForCompilerTesting)                \
   V(FunctionEntryStackCheck)                  \
   V(GeneratorStore)                           \
-  V(TryOnStackReplacement)                    \
   V(StoreMap)                                 \
   V(StoreFixedArrayElementWithWriteBarrier)   \
   V(StoreFixedArrayElementNoWriteBarrier)     \
@@ -563,7 +559,7 @@ static constexpr Opcode kFirstOpcode = static_cast<Opcode>(0);
 static constexpr Opcode kLastOpcode = static_cast<Opcode>(kOpcodeCount - 1);
 #undef PLUS_ONE
 
-const char* OpcodeToString(Opcode opcode);
+V8_EXPORT_PRIVATE const char* OpcodeToString(Opcode opcode);
 inline std::ostream& operator<<(std::ostream& os, Opcode opcode) {
   return os << OpcodeToString(opcode);
 }
@@ -971,43 +967,6 @@ std::ostream& operator<<(std::ostream& os, UseRepresentation repr);
 typedef base::EnumSet<ValueRepresentation, int8_t> ValueRepresentationSet;
 typedef base::EnumSet<UseRepresentation, int8_t> UseRepresentationSet;
 
-enum class TaggedToFloat64ConversionType : uint8_t {
-  kOnlyNumber,
-  kNumberOrUndefined,
-  kNumberOrBoolean,
-  kNumberOrOddball,
-};
-
-constexpr TaggedToFloat64ConversionType GetTaggedToFloat64ConversionType(
-    NodeType type) {
-  if (NodeTypeIs(type, NodeType::kNumber)) {
-    return TaggedToFloat64ConversionType::kOnlyNumber;
-  }
-  if (NodeTypeIs(type, NodeType::kNumberOrBoolean)) {
-    return TaggedToFloat64ConversionType::kNumberOrBoolean;
-  }
-  if (NodeTypeIs(type, NodeType::kNumberOrUndefined)) {
-    return TaggedToFloat64ConversionType::kNumberOrUndefined;
-  }
-  DCHECK(NodeTypeIs(type, NodeType::kNumberOrOddball));
-  return TaggedToFloat64ConversionType::kNumberOrOddball;
-}
-
-constexpr NodeType GetAllowedTypeFromConversionType(
-    TaggedToFloat64ConversionType conversion) {
-  switch (conversion) {
-    case TaggedToFloat64ConversionType::kOnlyNumber:
-      return NodeType::kNumber;
-    case TaggedToFloat64ConversionType::kNumberOrUndefined:
-      return NodeType::kNumberOrUndefined;
-    case TaggedToFloat64ConversionType::kNumberOrBoolean:
-      return NodeType::kNumberOrBoolean;
-    case TaggedToFloat64ConversionType::kNumberOrOddball:
-      return NodeType::kNumberOrOddball;
-  }
-  UNREACHABLE();
-}
-
 constexpr Condition ConditionFor(Operation cond);
 constexpr Condition ConditionForNaN();
 
@@ -1033,21 +992,6 @@ inline std::ostream& operator<<(std::ostream& os,
       return os << "RawPtr";
     case ValueRepresentation::kNone:
       return os << "None";
-  }
-  UNREACHABLE();
-}
-
-inline std::ostream& operator<<(
-    std::ostream& os, const TaggedToFloat64ConversionType& conversion_type) {
-  switch (conversion_type) {
-    case TaggedToFloat64ConversionType::kOnlyNumber:
-      return os << "Number";
-    case TaggedToFloat64ConversionType::kNumberOrUndefined:
-      return os << "NumberOrUndefined";
-    case TaggedToFloat64ConversionType::kNumberOrBoolean:
-      return os << "NumberOrBoolean";
-    case TaggedToFloat64ConversionType::kNumberOrOddball:
-      return os << "NumberOrOddball";
   }
   UNREACHABLE();
 }
@@ -1993,7 +1937,6 @@ class LazyDeoptInfo : public DeoptInfo {
 
 class ExceptionHandlerInfo {
  public:
-  using List = base::ThreadedList<ExceptionHandlerInfo>;
   enum Mode {
     kNoExceptionHandler = -1,
     kLazyDeopt = -2,
@@ -2039,12 +1982,6 @@ class ExceptionHandlerInfo {
   Label trampoline_entry_;
   int depth_;
   int pc_offset_;
-
-  ExceptionHandlerInfo* next_ = nullptr;
-  ExceptionHandlerInfo** next() { return &next_; }
-
-  friend List;
-  friend base::ThreadedListTraits<ExceptionHandlerInfo>;
 };
 
 // Dummy type for the initial raw allocation.
@@ -2360,6 +2297,16 @@ class NodeBase : public ZoneObject {
     DCHECK(properties().can_throw());
     return reinterpret_cast<const ExceptionHandlerInfo*>(
         exception_handler_address());
+  }
+
+  // Returns the catch block this node throws to, or nullptr if it cannot throw
+  // or if it lazy deopts instead of dispatching to a handler.
+  BasicBlock* GetLiveCatchBlock() {
+    if (!properties().can_throw()) return nullptr;
+    ExceptionHandlerInfo* info = exception_handler_info();
+    if (!info->HasExceptionHandler()) return nullptr;
+    if (info->ShouldLazyDeopt()) return nullptr;
+    return info->catch_block();
   }
 
   void set_register_snapshot(RegisterSnapshot snapshot) {
@@ -2764,6 +2711,12 @@ class ValueNode : public Node {
   constexpr bool is_float64_or_holey_float64() const {
     return is_float64() || is_holey_float64();
   }
+
+  // Whether the bits of this value could be one of the NaN patterns that
+  // HoleyFloat64 gives a meaning to. Only false if that is provably not the
+  // case, so that whoever writes those bits somewhere they would regain that
+  // meaning (a double array, mainly) can skip canonicalizing them.
+  bool MayBeHoleOrUndefinedNan() const;
 
 #ifdef V8_COMPRESS_POINTERS
   constexpr bool decompresses_tagged_result() const {
@@ -3266,7 +3219,7 @@ class DeadValue : public FixedInputValueNodeT<0, DeadValue> {
 };
 
 template <class Derived, Operation kOperation>
-class UnaryWithFeedbackNode : public FixedInputValueNodeT<1, Derived> {
+class UnaryWithEmbeddedFeedbackNode : public FixedInputValueNodeT<1, Derived> {
   using Base = FixedInputValueNodeT<1, Derived>;
 
  public:
@@ -3274,17 +3227,17 @@ class UnaryWithFeedbackNode : public FixedInputValueNodeT<1, Derived> {
   static constexpr OpProperties kProperties = OpProperties::JSCall();
   DECLARE_UNOP(Tagged)
 
-  compiler::FeedbackSource feedback() const { return feedback_; }
+  compiler::EmbeddedFeedbackSource feedback() const { return feedback_; }
 
  protected:
-  explicit UnaryWithFeedbackNode(uint64_t bitfield,
-                                 const compiler::FeedbackSource& feedback)
+  explicit UnaryWithEmbeddedFeedbackNode(
+      uint64_t bitfield, const compiler::EmbeddedFeedbackSource& feedback)
       : Base(bitfield), feedback_(feedback) {}
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 
-  const compiler::FeedbackSource feedback_;
+  const compiler::EmbeddedFeedbackSource feedback_;
 };
 
 template <class Derived, Operation kOperation>
@@ -3309,18 +3262,6 @@ class BinaryWithEmbeddedFeedbackNode : public FixedInputValueNodeT<2, Derived> {
   const compiler::EmbeddedFeedbackSource feedback_;
 };
 
-#define DEF_OPERATION_WITH_FEEDBACK_NODE(Name, Super, OpName)         \
-  class Name : public Super<Name, Operation::k##OpName> {             \
-    using Base = Super<Name, Operation::k##OpName>;                   \
-                                                                      \
-   public:                                                            \
-    Name(uint64_t bitfield, const compiler::FeedbackSource& feedback) \
-        : Base(bitfield, feedback) {}                                 \
-    int MaxCallStackArgs() const { return 0; }                        \
-    void SetValueLocationConstraints();                               \
-    void GenerateCode(MaglevAssembler*, const ProcessingState&);      \
-  };
-
 #define DEF_OPERATION_WITH_EMBEDDED_FEEDBACK_NODE(Name, Super, OpName)        \
   class Name : public Super<Name, Operation::k##OpName> {                     \
     using Base = Super<Name, Operation::k##OpName>;                           \
@@ -3333,8 +3274,9 @@ class BinaryWithEmbeddedFeedbackNode : public FixedInputValueNodeT<2, Derived> {
     void GenerateCode(MaglevAssembler*, const ProcessingState&);              \
   };
 
-#define DEF_UNARY_WITH_FEEDBACK_NODE(Name) \
-  DEF_OPERATION_WITH_FEEDBACK_NODE(Generic##Name, UnaryWithFeedbackNode, Name)
+#define DEF_UNARY_WITH_FEEDBACK_NODE(Name)   \
+  DEF_OPERATION_WITH_EMBEDDED_FEEDBACK_NODE( \
+      Generic##Name, UnaryWithEmbeddedFeedbackNode, Name)
 #define DEF_BINARY_WITH_EMBEDDED_FEEDBACK_NODE(Name) \
   DEF_OPERATION_WITH_EMBEDDED_FEEDBACK_NODE(         \
       Generic##Name, BinaryWithEmbeddedFeedbackNode, Name)
@@ -3345,7 +3287,6 @@ COMPARISON_OPERATION_LIST(DEF_BINARY_WITH_EMBEDDED_FEEDBACK_NODE)
 
 #undef DEF_UNARY_WITH_FEEDBACK_NODE
 #undef DEF_BINARY_WITH_EMBEDDED_FEEDBACK_NODE
-#undef DEF_OPERATION_WITH_FEEDBACK_NODE
 #undef DEF_OPERATION_WITH_EMBEDDED_FEEDBACK_NODE
 
 // Number of bits needed to encode an Operation in a node's bitfield.
@@ -4460,12 +4401,12 @@ DEFINE_TRUNCATE_NODE(TruncateHoleyFloat64ToInt32, HoleyFloat64,
 class CheckedNumberOrOddballToFloat64
     : public FixedInputValueNodeT<1, CheckedNumberOrOddballToFloat64> {
  public:
-  explicit CheckedNumberOrOddballToFloat64(
-      uint64_t bitfield, TaggedToFloat64ConversionType conversion_type)
-      : Base(TaggedToFloat64ConversionTypeOffset::update(bitfield,
-                                                         conversion_type)) {
-    // CheckedNumberToFloat64 should be used instead for kOnlyNumber.
-    DCHECK_NE(conversion_type, TaggedToFloat64ConversionType::kOnlyNumber);
+  explicit CheckedNumberOrOddballToFloat64(uint64_t bitfield,
+                                           NodeType assumed_input_type)
+      : Base(bitfield), assumed_input_type_(assumed_input_type) {
+    DCHECK(NodeTypeIs(assumed_input_type, NodeType::kNumberOrOddball));
+    // CheckedNumberToFloat64 should be used instead for kNumber.
+    DCHECK(!NodeTypeIs(assumed_input_type, NodeType::kNumber));
   }
 
   static constexpr OpProperties kProperties =
@@ -4475,77 +4416,67 @@ class CheckedNumberOrOddballToFloat64
   // Not a conversion node since it is not reversible.
   static_assert(!kProperties.is_conversion());
 
-  TaggedToFloat64ConversionType conversion_type() const {
-    return TaggedToFloat64ConversionTypeOffset::decode(Base::bitfield());
-  }
+  NodeType assumed_input_type() const { return assumed_input_type_; }
   DeoptimizeReason deoptimize_reason() const {
-    return conversion_type() == TaggedToFloat64ConversionType::kNumberOrBoolean
+    return NodeTypeIs(assumed_input_type(), NodeType::kNumberOrBoolean)
                ? DeoptimizeReason::kNotANumberOrBoolean
                : DeoptimizeReason::kNotANumberOrOddball;
   }
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
-  auto options() const { return std::tuple{conversion_type()}; }
+  auto options() const { return std::tuple{assumed_input_type()}; }
 
  private:
-  using TaggedToFloat64ConversionTypeOffset =
-      Base::template NextBitField<TaggedToFloat64ConversionType, 2>;
+  const NodeType assumed_input_type_;
 };
 
 class CheckedNumberOrOddballToHoleyFloat64
     : public FixedInputValueNodeT<1, CheckedNumberOrOddballToHoleyFloat64> {
  public:
-  explicit CheckedNumberOrOddballToHoleyFloat64(
-      uint64_t bitfield, TaggedToFloat64ConversionType conversion_type)
-      : Base(TaggedToFloat64ConversionTypeOffset::update(bitfield,
-                                                         conversion_type)) {
-    // CheckedNumberToFloat64 should be used instead for kOnlyNumber.
-    DCHECK_NE(conversion_type, TaggedToFloat64ConversionType::kOnlyNumber);
+  explicit CheckedNumberOrOddballToHoleyFloat64(uint64_t bitfield,
+                                                NodeType assumed_input_type)
+      : Base(bitfield), assumed_input_type_(assumed_input_type) {
+    DCHECK(NodeTypeIs(assumed_input_type, NodeType::kNumberOrOddball));
+    // CheckedNumberToFloat64 should be used instead for kNumber.
+    DCHECK(!NodeTypeIs(assumed_input_type, NodeType::kNumber));
   }
 
   static constexpr OpProperties kProperties =
       OpProperties::EagerDeopt() | OpProperties::HoleyFloat64();
   DECLARE_UNOP(Tagged)
 
-  TaggedToFloat64ConversionType conversion_type() const {
-    return TaggedToFloat64ConversionTypeOffset::decode(Base::bitfield());
-  }
+  NodeType assumed_input_type() const { return assumed_input_type_; }
 
   DeoptimizeReason deoptimize_reason() const {
-    switch (conversion_type()) {
-      case TaggedToFloat64ConversionType::kOnlyNumber:
-        // CheckedNumberToFloat64 should be used instead for kOnlyNumber.
-        UNREACHABLE();
-      case TaggedToFloat64ConversionType::kNumberOrBoolean:
-        return DeoptimizeReason::kNotANumberOrBoolean;
-      case TaggedToFloat64ConversionType::kNumberOrUndefined:
-        return DeoptimizeReason::kNotANumberOrUndefined;
-      case TaggedToFloat64ConversionType::kNumberOrOddball:
-        return DeoptimizeReason::kNotANumberOrOddball;
+    if (NodeTypeIs(assumed_input_type(), NodeType::kNumberOrBoolean)) {
+      return DeoptimizeReason::kNotANumberOrBoolean;
     }
-    UNREACHABLE();
+    if (NodeTypeIs(assumed_input_type(), NodeType::kNumberOrUndefined)) {
+      return DeoptimizeReason::kNotANumberOrUndefined;
+    }
+    DCHECK(NodeTypeIs(assumed_input_type(), NodeType::kNumberOrOddball));
+    return DeoptimizeReason::kNotANumberOrOddball;
   }
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 
-  auto options() const { return std::tuple{conversion_type()}; }
+  auto options() const { return std::tuple{assumed_input_type()}; }
 
  private:
-  using TaggedToFloat64ConversionTypeOffset =
-      Base::template NextBitField<TaggedToFloat64ConversionType, 2>;
+  const NodeType assumed_input_type_;
 };
 
 class UnsafeNumberOrOddballToFloat64
     : public FixedInputValueNodeT<1, UnsafeNumberOrOddballToFloat64> {
  public:
-  explicit UnsafeNumberOrOddballToFloat64(
-      uint64_t bitfield, TaggedToFloat64ConversionType conversion_type)
-      : Base(TaggedToFloat64ConversionTypeOffset::update(bitfield,
-                                                         conversion_type)) {
-    // UnsafeNumberToFloat64 should be used instead for kOnlyNumber.
-    DCHECK_NE(conversion_type, TaggedToFloat64ConversionType::kOnlyNumber);
+  explicit UnsafeNumberOrOddballToFloat64(uint64_t bitfield,
+                                          NodeType assumed_input_type)
+      : Base(bitfield), assumed_input_type_(assumed_input_type) {
+    DCHECK(NodeTypeIs(assumed_input_type, NodeType::kNumberOrOddball));
+    // UnsafeNumberToFloat64 should be used instead for kNumber.
+    DCHECK(!NodeTypeIs(assumed_input_type, NodeType::kNumber));
   }
 
   static constexpr OpProperties kProperties = OpProperties::Float64();
@@ -4554,26 +4485,24 @@ class UnsafeNumberOrOddballToFloat64
   // Not a conversion node since it is not reversible.
   static_assert(!kProperties.is_conversion());
 
-  TaggedToFloat64ConversionType conversion_type() const {
-    return TaggedToFloat64ConversionTypeOffset::decode(Base::bitfield());
-  }
+  NodeType assumed_input_type() const { return assumed_input_type_; }
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
-  auto options() const { return std::tuple{conversion_type()}; }
+  auto options() const { return std::tuple{assumed_input_type()}; }
 
  private:
-  using TaggedToFloat64ConversionTypeOffset =
-      Base::template NextBitField<TaggedToFloat64ConversionType, 2>;
+  const NodeType assumed_input_type_;
 };
 
 class UnsafeNumberOrOddballToHoleyFloat64
     : public FixedInputValueNodeT<1, UnsafeNumberOrOddballToHoleyFloat64> {
  public:
-  explicit UnsafeNumberOrOddballToHoleyFloat64(
-      uint64_t bitfield, TaggedToFloat64ConversionType conversion_type)
-      : Base(TaggedToFloat64ConversionTypeOffset::update(bitfield,
-                                                         conversion_type)) {}
+  explicit UnsafeNumberOrOddballToHoleyFloat64(uint64_t bitfield,
+                                               NodeType assumed_input_type)
+      : Base(bitfield), assumed_input_type_(assumed_input_type) {
+    DCHECK(NodeTypeIs(assumed_input_type, NodeType::kNumberOrOddball));
+  }
 
   static constexpr OpProperties kProperties = OpProperties::HoleyFloat64();
   DECLARE_UNOP(Tagged)
@@ -4581,15 +4510,12 @@ class UnsafeNumberOrOddballToHoleyFloat64
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 
-  TaggedToFloat64ConversionType conversion_type() const {
-    return TaggedToFloat64ConversionTypeOffset::decode(Base::bitfield());
-  }
+  NodeType assumed_input_type() const { return assumed_input_type_; }
 
-  auto options() const { return std::tuple{conversion_type()}; }
+  auto options() const { return std::tuple{assumed_input_type()}; }
 
  private:
-  using TaggedToFloat64ConversionTypeOffset =
-      Base::template NextBitField<TaggedToFloat64ConversionType, 2>;
+  const NodeType assumed_input_type_;
 };
 
 class UnsafeHoleyFloat64ToFloat64
@@ -4603,21 +4529,6 @@ class UnsafeHoleyFloat64ToFloat64
   int MaxCallStackArgs() const { return 0; }
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
-};
-
-class HoleyFloat64ToSilencedFloat64
-    : public FixedInputValueNodeT<1, HoleyFloat64ToSilencedFloat64> {
- public:
-  explicit HoleyFloat64ToSilencedFloat64(uint64_t bitfield) : Base(bitfield) {}
-
-  static constexpr OpProperties kProperties = OpProperties::Float64();
-  DECLARE_UNOP(HoleyFloat64)
-
-  int MaxCallStackArgs() const { return 0; }
-  void SetValueLocationConstraints();
-  void GenerateCode(MaglevAssembler*, const ProcessingState&);
-
-  auto options() const { return std::tuple{}; }
 };
 
 class Float64ToSilencedFloat64
@@ -4644,6 +4555,7 @@ class UnsafeFloat64ToHoleyFloat64
   DECLARE_UNOP(Float64)
 
   int MaxCallStackArgs() const { return 0; }
+  void VerifyInputs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 
@@ -4651,20 +4563,6 @@ class UnsafeFloat64ToHoleyFloat64
 };
 
 #ifdef V8_ENABLE_UNDEFINED_DOUBLE
-class HoleyFloat64ConvertHoleToUndefined
-    : public FixedInputValueNodeT<1, HoleyFloat64ConvertHoleToUndefined> {
- public:
-  explicit HoleyFloat64ConvertHoleToUndefined(uint64_t bitfield)
-      : Base(bitfield) {}
-
-  static constexpr OpProperties kProperties = OpProperties::HoleyFloat64();
-  DECLARE_UNOP(HoleyFloat64)
-
-  int MaxCallStackArgs() const { return 0; }
-  void SetValueLocationConstraints();
-  void GenerateCode(MaglevAssembler*, const ProcessingState&);
-};
-
 class HoleyFloat64IsUndefinedOrHole
     : public FixedInputValueNodeT<1, HoleyFloat64IsUndefinedOrHole> {
  public:
@@ -4693,10 +4591,12 @@ class HoleyFloat64IsHole : public FixedInputValueNodeT<1, HoleyFloat64IsHole> {
 class TruncateUnsafeNumberOrOddballToInt32
     : public FixedInputValueNodeT<1, TruncateUnsafeNumberOrOddballToInt32> {
  public:
-  explicit TruncateUnsafeNumberOrOddballToInt32(
-      uint64_t bitfield, TaggedToFloat64ConversionType conversion_type)
-      : Base(TaggedToFloat64ConversionTypeOffset::update(bitfield,
-                                                         conversion_type)) {}
+  explicit TruncateUnsafeNumberOrOddballToInt32(uint64_t bitfield,
+                                                NodeType assumed_input_type)
+      : Base(bitfield), assumed_input_type_(assumed_input_type) {
+    DCHECK(NodeTypeIs(assumed_input_type, NodeType::kNumberOrOddball));
+    DCHECK_NE(assumed_input_type, NodeType::kNumberOrUndefined);
+  }
 
   static constexpr OpProperties kProperties = OpProperties::Int32();
   DECLARE_UNOP(Tagged)
@@ -4704,15 +4604,12 @@ class TruncateUnsafeNumberOrOddballToInt32
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 
-  TaggedToFloat64ConversionType conversion_type() const {
-    return TaggedToFloat64ConversionTypeOffset::decode(bitfield());
-  }
+  NodeType assumed_input_type() const { return assumed_input_type_; }
 
-  auto options() const { return std::tuple{conversion_type()}; }
+  auto options() const { return std::tuple{assumed_input_type()}; }
 
  private:
-  using TaggedToFloat64ConversionTypeOffset =
-      NextBitField<TaggedToFloat64ConversionType, 2>;
+  const NodeType assumed_input_type_;
 };
 
 // This node checks that the input is a Number and that it is in the SafeInt
@@ -4783,10 +4680,12 @@ class TruncateHoleyFloat64AsSafeIntToInt32
 class TruncateCheckedNumberOrOddballToInt32
     : public FixedInputValueNodeT<1, TruncateCheckedNumberOrOddballToInt32> {
  public:
-  explicit TruncateCheckedNumberOrOddballToInt32(
-      uint64_t bitfield, TaggedToFloat64ConversionType conversion_type)
-      : Base(TaggedToFloat64ConversionTypeOffset::update(bitfield,
-                                                         conversion_type)) {}
+  explicit TruncateCheckedNumberOrOddballToInt32(uint64_t bitfield,
+                                                 NodeType assumed_input_type)
+      : Base(bitfield), assumed_input_type_(assumed_input_type) {
+    DCHECK(NodeTypeIs(assumed_input_type, NodeType::kNumberOrOddball));
+    DCHECK_NE(assumed_input_type, NodeType::kNumberOrUndefined);
+  }
 
   static constexpr OpProperties kProperties =
       OpProperties::EagerDeopt() | OpProperties::Int32();
@@ -4795,15 +4694,12 @@ class TruncateCheckedNumberOrOddballToInt32
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 
-  TaggedToFloat64ConversionType conversion_type() const {
-    return TaggedToFloat64ConversionTypeOffset::decode(bitfield());
-  }
+  NodeType assumed_input_type() const { return assumed_input_type_; }
 
-  auto options() const { return std::tuple{conversion_type()}; }
+  auto options() const { return std::tuple{assumed_input_type()}; }
 
  private:
-  using TaggedToFloat64ConversionTypeOffset =
-      NextBitField<TaggedToFloat64ConversionType, 2>;
+  const NodeType assumed_input_type_;
 };
 
 class LogicalNot : public FixedInputValueNodeT<1, LogicalNot> {
@@ -5105,40 +5001,6 @@ class GeneratorStore : public VarargsNodeT<2, GeneratorStore> {
  private:
   const int suspend_id_;
   const int bytecode_offset_;
-};
-
-class TryOnStackReplacement : public FixedInputNodeT<1, TryOnStackReplacement> {
- public:
-  explicit TryOnStackReplacement(uint64_t bitfield, int32_t loop_depth,
-                                 FeedbackSlot feedback_slot,
-                                 BytecodeOffset osr_offset,
-                                 MaglevCompilationUnit* unit)
-      : Base(bitfield),
-        loop_depth_(loop_depth),
-        feedback_slot_(feedback_slot),
-        osr_offset_(osr_offset),
-        unit_(unit) {}
-
-  static constexpr OpProperties kProperties =
-      OpProperties::DeferredCall() | OpProperties::EagerDeopt() |
-      OpProperties::CanAllocate() | OpProperties::NotIdempotent();
-  DECLARE_INPUTS(Closure)
-  DECLARE_INPUT_TYPES(Tagged)
-
-  Input closure() { return Node::input(0); }
-
-  const MaglevCompilationUnit* unit() const { return unit_; }
-
-  int MaxCallStackArgs() const;
-  void SetValueLocationConstraints();
-  void GenerateCode(MaglevAssembler*, const ProcessingState&);
-
- private:
-  // For OSR.
-  const int32_t loop_depth_;
-  const FeedbackSlot feedback_slot_;
-  const BytecodeOffset osr_offset_;
-  MaglevCompilationUnit* const unit_;
 };
 
 class ForInPrepare : public FixedInputValueNodeT<2, ForInPrepare> {
@@ -6204,6 +6066,16 @@ struct VirtualJSStringIteratorShape : VirtualJSObjectShape {
   using T = JSStringIterator;
 #define FIELD_LIST(V)                                       \
   V(string, offsetof(T, string_), vobj::FieldType::kTagged) \
+  V(index, offsetof(T, index_), vobj::FieldType::kTagged)
+  DEF_SHAPE(VirtualJSObjectShape, FIELD_LIST);
+#undef FIELD_LIST
+};
+
+struct VirtualJSMapIteratorShape : VirtualJSObjectShape {
+  using T = JSCollectionIterator;
+#define FIELD_LIST(V)                                     \
+  V(table, offsetof(T, table_), vobj::FieldType::kTagged, \
+    vobj::FieldConstness::kConstAfterInit)                \
   V(index, offsetof(T, index_), vobj::FieldType::kTagged)
   DEF_SHAPE(VirtualJSObjectShape, FIELD_LIST);
 #undef FIELD_LIST
@@ -8229,8 +8101,9 @@ class ProcessWasmArgument
  public:
   explicit ProcessWasmArgument(uint64_t bitfield) : Base(bitfield) {}
 
-  static constexpr OpProperties kProperties =
-      OpProperties::EagerDeopt() | OpProperties::TaggedValue();
+  static constexpr OpProperties kProperties = OpProperties::EagerDeopt() |
+                                              OpProperties::TaggedValue() |
+                                              OpProperties::NotIdempotent();
 
   DECLARE_INPUTS(Value)
   DECLARE_INPUT_TYPES(Tagged)
@@ -8971,43 +8844,6 @@ class LoadHoleyFixedDoubleArrayElement
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
 };
 
-class LoadHoleyFixedDoubleArrayElementCheckedNotHole
-    : public FixedInputValueNodeT<
-          2, LoadHoleyFixedDoubleArrayElementCheckedNotHole> {
- public:
-  explicit LoadHoleyFixedDoubleArrayElementCheckedNotHole(uint64_t bitfield)
-      : Base(bitfield) {}
-
-  static constexpr OpProperties kProperties = OpProperties::CanRead() |
-                                              OpProperties::Float64() |
-                                              OpProperties::EagerDeopt();
-  DECLARE_INPUTS(Elements, Index)
-  DECLARE_INPUT_TYPES(Tagged, Int32)
-
-  void SetValueLocationConstraints();
-  void GenerateCode(MaglevAssembler*, const ProcessingState&);
-};
-
-#ifdef V8_ENABLE_UNDEFINED_DOUBLE
-class LoadHoleyFixedDoubleArrayElementCheckedNotUndefinedOrHole
-    : public FixedInputValueNodeT<
-          2, LoadHoleyFixedDoubleArrayElementCheckedNotUndefinedOrHole> {
- public:
-  explicit LoadHoleyFixedDoubleArrayElementCheckedNotUndefinedOrHole(
-      uint64_t bitfield)
-      : Base(bitfield) {}
-
-  static constexpr OpProperties kProperties = OpProperties::CanRead() |
-                                              OpProperties::Float64() |
-                                              OpProperties::EagerDeopt();
-  DECLARE_INPUTS(Elements, Index)
-  DECLARE_INPUT_TYPES(Tagged, Int32)
-
-  void SetValueLocationConstraints();
-  void GenerateCode(MaglevAssembler*, const ProcessingState&);
-};
-#endif  // V8_ENABLE_UNDEFINED_DOUBLE
-
 template <typename Derived, ValueRepresentation value_input_rep>
 class StoreFixedDoubleArrayElementT : public FixedInputNodeT<3, Derived> {
  public:
@@ -9034,6 +8870,9 @@ class StoreFixedDoubleArrayElement
   explicit StoreFixedDoubleArrayElement(uint64_t bitfield) : Base(bitfield) {}
 };
 
+// Stores a value that can be undefined. HoleyFloat64 spells undefined in two
+// ways, while an element of the array only ever spells it as the undefined
+// NaN, so the store canonicalizes onto that one.
 class StoreFixedHoleyDoubleArrayElement
     : public StoreFixedDoubleArrayElementT<StoreFixedHoleyDoubleArrayElement,
                                            ValueRepresentation::kHoleyFloat64> {
@@ -10546,6 +10385,7 @@ class CallBuiltin : public VarargsValueNodeT<0, CallBuiltin> {
   V(ArrayPrototypeSplice, NodeType::kJSReceiver)                         \
   V(ArrayUnshift, NodeType::kNumber)                                     \
   V(ArrayBufferIsView, NodeType::kBoolean)                               \
+  V(CloneFastJSArray, NodeType::kJSArray)                                \
   V(ObjectAssign, NodeType::kJSReceiver)                                 \
   V(ObjectCreate, NodeType::kAnyHeapObject)                              \
   V(ObjectIs, NodeType::kBoolean)                                        \
@@ -11166,9 +11006,17 @@ class HandleNoHeapWritesInterrupt
 class ReduceInterruptBudgetForLoop
     : public FixedInputNodeT<1, ReduceInterruptBudgetForLoop> {
  public:
-  explicit ReduceInterruptBudgetForLoop(uint64_t bitfield, int amount)
-      : Base(bitfield), amount_(amount) {
+  explicit ReduceInterruptBudgetForLoop(uint64_t bitfield, int amount,
+                                        BytecodeOffset osr_offset,
+                                        int loop_depth,
+                                        FeedbackSlot feedback_slot)
+      : Base(bitfield),
+        amount_(amount),
+        osr_offset_(osr_offset),
+        loop_depth_(loop_depth),
+        feedback_slot_(feedback_slot) {
     DCHECK_GT(amount, 0);
+    DCHECK_EQ(osr_offset == BytecodeOffset::None(), !try_osr());
   }
 
   DECLARE_INPUTS(FeedbackCell)
@@ -11176,9 +11024,14 @@ class ReduceInterruptBudgetForLoop
 
   static constexpr OpProperties kProperties =
       OpProperties::DeferredCall() | OpProperties::CanAllocate() |
-      OpProperties::LazyDeopt() | OpProperties::NotIdempotent();
+      OpProperties::LazyDeopt() | OpProperties::EagerDeopt() |
+      OpProperties::NotIdempotent();
 
   int amount() const { return amount_; }
+  BytecodeOffset osr_offset() const { return osr_offset_; }
+  int loop_depth() const { return loop_depth_; }
+  FeedbackSlot feedback_slot() const { return feedback_slot_; }
+  bool try_osr() const { return !feedback_slot_.IsInvalid(); }
 
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
@@ -11187,6 +11040,9 @@ class ReduceInterruptBudgetForLoop
 
  private:
   const int amount_;
+  const BytecodeOffset osr_offset_;
+  const int loop_depth_;
+  const FeedbackSlot feedback_slot_;
 };
 
 class ReduceInterruptBudgetForReturn

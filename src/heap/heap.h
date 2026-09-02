@@ -2852,6 +2852,8 @@ class ClearStaleLeftTrimmedPointerVisitor : public RootVisitor {
     visitor_->Synchronize(tag);
   }
 
+  GarbageCollector collector() const override { return visitor_->collector(); }
+
   // The pointer compression cage base value used for decompression of all
   // tagged values except references to InstructionStream objects.
   PtrComprCageBase cage_base() const {

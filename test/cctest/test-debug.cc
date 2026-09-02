@@ -3487,7 +3487,7 @@ class ContextCheckEventListener : public v8::debug::DebugDelegate {
       v8::debug::BreakReasons break_reasons) override {
     CheckContext();
   }
-  void ScriptCompiled(v8::Local<v8::debug::Script> script, bool is_live_edited,
+  void ScriptCompiled(v8::Local<v8::debug::Script> script,
                       bool has_compile_error) override {
     CheckContext();
   }
@@ -3631,7 +3631,7 @@ TEST(EvalContextData) {
 // Debug event listener which counts script compiled events.
 class ScriptCompiledDelegate : public v8::debug::DebugDelegate {
  public:
-  void ScriptCompiled(v8::Local<v8::debug::Script>, bool,
+  void ScriptCompiled(v8::Local<v8::debug::Script>,
                       bool has_compile_error) override {
     if (!has_compile_error) {
       after_compile_event_count++;
@@ -4537,7 +4537,7 @@ TEST(DebugPromiseInterceptedByTryCatch) {
 
 class NoInterruptsOnDebugEvent : public v8::debug::DebugDelegate {
  public:
-  void ScriptCompiled(v8::Local<v8::debug::Script> script, bool is_live_edited,
+  void ScriptCompiled(v8::Local<v8::debug::Script> script,
                       bool has_compile_error) override {
     ++after_compile_handler_depth_;
     // Do not allow nested AfterCompile events.
@@ -4608,6 +4608,61 @@ TEST(BreakLocationIterator) {
     iterator.Next();
     CHECK(iterator.Done());
   }
+
+  DisableDebugger(isolate);
+}
+
+TEST(EnsureBreakInfoFailedSourcePositions) {
+  LocalContext env;
+  v8::Isolate* isolate = env.isolate();
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  v8::HandleScope scope(isolate);
+
+  v8::Local<v8::Value> result =
+      CompileRun("function f() { return 42; } f(); f");
+  DirectHandle<i::Object> function_obj = v8::Utils::OpenDirectHandle(*result);
+  DirectHandle<i::JSFunction> function = Cast<i::JSFunction>(function_obj);
+  Handle<i::SharedFunctionInfo> shared(function->shared(), i_isolate);
+
+  // Clear source position table if any so it needs collection.
+  shared->GetBytecodeArray(i_isolate)->clear_source_position_table(
+      v8::kReleaseStore);
+  CHECK(!shared->GetBytecodeArray(i_isolate)->HasSourcePositionTable());
+
+  // Simulate stack exhaustion by moving stack limit above current stack
+  // pointer. Using numeric_limits::max() - 1024 ensures it works on both 32-bit
+  // and 64-bit architectures without integer overflow.
+  uintptr_t original_limit = i_isolate->stack_guard()->real_climit();
+  uintptr_t exhausted_limit = std::numeric_limits<uintptr_t>::max() - 1024;
+  i_isolate->stack_guard()->SetStackLimit(exhausted_limit);
+
+  EnableDebugger(isolate);
+  // EnsureBreakInfo fails because source position collection fails due to
+  // exhausted stack.
+  CHECK(!i_isolate->debug()->EnsureBreakInfo(shared));
+  CHECK(!shared->HasBreakInfo(i_isolate));
+
+  // Verify SetBreakpoint also fails gracefully when stack is exhausted.
+  DirectHandle<i::BreakPoint> breakpoint = i_isolate->factory()->NewBreakPoint(
+      1, i_isolate->factory()->empty_string());
+  int position = 0;
+  CHECK(!i_isolate->debug()->SetBreakpoint(shared, breakpoint, &position));
+
+  // Restore the original stack limit so stack is no longer exhausted.
+  i_isolate->stack_guard()->SetStackLimit(original_limit);
+
+  // When conditions are right, EnsureBreakInfo can be retried successfully.
+  CHECK(i_isolate->debug()->EnsureBreakInfo(shared));
+  CHECK(shared->HasBreakInfo(i_isolate));
+  CHECK(shared->GetBytecodeArray(i_isolate)->HasSourcePositionTable());
+
+  // Verify SetBreakpoint now succeeds.
+  CHECK(i_isolate->debug()->SetBreakpoint(shared, breakpoint, &position));
+
+  // Verify BreakIterator works without crash.
+  Handle<i::DebugInfo> debug_info(shared->GetDebugInfo(i_isolate), i_isolate);
+  i::BreakIterator iterator(debug_info);
+  CHECK(!iterator.Done());
 
   DisableDebugger(isolate);
 }
@@ -5218,7 +5273,7 @@ TEST(SourceInfo) {
 namespace {
 class SetBreakpointOnScriptCompiled : public v8::debug::DebugDelegate {
  public:
-  void ScriptCompiled(v8::Local<v8::debug::Script> script, bool is_live_edited,
+  void ScriptCompiled(v8::Local<v8::debug::Script> script,
                       bool has_compile_error) override {
     v8::Local<v8::String> name;
     if (!script->SourceURL().ToLocal(&name)) return;
@@ -7065,8 +7120,7 @@ class FailedScriptCompiledDelegate : public v8::debug::DebugDelegate {
  public:
   explicit FailedScriptCompiledDelegate(v8::Isolate* isolate)
       : isolate(isolate) {}
-  void ScriptCompiled(v8::Local<v8::debug::Script> script, bool,
-                      bool) override {
+  void ScriptCompiled(v8::Local<v8::debug::Script> script, bool) override {
     script_.Reset(isolate, script);
     script_.SetWeak();
   }

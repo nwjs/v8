@@ -16,6 +16,7 @@
 #include "src/builtins/builtins.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/common/globals.h"
+#include "src/common/synchronization-point-support.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/abstract-code.h"
@@ -27,7 +28,6 @@
 #include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/hole.h"
 #include "src/objects/instance-type-inl.h"
-#include "src/objects/objects-inl.h"
 #include "src/objects/oddball-predicates-inl.h"
 #include "src/objects/scope-info-inl.h"
 #include "src/objects/script-inl.h"
@@ -502,8 +502,6 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, properties_are_final,
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags,
                     private_name_lookup_skips_outer_class,
                     SharedFunctionInfo::PrivateNameLookupSkipsOuterClassBit)
-BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, live_edited,
-                    SharedFunctionInfo::LiveEditedBit)
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, is_hoisted_in_context,
                     SharedFunctionInfo::IsHoistedInContextBit)
 
@@ -727,6 +725,36 @@ Tagged<ScopeInfo> SharedFunctionInfo::GetOuterScopeInfo() const {
   Tagged<ScopeInfo> info = scope_info(kAcquireLoad);
   if (info->IsEmpty()) return Cast<ScopeInfo>(outer_scope_info());
   return info->OuterScopeInfo();
+}
+
+Tagged<ScopeInfo> SharedFunctionInfo::TryGetScopeInfoForMerge() const {
+  Tagged<Object> maybe_scope_info = name_or_scope_info(kAcquireLoad);
+  if (IsScopeInfo(maybe_scope_info)) {
+    return Cast<ScopeInfo>(maybe_scope_info);
+  }
+  Tagged<Object> maybe_outer_scope_info_or_feedback =
+      raw_outer_scope_info_or_feedback_metadata(kAcquireLoad);
+  if (IsScopeInfo(maybe_outer_scope_info_or_feedback)) {
+    return Cast<ScopeInfo>(maybe_outer_scope_info_or_feedback);
+  }
+  return GetReadOnlyRoots().empty_scope_info();
+}
+
+Tagged<ScopeInfo> SharedFunctionInfo::TryGetOuterScopeInfo() const {
+  if (Tagged<ScopeInfo> scope_info;
+      TryCast(name_or_scope_info(kAcquireLoad), &scope_info)) {
+    if (scope_info->HasOuterScopeInfo()) {
+      return scope_info->OuterScopeInfo();
+    }
+    return GetReadOnlyRoots().empty_scope_info();
+  }
+  SYNCHRONIZATION_POINT("BeforeGetOuterScopeInfo");
+  if (Tagged<ScopeInfo> outer_scope_info;
+      TryCast(raw_outer_scope_info_or_feedback_metadata(kAcquireLoad),
+              &outer_scope_info)) {
+    return outer_scope_info;
+  }
+  return GetReadOnlyRoots().empty_scope_info();
 }
 
 void SharedFunctionInfo::set_outer_scope_info(

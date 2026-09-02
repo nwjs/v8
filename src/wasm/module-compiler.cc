@@ -1213,10 +1213,11 @@ class FeedbackMaker {
 
     // Feedback data is untrusted. An invalid handle could lead to an OOB read
     // from the `WasmCodePointerTable`, which either crashes or returns some
-    // garbage. Thus `WasmCodeManager::LookupCode` would either return `nullptr`
-    // (safe) or an unrelated code object which will be checked for a compatible
-    // signature before being inlined.
-    // So the CHECK here is mostly just there to silence a false positive report
+    // garbage. Only look up the target address in the current NativeModule: a
+    // target from a foreign module is not an inline candidate, and looking it
+    // up across all modules via `WasmCodeManager::LookupCode` could race with
+    // concurrent teardown of that foreign module.
+    // The CHECK here is mostly just there to silence a false positive report
     // by the sandbox crash filter about an OOB read.
     uint32_t untrusted_code_pointer =
         static_cast<uint32_t>(target_truncated_smi.value());
@@ -1224,10 +1225,9 @@ class FeedbackMaker {
     WasmCodePointer handle = WasmCodePointer{untrusted_code_pointer};
     Address entry = GetProcessWideWasmCodePointerTable()
                         ->GetEntrypointWithoutSignatureCheck(handle);
-    wasm::WasmCode* code =
-        wasm::GetWasmCodeManager()->LookupCode(nullptr, entry);
-    if (!code || code->native_module() != instance_data_->native_module() ||
-        code->IsAnonymous()) {
+    WasmCodeRefScope code_ref_scope;
+    wasm::WasmCode* code = instance_data_->native_module()->Lookup(entry);
+    if (!code || code->IsAnonymous()) {
       // Was not in the main table (e.g., because it's an imported function).
       has_non_inlineable_targets_ = true;
       return;
@@ -1593,6 +1593,7 @@ void PublishDetectedFeatures(WasmDetectedFeatures detected_features,
       {WasmDetectedFeature::memory64, Feature::kWasmMemory64},
       {WasmDetectedFeature::multi_memory, Feature::kWasmMultiMemory},
       {WasmDetectedFeature::gc, Feature::kWasmGC},
+      {WasmDetectedFeature::gc_allocation, Feature::kWasmGCAllocation},
       {WasmDetectedFeature::imported_strings, Feature::kWasmImportedStrings},
       {WasmDetectedFeature::imported_strings_utf8,
        Feature::kWasmImportedStringsUtf8},
@@ -2786,7 +2787,10 @@ void AsyncCompileJob::StartForegroundTask() {
 
   auto new_task = std::make_unique<CompileTask>(this, true);
   pending_foreground_task_ = new_task.get();
-  isolate_specific_info_.foreground_task_runner_->PostTask(std::move(new_task));
+  // Foreground compilation can invoke JavaScript callbacks and must not run
+  // nested inside an API interrupt.
+  isolate_specific_info_.foreground_task_runner_->PostNonNestableTask(
+      std::move(new_task));
 }
 
 void AsyncCompileJob::CancelPendingForegroundTask() {
@@ -3368,7 +3372,7 @@ bool AsyncStreamingProcessor::Deserialize(
   }
 
   DCHECK_NULL(job_->new_native_module_);
-  Managed<NativeModule>::Ptr deserialized_native_module =
+  CppGCManaged<NativeModule>::Ptr deserialized_native_module =
       module_object->native_module();
   job_->wire_bytes_ = ModuleWireBytes(deserialized_native_module->wire_bytes());
   // Calling {FinishCompile} deletes the {AsyncCompileJob} and {this}.

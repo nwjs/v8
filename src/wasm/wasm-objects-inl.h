@@ -25,7 +25,7 @@
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object-field-inl.h"
 #include "src/objects/heap-object.h"
-#include "src/objects/managed.h"
+#include "src/objects/managed-inl.h"
 #include "src/objects/object-predicates-inl.h"
 #include "src/objects/pod-array-inl.h"
 #include "src/objects/slots-inl.h"
@@ -64,12 +64,12 @@ namespace v8::internal {
   }
 
 // WasmModuleObject
-Tagged<Managed<wasm::NativeModule>> WasmModuleObject::managed_native_module()
-    const {
+Tagged<CppGCManaged<wasm::NativeModule>>
+WasmModuleObject::managed_native_module() const {
   return managed_native_module_.load();
 }
 void WasmModuleObject::set_managed_native_module(
-    Tagged<Managed<wasm::NativeModule>> value, WriteBarrierMode mode) {
+    Tagged<CppGCManaged<wasm::NativeModule>> value, WriteBarrierMode mode) {
   managed_native_module_.store(this, value, mode);
 }
 
@@ -78,7 +78,7 @@ void WasmModuleObject::set_script(Tagged<Script> value, WriteBarrierMode mode) {
   script_.store(this, value, mode);
 }
 
-Managed<wasm::NativeModule>::Ptr WasmModuleObject::native_module() {
+CppGCManaged<wasm::NativeModule>::Ptr WasmModuleObject::native_module() {
   return managed_native_module()->ptr();
 }
 
@@ -92,11 +92,12 @@ void WasmMemoryObject::set_array_buffer(
   array_buffer_.store(this, value, mode);
 }
 
-Tagged<Managed<BackingStore>> WasmMemoryObject::managed_backing_store() const {
+Tagged<CppGCManaged<BackingStore>> WasmMemoryObject::managed_backing_store()
+    const {
   return managed_backing_store_.load();
 }
 void WasmMemoryObject::set_managed_backing_store(
-    Tagged<Managed<BackingStore>> value, WriteBarrierMode mode) {
+    Tagged<CppGCManaged<BackingStore>> value, WriteBarrierMode mode) {
   managed_backing_store_.store(this, value, mode);
 }
 
@@ -122,7 +123,7 @@ void WasmMemoryObject::set_address_type(wasm::AddressType value) {
   address_type_ = static_cast<uint8_t>(value);
 }
 
-Managed<BackingStore>::Ptr WasmMemoryObject::backing_store() const {
+CppGCManaged<BackingStore>::Ptr WasmMemoryObject::backing_store() const {
   return managed_backing_store()->ptr();
 }
 
@@ -936,10 +937,10 @@ void WasmInternalFunction::set_call_target(WasmCodePointer code_pointer) {
 }
 
 // WasmCapiFunctionData
-Tagged<Foreign> WasmCapiFunctionData::embedder_data() const {
+Tagged<CppGCManagedBase> WasmCapiFunctionData::embedder_data() const {
   return embedder_data_.load();
 }
-void WasmCapiFunctionData::set_embedder_data(Tagged<Foreign> value,
+void WasmCapiFunctionData::set_embedder_data(Tagged<CppGCManagedBase> value,
                                              WriteBarrierMode mode) {
   embedder_data_.store(this, value, mode);
 }

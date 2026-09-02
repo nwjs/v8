@@ -141,7 +141,9 @@ constexpr bool CanTriggerGC(T... properties) {
   IF_SPARKPLUG_PLUS(F, PatchCompareOpBaselineCode, 4, 1)         \
   IF_SPARKPLUG_PLUS(F, PatchCompareOpBaselineCodeAndThrow, 4, 1) \
   IF_SPARKPLUG_PLUS(F, PatchBinopBaselineCode, 4, 1)             \
-  IF_SPARKPLUG_PLUS(F, PatchBinopBaselineCodeAndThrow, 4, 1)
+  IF_SPARKPLUG_PLUS(F, PatchBinopBaselineCodeAndThrow, 4, 1)     \
+  IF_SPARKPLUG_PLUS(F, PatchUnaryOpBaselineCode, 4, 1)           \
+  IF_SPARKPLUG_PLUS(F, PatchUnaryOpBaselineCodeAndThrow, 4, 1)
 
 // TODO(olivf): Unify the Maglev/TF variants into one runtime function and pass
 // the optimization tier as an argument.
@@ -151,7 +153,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(StartMaglevOptimizeJob, 1, 1)        \
   F(OptimizeTurbofanEager, 1, 1)         \
   F(StartTurbofanOptimizeJob, 1, 1)      \
-  F(MarkLazyDeoptimized, 2, 1)
+  F(MarkLazyDeoptimizedOrFlushed, 2, 1)
 
 #define FOR_EACH_INTRINSIC_COMPILER(F, I)    \
   FOR_EACH_INTRINSIC_COMPILER_GENERIC(F, I)  \
@@ -179,7 +181,6 @@ constexpr bool CanTriggerGC(T... properties) {
   F(HandleDebuggerStatement, 0, 1)              \
   F(IsBreakOnException, 1, 1)                   \
   F(IterableForEach, 2, 1)                      \
-  F(LiveEditPatchScript, 2, 1)                  \
   F(ProfileCreateSnapshotDataBlob, 0, 1)        \
   F(ScheduleBreak, 0, 1)                        \
   F(ScriptLocationFromLine2, 4, 1)              \
@@ -300,7 +301,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(BytecodeBudgetInterrupt_Sparkplug, 1, 1)               \
   F(BytecodeBudgetInterruptWithStackCheck_Sparkplug, 1, 1) \
   F(BytecodeBudgetInterrupt_Maglev, 1, 1)                  \
-  F(BytecodeBudgetInterruptWithStackCheck_Maglev, 1, 1)    \
+  F(BytecodeBudgetLoopInterrupt_Maglev, 2, 1)              \
   F(NotifyContextCellStateWillChange, 1, 1,                \
     RuntimeCallProperty::kCannotTriggerGC)                 \
   F(NewError, 2, 1)                                        \
@@ -669,6 +670,7 @@ constexpr bool CanTriggerGC(T... properties) {
   F(RegexpHasBytecode, 2, 1)                                             \
   F(RegexpHasNativeCode, 2, 1)                                           \
   F(RegexpIsUnmodified, 1, 1)                                            \
+  F(RegexpQuickCheckRejects, 2, 1)                                       \
   F(RegexpTypeTag, 1, 1)                                                 \
   F(Resume, 1, 1)                                                        \
   F(RunningInSimulator, 0, 1)                                            \

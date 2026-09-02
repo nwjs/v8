@@ -58,9 +58,9 @@ class V8_EXPORT MicrotaskQueue
                              MicrotasksPolicy policy = MicrotasksPolicy::kAuto);
   virtual void Trace(cppgc::Visitor* visitor) const {}
 #else
-  V8_DEPRECATE_SOON(
-      "Use MicrotaskQueue allocated in cppgc, "
-      "see gn flag: v8_cppgc_microtask_queue.")
+  // NW.js: not marked V8_DEPRECATED because this fork keeps
+  // v8_cppgc_microtask_queue disabled (the cppgc-based API caused a
+  // startup crash), so this is the only available API.
   static std::unique_ptr<MicrotaskQueue> New(
       Isolate* isolate, MicrotasksPolicy policy = MicrotasksPolicy::kAuto);
 #endif  // V8_CPPGC_MICROTASK_QUEUE

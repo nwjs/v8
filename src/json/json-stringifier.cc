@@ -20,6 +20,7 @@
 #include "src/objects/js-raw-json-inl.h"
 #include "src/objects/literal-objects-inl.h"
 #include "src/objects/lookup.h"
+#include "src/objects/object-conversions-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/oddball-inl.h"
 #include "src/objects/ordered-hash-table.h"
@@ -2650,7 +2651,7 @@ Builtin GetBuiltin(Isolate* isolate, Tagged<JSObject> obj,
   if (it.state() != LookupIterator::DATA) {
     return Builtin::kNoBuiltinId;
   }
-  DirectHandle<Object> fun = Object::GetProperty(&it).ToHandleChecked();
+  DirectHandle<Object> fun = it.GetDataValue(AllowAllocation{false});
   if (!IsJSFunction(*fun)) {
     return Builtin::kNoBuiltinId;
   }

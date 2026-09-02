@@ -667,6 +667,10 @@ class V8_EXPORT Isolate {
     kOBSOLETE_WasmResizableBuffers = 183,
     kInvalidatedArrayBufferMutableProtector = 184,
     kHoleyArrayReadthrough = 185,
+    kWasmGCAllocation = 186,
+    kModuleNamespaceMissingDefaultWithStarExport = 187,
+    kRegExpMatcherFlagsMismatch = 188,
+    kRegExpCustomSpecies = 189,
 
     // If you add new values here, you'll also need to update Chromium's:
     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
@@ -1533,7 +1537,7 @@ class V8_EXPORT Isolate {
    * The optional parameter |dependant_context| specifies whether the disposed
    * context was depending on state from other contexts or not.
    */
-  V8_DEPRECATE_SOON("Use version that passes ContextDependants.")
+  V8_DEPRECATED("Use version that passes ContextDependants.")
   int ContextDisposedNotification(bool dependant_context = true);
 
   /**

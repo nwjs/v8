@@ -22,6 +22,7 @@
 #include "src/objects/js-promise-inl.h"
 #include "src/objects/lookup-inl.h"
 #include "src/objects/managed-inl.h"
+#include "src/objects/object-conversions-inl.h"
 #include "src/objects/object-list-macros.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/property-descriptor.h"
@@ -726,7 +727,7 @@ RUNTIME_FUNCTION(Runtime_WasmI32AtomicWait) {
   int32_t expected_value = NumberToInt32(args[3]);
   Tagged<BigInt> timeout_ns = Cast<BigInt>(args[4]);
 
-  Managed<BackingStore>::Ptr backing_store =
+  CppGCManaged<BackingStore>::Ptr backing_store =
       trusted_instance_data->memory_object(memory_index)->backing_store();
   // Should have trapped if address was OOB.
   DCHECK_LT(offset, backing_store->byte_length());
@@ -752,7 +753,7 @@ RUNTIME_FUNCTION(Runtime_WasmI64AtomicWait) {
   Tagged<BigInt> expected_value = Cast<BigInt>(args[3]);
   Tagged<BigInt> timeout_ns = Cast<BigInt>(args[4]);
 
-  Managed<BackingStore>::Ptr backing_store =
+  CppGCManaged<BackingStore>::Ptr backing_store =
       trusted_instance_data->memory_object(memory_index)->backing_store();
   // Should have trapped if address was OOB.
   DCHECK_LT(offset, backing_store->byte_length());
@@ -1734,8 +1735,7 @@ class PrototypesSetup : public wasm::Decoder {
       return {};
     }
     // TODO(jkummerow): Can we tighten the spec to require non-nullable arrays?
-    if (!IsWasmFuncRef(*maybe_func)) {
-      DCHECK(IsWasmNull(*maybe_func));
+    if (IsWasmNull(*maybe_func)) {
       ThrowWasmError(isolate_, MessageTemplate::kWasmTrapNullFunc);
       return {};
     }
@@ -2680,6 +2680,10 @@ RUNTIME_FUNCTION(Runtime_WasmStringToUtf8Array) {
   DirectHandle<String> string(Cast<String>(args[0]), isolate);
   int32_t shared = args.smi_value_at(1);
   uint32_t length = MeasureWtf8(isolate, string);
+  constexpr int kElemSize = wasm::kWasmI8.value_kind_size();
+  if (length > static_cast<uint32_t>(WasmArray::MaxLength(kElemSize))) {
+    return ThrowWasmError(isolate, MessageTemplate::kWasmTrapArrayTooLarge);
+  }
   wasm::WasmValue initial_value(int8_t{0});
   Tagged<WeakFixedArray> rtts = isolate->heap()->wasm_canonical_rtts();
   // This function can only get called from Wasm code, so we can safely assume

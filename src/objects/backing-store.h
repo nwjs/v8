@@ -12,6 +12,7 @@
 #include "include/v8-internal.h"
 #include "src/base/bit-field.h"
 #include "src/handles/handles.h"
+#include "src/objects/managed-type-id.h"
 #include "src/sandbox/sandbox.h"
 
 namespace v8::internal {
@@ -56,7 +57,7 @@ struct SharedWasmMemoryData;
 // and the destructor frees the memory (and page allocation if necessary).
 class V8_EXPORT_PRIVATE BackingStore : public BackingStoreBase {
  public:
-  static constexpr ExternalPointerTag kManagedTag = kBackingStoreTag;
+  static constexpr ManagedTypeId kTypeID = ManagedTypeId::kBackingStore;
 
   ~BackingStore();
 

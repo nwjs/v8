@@ -117,17 +117,18 @@ using WasmModule = wasm::WasmModule;
 DirectHandle<WasmModuleObject> WasmModuleObject::New(
     Isolate* isolate, std::shared_ptr<wasm::NativeModule> native_module,
     DirectHandle<Script> script) {
-  DirectHandle<Managed<wasm::NativeModule>> managed_native_module;
+  DirectHandle<CppGCManaged<wasm::NativeModule>> managed_native_module;
   if (script->type() == Script::Type::kWasm) {
     managed_native_module = direct_handle(
-        Cast<Managed<wasm::NativeModule>>(script->wasm_managed_native_module()),
+        Cast<CppGCManaged<wasm::NativeModule>>(
+            script->wasm_managed_native_module()),
         isolate);
   } else {
     const WasmModule* module = native_module->module();
     size_t memory_estimate =
         native_module->committed_code_space() +
         wasm::WasmCodeManager::EstimateNativeModuleMetaDataSize(module);
-    managed_native_module = Managed<wasm::NativeModule>::From(
+    managed_native_module = CppGCManaged<wasm::NativeModule>::Create(
         isolate, memory_estimate, std::move(native_module));
   }
   DirectHandle<WasmModuleObject> module_object = Cast<WasmModuleObject>(
@@ -160,7 +161,7 @@ DirectHandle<String> WasmModuleObject::ExtractUtf8StringFromModuleBytes(
 
 MaybeDirectHandle<String> WasmModuleObject::GetModuleNameOrNull(
     Isolate* isolate, DirectHandle<WasmModuleObject> module_object) {
-  Managed<wasm::NativeModule>::Ptr native_module =
+  CppGCManaged<wasm::NativeModule>::Ptr native_module =
       module_object->native_module();
   const WasmModule* module = native_module->module();
   if (!module->name.is_set()) return {};
@@ -171,7 +172,7 @@ MaybeDirectHandle<String> WasmModuleObject::GetModuleNameOrNull(
 MaybeDirectHandle<String> WasmModuleObject::GetFunctionNameOrNull(
     Isolate* isolate, DirectHandle<WasmModuleObject> module_object,
     uint32_t func_index) {
-  Managed<wasm::NativeModule>::Ptr native_module =
+  CppGCManaged<wasm::NativeModule>::Ptr native_module =
       module_object->native_module();
   const WasmModule* module = native_module->module();
   DCHECK_LT(func_index, module->functions.size());
@@ -187,7 +188,7 @@ base::Vector<const uint8_t> WasmModuleObject::GetRawFunctionName(
   if (func_index == wasm::kAnonymousFuncIndex) {
     return base::Vector<const uint8_t>({nullptr, 0});
   }
-  Managed<wasm::NativeModule>::Ptr native_mod = native_module();
+  CppGCManaged<wasm::NativeModule>::Ptr native_mod = native_module();
   const WasmModule* module = native_mod->module();
   DCHECK_GT(module->functions.size(), func_index);
   wasm::ModuleWireBytes wire_bytes(native_mod->wire_bytes());
@@ -196,6 +197,41 @@ base::Vector<const uint8_t> WasmModuleObject::GetRawFunctionName(
   wasm::WasmName name = wire_bytes.GetNameOrNull(name_ref);
   return base::Vector<const uint8_t>::cast(name);
 }
+
+namespace {
+void UpdateDispatchTableMultiple(Isolate* isolate,
+                                 DirectHandle<WasmDispatchTable> dispatch_table,
+                                 int start_index, int count,
+                                 DirectHandle<Object> external) {
+  if (WasmExportedFunction::IsWasmExportedFunction(*external)) {
+    auto exported_function = Cast<WasmExportedFunction>(external);
+    auto func_data = exported_function->shared()->wasm_exported_function_data();
+    DirectHandle<WasmTrustedInstanceData> target_instance_data(
+        func_data->instance_data(), isolate);
+    int func_index = func_data->function_index();
+    const wasm::WasmModule* module = target_instance_data->module();
+    SBXCHECK_BOUNDS(func_index, module->functions.size());
+    auto* wasm_function = module->functions.data() + func_index;
+    for (int i = 0; i < count; ++i) {
+      WasmTableObject::UpdateDispatchTable(isolate, dispatch_table,
+                                           start_index + i, wasm_function,
+                                           target_instance_data
+#if V8_ENABLE_DRUMBRAKE
+                                           ,
+                                           func_index
+#endif  // V8_ENABLE_DRUMBRAKE
+      );
+    }
+  } else {
+    DCHECK(WasmCapiFunction::IsWasmCapiFunction(*external));
+    for (int i = 0; i < count; ++i) {
+      WasmTableObject::UpdateDispatchTable(isolate, dispatch_table,
+                                           start_index + i,
+                                           Cast<WasmCapiFunction>(external));
+    }
+  }
+}
+}  // namespace
 
 DirectHandle<WasmTableObject> WasmTableObject::New(
     Isolate* isolate, DirectHandle<WasmTrustedInstanceData> trusted_data,
@@ -207,7 +243,7 @@ DirectHandle<WasmTableObject> WasmTableObject::New(
 
   DCHECK_LE(initial, wasm::max_table_size());
   DirectHandle<FixedArray> entries = isolate->factory()->NewFixedArray(initial);
-  for (int i = 0; i < static_cast<int>(initial); ++i) {
+  for (uint32_t i = 0; i < initial; ++i) {
     entries->set(i, *initial_value);
   }
   bool is_function_table = canonical_type.IsFunctionType();
@@ -215,6 +251,18 @@ DirectHandle<WasmTableObject> WasmTableObject::New(
       is_function_table
           ? isolate->factory()->NewWasmDispatchTable(initial, canonical_type)
           : isolate->factory()->empty_wasm_dispatch_table();
+
+  if (is_function_table && initial > 0 && !IsWasmNull(*initial_value) &&
+      IsWasmFuncRef(*initial_value)) {
+    DirectHandle<Object> external =
+        WasmInternalFunction::GetOrCreateExternal(direct_handle(
+            Cast<WasmFuncRef>(*initial_value)->internal(isolate), isolate));
+
+    // The entries array was filled with *initial_value above, so this loop
+    // only has to do the dispatch-table half.
+    UpdateDispatchTableMultiple(isolate, dispatch_table, 0,
+                                static_cast<int>(initial), external);
+  }
 
   DirectHandle<UnionOf<Undefined, Number, BigInt>> max =
       isolate->factory()->undefined_value();
@@ -356,27 +404,8 @@ void WasmTableObject::SetFunctionTableEntry(
   DirectHandle<Object> external = WasmInternalFunction::GetOrCreateExternal(
       direct_handle(Cast<WasmFuncRef>(*entry)->internal(isolate), isolate));
 
-  if (WasmExportedFunction::IsWasmExportedFunction(*external)) {
-    auto exported_function = Cast<WasmExportedFunction>(external);
-    auto func_data = exported_function->shared()->wasm_exported_function_data();
-    DirectHandle<WasmTrustedInstanceData> target_instance_data(
-        func_data->instance_data(), isolate);
-    int func_index = func_data->function_index();
-    const WasmModule* module = target_instance_data->module();
-    SBXCHECK_BOUNDS(func_index, module->functions.size());
-    auto* wasm_function = module->functions.data() + func_index;
-    UpdateDispatchTable(isolate, dispatch_table, entry_index, wasm_function,
-                        target_instance_data
-#if V8_ENABLE_DRUMBRAKE
-                        ,
-                        func_index
-#endif  // V8_ENABLE_DRUMBRAKE
-    );
-  } else {
-    DCHECK(WasmCapiFunction::IsWasmCapiFunction(*external));
-    UpdateDispatchTable(isolate, dispatch_table, entry_index,
-                        Cast<WasmCapiFunction>(external));
-  }
+  UpdateDispatchTableMultiple(isolate, dispatch_table, entry_index, 1,
+                              external);
   table->entries()->set(entry_index, *entry);
 }
 
@@ -790,9 +819,9 @@ DirectHandle<WasmMemoryObject> WasmMemoryObject::New(
                      : !maybe_buffer.IsEmpty()
                          ? maybe_buffer.ToHandleChecked()->GetByteLength()
                          : 0;
-  DirectHandle<Managed<BackingStore>> managed_backing_store =
-      Managed<BackingStore>::From(isolate, byte_size, backing_store,
-                                  AllocationType::kOld);
+  DirectHandle<CppGCManaged<BackingStore>> managed_backing_store =
+      CppGCManaged<BackingStore>::Create(isolate, byte_size, backing_store,
+                                       AllocationType::kOld);
 
   DirectHandle<JSFunction> memory_ctor(
       isolate->native_context()->wasm_memory_constructor(), isolate);
@@ -988,7 +1017,7 @@ void WasmMemoryObject::FixUpResizableArrayBuffer(
 // static
 DirectHandle<JSArrayBuffer> WasmMemoryObject::RefreshBuffer(
     Isolate* isolate, DirectHandle<WasmMemoryObject> memory_object,
-    Managed<BackingStore>::Ptr backing_store,
+    CppGCManaged<BackingStore>::Ptr backing_store,
     std::optional<ResizableFlag> override_resizable) {
   DCHECK_EQ(backing_store.raw(), memory_object->backing_store().raw());
 
@@ -1015,7 +1044,8 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
                                uint32_t pages) {
   TRACE_EVENT("v8.wasm", "wasm.GrowMemory");
 
-  Managed<BackingStore>::Ptr backing_store = memory_object->backing_store();
+  CppGCManaged<BackingStore>::Ptr backing_store =
+      memory_object->backing_store();
   DCHECK_NOT_NULL(backing_store);
 
   DirectHandle<JSArrayBuffer> maybe_old_buffer;
@@ -1087,7 +1117,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
     // read-modify-write behavior required by the spec.
     uint32_t result = static_cast<int32_t>(result_inplace.value());
     memory_object->managed_backing_store()->UpdateEstimatedSize(
-        isolate, backing_store->byte_length());
+        backing_store->byte_length(), isolate);
     return result;  // success
   }
 
@@ -1106,7 +1136,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
     memory_object->UpdateInstances(isolate);
     DCHECK_EQ(result_inplace.value(), old_pages);
     memory_object->managed_backing_store()->UpdateEstimatedSize(
-        isolate, backing_store->byte_length());
+        backing_store->byte_length(), isolate);
     return static_cast<int32_t>(result_inplace.value());  // success
   }
   DCHECK(!has_old_buffer || !maybe_old_buffer->is_resizable_by_js());
@@ -1181,7 +1211,8 @@ DirectHandle<JSArrayBuffer> WasmMemoryObject::ChangeArrayBufferResizability(
     return buffer;
   }
 
-  Managed<BackingStore>::Ptr backing_store = memory_object->backing_store();
+  CppGCManaged<BackingStore>::Ptr backing_store =
+      memory_object->backing_store();
   // For shared memory the flag on the backing store is not authoritative.
   // Since the AB is never detached, we just update the AB and use that as the
   // authoritative source of resizability.
@@ -2714,7 +2745,8 @@ bool WasmCapiFunction::IsWasmCapiFunction(Tagged<Object> object) {
 }
 
 DirectHandle<WasmCapiFunction> WasmCapiFunction::New(
-    Isolate* isolate, Address call_target, DirectHandle<Foreign> embedder_data,
+    Isolate* isolate, Address call_target,
+    DirectHandle<CppGCManagedBase> embedder_data,
     const wasm::CanonicalSig* sig) {
   // TODO(jkummerow): Install a JavaScript wrapper. For now, calling
   // these functions directly is unsupported; they can only be called

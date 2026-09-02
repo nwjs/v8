@@ -759,8 +759,8 @@ bool MemoriesMatch(Isolate* isolate, const WasmModule* module,
     Tagged<WasmMemoryObject> ref_memory =
         ref_instance_data->memory_object(memory_index);
 
-    Managed<BackingStore>::Ptr store = memory->backing_store();
-    Managed<BackingStore>::Ptr ref_store = ref_memory->backing_store();
+    CppGCManaged<BackingStore>::Ptr store = memory->backing_store();
+    CppGCManaged<BackingStore>::Ptr ref_store = ref_memory->backing_store();
 
     size_t memory_size = store->byte_length();
     size_t ref_memory_size = ref_store->byte_length();
@@ -893,9 +893,10 @@ bool TablesMatch(Isolate* isolate, const WasmModule* module,
       // Tuple2 is used as placeholder in tables (see
       // `WasmTableObject::SetFunctionTablePlaceholder`). They reference the
       // instance and the function index; just check the stored function index.
-      if (IsTuple2(*entry)) {
-        if (IsTuple2(*ref_entry) && Cast<Tuple2>(*entry)->value2() ==
-                                        Cast<Tuple2>(*ref_entry)->value2()) {
+      if (!IsWasmNull(*entry) && IsTuple2(*entry)) {
+        if (!IsWasmNull(*ref_entry) && IsTuple2(*ref_entry) &&
+            Cast<Tuple2>(*entry)->value2() ==
+                Cast<Tuple2>(*ref_entry)->value2()) {
           continue;
         }
       } else {
@@ -930,7 +931,7 @@ int ExecuteAgainstReference(Isolate* isolate,
 ) {
   HandleScope handle_scope(isolate);
 
-  Managed<wasm::NativeModule>::Ptr native_module =
+  CppGCManaged<wasm::NativeModule>::Ptr native_module =
       module_object->native_module();
   const WasmModule* module = native_module->module();
   const base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();

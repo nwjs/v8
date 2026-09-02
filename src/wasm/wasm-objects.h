@@ -144,17 +144,18 @@ V8_OBJECT class WasmModuleObject : public JSObject {
  public:
   using Super = JSObject;
 
-  inline Tagged<Managed<wasm::NativeModule>> managed_native_module() const
+  inline Tagged<CppGCManaged<wasm::NativeModule>> managed_native_module() const
       V8_LIFETIME_BOUND;
   inline void set_managed_native_module(
-      Tagged<Managed<wasm::NativeModule>> value,
+      Tagged<CppGCManaged<wasm::NativeModule>> value,
       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   inline Tagged<Script> script() const V8_LIFETIME_BOUND;
   inline void set_script(Tagged<Script> value,
                          WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  inline Managed<wasm::NativeModule>::Ptr native_module() V8_LIFETIME_BOUND;
+  inline CppGCManaged<wasm::NativeModule>::Ptr native_module()
+      V8_LIFETIME_BOUND;
 
   // Dispatched behavior.
   DECL_PRINTER(WasmModuleObject)
@@ -195,7 +196,7 @@ V8_OBJECT class WasmModuleObject : public JSObject {
       Isolate*, base::Vector<const uint8_t> wire_bytes, wasm::WireBytesRef,
       InternalizeString, SharedFlag shared = SharedFlag{false});
 
-  TaggedMember<Managed<wasm::NativeModule>> managed_native_module_;
+  TaggedMember<CppGCManaged<wasm::NativeModule>> managed_native_module_;
   TaggedMember<Script> script_;
 } V8_OBJECT_END;
 
@@ -374,9 +375,9 @@ V8_OBJECT class WasmMemoryObject : public JSObject {
   inline void set_array_buffer(Tagged<UnionOf<JSArrayBuffer, Undefined>> value,
                                WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  inline Tagged<Managed<BackingStore>> managed_backing_store() const;
+  inline Tagged<CppGCManaged<BackingStore>> managed_backing_store() const;
   inline void set_managed_backing_store(
-      Tagged<Managed<BackingStore>> value,
+      Tagged<CppGCManaged<BackingStore>> value,
       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   inline int maximum_pages() const;
@@ -401,7 +402,7 @@ V8_OBJECT class WasmMemoryObject : public JSObject {
   }
 #endif  // TAGGED_SIZE_8_BYTES
 
-  inline Managed<BackingStore>::Ptr backing_store() const;
+  inline CppGCManaged<BackingStore>::Ptr backing_store() const;
 
   // Add a use of this memory object to the given instance. This updates the
   // internal weak list of instances that use this memory and also updates the
@@ -458,7 +459,7 @@ V8_OBJECT class WasmMemoryObject : public JSObject {
   // bit on the backing store is not authoritative).
   static DirectHandle<JSArrayBuffer> RefreshBuffer(
       Isolate* isolate, DirectHandle<WasmMemoryObject> memory,
-      Managed<BackingStore>::Ptr backing_store,
+      CppGCManaged<BackingStore>::Ptr backing_store,
       std::optional<ResizableFlag> override_resizable = {});
 
   V8_EXPORT_PRIVATE static int32_t Grow(Isolate*,
@@ -484,7 +485,7 @@ V8_OBJECT class WasmMemoryObject : public JSObject {
   static const int kHeaderSize;
 
   TaggedMember<UnionOf<JSArrayBuffer, Undefined>> array_buffer_;
-  TaggedMember<Managed<BackingStore>> managed_backing_store_;
+  TaggedMember<CppGCManaged<BackingStore>> managed_backing_store_;
   TaggedMember<Smi> maximum_pages_;
   TaggedMember<WeakArrayList> instances_;
   uint8_t address_type_;
@@ -1250,10 +1251,10 @@ class WasmCapiFunction : public JSFunction {
  public:
   static bool IsWasmCapiFunction(Tagged<Object> object);
 
-  static DirectHandle<WasmCapiFunction> New(Isolate* isolate,
-                                            Address call_target,
-                                            DirectHandle<Foreign> embedder_data,
-                                            const wasm::CanonicalSig* sig);
+  static DirectHandle<WasmCapiFunction> New(
+      Isolate* isolate, Address call_target,
+      DirectHandle<CppGCManagedBase> embedder_data,
+      const wasm::CanonicalSig* sig);
 
   // TODO(clemensb): Remove this accessor.
   const wasm::CanonicalSig* sig() const;
@@ -1528,8 +1529,8 @@ inline constexpr int WasmFuncRef::kSize = sizeof(WasmFuncRef);
 
 V8_OBJECT class WasmCapiFunctionData : public WasmFunctionData {
  public:
-  inline Tagged<Foreign> embedder_data() const;
-  inline void set_embedder_data(Tagged<Foreign> value,
+  inline Tagged<CppGCManagedBase> embedder_data() const;
+  inline void set_embedder_data(Tagged<CppGCManagedBase> value,
                                 WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   DECL_PRINTER(WasmCapiFunctionData)
@@ -1541,7 +1542,7 @@ V8_OBJECT class WasmCapiFunctionData : public WasmFunctionData {
   static const int kSize;
 
  public:
-  TaggedMember<Foreign> embedder_data_;
+  TaggedMember<CppGCManagedBase> embedder_data_;
 } V8_OBJECT_END;
 
 inline constexpr int WasmCapiFunctionData::kHeaderSize =
@@ -2007,18 +2008,17 @@ V8_OBJECT class WasmNull : public HeapObject {
  public:
 #if V8_STATIC_ROOTS_BOOL || V8_STATIC_ROOTS_GENERATION_BOOL
   // TODO(manoskouk): Make it smaller if able and needed.
-  static constexpr int kPayloadSize = 64 * KB;
-  // Payload should be a multiple of page size.
-  static_assert(kPayloadSize % kMinimumOSPageSize == 0);
-
-  Address payload() { return reinterpret_cast<Address>(this) + kPayloadOffset; }
-
-  static const int kPayloadOffset;
-  static const int kSizeWithPayload;
+  static constexpr int kSize = 64 * KB;
+  // Inaccessible region should be a multiple of page size.
+  static_assert(kSize % kMinimumOSPageSize == 0);
+  // Any wasm struct offset should fit in the object.
+  static_assert(kSize >=
+                WasmStruct::kHeaderSize +
+                    (wasm::kMaxStructFieldIndexForImplicitNullCheck + 1) *
+                        kSimd128Size);
+#else
+  static constexpr int kSize = sizeof(HeapObject);
 #endif
-
-  static const int kHeaderSize;
-  static const int kSize;
 
   DECL_PRINTER(WasmNull)
   DECL_VERIFIER(WasmNull)
@@ -2027,21 +2027,6 @@ V8_OBJECT class WasmNull : public HeapObject {
   // (not fixed size) as kSize is too large for a fixed-size map.
   class BodyDescriptor;
 } V8_OBJECT_END;
-
-inline constexpr int WasmNull::kHeaderSize = sizeof(WasmNull);
-#if V8_STATIC_ROOTS_BOOL || V8_STATIC_ROOTS_GENERATION_BOOL
-inline constexpr int WasmNull::kPayloadOffset = WasmNull::kHeaderSize;
-inline constexpr int WasmNull::kSizeWithPayload =
-    WasmNull::kPayloadOffset + WasmNull::kPayloadSize;
-inline constexpr int WasmNull::kSize = WasmNull::kSizeWithPayload;
-// Any wasm struct offset should fit in the object.
-static_assert(WasmNull::kSizeWithPayload >=
-              WasmStruct::kHeaderSize +
-                  (wasm::kMaxStructFieldIndexForImplicitNullCheck + 1) *
-                      kSimd128Size);
-#else
-inline constexpr int WasmNull::kSize = WasmNull::kHeaderSize;
-#endif
 
 #undef DECL_OPTIONAL_ACCESSORS
 

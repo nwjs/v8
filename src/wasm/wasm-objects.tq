@@ -11,14 +11,14 @@
 type PodArrayOfWasmValueType extends ByteArray
     constexpr 'PodArray<wasm::ValueType>';
 @useParentTypeChecker
-type ManagedWasmNativeModule extends Foreign
-    constexpr 'Managed<wasm::NativeModule>';
+type ManagedWasmNativeModule extends CppGCManagedBase
+    constexpr 'CppGCManaged<wasm::NativeModule>';
 @useParentTypeChecker
 type TrustedManagedWasmNativeModule extends TrustedForeign
     constexpr 'TrustedManaged<wasm::NativeModule>';
 @useParentTypeChecker
-type ManagedBackingStore extends Foreign
-    constexpr 'Managed<BackingStore>';
+type ManagedBackingStore extends CppGCManagedBase
+    constexpr 'CppGCManaged<BackingStore>';
 
 type RawFunctionSigPtr extends RawPtr constexpr 'const wasm::CanonicalSig*';
 
@@ -163,7 +163,7 @@ extern operator '.instance_data' macro
 
 @cppObjectLayoutDefinition
 extern class WasmCapiFunctionData extends WasmFunctionData {
-  embedder_data: Foreign;  // Managed<wasm::FuncData>
+  embedder_data: CppGCManagedBase;  // CppGCManaged<wasm::FuncData>
 }
 
 @cppObjectLayoutDefinition
@@ -330,6 +330,8 @@ extern class WasmStringViewIter extends HeapObject {
 }
 
 @cppObjectLayoutDefinition
+@doNotGenerateCast
+@doNotGenerateInstanceTypeCheck
 extern class WasmNull extends HeapObject {}
 
 extern macro WasmNullConstant(): WasmNull;

@@ -17,7 +17,6 @@
 #include "src/common/globals.h"
 #include "src/common/message-template.h"
 #include "src/debug/debug-evaluate.h"
-#include "src/debug/liveedit.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate-inl.h"
@@ -1393,7 +1392,8 @@ void Debug::PrepareStepOnThrow() {
     if (last_step_action() == StepInto) {
       // Deoptimize frame to ensure calls are checked for step-in.
       Deoptimizer::DeoptimizeFunction(frame->function(),
-                                      LazyDeoptimizeReason::kDebugger);
+                                      LazyDeoptimizeReason::kDebugger,
+                                      frame->LookupCode());
     }
     FrameSummaries summaries = frame->Summarize();
     for (size_t i = summaries.size(); i != 0; i--, current_frame_count--) {
@@ -1596,7 +1596,8 @@ void Debug::PrepareStep(StepAction step_action) {
         if (last_step_action() == StepInto) {
           // Deoptimize frame to ensure calls are checked for step-in.
           Deoptimizer::DeoptimizeFunction(js_frame->function(),
-                                          LazyDeoptimizeReason::kDebugger);
+                                          LazyDeoptimizeReason::kDebugger,
+                                          js_frame->LookupCode());
         }
         HandleScope inner_scope(isolate_);
         std::vector<Handle<SharedFunctionInfo>> infos;
@@ -2321,13 +2322,19 @@ bool Debug::EnsureBreakInfo(Handle<SharedFunctionInfo> shared) {
                          &is_compiled_scope, CreateSourcePositions{true})) {
     return false;
   }
-  CreateBreakInfo(shared);
-  return true;
+  return CreateBreakInfo(shared);
 }
 
-void Debug::CreateBreakInfo(DirectHandle<SharedFunctionInfo> shared) {
+bool Debug::CreateBreakInfo(DirectHandle<SharedFunctionInfo> shared) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   HandleScope scope(isolate_);
+
+  SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate_, shared);
+  if (shared->HasBytecodeArray() &&
+      !shared->GetBytecodeArray(isolate_)->HasSourcePositionTable()) {
+    return false;
+  }
+
   DirectHandle<DebugInfo> debug_info = GetOrCreateDebugInfo(shared);
 
   // Initialize with break information.
@@ -2344,7 +2351,7 @@ void Debug::CreateBreakInfo(DirectHandle<SharedFunctionInfo> shared) {
   debug_info->set_flags(flags, kRelaxedStore);
   debug_info->set_break_points(*break_points);
 
-  SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate_, shared);
+  return true;
 }
 
 Handle<DebugInfo> Debug::GetOrCreateDebugInfo(
@@ -2778,24 +2785,6 @@ bool Debug::CanBreakAtEntry(DirectHandle<SharedFunctionInfo> shared) {
   return false;
 }
 
-bool Debug::SetScriptSource(Handle<Script> script, Handle<String> source,
-                            bool preview, bool allow_top_frame_live_editing,
-                            debug::LiveEditResult* result) {
-  RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
-  DebugScope debug_scope(this);
-
-  if (v8_flags.inspector_live_edit) {
-    running_live_edit_ = true;
-    LiveEdit::PatchScript(isolate_, script, source, preview,
-                          allow_top_frame_live_editing, result);
-    running_live_edit_ = false;
-  } else {
-    result->status = debug::LiveEditResult::FEATURE_DISABLED;
-  }
-
-  return result->status == debug::LiveEditResult::OK;
-}
-
 void Debug::OnCompileError(DirectHandle<Script> script) {
   ProcessCompileEvent(true, script);
 }
@@ -2809,9 +2798,6 @@ void Debug::ProcessCompileEvent(bool has_compile_error,
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   // Ignore temporary scripts.
   if (script->id() == Script::kTemporaryScriptId) return;
-  // TODO(kozyatinskiy): teach devtools to work with liveedit scripts better
-  // first and then remove this fast return.
-  if (running_live_edit_) return;
   // Attach the correct debug id to the script. The debug id is used by the
   // inspector to filter scripts by native context.
   script->set_context_data(isolate_->native_context()->debug_context_id());
@@ -2826,7 +2812,7 @@ void Debug::ProcessCompileEvent(bool has_compile_error,
   {
     RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebuggerCallback);
     debug_delegate_->ScriptCompiled(ToApiHandle<debug::Script>(script),
-                                    running_live_edit_, has_compile_error);
+                                    has_compile_error);
   }
 }
 
@@ -2911,8 +2897,8 @@ void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode,
       // caller frames are at a call site, which acts as a memory serialization
       // barrier, forcing them to reload all heap state upon return anyway.
       if (frame->is_optimized()) {
-        Deoptimizer::DeoptimizeFunction(*function,
-                                        LazyDeoptimizeReason::kDebugger);
+        Deoptimizer::DeoptimizeFunction(
+            *function, LazyDeoptimizeReason::kDebugger, frame->LookupCode());
       }
 
       // kScheduled breaks are triggered by the stack check. While we could
@@ -3434,7 +3420,8 @@ void Debug::PrepareRestartFrame(JavaScriptFrame* frame,
                                 int inlined_frame_index) {
   if (frame->is_optimized()) {
     Deoptimizer::DeoptimizeFunction(frame->function(),
-                                    LazyDeoptimizeReason::kDebugger);
+                                    LazyDeoptimizeReason::kDebugger,
+                                    frame->LookupCode());
   }
 
   thread_local_.restart_frame_id_ = frame->id();

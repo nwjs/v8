@@ -1054,19 +1054,6 @@ void ChangeFloat64ToHoleyFloat64::GenerateCode(MaglevAssembler* masm,
   __ Subsd(value, kScratchDoubleReg);
 }
 
-void HoleyFloat64ToSilencedFloat64::SetValueLocationConstraints() {
-  UseRegister(ValueInput());
-  DefineSameAsFirst(this);
-}
-void HoleyFloat64ToSilencedFloat64::GenerateCode(MaglevAssembler* masm,
-                                                 const ProcessingState& state) {
-  DoubleRegister value = ToDoubleRegister(ValueInput());
-  // The hole value is a signalling NaN, so just silence it to get the
-  // float64 value.
-  __ Xorpd(kScratchDoubleReg, kScratchDoubleReg);
-  __ Subsd(value, kScratchDoubleReg);
-}
-
 void Float64ToSilencedFloat64::SetValueLocationConstraints() {
   UseRegister(ValueInput());
   DefineSameAsFirst(this);
@@ -1087,21 +1074,6 @@ void UnsafeFloat64ToHoleyFloat64::SetValueLocationConstraints() {
 void UnsafeFloat64ToHoleyFloat64::GenerateCode(MaglevAssembler* masm,
                                                const ProcessingState& state) {}
 
-#ifdef V8_ENABLE_UNDEFINED_DOUBLE
-void HoleyFloat64ConvertHoleToUndefined::SetValueLocationConstraints() {
-  UseRegister(ValueInput());
-  DefineSameAsFirst(this);
-}
-void HoleyFloat64ConvertHoleToUndefined::GenerateCode(
-    MaglevAssembler* masm, const ProcessingState& state) {
-  DoubleRegister value = ToDoubleRegister(ValueInput());
-  Label done;
-  __ JumpIfNotHoleNan(value, kScratchRegister, &done);
-  __ Move(value, UndefinedNan());
-  __ bind(&done);
-}
-#endif  // V8_ENABLE_UNDEFINED_DOUBLE
-
 namespace {
 
 enum class ReduceInterruptBudgetType { kLoop, kReturn };
@@ -1113,38 +1085,23 @@ void HandleInterruptsAndTiering(MaglevAssembler* masm, ZoneLabelRef done,
     __ ResetLastYoungAllocation();
   }
 
-  // For loops, first check for interrupts. Don't do this for returns, as we
-  // can't lazy deopt to the end of a return.
+  // Call into the TieringManager. For loops, pass the OSR bytecode offset and
+  // define a lazy deopt point since they double as interrupt checks.
   if (type == ReduceInterruptBudgetType::kLoop) {
-    Label next;
-
-    // Here, we only care about interrupts since we've already guarded against
-    // real stack overflows on function entry.
-    __ cmpq(rsp, __ StackLimitAsOperand(StackLimitKind::kInterruptStackLimit));
-    __ j(above, &next);
-
-    // An interrupt has been requested and we must call into runtime to handle
-    // it; since we already pay the call cost, combine with the TieringManager
-    // call.
-    {
-      SaveRegisterStateForCall save_register_state(masm,
-                                                   node->register_snapshot());
-      __ Move(kContextRegister, masm->native_context().object());
-      __ Push(MemOperand(rbp, StandardFrameConstants::kFunctionOffset));
-      __ CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheck_Maglev, 1);
-      save_register_state.DefineSafepointWithLazyDeopt(node->lazy_deopt_info());
-    }
-    __ jmp(*done);  // All done, continue.
-
-    __ bind(&next);
-  }
-
-  // No pending interrupts. Call into the TieringManager if needed.
-  {
     SaveRegisterStateForCall save_register_state(masm,
                                                  node->register_snapshot());
-    __ Move(kContextRegister, masm->native_context().object());
     __ Push(MemOperand(rbp, StandardFrameConstants::kFunctionOffset));
+    __ Push(Smi::FromInt(
+        node->Cast<ReduceInterruptBudgetForLoop>()->osr_offset().ToInt()));
+    __ Move(kContextRegister, masm->native_context().object());
+    __ CallRuntime(Runtime::kBytecodeBudgetLoopInterrupt_Maglev, 2);
+    save_register_state.DefineSafepointWithLazyDeopt(node->lazy_deopt_info());
+  } else {
+    DCHECK_EQ(type, ReduceInterruptBudgetType::kReturn);
+    SaveRegisterStateForCall save_register_state(masm,
+                                                 node->register_snapshot());
+    __ Push(MemOperand(rbp, StandardFrameConstants::kFunctionOffset));
+    __ Move(kContextRegister, masm->native_context().object());
     // Note: must not cause a lazy deopt!
     __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Maglev, 1);
     save_register_state.DefineSafepoint();
@@ -1166,14 +1123,19 @@ void GenerateReduceInterruptBudget(MaglevAssembler* masm, Node* node,
 
 }  // namespace
 
-int ReduceInterruptBudgetForLoop::MaxCallStackArgs() const { return 1; }
 void ReduceInterruptBudgetForLoop::SetValueLocationConstraints() {
   UseRegister(FeedbackCellInput());
+  if (try_osr()) {
+    set_temporaries_needed(2);
+  }
 }
 void ReduceInterruptBudgetForLoop::GenerateCode(MaglevAssembler* masm,
                                                 const ProcessingState& state) {
   GenerateReduceInterruptBudget(masm, this, ToRegister(FeedbackCellInput()),
                                 ReduceInterruptBudgetType::kLoop, amount());
+  if (try_osr()) {
+    masm->TryOnStackReplacement(this, feedback_slot());
+  }
 }
 
 int ReduceInterruptBudgetForReturn::MaxCallStackArgs() const { return 1; }

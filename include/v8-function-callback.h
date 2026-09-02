@@ -243,8 +243,9 @@ class PropertyCallbackInfo {
    * would return the global proxy.
    */
   V8_INLINE Local<Object> Holder() const;
-  // TODO(http://crbug.com/333672197): deprecate and remove.
-  V8_DEPRECATED("Use Holder().")
+  // NW.js: keep the pre-rename alias; removed upstream by
+  // "[api] Remove deprecated methods, pt.1" but the Node.js version
+  // used by NW.js still calls HolderV2().
   V8_INLINE Local<Object> HolderV2() const;
 
   /**
@@ -688,6 +689,7 @@ template <typename T>
 Local<Object> PropertyCallbackInfo<T>::Holder() const {
   return Local<Object>::FromSlot(&args_[kHolderIndex]);
 }
+
 template <typename T>
 Local<Object> PropertyCallbackInfo<T>::HolderV2() const {
   return Holder();

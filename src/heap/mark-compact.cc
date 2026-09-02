@@ -3262,6 +3262,8 @@ void MarkCompactCollector::ClearNonLiveReferences() {
         JSDispatchTable& jdt = isolate->js_dispatch_table();
         Tagged<Code> compile_lazy =
             heap_->isolate()->builtins()->code(Builtin::kCompileLazy);
+        Tagged<Code> mark_flushed =
+            heap_->isolate()->builtins()->code(Builtin::kMarkFlushed);
         jdt.Sweep(heap_->js_dispatch_table_space(),
                   heap_->isolate()->counters(), [&](JSDispatchEntry& entry) {
                     Tagged<Code> code = entry.GetCode();
@@ -3286,7 +3288,7 @@ void MarkCompactCollector::ClearNonLiveReferences() {
                              code->kind() == CodeKind::TURBOFAN_JS ||
                              code->is_interpreter_trampoline_builtin());
                       entry.SetCodeAndEntrypointPointer(
-                          compile_lazy.ptr(), compile_lazy->instruction_start(),
+                          compile_lazy.ptr(), mark_flushed->instruction_start(),
                           isolate);
                     }
                   });
@@ -3641,6 +3643,13 @@ void MarkCompactCollector::FlushBytecodeFromSFI(
   // Replace the bytecode with an uncompiled data object.
   Tagged<BytecodeArray> bytecode_array =
       shared_info->GetBytecodeArrayForGC(heap_->isolate());
+
+  // With in-sandbox corruption, the SFI::trusted_function_data_ handle could be
+  // swapped before getting flushed. The SBXCHECK ensures that we haven't marked
+  // this bytecode as live, so we don't flush out functions that are currently
+  // executing on the stack.
+  SBXCHECK(!MarkingHelper::IsMarkedOrAlwaysLive(
+      heap_, non_atomic_marking_state_, bytecode_array));
 
 #ifdef V8_ENABLE_SANDBOX
   DCHECK(!HeapLayout::InWritableSharedSpace(shared_info));

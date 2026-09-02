@@ -22,6 +22,7 @@
 #include "src/compiler/turboshaft/select-lowering-reducer.h"
 #include "src/compiler/turboshaft/variable-reducer.h"
 #include "src/compiler/wasm-compiler-definitions.h"
+#include "src/execution/frame-constants.h"
 #include "src/flags/flags.h"
 #include "src/objects/object-list-macros.h"
 #include "src/trap-handler/trap-handler.h"
@@ -2155,6 +2156,7 @@ class TurboshaftGraphBuildingInterface
     OpIndex ret_val = __ Call(target_address, OpIndex::Invalid(),
                               base::VectorOf(inputs), ts_call_descriptor);
     BuildSwitchBackFromCentralStack(old_sp, old_limit);
+    instance_cache_.ReloadCachedMemory();
 
 #if DEBUG
     // Reset the context again after the call, to make sure nobody is using the
@@ -3849,12 +3851,10 @@ class TurboshaftGraphBuildingInterface
 
     BindBlockAndGeneratePhis(decoder, block->false_or_loop_or_catch_block,
                              nullptr, &block->exception);
-    V<NativeContext> native_context = instance_cache_.native_context();
     V<WasmExceptionTag> caught_tag = V<WasmExceptionTag>::Cast(
         CallBuiltinThroughJumptable<BuiltinCallDescriptor::WasmGetOwnProperty>(
-            decoder, native_context,
-            {block->exception,
-             __ LoadRoot<RootIndex::kwasm_exception_tag_symbol>()}));
+            decoder, {block->exception,
+                      __ LoadRoot<RootIndex::kwasm_exception_tag_symbol>()}));
     // TODO(14616): Support shared tags.
     V<TrustedFixedArray> instance_tags =
         LOAD_IMMUTABLE_PROTECTED_INSTANCE_FIELD(
@@ -3885,7 +3885,7 @@ class TurboshaftGraphBuildingInterface
 
       IF (UNLIKELY(caught_tag_undefined)) {
         V<Object> tag_object = __ Load(
-            native_context, LoadOp::Kind::TaggedBase(),
+            instance_cache_.native_context(), LoadOp::Kind::TaggedBase(),
             MemoryRepresentation::TaggedPointer(),
             NativeContext::OffsetOfElementAt(Context::WASM_JS_TAG_INDEX));
         V<Object> js_tag = __ Load(tag_object, LoadOp::Kind::TaggedBase(),
@@ -3985,12 +3985,10 @@ class TurboshaftGraphBuildingInterface
       BrOrRet(decoder, catch_case.br_imm.depth);
       return;
     }
-    V<NativeContext> native_context = instance_cache_.native_context();
     V<WasmExceptionTag> caught_tag = V<WasmExceptionTag>::Cast(
         CallBuiltinThroughJumptable<BuiltinCallDescriptor::WasmGetOwnProperty>(
-            decoder, native_context,
-            {block->exception,
-             __ LoadRoot<RootIndex::kwasm_exception_tag_symbol>()}));
+            decoder, {block->exception,
+                      __ LoadRoot<RootIndex::kwasm_exception_tag_symbol>()}));
     // TODO(14616): Support shared tags.
     V<TrustedFixedArray> instance_tags =
         LOAD_IMMUTABLE_PROTECTED_INSTANCE_FIELD(
@@ -4022,7 +4020,7 @@ class TurboshaftGraphBuildingInterface
 
       IF (UNLIKELY(caught_tag_undefined)) {
         V<Object> tag_object = __ Load(
-            native_context, LoadOp::Kind::TaggedBase(),
+            instance_cache_.native_context(), LoadOp::Kind::TaggedBase(),
             MemoryRepresentation::TaggedPointer(),
             NativeContext::OffsetOfElementAt(Context::WASM_JS_TAG_INDEX));
         V<Object> js_tag = __ Load(tag_object, LoadOp::Kind::TaggedBase(),
@@ -5118,9 +5116,12 @@ class TurboshaftGraphBuildingInterface
       // initialize the function table entry.
       Label<Object> resolved(&asm_);
       Label<> call_runtime(&asm_);
-      // The entry is a WasmFuncRef, WasmNull, or Tuple2. Hence
-      // it is safe to cast it to HeapObject.
+      // The entry is a WasmFuncRef, WasmNull, or Tuple2. We can cast it
+      // to HeapObject after checking for WasmNull.
+      GOTO_IF(UNLIKELY(__ IsNull(entry, kWasmFuncRef)), resolved, entry);
       V<Map> entry_map = __ LoadMapField(V<HeapObject>::Cast(entry));
+      // TODO(jkummerow): Instead of loading the instance type, compare
+      // the Tuple2Map by pointer identity.
       V<Word32> instance_type = __ LoadInstanceTypeField(entry_map);
       GOTO_IF(
           UNLIKELY(__ Word32Equal(instance_type, InstanceType::TUPLE2_TYPE)),
@@ -7164,6 +7165,18 @@ class TurboshaftGraphBuildingInterface
     // stack check.
     CHECK_NE(liftoff_frame_size_,
              FunctionTypeFeedback::kUninitializedLiftoffFrameSize);
+
+    int parameter_stack_slots = 0;
+    class DummyResultCollector {
+     public:
+      void AddParamAt(size_t index, LinkageLocation location) {}
+      void AddReturnAt(size_t index, LinkageLocation location) {}
+    } result_collector;
+    wasm::IterateSignatureImpl(decoder->sig_, false, result_collector, nullptr,
+                               &parameter_stack_slots, nullptr, nullptr);
+
+    liftoff_frame_size_ += parameter_stack_slots * kSystemPointerSize +
+                           CommonFrameConstants::kFixedFrameSizeAboveFp;
     return liftoff_frame_size_;
   }
 
@@ -8891,7 +8904,7 @@ class TurboshaftGraphBuildingInterface
                            base::Vector<Value> values) {
     V<FixedArray> exception_values_array = V<FixedArray>::Cast(
         CallBuiltinThroughJumptable<BuiltinCallDescriptor::WasmGetOwnProperty>(
-            decoder, instance_cache_.native_context(),
+            decoder,
             {exception,
              __ LoadRoot<RootIndex::kwasm_exception_values_symbol>()}));
 

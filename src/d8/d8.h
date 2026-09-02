@@ -193,6 +193,10 @@ class SerializationData {
   const std::vector<CompiledWasmModule>& compiled_wasm_modules() {
     return compiled_wasm_modules_;
   }
+  const std::vector<std::shared_ptr<v8::BackingStore>>&
+  shared_immutable_backing_stores() {
+    return shared_immutable_backing_stores_;
+  }
   const std::optional<v8::SharedValueConveyor>& shared_value_conveyor() {
     return shared_value_conveyor_;
   }
@@ -206,6 +210,8 @@ class SerializationData {
   size_t size_ = 0;
   std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
   std::vector<std::shared_ptr<v8::BackingStore>> sab_backing_stores_;
+  std::vector<std::shared_ptr<v8::BackingStore>>
+      shared_immutable_backing_stores_;
   std::vector<CompiledWasmModule> compiled_wasm_modules_;
   std::optional<v8::SharedValueConveyor> shared_value_conveyor_;
 
@@ -227,7 +233,7 @@ class SerializationDataQueue {
 
 class Worker : public std::enable_shared_from_this<Worker> {
  public:
-  static constexpr i::ExternalPointerTag kManagedTag = i::kD8WorkerTag;
+  static constexpr i::ManagedTypeId kTypeID = i::ManagedTypeId::kD8Worker;
 
   explicit Worker(Isolate* parent_isolate, const char* script,
                   bool flush_denormals);
@@ -996,12 +1002,12 @@ class Shell : public i::AllStatic {
                                             const std::string& file_name,
                                             ModuleType module_type);
 
-  static MaybeLocal<Value> JSONModuleEvaluationSteps(Local<Context> context,
-                                                     Local<Module> module);
-  static MaybeLocal<Value> TextModuleEvaluationSteps(Local<Context> context,
-                                                     Local<Module> module);
-  static MaybeLocal<Value> BytesModuleEvaluationSteps(Local<Context> context,
-                                                      Local<Module> module);
+  static MaybeLocal<Promise> JSONModuleEvaluationSteps(Local<Context> context,
+                                                       Local<Module> module);
+  static MaybeLocal<Promise> TextModuleEvaluationSteps(Local<Context> context,
+                                                       Local<Module> module);
+  static MaybeLocal<Promise> BytesModuleEvaluationSteps(Local<Context> context,
+                                                        Local<Module> module);
 
   template <class T>
   static MaybeLocal<T> CompileSource(Isolate* isolate, Local<Context> context,

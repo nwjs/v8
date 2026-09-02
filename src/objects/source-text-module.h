@@ -83,6 +83,11 @@ V8_OBJECT class SourceTextModule : public Module {
             DirectHandleVector<JSMessageObject>>
   GetStalledTopLevelAwaitMessages(Isolate* isolate);
 
+  // https://tc39.es/proposal-defer-import-eval/#sec-IsModuleSCCEvaluated
+  // This function checks if the Strongly Connected Component (SCC) that the
+  // module participates is evaluated.
+  static bool IsModuleSCCEvaluated(Handle<SourceTextModule> module);
+
   static void GatherAsynchronousTransitiveDependencies(
       Isolate* isolate, Handle<Module> module,
       UnorderedModuleSet* evaluation_set,
@@ -232,7 +237,7 @@ V8_OBJECT class SourceTextModule : public Module {
                                        AvailableAncestorsSet* exec_list);
 
   // Implementation of spec concrete method Evaluate.
-  static V8_WARN_UNUSED_RESULT MaybeDirectHandle<Object> Evaluate(
+  static V8_WARN_UNUSED_RESULT MaybeDirectHandle<JSPromise> Evaluate(
       Isolate* isolate, Handle<SourceTextModule> module);
 
   // Implementation of spec abstract operation InnerModuleEvaluation.
@@ -316,6 +321,9 @@ class SourceTextModuleInfo : public FixedArray {
   Tagged<FixedArray> RegularExportExportNames(int i) const;
 
   inline bool Equals(Tagged<SourceTextModuleInfo> other) const;
+
+  // Whether the module has at least one `export * from '...'` statement.
+  bool HasStarExports() const;
 
  private:
   template <typename Impl>

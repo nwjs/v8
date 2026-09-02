@@ -877,6 +877,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   inline bool is_catchable_by_javascript(Tagged<Object> exception);
   inline bool is_catchable_by_wasm(Tagged<Object> exception);
   inline bool is_execution_terminating();
+  inline bool is_javascript_execution_allowed() const;
 
   // JS execution stack (see frames.h).
   static Address c_entry_fp(ThreadLocalTop* thread) {
@@ -1157,6 +1158,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void RegisterTryCatchHandler(v8::TryCatch* that);
   void UnregisterTryCatchHandler(v8::TryCatch* that);
+  static void MarkTryCatchInternal(v8::TryCatch* that);
+  static bool IsInternalTryCatch(v8::TryCatch* that);
 
   char* ArchiveThread(char* to);
   char* RestoreThread(char* from);
@@ -1935,6 +1938,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void SetReleaseCppHeapCallback(v8::Isolate::ReleaseCppHeapCallback callback);
 
   void RunReleaseCppHeapCallback(std::unique_ptr<v8::CppHeap> cpp_heap);
+  std::shared_ptr<bool> cpp_heap_isolate_alive_token() const;
 
   void SetPromiseHook(PromiseHook hook);
   void RunPromiseHook(PromiseHookType type, DirectHandle<JSPromise> promise,
@@ -3168,9 +3172,14 @@ class StackLimitCheck {
 #endif
 
   // Use this to check for interrupt request in C++ code.
-  V8_INLINE bool InterruptRequested() {
+  V8_INLINE bool InterruptRequested(
+      StackGuard::InterruptLevel level =
+          StackGuard::InterruptLevel::kAnyEffect) {
     StackGuard* stack_guard = isolate_->stack_guard();
-    return GetCurrentStackPosition() < stack_guard->climit();
+    if (level == StackGuard::InterruptLevel::kAnyEffect) {
+      return GetCurrentStackPosition() < stack_guard->climit();
+    }
+    return stack_guard->CheckInterrupt(StackGuard::InterruptLevelMask(level));
   }
 
   // Precondition: InterruptRequested == true.

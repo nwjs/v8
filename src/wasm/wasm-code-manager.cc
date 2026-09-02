@@ -1038,10 +1038,10 @@ NativeModule::NativeModule(WasmEnabledFeatures enabled_features,
                            std::shared_ptr<NativeModule>* shared_this)
     : engine_scope_(
           GetWasmEngine()->GetBarrierForBackgroundCompile()->TryLock()),
-      code_allocator_(&counter_updates_),
       enabled_features_(enabled_features),
       compile_imports_(std::move(compile_imports)),
       module_(std::move(module)),
+      code_allocator_(&counter_updates_),
       // We don't use `std::make_shared` here because of problems with UBsan,
       // see http://b/478120402.
       fast_api_data_(new FastApiData[module_->num_imported_functions]) {
@@ -2168,6 +2168,14 @@ WasmCodePointer NativeModule::GetCodePointerHandle(int index) const {
 
 NativeModule::~NativeModule() {
   TRACE_HEAP("Deleting native module: %p\n", this);
+
+  // Ensure that {code_allocator_} is declared after {owned_code_} so that C++
+  // destroys {code_allocator_} (and removes the memory ranges from
+  // {WasmCodeManager::lookup_map_}) BEFORE {owned_code_} is destroyed.
+  static_assert(offsetof(NativeModule, code_allocator_) >
+                    offsetof(NativeModule, owned_code_),
+                "code_allocator_ must be declared after owned_code_");
+
   // Cancel all background compilation before resetting any field of the
   // NativeModule or freeing anything.
   compilation_state_->CancelCompilation();
@@ -3061,17 +3069,11 @@ WasmCode* WasmCodeManager::LookupCode(Address pc) const {
 }
 
 WasmCode* WasmCodeManager::LookupCode(Isolate* isolate, Address pc) const {
+  DCHECK_NOT_NULL(isolate);
   // Since kNullAddress is used as a sentinel value, we should not try
-  // to look it up in the cache
+  // to look it up in the cache.
   if (pc == kNullAddress) return nullptr;
-  // If 'isolate' is nullptr, do not use a cache. This can happen when
-  // called from function V8NameConverter::NameOfAddress
-  if (isolate) {
-    return isolate->wasm_code_look_up_cache()->GetCacheEntry(pc)->code;
-  } else {
-    wasm::WasmCodeRefScope code_ref_scope;
-    return LookupCode(pc);
-  }
+  return isolate->wasm_code_look_up_cache()->GetCacheEntry(pc)->code;
 }
 
 std::pair<WasmCode*, SafepointEntry&> WasmCodeManager::LookupCodeAndSafepoint(

@@ -95,8 +95,7 @@ SAFE_CONVERSION_LIST(DEFINE_PROCESS_SAFE_CONV)
 ProcessResult RecomputeKnownNodeAspectsProcessor::ProcessNode(
     CheckedNumberOrOddballToFloat64* node) {
   NodeInfo* info = GetOrCreateInfoFor(node->input_node(0));
-  info->IntersectType(
-      GetAllowedTypeFromConversionType(node->conversion_type()));
+  info->IntersectType(node->assumed_input_type());
   if (!info->alternative().float64() &&
       NodeTypeIs(info->type(), NodeType::kNumber)) {
     info->alternative().set_float64(node);
@@ -121,7 +120,7 @@ ProcessResult RecomputeKnownNodeAspectsProcessor::ProcessNode(
 }
 
 ProcessResult RecomputeKnownNodeAspectsProcessor::ProcessNode(
-    HoleyFloat64ToSilencedFloat64* node) {
+    UnsafeHoleyFloat64ToFloat64* node) {
   NodeInfo* info = GetOrCreateInfoFor(node->input_node(0));
   if (!info->alternative().float64() &&
       NodeTypeIs(info->type(), NodeType::kNumber)) {

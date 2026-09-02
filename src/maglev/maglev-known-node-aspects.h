@@ -449,7 +449,7 @@ class KnownNodeAspects {
     loaded_context_slots_.clear();
     available_expressions_.clear();
     side_effects_require_invalidation_ = false;
-    may_have_aliasing_contexts_ = ContextSlotLoadsAlias::kNone;
+    may_have_aliasing_contexts_ = ContextSlotLoadsAlias::kNever;
     node_infos_.clear();
     virtual_objects_ = {};
   }
@@ -723,10 +723,10 @@ class KnownNodeAspects {
   }
 
   enum class ContextSlotLoadsAlias : uint8_t {
-    kNone,
+    kNever,
     kOnlyLoadsRelativeToCurrentContext,
     kOnlyLoadsRelativeToConstant,
-    kYes,
+    kAlways,
   };
   ContextSlotLoadsAlias may_have_aliasing_contexts() const {
     return may_have_aliasing_contexts_;
@@ -734,9 +734,9 @@ class KnownNodeAspects {
   static ContextSlotLoadsAlias ContextSlotLoadsAliasMerge(
       ContextSlotLoadsAlias m1, ContextSlotLoadsAlias m2) {
     if (m1 == m2) return m1;
-    if (m1 == ContextSlotLoadsAlias::kNone) return m2;
-    if (m2 == ContextSlotLoadsAlias::kNone) return m1;
-    return ContextSlotLoadsAlias::kYes;
+    if (m1 == ContextSlotLoadsAlias::kNever) return m2;
+    if (m2 == ContextSlotLoadsAlias::kNever) return m1;
+    return ContextSlotLoadsAlias::kAlways;
   }
   struct ContextStoreResult {
     enum Type {
@@ -790,6 +790,16 @@ class KnownNodeAspects {
                                         : loaded_context_constants_.empty();
   }
 
+  static bool BuiltinInvalidatesKNA(Builtin builtin) {
+    switch (builtin) {
+      // TODO(victorgomes): Add more builtins to the list!
+      case Builtin::kCloneFastJSArray:
+        return false;
+      default:
+        return true;
+    }
+  }
+
   template <typename NodeT>
   void MarkPossibleSideEffect(NodeT* node, compiler::JSHeapBroker* broker,
                               bool is_tracing_enabled) {
@@ -800,6 +810,10 @@ class KnownNodeAspects {
 
     if constexpr (!PreservesTaggedKeyedProperties(Node::opcode_of<NodeT>)) {
       loaded_tagged_keyed_properties_.clear();
+    }
+
+    if constexpr (Node::opcode_of<NodeT> == Opcode::kCallBuiltin) {
+      if (!BuiltinInvalidatesKNA(node->builtin())) return;
     }
 
     if constexpr (Node::opcode_of<NodeT> == Opcode::kMaybeGrowFastElements) {
@@ -850,7 +864,7 @@ class KnownNodeAspects {
         loaded_context_slots_(zone),
         available_expressions_(zone),
         side_effects_require_invalidation_(false),
-        may_have_aliasing_contexts_(ContextSlotLoadsAlias::kNone),
+        may_have_aliasing_contexts_(ContextSlotLoadsAlias::kNever),
         effect_epoch_(0),
         node_infos_(zone),
         virtual_objects_() {}
@@ -880,6 +894,7 @@ class KnownNodeAspects {
   friend class MaglevReducer;
   friend class RecomputeKnownNodeAspectsProcessor;
   friend class MergePointInterpreterFrameState;
+  friend class LoopMergePointInterpreterFrameState;
 
   NodeType GetTypeUnchecked(compiler::JSHeapBroker* broker,
                             ValueNode* node) const {

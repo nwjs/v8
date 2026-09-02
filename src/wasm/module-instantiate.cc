@@ -19,6 +19,7 @@
 #include "src/objects/descriptor-array-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/managed.h"
+#include "src/objects/object-conversions-inl.h"
 #include "src/objects/property-descriptor.h"
 #include "src/sandbox/trusted-pointer-scope.h"
 #include "src/tracing/trace-event.h"
@@ -978,7 +979,8 @@ MaybeDirectHandle<WasmInstanceObject> InstantiateToInstanceObject(
   InstanceBuilder builder(isolate, context_id, thrower, module_object, imports);
   MaybeDirectHandle<WasmInstanceObject> instance_object = builder.Build();
   if (!instance_object.is_null()) {
-    Managed<NativeModule>::Ptr native_module = module_object->native_module();
+    CppGCManaged<NativeModule>::Ptr native_module =
+        module_object->native_module();
     if (v8_flags.wasm_pgo_to_file && native_module->ShouldPgoDataBeWritten() &&
         native_module->module()->num_declared_functions > 0) {
       WriteOutPGOTask::Schedule(std::move(native_module).as_shared_ptr());
@@ -2093,7 +2095,8 @@ bool InstanceBuilder::ProcessImportedMemories(
     uint32_t memory_index = import.index;
     auto memory_object = Cast<WasmMemoryObject>(value);
 
-    Managed<BackingStore>::Ptr backing_store = memory_object->backing_store();
+    CppGCManaged<BackingStore>::Ptr backing_store =
+        memory_object->backing_store();
 #ifdef DEBUG
     if (Tagged<JSArrayBuffer> buffer;
         TryCast(memory_object->array_buffer(), &buffer)) {

@@ -278,6 +278,13 @@ void HeapObject::PrintHeader(std::ostream& os, const char* id) {
 }
 
 void HeapObject::HeapObjectPrint(std::ostream& os) {
+#if V8_ENABLE_WEBASSEMBLY
+  if (IsWasmNull(Tagged<HeapObject>(this))) {
+    os << "WasmNull";
+    return;
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
+
   InstanceType instance_type = map()->instance_type();
 
   if (instance_type < FIRST_NONSTRING_TYPE) {
@@ -392,6 +399,9 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
     case WASM_EXCEPTION_PACKAGE_TYPE:
       Cast<WasmExceptionPackage>(this)->WasmExceptionPackagePrint(os);
       break;
+    case WASM_NULL_TYPE:
+      // Handled before the switch.
+      UNREACHABLE();
 #endif  // V8_ENABLE_WEBASSEMBLY
     case INSTRUCTION_STREAM_TYPE:
       TrustedCast<InstructionStream>(this)->InstructionStreamPrint(os);
@@ -2964,6 +2974,11 @@ void Foreign::ForeignPrint(std::ostream& os) {
   os << "\n";
 }
 
+void CppGCManagedBase::CppGCManagedBasePrint(std::ostream& os) {
+  PrintHeader(os, "CppGCManagedBase");
+  os << "\n";
+}
+
 void TrustedForeign::TrustedForeignPrint(std::ostream& os) {
   PrintHeader(os, "TrustedForeign");
   os << "\n - foreign address: " << reinterpret_cast<void*>(foreign_address());
@@ -3730,6 +3745,13 @@ void ErrorStackData::ErrorStackDataPrint(std::ostream& os) {
   os << "\n";
 }
 
+void DebugScriptScopeInfo::DebugScriptScopeInfoPrint(std::ostream& os) {
+  this->PrintHeader(os, "DebugScriptScopeInfo");
+  os << "\n - numeric_data: " << Brief(this->numeric_data());
+  os << "\n - string_table: " << Brief(this->string_table());
+  os << "\n";
+}
+
 void LoadHandler::LoadHandlerPrint(std::ostream& os) {
   PrintHeader(os, "LoadHandler");
   // TODO(ishell): implement printing based on handler kind
@@ -4274,7 +4296,12 @@ void HeapObject::Print(Tagged<Object> obj, std::ostream& os) {
 
 void HeapObject::HeapObjectShortPrint(std::ostream& os) {
   os << AsHex::Address(this->ptr()) << " ";
-
+#if V8_ENABLE_WEBASSEMBLY
+  if (IsWasmNull(Tagged<HeapObject>(this))) {
+    os << "WasmNull";
+    return;
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
   if (Is<String>(this)) {
     HeapStringAllocator allocator;
     StringStream accumulator(&allocator);

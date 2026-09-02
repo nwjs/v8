@@ -28,7 +28,6 @@
 #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
 #include "src/compiler/turbofan.h"
 #include "src/debug/debug.h"
-#include "src/debug/liveedit.h"
 #include "src/diagnostics/code-tracer.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate-inl.h"
@@ -1177,6 +1176,33 @@ void RecordMaglevFunctionCompilation(Isolate* isolate,
       isolate, LogEventListener::CodeTag::kFunction, script, shared,
       feedback_vector, code, code->kind(), time_taken_ms);
 }
+
+// A bailout on a property of the function itself repeats on every attempt.
+// Recording it stops the tiering manager from picking Maglev again, so the
+// function tiers up to Turbofan instead of recompiling Maglev forever.
+void MaybeMarkMaglevCompilationFailed(DirectHandle<JSFunction> function,
+                                      BytecodeOffset osr_offset,
+                                      BailoutReason reason) {
+  // The bit lives on the SharedFunctionInfo, so an OSR-only bailout must not
+  // disable Maglev for the regular entry point too.
+  if (IsOSR(osr_offset)) return;
+  switch (reason) {
+    case BailoutReason::kMaglevGraphBuildingFailed:
+      function->shared()->set_maglev_compilation_failed(true);
+      break;
+    default:
+      break;
+  }
+}
+
+void AbortMaglevCompilationJob(Isolate* isolate,
+                               DirectHandle<JSFunction> function,
+                               BytecodeOffset osr_offset,
+                               BailoutReason reason) {
+  CompilerTracer::TraceAbortedMaglevCompile(isolate, function, reason);
+  MaybeMarkMaglevCompilationFailed(function, osr_offset, reason);
+  function->SetTieringInProgress(isolate, false, osr_offset);
+}
 #endif  // V8_ENABLE_MAGLEV
 
 MaybeHandle<Code> CompileMaglev(Isolate* isolate, Handle<JSFunction> function,
@@ -1228,6 +1254,12 @@ MaybeHandle<Code> CompileMaglev(Isolate* isolate, Handle<JSFunction> function,
         job->ExecuteJob(isolate->counters()->runtime_call_stats(),
                         isolate->main_thread_local_isolate());
     if (status == CompilationJob::FAILED) {
+      // Synchronous compilation never sets tiering_in_progress, so unlike
+      // FinalizeMaglevCompilationJob this must not reset it.
+      CompilerTracer::TraceAbortedMaglevCompile(isolate, function,
+                                                job->bailout_reason_);
+      MaybeMarkMaglevCompilationFailed(function, osr_offset,
+                                       job->bailout_reason_);
       return {};
     }
     CHECK_EQ(status, CompilationJob::SUCCEEDED);
@@ -2049,15 +2081,11 @@ class ConstantPoolPointerForwarder {
   void RecordScopeInfos(Tagged<HeapObject> info) {
     Tagged<ScopeInfo> scope_info;
     if (Is<SharedFunctionInfo>(info)) {
-      Tagged<SharedFunctionInfo> old_sfi = Cast<SharedFunctionInfo>(info);
-      // Also record own scope infos for SFIs.
-      if (!old_sfi->scope_info()->IsEmpty()) {
-        scope_info = old_sfi->scope_info();
-      } else if (old_sfi->HasOuterScopeInfo()) {
-        scope_info = old_sfi->GetOuterScopeInfo();
-      } else {
-        return;
-      }
+      // We can get an empty scope info here for a function that is racily
+      // getting compiled, which is ok because we will revisit it during
+      // foreground merging.
+      scope_info = Cast<SharedFunctionInfo>(info)->TryGetScopeInfoForMerge();
+      if (scope_info->IsEmpty()) return;
     } else {
       scope_info = Cast<ScopeInfo>(info);
     }
@@ -2466,9 +2494,11 @@ void BackgroundMergeTask::BeginMergeInBackground(
           Tagged<ScopeInfo> info = old_sfi->scope_info();
           if (!info->IsEmpty()) {
             new_sfi->SetScopeInfo(info);
-          } else if (old_sfi->HasOuterScopeInfo()) {
-            new_sfi->scope_info()->set_outer_scope_info(
-                old_sfi->GetOuterScopeInfo());
+          } else {
+            Tagged<ScopeInfo> outer_info = old_sfi->TryGetOuterScopeInfo();
+            if (!outer_info->IsEmpty()) {
+              new_sfi->scope_info()->set_outer_scope_info(outer_info);
+            }
           }
           forwarder.AddBytecodeArray(new_sfi->GetBytecodeArray(isolate));
         }
@@ -3258,23 +3288,13 @@ void Compiler::CompileOptimized(Isolate* isolate,
   DCHECK(function->is_compiled(isolate));
   DCHECK(function->shared()->HasBytecodeArray());
 
-  DCHECK_IMPLIES(function->IsTieringRequestedOrInProgress(isolate) &&
-                     !function->IsLoggingRequested(isolate),
+  DCHECK_IMPLIES(function->IsOptimizationRequested(isolate),
                  function->tiering_in_progress());
   DCHECK_IMPLIES(!tiering_was_in_progress && function->tiering_in_progress(),
                  function->ChecksTieringState(isolate));
   DCHECK_IMPLIES(!tiering_was_in_progress && function->tiering_in_progress(),
                  IsConcurrent(mode));
 #endif  // DEBUG
-}
-
-// static
-MaybeDirectHandle<SharedFunctionInfo> Compiler::CompileForLiveEdit(
-    ParseInfo* parse_info, Handle<Script> script,
-    MaybeDirectHandle<ScopeInfo> outer_scope_info, Isolate* isolate) {
-  IsCompiledScope is_compiled_scope;
-  return v8::internal::CompileToplevel(parse_info, script, outer_scope_info,
-                                       isolate, &is_compiled_scope);
 }
 
 // static
@@ -4519,9 +4539,6 @@ void Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
   if (V8_LIKELY(use_result)) {
     function->SetTieringInProgress(isolate, false,
                                    job->compilation_info()->osr_offset());
-    if (!IsOSR(osr_offset)) {
-      function->UpdateCode(isolate, shared->GetCode(isolate));
-    }
   }
 }
 
@@ -4544,24 +4561,26 @@ void Compiler::FinalizeMaglevCompilationJob(maglev::MaglevCompilationJob* job,
   DirectHandle<JSFunction> function = job->function();
   BytecodeOffset osr_offset = job->osr_offset();
 
+  if (job->state() == CompilationJob::State::kFailed) {
+    AbortMaglevCompilationJob(isolate, function, osr_offset,
+                              job->bailout_reason_);
+    return;
+  }
+  DCHECK_EQ(job->state(), CompilationJob::State::kReadyToFinalize);
+
   if (function->ActiveTierIsTurbofan(isolate) && !job->is_osr()) {
-    function->SetTieringInProgress(isolate, false, osr_offset);
-    CompilerTracer::TraceAbortedMaglevCompile(isolate, function,
-                                              BailoutReason::kCancelled);
+    AbortMaglevCompilationJob(isolate, function, osr_offset,
+                              BailoutReason::kCancelled);
     return;
   }
   // Discard code compiled for a discarded native context without finalization.
   if (function->native_context()->IsDetached()) {
-    CompilerTracer::TraceAbortedMaglevCompile(
-        isolate, function, BailoutReason::kDetachedNativeContext);
+    AbortMaglevCompilationJob(isolate, function, osr_offset,
+                              BailoutReason::kDetachedNativeContext);
     return;
   }
 
   const CompilationJob::Status status = job->FinalizeJob(isolate);
-
-  // TODO(v8:7700): Use the result and check if job succeed
-  // when all the bytecodes are implemented.
-  USE(status);
 
   if (status == CompilationJob::SUCCEEDED) {
     DirectHandle<SharedFunctionInfo> shared(function->shared(), isolate);
@@ -4597,11 +4616,11 @@ void Compiler::FinalizeMaglevCompilationJob(maglev::MaglevCompilationJob* job,
     CompilerTracer::TraceFinishMaglevCompile(
         isolate, function, job->is_osr(), job->prepare_in_ms(),
         job->execute_in_ms(), job->finalize_in_ms());
+    function->SetTieringInProgress(isolate, false, osr_offset);
   } else {
-    CompilerTracer::TraceAbortedMaglevCompile(isolate, function,
-                                              job->bailout_reason_);
+    AbortMaglevCompilationJob(isolate, function, osr_offset,
+                              job->bailout_reason_);
   }
-  function->SetTieringInProgress(isolate, false, osr_offset);
 #endif
 }
 
