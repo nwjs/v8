@@ -3498,10 +3498,15 @@ class AssemblerOpInterface : public Next {
 
   void JSStackCheck(V<Context> context, OptionalV<LazyFrameState> frame_state,
                     JSStackCheckOp::Kind kind) {
+    if (V8_UNLIKELY(v8_flags.disable_loop_stack_checks &&
+                    kind == JSStackCheckOp::Kind::kLoop)) {
+      return;
+    }
     ReduceIfReachableJSStackCheck(context, frame_state, kind);
   }
 
   void JSLoopStackCheck(V<Context> context, V<LazyFrameState> frame_state) {
+    if (V8_UNLIKELY(v8_flags.disable_loop_stack_checks)) return;
     JSStackCheck(context, frame_state, JSStackCheckOp::Kind::kLoop);
   }
   void JSFunctionEntryStackCheck(V<Context> context,
@@ -5404,6 +5409,11 @@ class AssemblerOpInterface : public Next {
     return ReduceIfReachableStringPrepareForGetCodeUnit(string);
   }
 
+  V<Object> LoadWasmTypeInfo(V<Map> map) {
+    int offset = offsetof(Map, constructor_or_back_pointer_or_native_context_);
+    return Load(map, LoadOp::Kind::TaggedBase().Immutable(),
+                MemoryRepresentation::TaggedPointer(), offset);
+  }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 #ifdef V8_ENABLE_SIMD128

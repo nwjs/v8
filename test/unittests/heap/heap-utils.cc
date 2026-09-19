@@ -11,14 +11,29 @@
 #include "src/flags/flags.h"
 #include "src/heap/gc-tracer-inl.h"
 #include "src/heap/incremental-marking.h"
+#include "src/heap/main-allocator-inl.h"
 #include "src/heap/mark-compact.h"
 #include "src/heap/new-spaces.h"
 #include "src/heap/normal-page-inl.h"
 #include "src/heap/safepoint.h"
+#include "src/heap/spaces-inl.h"
 #include "src/objects/free-space-inl.h"
 
 namespace v8 {
 namespace internal {
+
+namespace heap {
+class HeapTester {
+ public:
+  static size_t OldGenerationSpaceAvailable(Heap* heap) {
+    return heap->OldGenerationSpaceAvailable();
+  }
+};
+}  // namespace heap
+
+size_t HeapInternalsBase::OldGenerationSpaceAvailable(Heap* heap) {
+  return heap::HeapTester::OldGenerationSpaceAvailable(heap);
+}
 
 void HeapInternalsBase::SimulateIncrementalMarking(Heap* heap,
                                                    bool force_completion) {
@@ -340,6 +355,50 @@ ManualGCScope::~ManualGCScope() {
     CppHeap::From(isolate_->heap()->cpp_heap())
         ->UpdateGCCapabilitiesFromFlagsForTesting();
   }
+}
+
+void AbandonCurrentlyFreeMemory(PagedSpace* space) {
+  Heap* heap = space->heap();
+  SafepointScope safepoint_scope(heap->isolate(),
+                                 kGlobalSafepointForSharedSpaceIsolate);
+  heap->FreeLinearAllocationAreas();
+
+  for (NormalPage* page : *space) {
+    page->MarkNeverAllocateForTesting();
+  }
+}
+
+Tagged<HeapObject> AllocateAligned(Heap* heap, MainAllocator* allocator,
+                                   int size, AllocationAlignment alignment) {
+  AllocationResult allocation = allocator->AllocateRawForceAlignmentForTesting(
+      size, alignment, AllocationOrigin::kRuntime);
+  Tagged<HeapObject> obj;
+  allocation.To(&obj);
+  heap->CreateFillerObjectAt(obj.address(), size);
+  return obj;
+}
+
+Address AlignOldSpace(Heap* heap, AllocationAlignment alignment, int offset) {
+  LinearAllocationArea* old_space =
+      &heap->isolate()->isolate_data()->old_allocation_info();
+  int fill = MainAllocator::GetFillToAlign(old_space->top(), alignment);
+  int allocation = fill + offset;
+  if (allocation) {
+    AllocateAligned(heap, heap->allocator()->old_space_allocator(), allocation,
+                    kTaggedAligned);
+  }
+  Address top = old_space->top();
+  // Now force the remaining allocation onto the free list.
+  heap->FreeMainThreadLinearAllocationAreas();
+  return top;
+}
+
+void ForceEvacuationCandidate(NormalPage* page) {
+  Isolate* isolate = page->owner()->heap()->isolate();
+  SafepointScope safepoint(isolate, kGlobalSafepointForSharedSpaceIsolate);
+  CHECK(v8_flags.manual_evacuation_candidates_selection);
+  page->set_forced_evacuation_candidate_for_testing(true);
+  page->owner()->heap()->FreeLinearAllocationAreas();
 }
 
 }  // namespace internal

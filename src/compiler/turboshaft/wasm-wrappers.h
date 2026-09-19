@@ -181,6 +181,158 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
     return result;
   }
 
+  V<Object> BuildCheckWasmObject(V<Object> input, V<Context> js_context,
+                                 CanonicalValueType type,
+                                 InstanceType instance_type) {
+    Block* done = __ NewBlock();
+    Block* type_error = __ NewBlock();
+    DCHECK(type.use_wasm_null());
+    ScopedVar<Object> result(this,
+                             __ template LoadRoot<RootIndex::kWasmNull>());
+
+    __ GotoIf(__ IsSmi(input), type_error, BranchHint::kFalse);
+
+    if (type.is_nullable()) {
+      __ GotoIf(
+          __ TaggedEqual(input, __ template LoadRoot<RootIndex::kNullValue>()),
+          done);
+    }
+
+    V<Map> map = LoadMap(input);
+    V<Word32> is_wasm_object_of_instance_type =
+        __ Word32Equal(__ LoadInstanceTypeField(map), instance_type);
+    __ GotoIfNot(is_wasm_object_of_instance_type, type_error,
+                 BranchHint::kTrue);
+
+    if (v8_flags.wasm_shared) {
+      V<WordPtr> flags = __ LoadPageFlags(V<HeapObject>::Cast(input));
+      V<WordPtr> page_flags = __ WordPtrBitwiseAnd(
+          flags, static_cast<uintptr_t>(MemoryChunk::kInSharedHeap));
+      if (type.is_shared()) {
+        __ GotoIf(__ WordPtrEqual(page_flags, 0), type_error);
+      } else {
+        __ GotoIfNot(__ WordPtrEqual(page_flags, 0), type_error);
+      }
+#ifdef DEBUG
+#if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
+      // Wasm GC objects (structs/arrays) are currently never allocated in
+      // read-only space. Verify this invariant to guard against future changes
+      // where constant Wasm objects might be placed in RO space.
+      V<Word32> lower32 = __ TruncateWordPtrToWord32(
+          __ BitcastTaggedToWordPtr(V<HeapObject>::Cast(input)));
+      // TSA_DCHECK is only usable in isolate-dependent code.
+      if (__ data()->isolate() != nullptr) {
+        TSA_DCHECK(this, __ Uint32LessThanOrEqual(
+                             __ Word32Constant(static_cast<uint32_t>(
+                                 kContiguousReadOnlyReservationSize)),
+                             lower32));
+      }
+#endif  // CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
+#endif  // DEBUG
+    }
+
+    result = input;
+    __ Goto(done);
+
+    __ Bind(type_error);
+    __ WasmCallRuntime(__ phase_zone(), Runtime::kWasmThrowJSTypeError, {},
+                       js_context);
+    __ Unreachable();
+
+    __ Bind(done);
+    return result;
+  }
+
+  V<Object> BuildCheckIndexedStructOrArray(V<Object> input, V<Context> context,
+                                           CanonicalValueType type) {
+    Block* done = __ NewBlock();
+    Block* mismatch = __ NewBlock();
+
+    ScopedVar<Object> result(this,
+                             __ template LoadRoot<RootIndex::kWasmNull>());
+
+    __ GotoIf(__ IsSmi(input), mismatch, BranchHint::kFalse);
+
+    if (type.is_nullable()) {
+      __ GotoIf(
+          __ TaggedEqual(input, __ template LoadRoot<RootIndex::kNullValue>()),
+          done);
+    }
+
+    V<Map> object_map = LoadMap(input);
+    // Fetch the canonical-types array from isolate roots.
+    V<WeakFixedArray> canonical_rtts =
+        __ template LoadRoot<RootIndex::kWasmCanonicalRtts>();
+    V<Object> cached_map = V<Object>::Cast(__ LoadField(
+        canonical_rtts, compiler::AccessBuilder::ForWeakFixedArraySlot(
+                            type.ref_index().index)));
+    V<Map> supertype_rtt =
+        __ template BitcastWordPtrToTagged<Map>(__ WordPtrBitwiseAnd(
+            __ BitcastTaggedToWordPtr(cached_map), ~kWeakHeapObjectMask));
+
+    IF (__ TaggedEqual(object_map, supertype_rtt)) {
+      result = input;
+      __ Goto(done);
+    }
+
+    if (type.is_exact()) {
+      __ Goto(mismatch);
+    } else {
+      wasm::TypeCanonicalizer* type_canonicalizer =
+          wasm::GetTypeCanonicalizer();
+
+      V<Word32> instance_type = __ LoadInstanceTypeField(object_map);
+
+      InstanceType expected_instance_type;
+      switch (type.ref_type_kind()) {
+        case wasm::RefTypeKind::kStruct:
+          expected_instance_type = WASM_STRUCT_TYPE;
+          break;
+        case wasm::RefTypeKind::kArray:
+          expected_instance_type = WASM_ARRAY_TYPE;
+          break;
+        case wasm::RefTypeKind::kCont:
+        case wasm::RefTypeKind::kFunction:
+        case wasm::RefTypeKind::kOther:
+          UNREACHABLE();
+      }
+
+      V<Word32> has_type_info =
+          __ Word32Equal(instance_type, expected_instance_type);
+
+      IF (has_type_info) {
+        uint8_t rtt_depth =
+            type_canonicalizer->GetSubtypingDepth_Slow(type.ref_index());
+
+        V<Object> type_info = __ LoadWasmTypeInfo(object_map);
+        V<Word32> supertypes_length = __ UntagSmi(
+            __ Load(type_info, LoadOp::Kind::TaggedBase().Immutable(),
+                    MemoryRepresentation::TaggedSigned(),
+                    offsetof(WasmTypeInfo, supertypes_length_)));
+
+        IF (__ Uint32LessThan(rtt_depth, supertypes_length)) {
+          V<Object> maybe_match = __ Load(
+              type_info, LoadOp::Kind::TaggedBase().Immutable(),
+              MemoryRepresentation::TaggedPointer(),
+              WasmTypeInfo::kSupertypesOffset + kTaggedSize * rtt_depth);
+          IF (__ TaggedEqual(maybe_match, supertype_rtt)) {
+            result = input;
+            __ Goto(done);
+          }
+        }
+      }
+      __ Goto(mismatch);
+    }
+
+    __ Bind(mismatch);
+    __ WasmCallRuntime(__ phase_zone(), Runtime::kWasmThrowJSTypeError, {},
+                       context);
+    __ Unreachable();
+
+    __ Bind(done);
+    return result;
+  }
+
   V<Float32> BuildChangeTaggedToFloat32(
       V<Object> value, V<Context> context,
       OptionalV<EagerFrameState> caller_frame_state) {
@@ -426,6 +578,10 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
         }
         case GenericKind::kString:
           return BuildCheckString(input, context, type);
+        case GenericKind::kStruct:
+          return BuildCheckWasmObject(input, context, type, WASM_STRUCT_TYPE);
+        case GenericKind::kArray:
+          return BuildCheckWasmObject(input, context, type, WASM_ARRAY_TYPE);
 
         case GenericKind::kNoExtern:
         case GenericKind::kNoFunc:
@@ -434,8 +590,6 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
         case GenericKind::kAny:
         case GenericKind::kEq:
         case GenericKind::kI31:
-        case GenericKind::kStruct:
-        case GenericKind::kArray:
           break;  // Fall through.
 
         case GenericKind::kVoid:
@@ -456,7 +610,15 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
           UNREACHABLE();
       }
     }
-    // Both indexed and allow-listed generic references get here.
+    // Both indexed types and remaining references to abstract types get here.
+
+    if (type.has_index() &&
+        (type.ref_type_kind() == wasm::RefTypeKind::kStruct ||
+         type.ref_type_kind() == wasm::RefTypeKind::kArray) &&
+        // TODO(manoskouk, jkummerow): Also implement descriptor support.
+        !wasm::GetTypeCanonicalizer()->has_descriptor(type.ref_index())) {
+      return BuildCheckIndexedStructOrArray(input, context, type);
+    }
 
     // Make sure ValueType fits in a Smi.
     static_assert(wasm::ValueType::kLastUsedBit + 1 <= kSmiValueSize);

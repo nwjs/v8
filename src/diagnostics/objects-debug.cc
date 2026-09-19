@@ -1022,6 +1022,7 @@ void FeedbackVector::FeedbackVectorVerify(Isolate* isolate) {
   CHECK(IsFeedbackCell(parent_feedback_cell()));
   // Variable-length maybe-weak tail.
   const uint32_t len = length().value();
+  CHECK_LE(len, static_cast<uint32_t>(kMaxLength));
   for (uint32_t i = 0; i < len; ++i) {
     Tagged<MaybeObject> value = raw_feedback_slots()[i].Relaxed_Load();
     Object::VerifyMaybeObjectPointer(isolate, value);
@@ -3925,12 +3926,6 @@ void ErrorStackData::ErrorStackDataVerify(Isolate* isolate) {
   Object::VerifyPointer(isolate, stack_trace_.load());
 }
 
-void DebugScriptScopeInfo::DebugScriptScopeInfoVerify(Isolate* isolate) {
-  CHECK(Is<Struct>(this));
-  CHECK(Is<DebugScriptScopeInfo>(this));
-  Object::VerifyPointer(isolate, numeric_data_.load());
-  Object::VerifyPointer(isolate, string_table_.load());
-}
 
 void SloppyArgumentsElements::SloppyArgumentsElementsVerify(Isolate* isolate) {
   CHECK_LE(length_, kMaxCapacity);

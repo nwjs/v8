@@ -468,6 +468,19 @@ TEST_F(FeedbackVectorTest, VectorLoadICStates) {
   nexus.ExtractMaps(&maps);
   CHECK_EQ(4, maps.size());
 
+  // Fill up to max_valid_polymorphic_map_count.
+  TryRunJS(
+      "for (let i = 4; i < 10; ++i) {"
+      "  let obj = { foo: 2 };"
+      "  obj['p' + i] = i;"
+      "  f(obj);"
+      "}");
+  CHECK_EQ(InlineCacheState::POLYMORPHIC, nexus.ic_state());
+  maps.clear();
+  nexus.ExtractMaps(&maps);
+  CHECK_EQ(static_cast<size_t>(v8_flags.max_valid_polymorphic_map_count),
+           maps.size());
+
   // Finally driven megamorphic.
   TryRunJS("f({ blarg: 3, gran: 3, torino: 10, foo: 2 })");
   CHECK_EQ(InlineCacheState::MEGAMORPHIC, nexus.ic_state());
@@ -768,6 +781,27 @@ TEST_F(FeedbackVectorTest, DefineNamedOwnIC) {
   CHECK_SLOT_KIND(helper, 1, FeedbackSlotKind::kDefineNamedOwn);
   FeedbackNexus nexus(i_isolate(), feedback_vector, helper.slot(1));
   CHECK_EQ(InlineCacheState::MONOMORPHIC, nexus.ic_state());
+}
+
+TEST_F(FeedbackVectorTest, MaxLengthAndSizeFor) {
+  static_assert(FeedbackVector::SizeFor(0) == FeedbackVector::kHeaderSize);
+  static_assert(FeedbackVector::SizeFor(10) ==
+                FeedbackVector::kHeaderSize + 10 * kTaggedSize);
+  static_assert(FeedbackVector::SizeFor(FeedbackVector::kMaxLength) ==
+                FeedbackVector::kHeaderSize +
+                    FeedbackVector::kMaxLength * kTaggedSize);
+
+  EXPECT_EQ(FeedbackVector::kHeaderSize, FeedbackVector::SizeFor(0));
+  EXPECT_EQ(FeedbackVector::kHeaderSize + 10 * kTaggedSize,
+            FeedbackVector::SizeFor(10));
+  EXPECT_EQ(
+      FeedbackVector::kHeaderSize + FeedbackVector::kMaxLength * kTaggedSize,
+      FeedbackVector::SizeFor(FeedbackVector::kMaxLength));
+
+  ASSERT_DEATH_IF_SUPPORTED({ FeedbackVector::SizeFor(-1); }, ".*");
+  ASSERT_DEATH_IF_SUPPORTED(
+      { FeedbackVector::SizeFor(FeedbackVector::kMaxLength + 1); }, ".*");
+  ASSERT_DEATH_IF_SUPPORTED({ FeedbackVector::SizeFor(1 << 30); }, ".*");
 }
 
 }  // namespace internal

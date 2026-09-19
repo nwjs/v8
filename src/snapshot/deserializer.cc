@@ -21,6 +21,7 @@
 #include "src/logging/local-logger.h"
 #include "src/logging/log.h"
 #include "src/objects/backing-store.h"
+#include "src/objects/bytecode-array-inl.h"
 #include "src/objects/heap-object-field-inl.h"
 #include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
@@ -29,7 +30,9 @@
 #include "src/objects/objects.h"
 #include "src/objects/slots.h"
 #include "src/objects/string.h"
+#include "src/objects/trusted-object-inl.h"
 #include "src/roots/roots.h"
+#include "src/sandbox/bytecode-verifier.h"
 #include "src/sandbox/js-dispatch-table-inl.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
 #include "src/snapshot/references.h"
@@ -37,6 +40,7 @@
 #include "src/snapshot/shared-heap-serializer.h"
 #include "src/snapshot/snapshot-data.h"
 #include "src/utils/memcopy.h"
+#include "src/zone/zone.h"
 
 // Has to be the last include (doesn't have include guards)
 #include "src/objects/object-macros.h"
@@ -334,6 +338,7 @@ Deserializer<IsolateT>::Deserializer(IsolateT* isolate,
       interceptor_infos_(isolate),
       function_template_infos_(isolate),
       new_scripts_(isolate),
+      new_exposed_trusted_objects_(isolate),
       deserializing_user_code_(deserializing_user_code),
       should_rehash_((v8_flags.rehash_snapshot && can_rehash) ||
                      deserializing_user_code),
@@ -438,6 +443,22 @@ void Deserializer<IsolateT>::LogScriptEvents(Tagged<Script> script) {
   DisallowGarbageCollection no_gc;
   LOG(isolate(), ScriptEvent(ScriptEventType::kDeserialize, script->id()));
   LOG(isolate(), ScriptDetails(script));
+}
+
+template <typename IsolateT>
+void Deserializer<IsolateT>::PostProcessExposedTrustedObjects() {
+#ifdef V8_ENABLE_SANDBOX
+  Zone zone(isolate()->allocator(), ZONE_NAME);
+  for (DirectHandle<ExposedTrustedObject> obj : new_exposed_trusted_objects()) {
+    if (Is<BytecodeArray>(*obj)) {
+      DirectHandle<BytecodeArray> bytecode = TrustedCast<BytecodeArray>(obj);
+      BytecodeVerifier::Verify(isolate(), indirect_handle(bytecode, isolate()),
+                               &zone);
+    } else {
+      obj->Publish(isolate());
+    }
+  }
+#endif
 }
 
 namespace {
@@ -924,6 +945,9 @@ template <typename IsolateT>
 template <typename SlotAccessor>
 int Deserializer<IsolateT>::ReadRepeatedRoot(SlotAccessor slot_accessor,
                                              int repeat_count) {
+  DCHECK(!next_reference_is_weak_);
+  DCHECK(!next_reference_is_indirect_pointer_);
+  DCHECK(!next_reference_is_protected_pointer);
   CHECK_LE(2, repeat_count);
 
   uint8_t id = source_.Get();
@@ -1493,7 +1517,9 @@ int Deserializer<IsolateT>::ReadInitializeSelfIndirectPointer(
 
   Tagged<ExposedTrustedObject> host =
       TrustedCast<ExposedTrustedObject>(*slot_accessor.object());
-  host->InitAndPublish(isolate());
+  host->InitDontPublish(isolate());
+  new_exposed_trusted_objects_.push_back(
+      TrustedCast<ExposedTrustedObject>(slot_accessor.object()));
 
   return 1;
 #else
@@ -1581,8 +1607,9 @@ int Deserializer<IsolateT>::ReadRootArrayConstants(uint8_t data,
     PrintF("%*sRootArrayConstants [%u] : %s\n", depth_, "",
            static_cast<int>(root_index), RootsTable::name(root_index));
   }
-  return slot_accessor.Write(heap_object, HeapObjectReferenceType::STRONG, 0,
-                             SKIP_WRITE_BARRIER);
+  return WriteHeapPointer(slot_accessor, heap_object,
+                          GetAndResetNextReferenceDescriptor(),
+                          SKIP_WRITE_BARRIER);
 }
 
 template <typename IsolateT>

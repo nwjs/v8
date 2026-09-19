@@ -358,23 +358,14 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
   bind(&done);
 }
 
-void MacroAssembler::DecodeSandboxedPointer(Register value) {
-  ASM_CODE_COMMENT(this);
-#ifdef V8_ENABLE_SANDBOX
-  srli_d(value, value, kSandboxedPointerShift);
-  Add_d(value, value, kPtrComprCageBaseRegister);
-#else
-  UNREACHABLE();
-#endif
-}
-
 void MacroAssembler::LoadSandboxedPointerField(Register destination,
                                                MemOperand field_operand,
                                                int* trap_pc) {
 #ifdef V8_ENABLE_SANDBOX
   ASM_CODE_COMMENT(this);
   Ld_d(destination, field_operand, trap_pc);
-  DecodeSandboxedPointer(destination);
+  srli_d(destination, destination, kSandboxedPointerShift);
+  Add_d(destination, kPtrComprCageBaseRegister, destination);
 #else
   UNREACHABLE();
 #endif
@@ -4594,30 +4585,46 @@ void MacroAssembler::AddOverflow_d(Register dst, Register left,
   BlockTrampolinePoolScope block_trampoline_pool(this);
   UseScratchRegisterScope temps(this);
   Register scratch = temps.Acquire();
-  Register scratch2 = temps.Acquire();
-  Register right_reg = no_reg;
   if (!right.is_reg()) {
-    li(scratch, Operand(right));
-    right_reg = scratch;
-  } else {
-    right_reg = right.rm();
+    int64_t imm = right.immediate();
+    DCHECK(!AreAliased(overflow, dst));
+    if (dst == left) {
+      mov(scratch, left);
+      left = scratch;
+    }
+    Add_d(dst, left, right);
+    if (imm > 0) {
+      Slt(overflow, dst, left);
+    } else {
+      Sgt(overflow, dst, left);
+    }
+    return;
   }
 
+  Register right_reg = right.rm();
+  Register scratch2 = temps.Acquire();
+  DCHECK(left != scratch && right_reg != scratch && dst != scratch &&
+         overflow != scratch);
   DCHECK(left != scratch2 && right_reg != scratch2 && dst != scratch2 &&
          overflow != scratch2);
-  DCHECK(overflow != left && overflow != right_reg);
 
-  if (dst == left || dst == right_reg) {
-    add_d(scratch2, left, right_reg);
-    xor_(overflow, scratch2, left);
-    xor_(scratch, scratch2, right_reg);
-    and_(overflow, overflow, scratch);
-    mov(dst, scratch2);
-  } else {
+  if (dst != left) {
+    slti(scratch, right_reg, 0);
     add_d(dst, left, right_reg);
-    xor_(overflow, dst, left);
-    xor_(scratch, dst, right_reg);
-    and_(overflow, overflow, scratch);
+    slt(scratch2, dst, left);
+    xor_(overflow, scratch, scratch2);
+  } else if (left != right_reg) {
+    // dst == left
+    slti(scratch, left, 0);
+    add_d(dst, right_reg, left);
+    slt(scratch2, dst, right_reg);
+    xor_(overflow, scratch, scratch2);
+  } else {
+    // dst == left == right_reg
+    add_d(scratch2, left, left);
+    xor_(overflow, scratch2, left);
+    slti(overflow, overflow, 0);
+    mov(dst, scratch2);
   }
 }
 
@@ -4627,31 +4634,30 @@ void MacroAssembler::SubOverflow_d(Register dst, Register left,
   BlockTrampolinePoolScope block_trampoline_pool(this);
   UseScratchRegisterScope temps(this);
   Register scratch = temps.Acquire();
-  Register scratch2 = temps.Acquire();
-  Register right_reg = no_reg;
   if (!right.is_reg()) {
-    li(scratch, Operand(right));
-    right_reg = scratch;
-  } else {
-    right_reg = right.rm();
+    int64_t imm = right.immediate();
+    if (dst == left) {
+      mov(scratch, left);
+      left = scratch;
+    }
+    Sub_d(dst, left, right);
+    if (imm < 0) {
+      Slt(overflow, dst, left);
+    } else {
+      Sgt(overflow, dst, left);
+    }
+    return;
   }
 
+  Register right_reg = right.rm();
+  Register scratch2 = temps.Acquire();
   DCHECK(left != scratch2 && right_reg != scratch2 && dst != scratch2 &&
          overflow != scratch2);
-  DCHECK(overflow != left && overflow != right_reg);
 
-  if (dst == left || dst == right_reg) {
-    Sub_d(scratch2, left, right_reg);
-    xor_(overflow, left, scratch2);
-    xor_(scratch, left, right_reg);
-    and_(overflow, overflow, scratch);
-    mov(dst, scratch2);
-  } else {
-    sub_d(dst, left, right_reg);
-    xor_(overflow, left, dst);
-    xor_(scratch, left, right_reg);
-    and_(overflow, overflow, scratch);
-  }
+  slt(scratch2, left, right_reg);
+  sub_d(dst, left, right_reg);
+  slti(overflow, dst, 0);
+  xor_(overflow, overflow, scratch2);
 }
 
 void MacroAssembler::MulOverflow_w(Register dst, Register left,
@@ -4669,21 +4675,12 @@ void MacroAssembler::MulOverflow_w(Register dst, Register left,
     right_reg = right.rm();
   }
 
-  DCHECK(left != scratch2 && right_reg != scratch2 && dst != scratch2 &&
-         overflow != scratch2);
-  DCHECK(overflow != left && overflow != right_reg);
+  DCHECK(dst != scratch2);
 
-  if (dst == left || dst == right_reg) {
-    Mul_w(scratch2, left, right_reg);
-    Mulh_w(overflow, left, right_reg);
-    mov(dst, scratch2);
-  } else {
-    Mul_w(dst, left, right_reg);
-    Mulh_w(overflow, left, right_reg);
-  }
-
-  srai_d(scratch2, dst, 32);
-  xor_(overflow, overflow, scratch2);
+  mulw_d_w(scratch2, left, right_reg);
+  slli_w(dst, scratch2, 0);
+  xor_(scratch2, scratch2, dst);
+  sltu(overflow, zero_reg, scratch2);
 }
 
 void MacroAssembler::MulOverflow_d(Register dst, Register left,
@@ -4703,19 +4700,13 @@ void MacroAssembler::MulOverflow_d(Register dst, Register left,
 
   DCHECK(left != scratch2 && right_reg != scratch2 && dst != scratch2 &&
          overflow != scratch2);
-  DCHECK(overflow != left && overflow != right_reg);
 
-  if (dst == left || dst == right_reg) {
-    Mul_d(scratch2, left, right_reg);
-    Mulh_d(overflow, left, right_reg);
-    mov(dst, scratch2);
-  } else {
-    Mul_d(dst, left, right_reg);
-    Mulh_d(overflow, left, right_reg);
-  }
+  Mulh_d(scratch2, left, right_reg);
+  Mul_d(dst, left, right_reg);
 
-  srai_d(scratch2, dst, 63);
+  srai_d(overflow, dst, 63);
   xor_(overflow, overflow, scratch2);
+  sltu(overflow, zero_reg, overflow);
 }
 
 void MacroAssembler::CallRuntime(const Runtime::Function* f,
@@ -6090,18 +6081,18 @@ void MacroAssembler::DecompressTagged(Register dst, const MemOperand& src,
                                       int* trap_pc) {
   ASM_CODE_COMMENT(this);
   Ld_wu(dst, src, trap_pc);
-  Add_d(dst, kPtrComprCageBaseRegister, dst);
+  Or(dst, kPtrComprCageBaseRegister, dst);
 }
 
 void MacroAssembler::DecompressTagged(Register dst, Register src) {
   ASM_CODE_COMMENT(this);
   Bstrpick_d(dst, src, 31, 0);
-  Add_d(dst, kPtrComprCageBaseRegister, Operand(dst));
+  Or(dst, kPtrComprCageBaseRegister, dst);
 }
 
 void MacroAssembler::DecompressTagged(Register dst, Tagged_t immediate) {
   ASM_CODE_COMMENT(this);
-  Add_d(dst, kPtrComprCageBaseRegister, static_cast<int32_t>(immediate));
+  Or(dst, kPtrComprCageBaseRegister, static_cast<uint32_t>(immediate));
 }
 
 void MacroAssembler::DecompressProtected(const Register& destination,
@@ -6139,7 +6130,7 @@ void MacroAssembler::AtomicDecompressTagged(Register dst, const MemOperand& src,
   ASM_CODE_COMMENT(this);
   Ld_wu(dst, src, trap_pc);
   dbar(0);
-  Add_d(dst, kPtrComprCageBaseRegister, dst);
+  Or(dst, kPtrComprCageBaseRegister, dst);
 }
 
 // Calls an API function. Allocates HandleScope, extracts returned value

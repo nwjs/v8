@@ -49,6 +49,7 @@
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap-controller.h"
 #include "src/heap/heap.h"
+#include "src/heap/incremental-marking.h"
 #include "src/heap/marking-worklist.h"
 #include "src/heap/minor-mark-sweep.h"
 #include "src/heap/traced-handles-marking-visitor.h"
@@ -143,6 +144,15 @@ void CppHeap::CollectGarbageInYoungGenerationForTesting(
     cppgc::EmbedderStackState stack_state) {
   return internal::CppHeap::From(this)->CollectGarbageForTesting(
       internal::CppHeap::CollectionType::kMinor, stack_state);
+}
+
+void CppHeap::SetForceIncrementalSweepingForTesting(bool value) {
+  return internal::CppHeap::From(this)->SetForceIncrementalSweepingForTesting(
+      value);
+}
+
+void CppHeap::FinishSweepingForTesting() {
+  return internal::CppHeap::From(this)->FinishSweepingIfRunning();
 }
 
 namespace internal {
@@ -741,7 +751,15 @@ CppHeap::MarkingType CppHeap::SelectMarkingType() const {
 }
 
 CppHeap::SweepingType CppHeap::SelectSweepingType() const {
-  if (IsForceGC(current_gc_flags_)) return SweepingType::kAtomic;
+  // A forced GC normally sweeps atomically, which runs finalizers before the
+  // collection returns. Tests that need to observe an object after it has been
+  // found unreachable but before it is finalized opt out via
+  // SetForceIncrementalSweepingForTesting(), which leaves sweeping deferred as
+  // it would be in a natural GC.
+  if (IsForceGC(current_gc_flags_) &&
+      !force_incremental_sweeping_for_testing_) {
+    return SweepingType::kAtomic;
+  }
 
   return sweeping_support();
 }
@@ -1083,9 +1101,9 @@ void CppHeap::ReportBufferedAllocationSizeIfPossible() {
                          std::memory_order_relaxed);
     allocated_size_ += bytes_to_report;
 
-    if (v8_flags.incremental_marking) {
-      if (allocated_size_ > allocated_size_limit_for_check_) {
-        Heap* heap = isolate_->heap();
+    Heap* heap = isolate_->heap();
+    if (allocated_size_ > allocated_size_limit_for_check_) {
+      if (v8_flags.incremental_marking) {
         heap->StartIncrementalMarkingIfAllocationLimitIsReached(
             heap->main_thread_local_heap(),
             heap->GCFlagsForIncrementalMarking(),
@@ -1098,9 +1116,17 @@ void CppHeap::ReportBufferedAllocationSizeIfPossible() {
             heap->incremental_marking()->AdvanceOnAllocation();
           }
         }
-        allocated_size_limit_for_check_ =
-            allocated_size_ + kIncrementalMarkingCheckInterval;
+      } else if (heap->deserialization_complete()) {
+        if (heap->GlobalSpaceAvailable() == 0 ||
+            heap->OldGenerationSpaceAvailable() == 0) {
+          heap->CollectGarbage(
+              OLD_SPACE, heap->OldGenerationSpaceAvailable() == 0
+                             ? GarbageCollectionReason::kAllocationLimit
+                             : GarbageCollectionReason::kGlobalAllocationLimit);
+        }
       }
+      allocated_size_limit_for_check_ =
+          allocated_size_ + kIncrementalMarkingCheckInterval;
     }
   }
 }

@@ -396,7 +396,9 @@ inline void MaglevAssembler::LoadExternalPointerField(Register result,
 void MaglevAssembler::LoadFixedArrayElement(Register result, Register array,
                                             Register index) {
   if (v8_flags.debug_code) {
-    AssertObjectType(array, FIXED_ARRAY_TYPE, AbortReason::kUnexpectedValue);
+    AssertObjectTypeInRange(array, FIRST_FIXED_ARRAY_TYPE,
+                            LAST_FIXED_ARRAY_TYPE,
+                            AbortReason::kUnexpectedValue);
     CompareInt32AndAssert(index, 0, kUnsignedGreaterThanEqual,
                           AbortReason::kUnexpectedNegativeValue);
   }
@@ -413,7 +415,9 @@ inline void MaglevAssembler::LoadTaggedFieldWithoutDecompressing(
 void MaglevAssembler::LoadFixedArrayElementWithoutDecompressing(
     Register result, Register array, Register index) {
   if (v8_flags.debug_code) {
-    AssertObjectType(array, FIXED_ARRAY_TYPE, AbortReason::kUnexpectedValue);
+    AssertObjectTypeInRange(array, FIRST_FIXED_ARRAY_TYPE,
+                            LAST_FIXED_ARRAY_TYPE,
+                            AbortReason::kUnexpectedValue);
     CompareInt32AndAssert(index, 0, kUnsignedGreaterThanEqual,
                           AbortReason::kUnexpectedNegativeValue);
   }
@@ -1464,7 +1468,7 @@ inline void MaglevAssembler::AssertStackSizeCorrect() {
 inline Condition MaglevAssembler::FunctionEntryStackCheck(
     int stack_check_offset) {
   Register stack_cmp_reg = rsp;
-  if (stack_check_offset >= kStackLimitSlackForDeoptimizationInBytes) {
+  if (stack_check_offset > kStackLimitSlackForDeoptimizationInBytes) {
     stack_cmp_reg = kScratchRegister;
     leaq(stack_cmp_reg, Operand(rsp, -stack_check_offset));
   }

@@ -11,6 +11,7 @@
 #include "src/base/bit-field.h"
 #include "src/base/small-vector.h"
 #include "src/base/strings.h"
+#include "src/codegen/label.h"
 #include "src/regexp/regexp-flags.h"
 #include "src/regexp/regexp-nodes.h"
 
@@ -24,6 +25,15 @@ namespace regexp {
 class Diagnostics;
 class DynamicBitSet;
 class SpecialLoopState;
+
+class NonAssertingLabel : public Label {
+ public:
+  explicit NonAssertingLabel(Compiler* compiler) : compiler_(compiler) {}
+  ~NonAssertingLabel();
+
+ private:
+  Compiler* compiler_;
+};
 
 namespace compiler_constants {
 
@@ -503,7 +513,8 @@ class Trace {
 // regexp).
 class SpecialLoopState {
  public:
-  explicit SpecialLoopState(bool not_at_start, ChoiceNode* loop_choice_node);
+  SpecialLoopState(Compiler* compiler, bool not_at_start,
+                   ChoiceNode* loop_choice_node);
 
   void BindStepLabel(RegExpMacroAssembler* macro_assembler);
   void BindLoopTopLabel(RegExpMacroAssembler* macro_assembler);
@@ -514,8 +525,8 @@ class SpecialLoopState {
  private:
   // Step backwards (fixed length greed loop) or forwards (non-greedy
   // omnivourous loop.
-  Label step_label_;
-  Label loop_top_label_;
+  NonAssertingLabel step_label_;
+  NonAssertingLabel loop_top_label_;
   ChoiceNode* loop_choice_node_;
   Trace backtrack_trace_;
 };
@@ -532,8 +543,7 @@ struct PreloadState {
 // Analysis performs assertion propagation and computes eats_at_least_ values.
 // See the comments on AssertionPropagator and EatsAtLeastPropagator for more
 // details.
-Error AnalyzeRegExp(Isolate* isolate, bool is_one_byte, Flags flags,
-                    Node* node);
+Error AnalyzeRegExp(Isolate* isolate, bool is_one_byte, Node* node);
 
 class FrequencyCollator {
  public:
@@ -643,13 +653,12 @@ class V8_EXPORT_PRIVATE Compiler {
 
   struct WorkItem {
     Node* node;
-    Flags flags;
   };
 
   inline void AddWork(Node* node) {
     if (!node->on_work_list() && !node->label()->is_bound()) {
       node->set_on_work_list(true);
-      work_list_->push_back({node, flags()});
+      work_list_->push_back({node});
     }
   }
 

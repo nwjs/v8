@@ -5,6 +5,7 @@
 #ifndef V8_D8_D8_H_
 #define V8_D8_D8_H_
 
+#include <atomic>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -60,6 +61,36 @@ inline Local<Value> ThrowException(Isolate* isolate, Local<Value> exception) {
   if (isolate->IsExecutionTerminating()) return v8::Undefined(isolate);
   return isolate->ThrowException(exception);
 }
+
+// Converts a v8::Value to a UTF-8 string safely.
+// Unlike v8::String::Utf8Value, this does not swallow user exceptions or
+// terminate silently on string conversion failure.
+class SafeUtf8Value {
+ public:
+  SafeUtf8Value(Isolate* isolate, Local<Value> value)
+      : SafeUtf8Value(isolate, isolate->GetCurrentContext(), value) {}
+
+  SafeUtf8Value(Isolate* isolate, Local<Context> context, Local<Value> value) {
+    if (value.IsEmpty()) return;
+    Local<String> str;
+    if (value->ToString(context).ToLocal(&str)) {
+      utf8_.emplace(isolate, str);
+    }
+  }
+
+  bool is_valid() const { return utf8_.has_value(); }
+  explicit operator bool() const { return is_valid(); }
+
+  const char* operator*() const { return is_valid() ? **utf8_ : nullptr; }
+  char* operator*() { return is_valid() ? **utf8_ : nullptr; }
+  size_t length() const { return is_valid() ? utf8_->length() : 0; }
+  std::string_view as_view() const {
+    return is_valid() ? utf8_->as_view() : std::string_view();
+  }
+
+ private:
+  std::optional<v8::String::Utf8Value> utf8_;
+};
 
 class BackingStore;
 class CompiledWasmModule;
@@ -168,6 +199,7 @@ class SourceGroup {
   i::ParkingSemaphore next_semaphore_;
   i::ParkingSemaphore done_semaphore_;
   base::Thread* thread_;
+  std::atomic<bool> terminate_{false};
 
   void ExitShell(int exit_code);
 
@@ -525,7 +557,13 @@ class ShellOptions {
   DisallowReassignment<bool> fuzzilli_coverage_statistics = {
       "fuzzilli-coverage-statistics", false};
   DisallowReassignment<bool> fuzzilli_enable_builtins_coverage = {
-      "fuzzilli-enable-builtins-coverage", false};
+      "fuzzilli-enable-builtins-coverage",
+#ifdef V8_ENABLE_BUILTINS_PROFILING
+      true
+#else
+      false
+#endif
+  };
   DisallowReassignment<bool> send_idle_notification = {"send-idle-notification",
                                                        false};
   DisallowReassignment<bool> invoke_weak_callbacks = {"invoke-weak-callbacks",

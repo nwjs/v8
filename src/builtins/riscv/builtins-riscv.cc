@@ -2178,8 +2178,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
 
   // Check we are actually jumping to an OSR code object. This among other
   // things ensures that the object contains deoptimization data below.
-  __ Load32U(scratch,
-             FieldMemOperand(maybe_target_code, Code::kOsrOffsetOffset));
+  __ Lw(scratch, FieldMemOperand(maybe_target_code, Code::kOsrOffsetOffset));
   __ SbxCheck(ne, AbortReason::kExpectedOsrCode, scratch,
               Operand(BytecodeOffset::None().ToInt()));
 
@@ -3572,8 +3571,6 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
   // Stack unwinding and popchk shadow stack  before function return.
   // The num_frames_above_handler been modified in
   // Runtime::kUnwindAndFindExceptionHandler.
-  ER num_frames_above_pending_handler_address = ER::Create(
-      IsolateAddressId::kNumFramesAbovePendingHandlerAddress, masm->isolate());
   __ LoadWord(t1,
               __ AsMemOperand(IsolateFieldId::kNumFramesAbovePendingHandler));
   Label popchk_start;

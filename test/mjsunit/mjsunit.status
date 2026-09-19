@@ -76,6 +76,7 @@
 
   'turbolev/regress-532607231': [PASS, SLOW],
   'turbolev/regress-540717862': [PASS, SLOW],
+  'turboshaft/regress-554421904': [PASS, SLOW],
 
   # https://crbug.com/1129854
   'tools/log': ['arch == arm or arch == arm64', SKIP],
@@ -127,6 +128,9 @@
   # https://crbug.com/505063230
   'sandbox/regress-488362583': [SKIP],
 
+  # Fails on unrelated commit.
+  'sandbox/hardware-watchpoints/regress-524854777': [SKIP],
+
   ##############################################################################
   # Long-running tests.
   # We really should find better solutions for these.
@@ -134,6 +138,7 @@
   'harmony/promise-any-overflow-1': [SKIP],
   'migrations': [SKIP],
   'regress/regress-2073': [SKIP],
+  'wasm/wrapper-microbenchmark': [SKIP],
 
   ##############################################################################
   # Tests verifying CHECK and ASSERT.
@@ -554,6 +559,9 @@
 
   # https://crbug.com/v8/13461
   'maglev/inner-function': [SKIP],
+
+  # https://crbug.com/552791801
+  'maglev/float64-conversions': [SKIP],
 
   # https://crbug.com/v8/13916
   'readonly': [SKIP],
@@ -1281,6 +1289,7 @@
   'regress/regress-354626177': [SKIP],
   'regress/wasm/regress-398439335': [SKIP],
   'turbolev/regress-488090094': [SKIP],
+  'turbolev/dataview-deopt-oob': [SKIP],
   'maglev/regress-498816446-3': [SKIP],
   'maglev/regress-521604719': [SKIP],
 
@@ -3049,9 +3058,6 @@
 
   # Maglev deopts more aggressively on insufficient feedback.
   'array-literal-transitions': [SKIP],
-  'sealed-array-reduce': [SKIP],
-  'frozen-array-reduce': [SKIP],
-  'non-extensible-array-reduce': [SKIP],
 
   # Maglev doesn't inline String.prototype.includes.
   'optimized-string-includes': [SKIP],

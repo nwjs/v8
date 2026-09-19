@@ -47,6 +47,8 @@ class V8_EXPORT MicrotaskQueue
 #ifdef V8_CPPGC_MICROTASK_QUEUE
     : public cppgc::GarbageCollected<MicrotaskQueue>,
       public cppgc::NameProvider
+#else
+#error "Non-CppGC MicrotaskQueue definition is not supported."
 #endif  // V8_CPPGC_MICROTASK_QUEUE
 {
  public:
@@ -57,12 +59,6 @@ class V8_EXPORT MicrotaskQueue
   static MicrotaskQueue* New(Isolate* isolate,
                              MicrotasksPolicy policy = MicrotasksPolicy::kAuto);
   virtual void Trace(cppgc::Visitor* visitor) const {}
-#else
-  // NW.js: not marked V8_DEPRECATED because this fork keeps
-  // v8_cppgc_microtask_queue disabled (the cppgc-based API caused a
-  // startup crash), so this is the only available API.
-  static std::unique_ptr<MicrotaskQueue> New(
-      Isolate* isolate, MicrotasksPolicy policy = MicrotasksPolicy::kAuto);
 #endif  // V8_CPPGC_MICROTASK_QUEUE
 
   virtual ~MicrotaskQueue() = default;

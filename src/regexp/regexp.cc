@@ -6,6 +6,7 @@
 
 #include "src/base/strings.h"
 #include "src/codegen/compilation-cache.h"
+#include "src/common/synchronization-point-support.h"
 #include "src/diagnostics/code-tracer.h"
 #include "src/execution/interrupts-scope.h"
 #include "src/handles/global-handles-inl.h"
@@ -1210,11 +1211,13 @@ int RegExpImpl::IrregexpExecRaw(Isolate* isolate,
   if (!regexp_data->ShouldProduceBytecode()) {
     do {
       EnsureCompiledIrregexp(isolate, regexp_data, subject, is_one_byte);
+      SYNCHRONIZATION_POINT("IrregexpExecRaw_JIT");
       // The stack is used to allocate registers for the compiled regexp code.
       // This means that in case of failure, the output registers array is left
       // untouched and contains the capture results from the previous successful
       // match.  We can use that to set the last match info lazily.
-      int res = NativeRegExpMacroAssembler::Match(regexp_data, subject, output,
+      int res = NativeRegExpMacroAssembler::Match(regexp_data, subject,
+                                                  is_one_byte, output,
                                                   output_size, index, isolate);
       if (res != NativeRegExpMacroAssembler::RETRY) {
         DCHECK(res != NativeRegExpMacroAssembler::EXCEPTION ||
@@ -1422,7 +1425,7 @@ bool RegExpImpl::Compile(Isolate* isolate, Zone* zone, CompileData* data,
   if (data->error != Error::kNone) {
     return false;
   }
-  data->error = AnalyzeRegExp(isolate, is_one_byte, flags, data->node);
+  data->error = AnalyzeRegExp(isolate, is_one_byte, data->node);
   if (data->error != Error::kNone) {
     return false;
   }
