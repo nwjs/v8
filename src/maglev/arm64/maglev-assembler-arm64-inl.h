@@ -500,6 +500,14 @@ inline void MaglevAssembler::LoadDataViewElement(Register result,
   LoadSignedField(result, element_address, element_size);
 }
 
+inline void MaglevAssembler::LoadUnsignedDataViewElement(Register result,
+                                                         Register data_pointer,
+                                                         Register index,
+                                                         int element_size) {
+  MemOperand element_address = MemOperand(data_pointer, index);
+  LoadUnsignedField(result, element_address, element_size);
+}
+
 inline void MaglevAssembler::LoadTaggedFieldByIndex(Register result,
                                                     Register object,
                                                     Register index, int scale,
@@ -693,6 +701,18 @@ inline void MaglevAssembler::ReverseByteOrder(Register value, int size) {
   }
 }
 
+inline void MaglevAssembler::ReverseByteOrderUnsigned(Register value,
+                                                      int size) {
+  if (size == 2) {
+    Rev16(value, value);
+    Uxth(value, value);
+  } else if (size == 4) {
+    Rev32(value, value);
+  } else {
+    DCHECK_EQ(size, 1);
+  }
+}
+
 inline void MaglevAssembler::IncrementInt32(Register reg) {
   Add(reg.W(), reg.W(), Immediate(1));
 }
@@ -841,6 +861,36 @@ inline void MaglevAssembler::LoadFloat64(DoubleRegister dst, MemOperand src) {
 }
 inline void MaglevAssembler::StoreFloat64(MemOperand dst, DoubleRegister src) {
   Str(src, dst);
+}
+
+inline void MaglevAssembler::LoadUnalignedFloat32(DoubleRegister dst,
+                                                  Register base,
+                                                  Register index) {
+  LoadFloat32(dst, MemOperand(base, index));
+}
+inline void MaglevAssembler::LoadUnalignedFloat32AndReverseByteOrder(
+    DoubleRegister dst, Register base, Register index) {
+  TemporaryRegisterScope temps(this);
+  Register scratch = temps.AcquireScratch();
+  Ldr(scratch.W(), MemOperand(base, index));
+  Rev(scratch.W(), scratch.W());
+  Fmov(dst.S(), scratch.W());
+  Fcvt(dst, dst.S());
+}
+inline void MaglevAssembler::StoreUnalignedFloat32(Register base,
+                                                   Register index,
+                                                   DoubleRegister src) {
+  StoreFloat32(MemOperand(base, index), src);
+}
+inline void MaglevAssembler::ReverseByteOrderAndStoreUnalignedFloat32(
+    Register base, Register index, DoubleRegister src) {
+  TemporaryRegisterScope temps(this);
+  DoubleRegister scratch_double = temps.AcquireScratchDouble();
+  Fcvt(scratch_double.S(), src);
+  Register scratch = temps.AcquireScratch();
+  Fmov(scratch.W(), scratch_double.S());
+  Rev(scratch.W(), scratch.W());
+  Str(scratch.W(), MemOperand(base, index));
 }
 
 inline void MaglevAssembler::LoadUnalignedFloat64(DoubleRegister dst,
@@ -1367,9 +1417,28 @@ inline void MaglevAssembler::CompareInt32AndBranch(
     Register r1, int32_t value, Condition cond, Label* if_true,
     Label::Distance true_distance, bool fallthrough_when_true, Label* if_false,
     Label::Distance false_distance, bool fallthrough_when_false) {
-  Cmp(r1.W(), Immediate(value));
-  Branch(cond, if_true, true_distance, fallthrough_when_true, if_false,
-         false_distance, fallthrough_when_false);
+  // Mirror Branch's fallthrough resolution, but emit the compare and the
+  // jump together through CompareAndBranch, so comparing against zero with
+  // an eq/ne/lt/ge condition folds to a single cbz/cbnz/tbz/tbnz. Other
+  // immediates and conditions keep the cmp + b.cond shape. When both targets
+  // fall through, nothing is emitted: the compare fed only this branch, so
+  // its flags are dead.
+  if (fallthrough_when_false) {
+    if (fallthrough_when_true) {
+      // If both paths are a fallthrough, do nothing.
+      DCHECK_EQ(if_true, if_false);
+      return;
+    }
+    // Jump over the false block if true, otherwise fall through into it.
+    CompareAndBranch(r1.W(), Immediate(value), cond, if_true);
+  } else {
+    // Jump to the false block if true.
+    CompareAndBranch(r1.W(), Immediate(value), NegateCondition(cond), if_false);
+    // Jump to the true block if it's not the next block.
+    if (!fallthrough_when_true) {
+      Jump(if_true, true_distance);
+    }
+  }
 }
 
 inline void MaglevAssembler::CompareInt32AndBranch(
@@ -1385,9 +1454,23 @@ inline void MaglevAssembler::CompareIntPtrAndBranch(
     Register r1, int32_t value, Condition cond, Label* if_true,
     Label::Distance true_distance, bool fallthrough_when_true, Label* if_false,
     Label::Distance false_distance, bool fallthrough_when_false) {
-  Cmp(r1.X(), Immediate(value));
-  Branch(cond, if_true, true_distance, fallthrough_when_true, if_false,
-         false_distance, fallthrough_when_false);
+  // See CompareInt32AndBranch.
+  if (fallthrough_when_false) {
+    if (fallthrough_when_true) {
+      // If both paths are a fallthrough, do nothing.
+      DCHECK_EQ(if_true, if_false);
+      return;
+    }
+    // Jump over the false block if true, otherwise fall through into it.
+    CompareAndBranch(r1.X(), Immediate(value), cond, if_true);
+  } else {
+    // Jump to the false block if true.
+    CompareAndBranch(r1.X(), Immediate(value), NegateCondition(cond), if_false);
+    // Jump to the true block if it's not the next block.
+    if (!fallthrough_when_true) {
+      Jump(if_true, true_distance);
+    }
+  }
 }
 
 inline void MaglevAssembler::CompareSmiAndJumpIf(Register r1, Tagged<Smi> value,
@@ -1632,6 +1715,10 @@ inline void MaglevAssembler::MoveRepr(MachineRepresentation repr,
 
 inline void MaglevAssembler::MaybeEmitPlaceHolderForDeopt() {
   // Implemented only for x64.
+}
+
+inline void MaglevAssembler::MemoryBarrier(AtomicMemoryOrder order) {
+  Dmb(InnerShareable, BarrierAll);
 }
 
 }  // namespace maglev

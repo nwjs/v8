@@ -4593,8 +4593,7 @@ MaybeReduceResult MaglevGraphBuilder::TryBuildPropertyLoad(
                                         lookup_start_object);
     case compiler::PropertyAccessInfo::kModuleExport: {
       ValueNode* cell = GetConstant(access_info.constant().value().AsCell());
-      return BuildLoadTaggedField(cell, offsetof(Cell, maybe_value_),
-                                  NodeType::kUnknown, false, name);
+      return BuildLoadTaggedField(cell, offsetof(Cell, maybe_value_));
     }
     case compiler::PropertyAccessInfo::kStringLength: {
       DCHECK_EQ(receiver, lookup_start_object);
@@ -8407,42 +8406,22 @@ MaybeReduceResult MaglevGraphBuilder::TryReduceGeneratorPrototypeNext(
             StoreTaggedMode::kDefault)
             .IsDoneWithoutAbort());
 
-  // Generators can accept an optional value when resumed (e.g.
-  // g.next("val")). This value becomes the result of the `yield`
-  // expression inside the generator.
-  ValueNode* value = GetValueOrUndefined(args[0]);
-
   ValueNode* result;
-  CatchBlockDetails catch_block = GetCurrentTryCatchBlock();
-  if (catch_block.ref && catch_block.exception_handler_was_used) {
-    // The resume site has a catch handler that has already seen exceptions:
-    // use the wrapper builtin that closes the generator and rethrows, so
-    // that a throwing generator doesn't deopt on every throw.
+  {
     LazyDeoptFrameScope lazy_deopt_scope(
         &reducer_, GetContext(),
         Builtin::kGeneratorPrototypeNextLazyDeoptContinuation, target,
         base::VectorOf<ValueNode*>(
             {GetRootConstant(RootIndex::kUndefinedValue), receiver,
              GetRootConstant(RootIndex::kTheHoleValue)}));
+    // Generators can accept an optional value when resumed (e.g.
+    // g.next("val")). This value becomes the result of the `yield`
+    // expression inside the generator.
+    ValueNode* value = GetValueOrUndefined(args[0]);
     GET_VALUE_OR_ABORT(
         result,
         BuildCallBuiltinWithTaggedInputs<
             Builtin::kResumeGeneratorTrampoline_WithCatch>({value, receiver}));
-  } else {
-    // Call the trampoline directly; if the generator throws, we lazy deopt
-    // and the with-catch continuation closes the generator and rethrows.
-    // The deoptimizer passes the exception and the result, so they are not
-    // part of the parameters here.
-    LazyDeoptFrameScope lazy_deopt_scope(
-        &reducer_, GetContext(),
-        Builtin::kGeneratorPrototypeNextLazyDeoptContinuation, target,
-        base::VectorOf<ValueNode*>(
-            {GetRootConstant(RootIndex::kUndefinedValue), receiver}),
-        /* is_with_catch */ true);
-    GET_VALUE_OR_ABORT(
-        result,
-        BuildCallBuiltinWithTaggedInputs<Builtin::kResumeGeneratorTrampoline>(
-            {value, receiver}));
   }
 
   ValueNode* result_continuation;
@@ -11651,20 +11630,14 @@ MaglevGraphBuilder::TryExtractArgumentsFromElements(
 
   auto build_arguments = [&](int32_t capacity, auto get_element_at)
       -> std::optional<base::SmallVector<ValueNode*, 8>> {
-    int32_t length = 0;
-    if (arguments_object->map()->IsJSArrayMap()) {
-      ValueNode* length_node =
-          arguments_object->get(offsetof(JSArray, length_));
-      std::optional<int32_t> maybe_length = TryGetInt32Constant(length_node);
-      if (!maybe_length.has_value() || *maybe_length < 0 ||
-          *maybe_length > capacity) {
-        return {};
-      }
-      length = *maybe_length;
-    } else {
-      DCHECK(arguments_object->map()->IsJSArgumentsObjectMap());
-      length = capacity;
+    ValueNode* length_node =
+        arguments_object->get(JSStrictArgumentsObject::kLengthOffset);
+    std::optional<int32_t> maybe_length = TryGetInt32Constant(length_node);
+    if (!maybe_length.has_value() || *maybe_length < 0 ||
+        *maybe_length > capacity) {
+      return {};
     }
+    int32_t length = *maybe_length;
 
     if (num_args_to_copy + static_cast<size_t>(length) >
         kMaxArityForOptimizedSpread) {
@@ -11751,7 +11724,7 @@ MaglevGraphBuilder::TryExtractArgumentsFromElements(
   }
 
   if (auto* inlined_allocation = elements_value->TryCast<InlinedAllocation>()) {
-    VirtualObject* elements = inlined_allocation->object();
+    VirtualObject* elements = GetObjectFromAllocation(inlined_allocation);
     ValueNode* elements_length_node =
         elements->get(offsetof(FixedArray, length_));
     std::optional<int32_t> maybe_elements_length =
@@ -11822,9 +11795,13 @@ ReduceResult MaglevGraphBuilder::ReduceCallWithArrayLikeForArgumentsObject(
       arguments_object->get(offsetof(JSObject, elements_));
   if (ArgumentsElements* arguments_elements =
           elements_value->TryCast<ArgumentsElements>()) {
-    args.PopArrayLikeArgument();
-    return BuildCallForwardArgumentsElements<CallForwardVarargs>(
-        target_node, args, arguments_elements);
+    ValueNode* length_node =
+        arguments_object->get(JSStrictArgumentsObject::kLengthOffset);
+    if (length_node->Is<ArgumentsLength>() || length_node->Is<RestLength>()) {
+      args.PopArrayLikeArgument();
+      return BuildCallForwardArgumentsElements<CallForwardVarargs>(
+          target_node, args, arguments_elements);
+    }
   }
 
   std::optional<base::SmallVector<ValueNode*, 8>> arg_list =
@@ -11851,6 +11828,11 @@ MaglevGraphBuilder::TryReduceConstructWithSpreadForArgumentsObject(
   ValueNode* elements_value =
       arguments_object->get(offsetof(JSObject, elements_));
   if (auto* arguments_elements = elements_value->TryCast<ArgumentsElements>()) {
+    ValueNode* length_node =
+        arguments_object->get(JSStrictArgumentsObject::kLengthOffset);
+    if (!length_node->Is<ArgumentsLength>() && !length_node->Is<RestLength>()) {
+      return {};
+    }
     if (!broker()->dependencies()->DependOnArrayIteratorProtector()) {
       return {};
     }
@@ -11907,8 +11889,8 @@ MaglevGraphBuilder::TryGetNonEscapingArgumentsOrArray(ValueNode* value) {
     return {};
   }
 
-  VirtualObject* object = alloc->object();
-  if (!object->has_static_map()) {
+  VirtualObject* object = GetObjectFromAllocation(alloc);
+  if (!object || !object->has_static_map()) {
     return {};
   }
   compiler::MapRef map = *object->map();
@@ -11981,6 +11963,11 @@ MaybeReduceResult MaglevGraphBuilder::TryReduceCallWithSpreadForArgumentsObject(
 
   auto* elements_value = arguments_object->get(offsetof(JSObject, elements_));
   if (auto* arguments_elements = elements_value->TryCast<ArgumentsElements>()) {
+    ValueNode* length_node =
+        arguments_object->get(JSStrictArgumentsObject::kLengthOffset);
+    if (!length_node->Is<ArgumentsLength>() && !length_node->Is<RestLength>()) {
+      return {};
+    }
     if (!broker()->dependencies()->DependOnArrayIteratorProtector()) {
       return {};
     }
@@ -17493,17 +17480,6 @@ void MaglevGraphBuilder::StoreRegisterPair(
 }
 
 void MaglevGraphBuilder::AttachExceptionHandlerInfo(NodeBase* node) {
-  if (reducer_.current_lazy_deopt_scope() != nullptr &&
-      reducer_.current_lazy_deopt_scope()->is_with_catch()) {
-    // The lazy deopt continuation acts as a catch handler; a throw must
-    // trigger a lazy deopt so that the deoptimizer materializes the
-    // continuation frame with the exception.
-    new (node->exception_handler_info())
-        ExceptionHandlerInfo(ExceptionHandlerInfo::kLazyDeopt);
-    DCHECK(node->exception_handler_info()->HasExceptionHandler());
-    DCHECK(node->exception_handler_info()->ShouldLazyDeopt());
-    return;
-  }
   CatchBlockDetails catch_block = GetCurrentTryCatchBlock();
   if (catch_block.ref) {
     if (!catch_block.exception_handler_was_used) {

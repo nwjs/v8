@@ -30873,17 +30873,10 @@ TEST(CodeLikeFunction) {
 }
 
 namespace {
-#ifdef V8_CPPGC_MICROTASK_QUEUE
 template <typename T>
 T* GetRaw(T* ptr) {
   return ptr;
 }
-#else
-template <typename T>
-T* GetRaw(const std::unique_ptr<T>& ptr) {
-  return ptr.get();
-}
-#endif  // V8_CPPGC_MICROTASK_QUEUE
 }  // namespace
 
 THREADED_TEST(MicrotaskQueueOfContext) {
@@ -30966,69 +30959,6 @@ TEST(TestSetSabConstructorEnabledCallback) {
   CHECK(i_isolate->IsSharedArrayBufferConstructorEnabled(i_context));
 }
 
-namespace {
-void NodeTypeCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
-  CHECK(i::ValidateCallbackInfo(info));
-  v8::Isolate* isolate = info.GetIsolate();
-  info.GetReturnValue().Set(v8::Number::New(isolate, 1));
-}
-}  // namespace
-
-TEST(EmbedderInstanceTypes) {
-  LocalContext env;
-  v8::Isolate* isolate = env.isolate();
-  v8::HandleScope scope(isolate);
-  i::v8_flags.experimental_embedder_instance_types = true;
-  Local<FunctionTemplate> node = FunctionTemplate::New(isolate);
-  Local<ObjectTemplate> proto_template = node->PrototypeTemplate();
-
-  enum JSApiInstanceType : uint16_t {
-    kGenericApiObject = 0,  // FunctionTemplateInfo::kNoJSApiObjectType.
-    kElement,
-    kHTMLElement,
-    kHTMLDivElement,
-  };
-
-  Local<FunctionTemplate> nodeType = v8::FunctionTemplate::New(
-      isolate, NodeTypeCallback, Local<Value>(),
-      v8::Signature::New(isolate, node), 0, v8::ConstructorBehavior::kThrow,
-      v8::SideEffectType::kHasSideEffect, nullptr, kGenericApiObject, kElement,
-      kHTMLDivElement);
-  proto_template->SetAccessorProperty(
-      String::NewFromUtf8Literal(isolate, "nodeType"), nodeType);
-
-  Local<FunctionTemplate> element = FunctionTemplate::New(
-      isolate, nullptr, Local<Value>(), Local<v8::Signature>(), 0,
-      v8::ConstructorBehavior::kAllow, v8::SideEffectType::kHasSideEffect,
-      nullptr, kElement);
-  element->Inherit(node);
-
-  Local<FunctionTemplate> html_element = FunctionTemplate::New(
-      isolate, nullptr, Local<Value>(), Local<v8::Signature>(), 0,
-      v8::ConstructorBehavior::kAllow, v8::SideEffectType::kHasSideEffect,
-      nullptr, kHTMLElement);
-  html_element->Inherit(element);
-
-  Local<FunctionTemplate> div_element = FunctionTemplate::New(
-      isolate, nullptr, Local<Value>(), Local<v8::Signature>(), 0,
-      v8::ConstructorBehavior::kAllow, v8::SideEffectType::kHasSideEffect,
-      nullptr, kHTMLDivElement);
-  div_element->Inherit(html_element);
-
-  CHECK(env->Global()
-            ->Set(env.local(), v8_str("div"),
-                  div_element->GetFunction(env.local())
-                      .ToLocalChecked()
-                      ->NewInstance(env.local())
-                      .ToLocalChecked())
-            .FromJust());
-
-  CompileRun("var x = div.nodeType;");
-
-  Local<Value> res =
-      env->Global()->Get(env.local(), v8_str("x")).ToLocalChecked();
-  CHECK_EQ(1, res->ToInt32(env.local()).ToLocalChecked()->Value());
-}
 
 template <typename T>
 void TestCopyAndMoveConstructionAndAssignment() {
@@ -32183,6 +32113,65 @@ TEST(ContinuationPreservedEmbedderDataV2_CppHeapExternal) {
                              v8::CppHeapPointerTag::kTagForTesting,
                              v8::CppHeapPointerTag::kTagForTesting));
     CHECK_EQ(data, cpp_object.Get());
+  }
+
+  isolate->Exit();
+  isolate->Dispose();
+}
+
+TEST(EmbedderDataAlignedPointers_CppHeapPointer) {
+  v8::Isolate::CreateParams create_params = CreateTestParams();
+  create_params.cpp_heap =
+      v8::CppHeap::Create(::v8::internal::V8::GetCurrentPlatform(),
+                          v8::CppHeapCreateParams({}))
+          .release();
+  v8::Isolate* isolate = v8::Isolate::New(create_params);
+  isolate->Enter();
+  v8::CppHeap* cpp_heap = isolate->GetCppHeap();
+
+  {
+    v8::HandleScope scope(isolate);
+    LocalContext env(isolate);
+    v8::Local<v8::Object> obj = v8::Object::New(isolate);
+
+    cppgc::Persistent<TestGarbagedCollectedData> cpp_object(
+        cppgc::MakeGarbageCollected<TestGarbagedCollectedData>(
+            cpp_heap->GetAllocationHandle()));
+
+    // Null pointer test.
+    (*env)->SetAlignedPointerInEmbedderData(
+        0, static_cast<TestGarbagedCollectedData*>(nullptr),
+        v8::CppHeapPointerTag::kTagForTesting);
+    CHECK_EQ(
+        nullptr,
+        (*env)->GetAlignedPointerFromEmbedderData<TestGarbagedCollectedData>(
+            isolate, 0, v8::CppHeapPointerTag::kTagForTesting));
+    CHECK_EQ(nullptr, obj->GetAlignedPointerFromEmbedderDataInCreationContext(
+                          isolate, 0, v8::CppHeapPointerTag::kTagForTesting));
+
+    // Valid cppgc object test.
+    (*env)->SetAlignedPointerInEmbedderData(
+        1, cpp_object.Get(), v8::CppHeapPointerTag::kTagForTesting);
+    CHECK_EQ(
+        cpp_object.Get(),
+        (*env)->GetAlignedPointerFromEmbedderData<TestGarbagedCollectedData>(
+            isolate, 1, v8::CppHeapPointerTag::kTagForTesting));
+    CHECK_EQ(cpp_object.Get(),
+             obj->GetAlignedPointerFromEmbedderDataInCreationContext(
+                 isolate, 1, v8::CppHeapPointerTag::kTagForTesting));
+
+    // Detached global proxy test.
+    v8::Local<v8::Object> global_obj = env->Global();
+    (*env)->SetAlignedPointerInEmbedderData(
+        2, cpp_object.Get(), v8::CppHeapPointerTag::kTagForTesting);
+    CHECK_EQ(cpp_object.Get(),
+             global_obj->GetAlignedPointerFromEmbedderDataInCreationContext(
+                 isolate, 2, v8::CppHeapPointerTag::kTagForTesting));
+
+    env->DetachGlobal();
+    CHECK_EQ(cpp_object.Get(),
+             global_obj->GetAlignedPointerFromEmbedderDataInCreationContext(
+                 isolate, 2, v8::CppHeapPointerTag::kTagForTesting));
   }
 
   isolate->Exit();

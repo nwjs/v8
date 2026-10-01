@@ -747,8 +747,8 @@ void JSFunctionData::Cache(JSHeapBroker* broker) {
       ObjectData* proto_or_map = prototype_or_initial_map_;
       if (proto_or_map->IsTuple2()) {
         Tagged<Tuple2> tuple = Cast<Tuple2>(*proto_or_map->object());
-        proto_or_map =
-            broker->GetOrCreateData(tuple->value1(), kAssumeMemoryFence);
+        proto_or_map = broker->GetOrCreateData(tuple->value1(kAcquireLoad),
+                                               kAssumeMemoryFence);
       }
 
       has_initial_map_ = proto_or_map->IsMap();
@@ -2327,8 +2327,10 @@ std::optional<Float64> JSObjectRef::GetOwnFastConstantDoubleProperty(
   Float64 unboxed_value = Float64::FromBits(
       RacyReadHeapNumberBits(Cast<HeapNumber>(constant.value())));
 
-  // Const double fields should not contain values with the hole NaN pattern.
-  DCHECK(!unboxed_value.is_hole_nan());
+  // Const double fields should not contain values with the hole NaN pattern
+  // unless in-sandbox memory was corrupted.
+  DCHECK_IMPLIES(!v8_flags.expose_memory_corruption_api,
+                 !unboxed_value.is_hole_nan());
   dependencies->DependOnOwnConstantDoubleProperty(*this, map(broker), index,
                                                   unboxed_value);
   return unboxed_value;

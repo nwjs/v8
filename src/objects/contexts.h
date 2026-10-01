@@ -496,6 +496,7 @@ enum ContextLookupFlags {
 
 V8_OBJECT class Context : public HeapObject {
  public:
+  V8_IT_ABSTRACT;
   inline int length() const;
   inline void set_length(int value);
   inline int length(RelaxedLoadTag) const;
@@ -788,6 +789,8 @@ V8_OBJECT class FunctionContext : public Context {
 } V8_OBJECT_END;
 
 V8_OBJECT class NativeContext : public Context {
+  V8_IT_NO_AUTO_DISPATCH;
+
  public:
   // TODO(neis): Move some stuff from Context here.
 
@@ -803,13 +806,8 @@ V8_OBJECT class NativeContext : public Context {
                      ReleaseStoreTag);
 
   // [microtask_queue]: pointer to the MicrotaskQueue object.
-#ifdef V8_CPPGC_MICROTASK_QUEUE
   static constexpr int kMicrotaskQueueSlotSize = kCppHeapPointerSlotSize;
   DECL_CPP_POINTER_ACCESSORS(microtask_queue, MicrotaskQueue*)
-#else
-  static constexpr int kMicrotaskQueueSlotSize = kExternalPointerSlotSize;
-  DECL_EXTERNAL_POINTER_ACCESSORS(microtask_queue, MicrotaskQueue*)
-#endif  // V8_CPPGC_MICROTASK_QUEUE
 
   inline void synchronized_set_script_context_table(
       Tagged<ScriptContextTable> script_context_table);

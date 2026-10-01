@@ -782,9 +782,12 @@ void HeapObjectsMap::AddMergedNativeEntry(NativeObject addr,
                           ComputeAddressHash(canonical_addr));
   auto result = merged_native_entries_map_.insert(
       {addr, reinterpret_cast<size_t>(entry->value)});
-  if (!result.second) {
-    result.first->second = reinterpret_cast<size_t>(entry->value);
-  }
+  DCHECK(result.second);
+  USE(result);
+}
+
+void HeapObjectsMap::ClearMergedNativeEntries() {
+  merged_native_entries_map_.clear();
 }
 
 void HeapObjectsMap::StopHeapObjectsTracking() { time_intervals_.clear(); }
@@ -1234,10 +1237,8 @@ const char* V8HeapExplorer::GetSystemEntryName(Tagged<HeapObject> object) {
     // The following lists include every non-String instance type.
     // This includes a few types that already have non-"system" names assigned
     // by AddEntry, but this is a convenient way to avoid manual upkeep here.
-    TORQUE_INSTANCE_CHECKERS_SINGLE_FULLY_DEFINED(MAKE_TORQUE_CASE)
-    TORQUE_INSTANCE_CHECKERS_MULTIPLE_FULLY_DEFINED(MAKE_TORQUE_CASE)
-    TORQUE_INSTANCE_CHECKERS_SINGLE_ONLY_DECLARED(MAKE_TORQUE_CASE)
-    TORQUE_INSTANCE_CHECKERS_MULTIPLE_ONLY_DECLARED(MAKE_TORQUE_CASE)
+    INSTANCE_TYPE_LIST_SINGLE(MAKE_TORQUE_CASE)
+    INSTANCE_TYPE_LIST_MULTIPLE(MAKE_TORQUE_CASE)
 #undef MAKE_TORQUE_CASE
 
     // Strings were already handled by AddEntry.
@@ -2090,10 +2091,10 @@ void V8HeapExplorer::ExtractScriptReferences(HeapEntry* entry,
              static_cast<int>(script->type()));
   AddStringEdge(entry, HeapGraphEdge::kInternal, "script_type_name",
                 ToString(script->type()));
-  AddIntEdge(entry, HeapGraphEdge::kInternal, "compilation_type",
-             static_cast<int>(script->compilation_type()));
-  AddStringEdge(entry, HeapGraphEdge::kInternal, "compilation_type_name",
-                ToString(script->compilation_type()));
+  AddIntEdge(entry, HeapGraphEdge::kInternal, "compilation_kind",
+             static_cast<int>(script->compilation_kind()));
+  AddStringEdge(entry, HeapGraphEdge::kInternal, "compilation_kind_name",
+                ToString(script->compilation_kind()));
   AddIntEdge(entry, HeapGraphEdge::kInternal, "compilation_state",
              static_cast<int>(script->compilation_state()));
   AddStringEdge(entry, HeapGraphEdge::kInternal, "compilation_state_name",
@@ -2449,6 +2450,8 @@ void V8HeapExplorer::ExtractScopeInfoReferences(HeapEntry* entry,
   AddIntEdge(entry, HeapGraphEdge::kInternal, "scope_type", info->scope_type());
   AddStringEdge(entry, HeapGraphEdge::kInternal, "scope_type_name",
                 ToString(info->scope_type()));
+  AddIntEdge(entry, HeapGraphEdge::kInternal, "scope_id",
+             info->UniqueIdInScript());
   AddIntEdge(entry, HeapGraphEdge::kInternal, "context_local_count",
              info->ContextLocalCount());
   AddIntEdge(entry, HeapGraphEdge::kInternal, "parameter_count",
@@ -3574,6 +3577,11 @@ bool NativeObjectsExplorer::IterateAndExtractReferences(
   generator_ = generator;
   DisallowGarbageCollection no_gc;
   HandleScope scope(isolate_);
+
+  // Native objects can be replaced while their JS wrapper survives.
+  // Rebuild these associations each snapshot instead of retaining
+  // stale native addresses for live wrapper entries.
+  heap_object_map_->ClearMergedNativeEntries();
 
   if (isolate_->heap()->cpp_heap()) {
     CppGraphBuilder::Run(

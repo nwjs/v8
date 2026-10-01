@@ -116,14 +116,6 @@ MachineType MachineTypeFor(maglev::ValueRepresentation repr) {
   UNREACHABLE();
 }
 
-FrameStateType FrameStateTypeFor(maglev::BuiltinContinuationDeoptFrame& frame) {
-  if (!frame.is_javascript()) return FrameStateType::kBuiltinContinuation;
-  if (frame.is_with_catch()) {
-    return FrameStateType::kJavaScriptBuiltinContinuationWithCatch;
-  }
-  return FrameStateType::kJavaScriptBuiltinContinuation;
-}
-
 }  // namespace
 
 template <typename T, typename... Nodes>
@@ -2732,8 +2724,8 @@ class GraphBuildingNodeProcessor {
                                 const maglev::ProcessingState& state) {
     GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
     __ DeoptimizeIfNot(
-        __ Uint32LessThan(Map(node->ValueInput()), Smi::kMaxValue), frame_state,
-        DeoptimizeReason::kNotASmi,
+        __ Uint32LessThanOrEqual(Map(node->ValueInput()), Smi::kMaxValue),
+        frame_state, DeoptimizeReason::kNotASmi,
         node->eager_deopt_info()->feedback_to_update());
     return maglev::ProcessResult::kContinue;
   }
@@ -3919,7 +3911,7 @@ class GraphBuildingNodeProcessor {
     return maglev::ProcessResult::kContinue;
   }
 
-  maglev::ProcessResult Process(maglev::LoadSignedIntDataViewElement* node,
+  maglev::ProcessResult Process(maglev::LoadInt32DataViewElement* node,
                                 const maglev::ProcessingState& state) {
     V<WordPtr> storage = Map<WordPtr>(node->DataPointerInput());
     // TODO(dmercadier): Peephole optimize TruncateJSPrimitiveToUntagged(Boolean
@@ -3935,7 +3927,7 @@ class GraphBuildingNodeProcessor {
                      is_little_endian, node->external_array_type()));
     return maglev::ProcessResult::kContinue;
   }
-  maglev::ProcessResult Process(maglev::LoadDoubleDataViewElement* node,
+  maglev::ProcessResult Process(maglev::LoadUint32DataViewElement* node,
                                 const maglev::ProcessingState& state) {
     V<WordPtr> storage = Map<WordPtr>(node->DataPointerInput());
     // TODO(dmercadier): Peephole optimize TruncateJSPrimitiveToUntagged(Boolean
@@ -3949,11 +3941,32 @@ class GraphBuildingNodeProcessor {
            __ LoadDataViewElement(
                Map(node->ObjectInput()), storage,
                __ ChangeInt32ToIntPtr(Map<Word32>(node->IndexInput())),
-               is_little_endian, ExternalArrayType::kExternalFloat64Array));
+               is_little_endian, ExternalArrayType::kExternalUint32Array));
+    return maglev::ProcessResult::kContinue;
+  }
+  maglev::ProcessResult Process(maglev::LoadDoubleDataViewElement* node,
+                                const maglev::ProcessingState& state) {
+    V<WordPtr> storage = Map<WordPtr>(node->DataPointerInput());
+    // TODO(dmercadier): Peephole optimize TruncateJSPrimitiveToUntagged(Boolean
+    // -> Bit) in SimplifiedOptimizationReducer, since the
+    // is_little_endian_input will often be a constant True/False boolean in
+    // practice.
+    V<Word32> is_little_endian =
+        ToBit(node->IsLittleEndianInput(),
+              TruncateJSPrimitiveToUntaggedOp::InputAssumptions::kObject);
+    V<Float> value = V<Float>::Cast(__ LoadDataViewElement(
+        Map(node->ObjectInput()), storage,
+        __ ChangeInt32ToIntPtr(Map<Word32>(node->IndexInput())),
+        is_little_endian, node->external_array_type()));
+    if (node->external_array_type() ==
+        ExternalArrayType::kExternalFloat32Array) {
+      value = __ ChangeFloat32ToFloat64(V<Float32>::Cast(value));
+    }
+    SetMap(node, value);
     return maglev::ProcessResult::kContinue;
   }
 
-  maglev::ProcessResult Process(maglev::StoreSignedIntDataViewElement* node,
+  maglev::ProcessResult Process(maglev::StoreInt32DataViewElement* node,
                                 const maglev::ProcessingState& state) {
     V<WordPtr> storage = Map<WordPtr>(node->DataPointerInput());
     // TODO(dmercadier): Peephole optimize TruncateJSPrimitiveToUntagged(Boolean
@@ -3970,6 +3983,7 @@ class GraphBuildingNodeProcessor {
         node->external_array_type());
     return maglev::ProcessResult::kContinue;
   }
+
   maglev::ProcessResult Process(maglev::StoreDoubleDataViewElement* node,
                                 const maglev::ProcessingState& state) {
     V<WordPtr> storage = Map<WordPtr>(node->DataPointerInput());
@@ -3980,11 +3994,15 @@ class GraphBuildingNodeProcessor {
     V<Word32> is_little_endian =
         ToBit(node->IsLittleEndianInput(),
               TruncateJSPrimitiveToUntaggedOp::InputAssumptions::kObject);
+    OpIndex value = Map<Float64>(node->ValueInput());
+    if (node->external_array_type() ==
+        ExternalArrayType::kExternalFloat32Array) {
+      value = __ TruncateFloat64ToFloat32(value);
+    }
     __ StoreDataViewElement(
         Map(node->ObjectInput()), storage,
-        __ ChangeInt32ToIntPtr(Map<Word32>(node->IndexInput())),
-        Map<Float64>(node->ValueInput()), is_little_endian,
-        ExternalArrayType::kExternalFloat64Array);
+        __ ChangeInt32ToIntPtr(Map<Word32>(node->IndexInput())), value,
+        is_little_endian, node->external_array_type());
     return maglev::ProcessResult::kContinue;
   }
 
@@ -5284,15 +5302,18 @@ class GraphBuildingNodeProcessor {
         ConvertJSPrimitiveToUntaggedOrDeoptOp::UntaggedKind::kArrayIndex,
         CheckForMinusZeroMode::kCheckForMinusZero, feedback);
     if constexpr (Is64()) {
-      // ArrayIndex is 32-bit in Maglev, but 64 in Turboshaft. This means that
-      // we have to convert it to 32-bit before the following `SetMap`, and we
-      // thus have to check that it actually fits in a Uint32.
-      __ DeoptimizeIfNot(__ Uint64LessThanOrEqual(
-                             result, std::numeric_limits<uint32_t>::max()),
+      // UntaggedKind::kArrayIndex produces signed Word64 in Turboshaft, but
+      // Maglev's CheckedObjectToIndex produces signed Int32. Ensure the value
+      // fits in a signed Int32 before mapping it (negative indices are valid
+      // and handled downstream by bounds checks).
+      V<Word32> i32 = __ TruncateWord64ToWord32(result);
+      __ DeoptimizeIfNot(__ Word64Equal(__ ChangeInt32ToInt64(i32), result),
                          frame_state, DeoptimizeReason::kNotInt32, feedback);
       RETURN_IF_UNREACHABLE();
+      SetMap(node, i32);
+    } else {
+      SetMap(node, result);
     }
-    SetMap(node, Is64() ? __ TruncateWord64ToWord32(result) : result);
     return maglev::ProcessResult::kContinue;
   }
   template <
@@ -6332,7 +6353,8 @@ class GraphBuildingNodeProcessor {
             case maglev::vobj::FieldType::kTrustedPointer:
             case maglev::vobj::FieldType::kFloat64:
             case maglev::vobj::FieldType::kInt32:
-              AddVirtualObjectNestedValue(builder, virtual_objects, value_node);
+              AddVirtualObjectNestedValue(builder, virtual_objects, vobj,
+                                          value_node);
               break;
             case maglev::vobj::FieldType::kNone:
               UNREACHABLE();
@@ -6344,7 +6366,7 @@ class GraphBuildingNodeProcessor {
   void AddVirtualObjectNestedValue(
       FrameStateData::Builder& builder,
       const maglev::VirtualObjectList& virtual_objects,
-      const maglev::ValueNode* value) {
+      const maglev::VirtualObject* vobj, const maglev::ValueNode* value) {
     if (maglev::IsConstantNode(value->opcode())) {
       switch (value->opcode()) {
         case maglev::Opcode::kHeapConstant:
@@ -6360,12 +6382,16 @@ class GraphBuildingNodeProcessor {
               value->opcode() == maglev::Opcode::kFloat64Constant
                   ? value->Cast<maglev::Float64Constant>()->value()
                   : value->Cast<maglev::HoleyFloat64Constant>()->value();
-          if (value_as_float.is_hole_nan()) {
+          DCHECK(vobj->has_static_map());
+          const bool is_fixed_double_array =
+              vobj->map()->IsFixedDoubleArrayMap();
+          if (is_fixed_double_array && value_as_float.is_hole_nan()) {
             builder.AddInput(
                 MachineType::AnyTagged(),
                 __ HeapConstantHole(local_factory_->the_hole_value()));
 #ifdef V8_ENABLE_UNDEFINED_DOUBLE
-          } else if (value_as_float.is_undefined_nan()) {
+          } else if (is_fixed_double_array &&
+                     value_as_float.is_undefined_nan()) {
             builder.AddInput(MachineType::AnyTagged(), undefined_value_);
 #endif  // V8_ENABLE_UNDEFINED_DOUBLE
           } else {
@@ -6541,8 +6567,9 @@ class GraphBuildingNodeProcessor {
 
   const FrameStateInfo* MakeFrameStateInfo(
       maglev::BuiltinContinuationDeoptFrame& maglev_frame) {
-    FrameStateType type = FrameStateTypeFor(maglev_frame);
-    DCHECK_IMPLIES(maglev_frame.is_with_catch(), maglev_frame.is_javascript());
+    FrameStateType type = maglev_frame.is_javascript()
+                              ? FrameStateType::kJavaScriptBuiltinContinuation
+                              : FrameStateType::kBuiltinContinuation;
     uint16_t parameter_count =
         static_cast<uint16_t>(maglev_frame.parameters().length());
     if (maglev_frame.is_javascript()) {

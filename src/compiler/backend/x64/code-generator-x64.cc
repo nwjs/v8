@@ -2084,10 +2084,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchAtomicStoreWithWriteBarrier: {
       // {EmitTSANAwareStore} calls RecordTrapInfoIfNeeded. No need to do it
       // here.
-      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+      RecordWriteMode mode =
+          arch_opcode == kArchStoreWithWriteBarrier
+              ? RecordWriteModeField::decode(instr->opcode())
+              : AtomicStoreRecordWriteModeField::decode(instr->opcode());
       // Indirect pointer writes must use a different opcode.
       DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
-      AtomicMemoryOrder order = AtomicMemoryOrderField::decode(instr->opcode());
       Register object = i.InputRegister(0);
       size_t index = 0;
       Operand operand = i.MemoryOperand(&index);
@@ -2111,6 +2113,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                            MachineRepresentation::kTagged, instr);
       } else {
         DCHECK_EQ(arch_opcode, kArchAtomicStoreWithWriteBarrier);
+        AtomicMemoryOrder order =
+            AtomicMemoryOrderField::decode(instr->opcode());
         EmitTSANAwareStore(zone(), this, masm(), operand, value, i,
                            DetermineStubCallMode(),
                            MachineRepresentation::kTagged, instr, order);
@@ -2139,7 +2143,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       size_t index = 0;
       Operand operand = i.MemoryOperand(&index);
       Register value = i.InputRegister(index);
-      AtomicMemoryOrder order = AtomicMemoryOrderField::decode(instr->opcode());
 
       DCHECK(v8_flags.verify_write_barriers);
       auto ool = zone()->New<OutOfLineVerifySkippedWriteBarrier>(
@@ -2154,6 +2157,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                            MachineRepresentation::kTagged, instr);
       } else {
         DCHECK_EQ(arch_opcode, kArchAtomicStoreSkippedWriteBarrier);
+        AtomicMemoryOrder order =
+            AtomicMemoryOrderField::decode(instr->opcode());
         EmitTSANAwareStore(zone(), this, masm(), operand, value, i,
                            DetermineStubCallMode(),
                            MachineRepresentation::kTagged, instr, order);
@@ -2299,6 +2304,48 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kX64Sub128:
       ASSEMBLE_BINOP_WIDE(subq, sbbq);
       break;
+    case kX64Add64_3: {
+      DCHECK_EQ(i.InputRegister(0), i.OutputRegister(0));
+      size_t last_input_index = instr->InputCount() - 1;
+      DCHECK(HasRegisterInput(instr, last_input_index));
+      Register carry_in = i.InputRegister(last_input_index);
+      Register out_low = i.OutputRegister(0);
+      Register out_high = no_reg;
+      Register temp = no_reg;
+      bool use_out_high = instr->OutputCount() > 1;
+      bool use_temp = false;
+      if (use_out_high) {
+        out_high = i.OutputRegister(1);
+        temp = i.TempRegister(0);
+        size_t end = instr->InputCount();
+        for (size_t j = 0; j < end; j++) {
+          if (HasRegisterInput(instr, j)) {
+            CHECK_NE(i.InputRegister(j), temp);
+            if (i.InputRegister(j) == out_high) {
+              use_temp = true;
+              out_high = temp;
+            }
+          }
+        }
+      }
+
+      // GCC style: just addc, no setcc.
+      if (use_out_high) __ xorq(out_high, out_high);
+      size_t index = 1;
+      if (HasAddressingMode(instr)) {
+        Operand b = i.MemoryOperand(&index);
+        __ addq(out_low, b);
+      } else {
+        ASSEMBLE_RHS(addq, out_low, index);
+      }
+      DCHECK_EQ(index, last_input_index);
+      if (use_out_high) __ adcq(out_high, Immediate(0));
+      __ addq(out_low, carry_in);
+      if (use_out_high) __ adcq(out_high, Immediate(0));
+      if (use_temp) __ movq(i.OutputRegister(1), temp);
+      break;
+    }
+
     case kX64And32:
       ASSEMBLE_BINOP(andl);
       break;
@@ -5183,14 +5230,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           }
           case LaneSize::kL64: {
             // I64x2ShrS
-            // TODO(zhin): there is vpsraq but requires AVX512
             XMMRegister dst = i.OutputSimd128Register();
             XMMRegister src = i.InputSimd128Register(0);
             if (HasImmediateInput(instr, 1)) {
               __ I64x2ShrS(dst, src, i.InputInt6(1), kScratchDoubleReg);
             } else {
-              __ I64x2ShrS(dst, src, i.InputRegister(1), kScratchDoubleReg,
-                           i.TempSimd128Register(0), kScratchRegister);
+              XMMRegister temp = UseAvx10_1() ? XMMRegister::no_reg()
+                                              : i.TempSimd128Register(0);
+              __ I64x2ShrS(dst, src, i.InputRegister(1), temp,
+                           kScratchDoubleReg, kScratchRegister);
             }
             break;
           }
@@ -5361,9 +5409,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           }
           case LaneSize::kL64: {
             // I64x2Mul
+            XMMRegister temp =
+                UseAvx10_1() ? XMMRegister::no_reg() : i.TempSimd128Register(0);
             __ I64x2Mul(i.OutputSimd128Register(), i.InputSimd128Register(0),
-                        i.InputSimd128Register(1), i.TempSimd128Register(0),
-                        kScratchDoubleReg);
+                        i.InputSimd128Register(1), temp, kScratchDoubleReg);
             break;
           }
           default:
@@ -5383,9 +5432,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           }
           case LaneSize::kL64: {
             // I64x4Mul
+            YMMRegister temp =
+                UseAvx10_1() ? YMMRegister::no_reg() : i.TempSimd256Register(0);
             __ I64x4Mul(i.OutputSimd256Register(), i.InputSimd256Register(0),
-                        i.InputSimd256Register(1), i.TempSimd256Register(0),
-                        kScratchSimd256Reg);
+                        i.InputSimd256Register(1), temp, kScratchSimd256Reg);
             break;
           }
           default:
@@ -6866,9 +6916,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kX64I8x16Popcnt: {
-      __ I8x16Popcnt(i.OutputSimd128Register(), i.InputSimd128Register(0),
-                     i.TempSimd128Register(0), kScratchDoubleReg,
-                     kScratchRegister);
+      if (UseAvx10_1()) {
+        __ I8x16Popcnt(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                       kScratchRegister);
+      } else {
+        __ I8x16Popcnt(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                       kScratchRegister, i.TempSimd128Register(0),
+                       kScratchDoubleReg);
+      }
       break;
     }
     case kX64S128Load8Splat: {

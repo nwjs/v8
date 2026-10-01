@@ -569,6 +569,11 @@ bool WasmShuffleAnalyzer::ProcessShuffleOfShuffle(
   // shuffle_out will be added to the shuffles_to_read_shifted list which will
   // update its shuffle array to look at indices 0 and 1, instead of 2 and 3.
 
+  // If shuffle_out is already scheduled to be shifted to expose a specific
+  // window at index 0, its unshifted elements cannot be used as shuffle_out
+  // without conflicting coordinate transformations.
+  if (IsShuffleToShift(shuffle_out)) return false;
+
   DemandedBytes shuffle_out_demanded = GetDemandedBytes(&shuffle_out);
   std::span<const uint8_t> shuffle_out_bytes(shuffle_out.shuffle,
                                              shuffle_out_demanded.bytes());
@@ -763,11 +768,14 @@ void WasmShuffleAnalyzer::ProcessShuffleOfLoads(const Simd128ShuffleOp& shuffle,
 void WasmShuffleAnalyzer::TryReduceFromMSB(OpIndex input,
                                            const Simd128ShuffleOp& shuffle,
                                            const ShuffleSide side) {
-  DemandedBytes demanded = GetDemandedBytes(&shuffle);
+  const ShuffleWindow* shift_window = FindShiftWindow(shuffle);
+  uint8_t start_index = shift_window ? shift_window->begin_index() : 0;
+  uint8_t count = shift_window ? shift_window->OutputDemanded().bytes()
+                               : GetDemandedBytes(&shuffle).bytes();
   std::optional<uint8_t> max = {};
 
-  for (unsigned i = 0; i < demanded.bytes(); ++i) {
-    uint8_t index = shuffle.shuffle[i];
+  for (unsigned i = 0; i < count; ++i) {
+    uint8_t index = shuffle.shuffle[start_index + i];
     if (InRange(index, side)) {
       max = std::max(static_cast<uint8_t>(index % kSimd128Size),
                      max.value_or(uint8_t{0}));

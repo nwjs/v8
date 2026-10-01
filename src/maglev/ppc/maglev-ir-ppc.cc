@@ -116,14 +116,16 @@ void Int32DecrementWithOverflow::GenerateCode(MaglevAssembler* masm,
                                               const ProcessingState& state) {
   Register value = ToRegister(ValueInput());
   Register out = ToRegister(result());
-    __ li(r0, Operand(-1));
-    __ add(out, value, r0, SetOE);
-    __ MoveToCrFromXer(cr0);
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register scratch = temps.AcquireScratch();
+  __ li(scratch, Operand(-1));
+  __ add(out, value, scratch, SetOE);
+  __ MoveToCrFromXer(cr0);
 
-    // Output register must not be a register input into the eager deopt info.
-    DCHECK_REGLIST_EMPTY(RegList{out} &
-                         GetGeneralRegistersUsedAsInputs(eager_deopt_info()));
-    __ EmitEagerDeoptIf(overflow32, DeoptimizeReason::kOverflow, this);
+  // Output register must not be a register input into the eager deopt info.
+  DCHECK_REGLIST_EMPTY(RegList{out} &
+                       GetGeneralRegistersUsedAsInputs(eager_deopt_info()));
+  __ EmitEagerDeoptIf(overflow32, DeoptimizeReason::kOverflow, this);
 
   __ extsw(out, out);
 }
@@ -503,8 +505,10 @@ void Int32DivideWithOverflow::GenerateCode(MaglevAssembler* masm,
   __ EmitEagerDeoptIf(overflow, DeoptimizeReason::kNotInt32, this);
 
   // Check that the remainder is zero.
-  __ mullw(r0, out, right);
-  __ sub(r0, left, r0, LeaveOE, SetRC);
+  MaglevAssembler::TemporaryRegisterScope temps(masm);
+  Register scratch = temps.AcquireScratch();
+  __ mullw(scratch, out, right);
+  __ sub(scratch, left, scratch, LeaveOE, SetRC);
   __ EmitEagerDeoptIf(ne, DeoptimizeReason::kNotInt32, this);
 
   __ extsw(out, out);
@@ -589,8 +593,9 @@ void Int32ModulusWithOverflow::GenerateCode(MaglevAssembler* masm,
   Label rhs_not_power_of_2;
   MaglevAssembler::TemporaryRegisterScope temps(masm);
   Register mask = temps.AcquireScratch();
+  Register scratch = temps.AcquireScratch();
   __ addi(mask, rhs, Operand(-1));
-  __ and_(r0, mask, rhs, SetRC);
+  __ and_(scratch, mask, rhs, SetRC);
   __ JumpIf(ne, &rhs_not_power_of_2);
 
   // {rhs} is power of 2.

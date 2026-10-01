@@ -100,6 +100,11 @@
       TriggerImplication(v8_flags.flag < min_value, #flag "<" #min_value, \
                          &v8_flags.flag, #flag, min_value, false);
 
+#define DEFINE_MAX_VALUE_IMPLICATION(flag, max_value)                     \
+  changed |=                                                              \
+      TriggerImplication(v8_flags.flag > max_value, #max_value "<" #flag, \
+                         &v8_flags.flag, #flag, max_value, false);
+
 #define DEFINE_DISABLE_FLAG_IMPLICATION(whenflag, thenflag) \
   if (whenflag && thenflag) {                               \
     PrintF(stderr, "Warning: disabling flag --" #thenflag   \
@@ -163,6 +168,10 @@
 
 #ifndef DEFINE_MIN_VALUE_IMPLICATION
 #define DEFINE_MIN_VALUE_IMPLICATION(flag, min_value)
+#endif
+
+#ifndef DEFINE_MAX_VALUE_IMPLICATION
+#define DEFINE_MAX_VALUE_IMPLICATION(flag, max_value)
 #endif
 
 #ifndef DEFINE_DISABLE_FLAG_IMPLICATION
@@ -1634,14 +1643,6 @@ DEFINE_BOOL(fast_api_allow_float_in_sim, false,
 // for other tests, which would just lead to errors or crashes.
 DEFINE_NEG_IMPLICATION(fuzzing, fast_api_allow_float_in_sim)
 
-#ifdef V8_USE_ZLIB
-DEFINE_BOOL(turbo_compress_frame_translations, false,
-            "compress deoptimization frame translations (experimental)")
-#else
-DEFINE_BOOL_READONLY(
-    turbo_compress_frame_translations, false,
-    "compress deoptimization frame translations (experimental)")
-#endif  // V8_USE_ZLIB
 DEFINE_BOOL(
     turbo_inline_js_wasm_calls, true,
     "inline JS->Wasm calls (specifically: inline JS-to-Wasm wrappers and then "
@@ -1844,6 +1845,7 @@ DEFINE_BOOL(profile_guided_optimization_for_empty_feedback_vector, true,
             "profile guided optimization for empty feedback vector")
 DEFINE_INT(invocation_count_for_early_optimization, 30,
            "invocation count threshold for early optimization")
+DEFINE_MAX_VALUE_IMPLICATION(invocation_count_for_early_optimization, 254)
 DEFINE_INT(invocation_count_for_maglev_with_delay, 600,
            "invocation count for maglev for functions which according to "
            "profile_guided_optimization are likely to deoptimize before "
@@ -2078,8 +2080,9 @@ DEFINE_DEBUG_BOOL(
     "enables a testing opcode in wasm that is only implemented in TurboFan")
 DEFINE_NEG_IMPLICATION(liftoff_only, enable_testing_opcode_in_wasm)
 // Do synchronous tier up (instead of in-background tierup) in single threaded
-// mode.
+// and predictable mode.
 DEFINE_IMPLICATION(single_threaded, wasm_sync_tier_up)
+DEFINE_IMPLICATION(predictable, wasm_sync_tier_up)
 DEFINE_DEBUG_BOOL(trace_liftoff, false,
                   "trace Liftoff, the baseline compiler for WebAssembly")
 DEFINE_DEVELOPER_FLAG(trace_wasm_memory,
@@ -2173,6 +2176,9 @@ DEFINE_ALIAS_BOOL_WITH_COMMENT(experimental_wasm_js_interop, wasm_js_interop,
 DEFINE_IMPLICATION(wasm_js_interop, wasm_custom_descriptors)
 DEFINE_BOOL(wasm_custom_descriptors_permitted, true,
             "Emergency off-switch for Custom Descriptors Origin Trial")
+DEFINE_EXPERIMENTAL_FEATURE(wasm_merged_descriptors,
+                            "merge Custom Descriptor into v8::internal::Map")
+DEFINE_IMPLICATION(wasm_merged_descriptors, wasm_custom_descriptors)
 
 DEFINE_DEBUG_BOOL(
     wasm_opt, true,
@@ -2711,6 +2717,7 @@ DEFINE_BOOL(memory_reducer_for_small_heaps, true,
             "use memory reducer for small heaps")
 DEFINE_INT(memory_reducer_gc_count, 2,
            "Maximum number of memory reducer GCs scheduled")
+DEFINE_REQUIREMENT(v8_flags.memory_reducer_gc_count > 0)
 DEFINE_INT(memory_reducer_delay_ms, 8'000, "Delay before memory reducer start")
 DEFINE_REQUIREMENT(v8_flags.memory_reducer_delay_ms > 0)
 DEFINE_INT(gc_memory_reducer_start_delay_ms, 30'000,
@@ -2789,6 +2796,7 @@ DEFINE_BOOL(flush_baseline_code, false,
 DEFINE_BOOL(flush_bytecode, true,
             "flush of bytecode when it has not been executed recently")
 DEFINE_INT(bytecode_old_age, 6, "number of gcs before we flush code")
+DEFINE_REQUIREMENT(v8_flags.bytecode_old_age >= 0)
 DEFINE_BOOL(flush_code_based_on_time, true,
             "Use time-base code flushing instead of age.")
 DEFINE_IMPLICATION(flush_code_based_on_time, late_heap_limit_check)
@@ -3034,11 +3042,6 @@ DEFINE_BOOL(
     "an existing Script if one is found in the Isolate compilation cache")
 DEFINE_BOOL(verify_code_merge, false, "Verify scope infos after merge")
 
-// Fix https://issues.chromium.org/u/1/issues/366783806 before enabling.
-DEFINE_BOOL(
-    experimental_embedder_instance_types, false,
-    "enable type checks based on instance types provided by the embedder")
-DEFINE_IMPLICATION(experimental_embedder_instance_types, experimental)
 
 // bootstrapper.cc
 DEFINE_BOOL(expose_gc, false, "expose gc extension")
@@ -3098,13 +3101,13 @@ DEFINE_INT(switch_table_min_cases, 6,
 DEFINE_REQUIREMENT(v8_flags.switch_table_min_cases > 0)
 // Note that enabling this stress mode might result in a failure to compile
 // even a top-level code.
-DEFINE_INT(stress_lazy_compilation, 0,
-           "stress lazy compilation by simulating stack overflow during "
-           "unoptimized bytecode generation with 1/n-th probability, "
-           "do nothing on 0")
+DEFINE_UINT(stress_lazy_compilation, 0,
+            "stress lazy compilation by simulating stack overflow during "
+            "unoptimized bytecode generation with 1/n-th probability, "
+            "do nothing on 0")
 // Correctness fuzzing treats stack overflows as crashes.
 DEFINE_VALUE_IMPLICATION(correctness_fuzzer_suppressions,
-                         stress_lazy_compilation, 0)
+                         stress_lazy_compilation, 0u)
 
 // codegen-ia32.cc / codegen-arm.cc
 DEFINE_BOOL(trace, false, "trace javascript function calls")
@@ -4225,7 +4228,12 @@ DEFINE_NEG_IMPLICATION(predictable, parallel_compile_tasks_for_lazy)
 #ifdef V8_ENABLE_MAGLEV
 DEFINE_NEG_IMPLICATION(predictable, maglev_deopt_data_on_background)
 DEFINE_NEG_IMPLICATION(predictable, maglev_build_code_on_background)
+DEFINE_NEG_IMPLICATION(predictable, maglev_destroy_on_background)
 #endif  // V8_ENABLE_MAGLEV
+DEFINE_NEG_IMPLICATION(predictable, concurrent_cache_deserialization)
+#if V8_ENABLE_WEBASSEMBLY
+DEFINE_NEG_IMPLICATION(predictable, wasm_test_streaming)
+#endif  // V8_ENABLE_WEBASSEMBLY
 // Avoid random seeds in predictable mode.
 DEFINE_VALUE_IMPLICATION(predictable && random_seed == 0, random_seed, 12347)
 
@@ -4535,6 +4543,7 @@ DEFINE_IMPLICATION(gdbjit, log)
 #undef DEFINE_NEG_VALUE_VALUE_IMPLICATION
 #undef DEFINE_VALUE_IMPLICATION
 #undef DEFINE_MIN_VALUE_IMPLICATION
+#undef DEFINE_MAX_VALUE_IMPLICATION
 #undef DEFINE_DISABLE_FLAG_IMPLICATION
 #undef DEFINE_WEAK_VALUE_IMPLICATION
 #undef DEFINE_GENERIC_IMPLICATION

@@ -142,7 +142,6 @@
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 #if V8_ENABLE_WASM_SIMD256_REVEC
-#include "src/compiler/revectorizer.h"
 #include "src/compiler/turboshaft/wasm-revec-phase.h"
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
@@ -179,9 +178,6 @@ class PipelineImpl final {
   // Substep B.1. Produce a scheduled graph.
   V8_WARN_UNUSED_RESULT bool ComputeScheduledGraph();
 
-#if V8_ENABLE_WASM_SIMD256_REVEC
-  V8_WARN_UNUSED_RESULT bool Revectorize();
-#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
   // Substep B.3. Run register allocation on the instruction sequence.
   V8_WARN_UNUSED_RESULT bool AllocateRegisters(CallDescriptor* call_descriptor,
@@ -1477,17 +1473,6 @@ struct ComputeSchedulePhase {
   }
 };
 
-#if V8_ENABLE_WASM_SIMD256_REVEC
-struct RevectorizePhase {
-  DECL_PIPELINE_PHASE_CONSTANTS(Revectorizer)
-
-  void Run(TFPipelineData* data, Zone* temp_zone) {
-    Revectorizer revec(temp_zone, data->graph(), data->mcgraph(),
-                       data->source_positions());
-    revec.TryRevectorize(data->info()->GetDebugName().get());
-  }
-};
-#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 struct PrintGraphPhase {
   DECL_PIPELINE_PHASE_CONSTANTS(PrintGraph)
@@ -3098,6 +3083,11 @@ wasm::WasmCompilationResult Pipeline::GenerateWasmCode(
         std::cout << "Finished revec function "
                   << data.info()->GetDebugName().get() << std::endl;
       }
+      // Report the percentage of this function's SIMD128 operations that were
+      // combined into SIMD256. Recorded via {counter_updates} because
+      // compilation may run on a background thread with no current isolate.
+      counter_updates->AddSample(&Counters::wasm_revec_conversion_percent,
+                                 turboshaft_data.wasm_revec_percent());
     }
   }
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
@@ -3170,6 +3160,7 @@ wasm::WasmCompilationResult Pipeline::GenerateWasmCode(
                                         &pipeline, data.osr_helper_ptr()));
 
   CodeGenerator* code_generator = turboshaft_data.code_generator();
+  CHECK_EQ(code_generator->result(), CodeGenerator::kSuccess);
 
   wasm::WasmCompilationResult result;
   code_generator->masm()->GetCode(
@@ -3460,9 +3451,6 @@ bool PipelineImpl::ComputeScheduledGraph() {
   return true;
 }
 
-#if V8_ENABLE_WASM_SIMD256_REVEC
-bool PipelineImpl::Revectorize() { return Run<RevectorizePhase>(); }
-#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 OptimizedCompilationInfo* PipelineImpl::info() const { return data_->info(); }
 

@@ -960,8 +960,8 @@ Context::BackupIncumbentScope::~BackupIncumbentScope() {
 }
 
 static_assert(i::Internals::kEmbedderDataSlotSize == i::kEmbedderDataSlotSize);
-static_assert(i::Internals::kEmbedderDataSlotExternalPointerOffset ==
-              i::EmbedderDataSlot::kExternalPointerOffset);
+static_assert(i::Internals::kEmbedderDataSlotCppHeapPointerOffset ==
+              i::EmbedderDataSlot::kCppHeapPointerOffset);
 
 static i::DirectHandle<i::EmbedderDataArray> EmbedderDataFor(
     Context* context, int index, bool can_grow, const char* location) {
@@ -1040,8 +1040,8 @@ void Context::SetEmbedderDataV2(int index, v8::Local<Data> value) {
             *Utils::OpenDirectHandle(*GetEmbedderDataV2(index)));
 }
 
-void* Context::SlowGetAlignedPointerFromEmbedderData(int index,
-                                                     EmbedderDataTypeTag tag) {
+void* Context::GetAlignedPointerFromEmbedderData(int index,
+                                                 EmbedderDataTypeTag tag) {
   const char* location = "v8::Context::GetAlignedPointerFromEmbedderData()";
   i::Isolate* i_isolate = i::Isolate::Current();
   i::HandleScope handle_scope(i_isolate);
@@ -1056,17 +1056,42 @@ void* Context::SlowGetAlignedPointerFromEmbedderData(int index,
   return result;
 }
 
+void* Context::SlowGetAlignedPointerFromEmbedderData(int index,
+                                                     CppHeapPointerTag tag) {
+  const char* location = "v8::Context::GetAlignedPointerFromEmbedderData()";
+  i::Isolate* i_isolate = i::Isolate::Current();
+  i::HandleScope handle_scope(i_isolate);
+  i::DirectHandle<i::EmbedderDataArray> data =
+      EmbedderDataFor(this, index, false, location);
+  if (data.is_null()) return nullptr;
+  void* result;
+  Utils::ApiCheck(i::EmbedderDataSlot(*data, index)
+                      .ToAlignedPointer(i_isolate, &result, tag),
+                  location, "Pointer is not aligned");
+  return result;
+}
+
 void Context::SetAlignedPointerInEmbedderData(int index, void* value,
                                               EmbedderDataTypeTag tag) {
   const char* location = "v8::Context::SetAlignedPointerInEmbedderData()";
   i::Isolate* i_isolate = i::Isolate::Current();
   i::DirectHandle<i::EmbedderDataArray> data =
       EmbedderDataFor(this, index, true, location);
-  bool ok = i::EmbedderDataSlot(*data, index)
-                .store_aligned_pointer(i_isolate, *data, value,
-                                       ToExternalPointerTag(tag));
+  bool ok = i::EmbedderDataSlot::store_aligned_pointer(
+      i_isolate, data, index, value, ToExternalPointerTag(tag));
   Utils::ApiCheck(ok, location, "Pointer is not aligned");
   DCHECK_EQ(value, GetAlignedPointerFromEmbedderData(index, tag));
+}
+
+void Context::SetAlignedPointerInEmbedderDataInternal(int index, void* value,
+                                                      CppHeapPointerTag tag) {
+  const char* location = "v8::Context::SetAlignedPointerInEmbedderData()";
+  i::Isolate* i_isolate = i::Isolate::Current();
+  i::DirectHandle<i::EmbedderDataArray> data =
+      EmbedderDataFor(this, index, true, location);
+  bool ok = i::EmbedderDataSlot(*data, index)
+                .store_aligned_pointer(i_isolate, *data, value, tag);
+  Utils::ApiCheck(ok, location, "Pointer is not aligned");
 }
 
 // --- T e m p l a t e ---
@@ -3529,8 +3554,7 @@ Local<String> StackFrame::GetFunctionName() const {
 
 bool StackFrame::IsEval() const {
   auto self = Utils::OpenDirectHandle(this);
-  return self->script()->compilation_type() ==
-         i::Script::CompilationType::kEval;
+  return self->script()->has_eval_origin();
 }
 
 bool StackFrame::IsConstructor() const {
@@ -4074,6 +4098,10 @@ bool Value::IsPromise() const {
 
 bool Value::IsModuleNamespaceObject() const {
   return IsJSModuleNamespace(*Utils::OpenDirectHandle(this));
+}
+
+bool Value::IsDeferredModuleNamespaceObject() const {
+  return IsJSDeferredModuleNamespace(*Utils::OpenDirectHandle(this));
 }
 
 MaybeLocal<String> Value::ToString(Local<Context> context) const {
@@ -5535,10 +5563,10 @@ Local<v8::Context> v8::Object::GetCreationContextChecked() {
 }
 
 namespace {
+template <typename TagType>
 V8_INLINE void* GetAlignedPointerFromEmbedderDataInCreationContextImpl(
-    i::DirectHandle<i::JSReceiver> object,
-    i::IsolateForSandbox i_isolate_for_sandbox, int index,
-    EmbedderDataTypeTag tag) {
+    i::DirectHandle<i::JSReceiver> object, i::Isolate* i_isolate, int index,
+    TagType tag) {
   const char* location =
       "v8::Object::GetAlignedPointerFromEmbedderDataInCreationContext()";
   auto maybe_context = object->GetCreationContext();
@@ -5552,8 +5580,7 @@ V8_INLINE void* GetAlignedPointerFromEmbedderDataInCreationContextImpl(
     // cleared on Detach to avoid leaks). Since we're doing a global proxy
     // access though, the Isolate's current native context must be the native
     // context we care about.
-    i::Isolate* isolate = i::Isolate::Current();
-    i::Tagged<i::Context> context = isolate->context();
+    i::Tagged<i::Context> context = i_isolate->context();
     CHECK_EQ(context->global_proxy(), *object);
     native_context = context->native_context();
   }
@@ -5574,8 +5601,7 @@ V8_INLINE void* GetAlignedPointerFromEmbedderDataInCreationContextImpl(
                 static_cast<unsigned>(data->length()))) {
     void* result;
     Utils::ApiCheck(i::EmbedderDataSlot(data, index)
-                        .ToAlignedPointer(i_isolate_for_sandbox, &result,
-                                          ToExternalPointerTag(tag)),
+                        .ToAlignedPointer(i_isolate, &result, tag),
                     location, "Pointer is not aligned");
     return result;
   }
@@ -5591,15 +5617,22 @@ void* v8::Object::GetAlignedPointerFromEmbedderDataInCreationContext(
     v8::Isolate* isolate, int index, EmbedderDataTypeTag tag) {
   auto self = Utils::OpenDirectHandle(this);
   auto i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  return GetAlignedPointerFromEmbedderDataInCreationContextImpl(self, i_isolate,
-                                                                index, tag);
+  return GetAlignedPointerFromEmbedderDataInCreationContextImpl(
+      self, i_isolate, index, ToExternalPointerTag(tag));
 }
 
 void* v8::Object::GetAlignedPointerFromEmbedderDataInCreationContext(
     int index, EmbedderDataTypeTag tag) {
   auto self = Utils::OpenDirectHandle(this);
-  i::IsolateForSandbox isolate = i::GetCurrentIsolateForSandbox();
-  return GetAlignedPointerFromEmbedderDataInCreationContextImpl(self, isolate,
+  return GetAlignedPointerFromEmbedderDataInCreationContextImpl(
+      self, i::Isolate::Current(), index, ToExternalPointerTag(tag));
+}
+
+void* v8::Object::GetAlignedPointerFromEmbedderDataInCreationContext(
+    v8::Isolate* isolate, int index, CppHeapPointerTag tag) {
+  auto self = Utils::OpenDirectHandle(this);
+  auto i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  return GetAlignedPointerFromEmbedderDataInCreationContextImpl(self, i_isolate,
                                                                 index, tag);
 }
 
@@ -6351,10 +6384,9 @@ void v8::Object::SetAlignedPointerInInternalField(int index, void* value,
   const char* location = "v8::Object::SetAlignedPointerInInternalField()";
   if (!InternalFieldOK(obj, index, location)) return;
 
-  i::DisallowGarbageCollection no_gc;
-  Utils::ApiCheck(i::EmbedderDataSlot(i::Cast<i::JSObject>(*obj), index)
-                      .store_aligned_pointer(i::Isolate::Current(), *obj, value,
-                                             ToExternalPointerTag(tag)),
+  Utils::ApiCheck(i::EmbedderDataSlot::store_aligned_pointer(
+                      i::Isolate::Current(), i::Cast<i::JSObject>(obj), index,
+                      value, ToExternalPointerTag(tag)),
                   location, "Unaligned pointer");
   DCHECK_EQ(value, GetAlignedPointerFromInternalField(index, tag));
 }
@@ -7024,6 +7056,7 @@ bool IsJSReceiverSafeToFreeze(i::InstanceType obj_type) {
       return true;
 #if V8_ENABLE_WEBASSEMBLY
     case i::WASM_ARRAY_TYPE:
+    case i::WASM_CUSTOM_MAP_TYPE:
     case i::WASM_STRUCT_TYPE:
     case i::WASM_TAG_OBJECT_TYPE:
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -11322,7 +11355,6 @@ bool v8::Object::IsCodeLike(v8::Isolate* v8_isolate) const {
 }
 
 // static
-#ifdef V8_CPPGC_MICROTASK_QUEUE
 MicrotaskQueue* MicrotaskQueue::New(Isolate* v8_isolate,
                                     MicrotasksPolicy policy) {
   auto* microtask_queue =
@@ -11330,7 +11362,6 @@ MicrotaskQueue* MicrotaskQueue::New(Isolate* v8_isolate,
   microtask_queue->set_microtasks_policy(policy);
   return microtask_queue;
 }
-#endif  // V8_CPPGC_MICROTASK_QUEUE
 
 MicrotasksScope::MicrotasksScope(Local<Context> v8_context,
                                  MicrotasksScope::Type type)

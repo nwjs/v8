@@ -634,10 +634,16 @@ uint32_t ComputeFlagListHash() {
     // The following flags are implied by --predictable (some negated).
     if (flag.PointsTo(&v8_flags.concurrent_sparkplug) ||
         flag.PointsTo(&v8_flags.concurrent_recompilation) ||
+        flag.PointsTo(&v8_flags.concurrent_cache_deserialization) ||
         flag.PointsTo(&v8_flags.lazy_feedback_allocation) ||
 #ifdef V8_ENABLE_MAGLEV
         flag.PointsTo(&v8_flags.maglev_deopt_data_on_background) ||
         flag.PointsTo(&v8_flags.maglev_build_code_on_background) ||
+        flag.PointsTo(&v8_flags.maglev_destroy_on_background) ||
+#endif
+#if V8_ENABLE_WEBASSEMBLY
+        flag.PointsTo(&v8_flags.wasm_sync_tier_up) ||
+        flag.PointsTo(&v8_flags.wasm_test_streaming) ||
 #endif
         flag.PointsTo(&v8_flags.parallel_scavenge) ||
         flag.PointsTo(&v8_flags.concurrent_marking) ||
@@ -1420,6 +1426,7 @@ void FlagList::ResolveContradictionsWhenFuzzing() {
   CONTRADICTION(predictable_gc_schedule, stress_compaction);
   CONTRADICTION(single_threaded, stress_concurrent_inlining_attach_code);
 #if V8_ENABLE_WEBASSEMBLY
+  CONTRADICTION(wasm_test_streaming, predictable);
   CONTRADICTION(single_threaded, wasm_pgo_to_file);
   CONTRADICTION(single_threaded, wasm_generate_compilation_hints);
   CONTRADICTION(single_threaded, trace_wasm_generate_compilation_hints);
@@ -1470,6 +1477,11 @@ void FlagList::ResolveContradictionsWhenFuzzing() {
 
   // Not useful for differential fuzzing: https://crbug.com/496356383
   RESET_WHEN_CORRECTNESS_FUZZING(heap_snapshot_on_gc);
+
+  // https://crbug.com/550629905
+#if V8_ENABLE_WEBASSEMBLY
+  RESET_WHEN_CORRECTNESS_FUZZING(wasm_pgo_to_file);
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   // https://crbug.com/369974230
   RESET_WHEN_FUZZING(expose_async_hooks);

@@ -150,12 +150,7 @@
   /* proposal. */                                                              \
   /* Part of https://github.com/WebAssembly/shared-everything-threads */       \
   /* V8 side owner: rezvan */                                                  \
-  WASM_FEATURE(acquire_release, "acquire_release memory ordering")             \
-                                                                               \
-  /* Wasm Re-vectorization (no proposal, engine optimization only). */         \
-  /* V8 side owner: jkummerow */                                               \
-  IF_REVEC_ENABLED(INTERNAL_FEATURE, wasm_revectorize,                         \
-                   "128 to 256 bit SIMD re-vectorization for Wasm")
+  WASM_FEATURE(acquire_release, "acquire_release memory ordering")
 
 // #############################################################################
 // Staged features (disabled by default, but enabled via --js-staging/--harmony,
@@ -175,8 +170,6 @@
                                                                                \
   JS_FEATURE(js_immutable_arraybuffer, "Immutable ArrayBuffer")                \
                                                                                \
-  JS_FEATURE(js_import_text, "import text")                                    \
-                                                                               \
   JS_FEATURE(js_import_bytes, "import bytes")                                  \
                                                                                \
   JS_FEATURE(js_defer_import_eval, "defer import eval")                        \
@@ -187,7 +180,13 @@
   /* --wasm-js-interop for now. */                                             \
   /* V8 side owner: jkummerow */                                               \
   /* Staged (without JS Interop) in v14.8 */                                   \
-  WASM_FEATURE(custom_descriptors, "custom descriptors")
+  WASM_FEATURE(custom_descriptors, "custom descriptors")                       \
+                                                                               \
+  /* Wasm Re-vectorization (no proposal, engine optimization only). */         \
+  /* V8 side owner: jkummerow */                                               \
+  /* Staged in 15.4 */                                                         \
+  IF_REVEC_ENABLED(INTERNAL_FEATURE, wasm_revectorize,                         \
+                   "128 to 256 bit SIMD re-vectorization for Wasm")
 
 // #############################################################################
 // Shipped features (enabled by default).
@@ -217,6 +216,8 @@
              "non-throwing case (https://github.com/tc39/ecma262/pull/3883)")  \
                                                                                \
   JS_FEATURE(js_iterator_includes, "Iterator.prototype.includes")              \
+                                                                               \
+  JS_FEATURE(js_import_text, "import text")                                    \
                                                                                \
   /* Legacy exception handling proposal. */                                    \
   /* https://github.com/WebAssembly/exception-handling */                      \

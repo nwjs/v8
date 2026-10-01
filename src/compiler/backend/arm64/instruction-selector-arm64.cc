@@ -1687,6 +1687,33 @@ static bool TryMatchConditionalCompareChain(InstructionSelector* selector,
 
 }  // end namespace turboshaft
 
+// Per-arch ccmp cascade hooks (driven by TryCascadeCcmpFuseOrEmit in
+// instruction-selector.cc). ccmp is native on ARM64, so always available.
+bool InstructionSelector::SupportsCcmpBranchCascade() const { return true; }
+
+bool InstructionSelector::CcmpCascadeConstantOk(OpIndex node,
+                                                bool is_ccmp_operand) {
+  // Gate on the range each operand is actually emitted with: ccmp's immediate
+  // range is much narrower than cmp's. A constant in between would be emitted
+  // as a register by VisitCompareChain, but the now-dead fused block never
+  // materializes it (use without a definition).
+  Arm64OperandGenerator g(this);
+  return g.CanBeImmediate(
+      node, is_ccmp_operand ? kConditionalCompareImm : kArithmeticImm);
+}
+
+InstructionCode InstructionSelector::CcmpCmpOpcode(
+    RegisterRepresentation rep) const {
+  return Arm64GetCmpOpcode(rep, /*is_test=*/false);
+}
+
+void InstructionSelector::EmitCcmpCompareChain(
+    compare_chain::CompareSequence& sequence, RegisterRepresentation rep,
+    FlagsContinuation* cont) {
+  VisitCompareChain(this, sequence.left(), sequence.right(), rep,
+                    sequence.opcode(), kArithmeticImm, cont);
+}
+
 static void VisitLogical(InstructionSelector* selector, Zone* zone,
                          OpIndex node, WordRepresentation rep,
                          ArchOpcode opcode, bool left_can_cover,
@@ -2036,6 +2063,15 @@ void InstructionSelector::VisitWord64Shl(OpIndex node) {
       Emit(kArm64Lsl, g.DefineAsRegister(node),
            g.UseRegister(lhs.Cast<ChangeOp>().input()),
            g.UseImmediate64(shift_by));
+      return;
+    }
+    if (base::IsInRange(shift_by, 1, 31) && CanCover(node, shift_op.left())) {
+      // A bitfield insert (sbfiz/ubfiz) sign/zero-extends the low 32 bits of
+      // the input and shifts them into place in a single instruction.
+      Emit(lhs.Is<Opmask::kChangeInt32ToInt64>() ? kArm64Sbfiz : kArm64Ubfiz,
+           g.DefineAsRegister(node),
+           g.UseRegister(lhs.Cast<ChangeOp>().input()),
+           g.UseImmediate(static_cast<int32_t>(shift_by)), g.UseImmediate(32));
       return;
     }
   }
@@ -2611,6 +2647,10 @@ void InstructionSelector::VisitUint64Add128(OpIndex node) {
 
 void InstructionSelector::VisitUint64Sub128(OpIndex node) {
   VisitWideAddSub(this, node, false);
+}
+
+void InstructionSelector::VisitUint64Add3WithCarry(OpIndex node) {
+  UNIMPLEMENTED();
 }
 
 #if V8_ENABLE_SIMD128
@@ -3932,13 +3972,12 @@ void VisitAtomicStore(InstructionSelector* selector, OpIndex node,
 
     if (write_barrier_kind == kSkippedWriteBarrier) {
       code = kArchAtomicStoreSkippedWriteBarrier;
-      code |= RecordWriteModeField::encode(RecordWriteMode::kValueIsAny);
       temps[temp_count++] = g.TempRegister();
     } else {
       RecordWriteMode record_write_mode =
           WriteBarrierKindToRecordWriteMode(write_barrier_kind);
       code = kArchAtomicStoreWithWriteBarrier;
-      code |= RecordWriteModeField::encode(record_write_mode);
+      code |= AtomicStoreRecordWriteModeField::encode(record_write_mode);
     }
   } else {
     switch (rep) {
@@ -4221,6 +4260,12 @@ void InstructionSelector::VisitWordCompareZero(OpIndex user, OpIndex value,
     Emit(cont->Encode(kArm64CompareAndBranch32), g.NoOutput(),
          g.UseRegister(value), g.Label(cont->true_block()),
          g.Label(cont->false_block()));
+  } else if (cont->IsDeoptimize()) {
+    // Deoptimization checks compare-and-branch too, saving the tst:
+    // their exits are laid out at the end of the code, within cbz/cbnz
+    // range, and AssembleArchDeoptBranch assembles this pseudo
+    // instruction exactly as AssembleArchBranch does.
+    EmitWithContinuation(kArm64CompareAndBranch32, g.UseRegister(value), cont);
   } else {
     VisitCompare(this, cont->Encode(kArm64Tst32), g.UseRegister(value),
                  g.UseRegister(value), cont);
@@ -4304,12 +4349,12 @@ void InstructionSelector::VisitWord32Equal(OpIndex node) {
     Arm64OperandGenerator g(this);
     const RootsTable& roots_table = isolate()->roots_table();
     RootIndex root_index;
-    Handle<HeapObject> right;
+    Handle<HeapObject> heap_object;
     // HeapConstants and CompressedHeapConstants can be treated the same when
     // using them as an input to a 32-bit comparison. Check whether either is
     // present.
-    if (MatchHeapConstant(node, &right) && !right.is_null() &&
-        roots_table.IsRootHandle(right, &root_index)) {
+    if (MatchHeapConstant(right, &heap_object) && !heap_object.is_null() &&
+        roots_table.IsRootHandle(heap_object, &root_index)) {
       if (RootsTable::IsReadOnly(root_index)) {
         Tagged_t ptr =
             MacroAssemblerBase::ReadOnlyRootPtr(root_index, isolate());

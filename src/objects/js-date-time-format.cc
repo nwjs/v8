@@ -202,7 +202,11 @@ static std::vector<PatternItem> BuildPatternItems() {
                   {{"GGGGG", "narrow"}, {"GGGG", "long"}, {"GGG", "short"}},
                   kNarrowLongShort),
       PatternItem(Year::kShift, DateTimeProperty::kYear,
-                  {{"yy", "2-digit"}, {"y", "numeric"}}, k2DigitNumeric)};
+                  {{"yy", "2-digit"},
+                   {"y", "numeric"},
+                   {"YY", "2-digit"},
+                   {"Y", "numeric"}},
+                  k2DigitNumeric)};
   // Sometimes we get L instead of M for month - standalone name.
   items.push_back(PatternItem(Month::kShift, DateTimeProperty::kMonth,
                               {{"MMMMM", "narrow"},
@@ -1685,11 +1689,16 @@ std::unique_ptr<icu::SimpleDateFormat> GetSimpleDateTimeForTemporal(
     JSDateTimeFormat::DateTimeStyle time_style,
     bool has_to_locale_string_time_zone) {
   DCHECK_NE(kind, PatternKind::kDate);
+  icu::UnicodeString original_skeleton = SkeletonFromDateFormat(date_format);
   icu::UnicodeString skeleton = GetSkeletonForPatternKind(
-      SkeletonFromDateFormat(date_format), explicit_components_in_options, kind,
-      date_style, time_style, has_to_locale_string_time_zone);
+      original_skeleton, explicit_components_in_options, kind, date_style,
+      time_style, has_to_locale_string_time_zone);
   if (skeleton.length() == 0) {
     return nullptr;
+  }
+  if (skeleton == original_skeleton) {
+    return std::unique_ptr<icu::SimpleDateFormat>(
+        static_cast<icu::SimpleDateFormat*>(date_format.clone()));
   }
   UErrorCode status = U_ZERO_ERROR;
   std::unique_ptr<icu::SimpleDateFormat> result(
@@ -3119,6 +3128,7 @@ DirectHandle<String> IcuDateFieldIdToDateType(int32_t field_id,
       return isolate->factory()->literal_string();
     case UDAT_YEAR_FIELD:
     case UDAT_EXTENDED_YEAR_FIELD:
+    case UDAT_YEAR_WOY_FIELD:
       return isolate->factory()->year_string();
     case UDAT_YEAR_NAME_FIELD:
       return isolate->factory()->yearName_string();

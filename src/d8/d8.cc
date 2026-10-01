@@ -663,8 +663,7 @@ std::unordered_set<std::shared_ptr<Worker>> Shell::running_workers_;
 std::atomic<bool> Shell::script_executed_{false};
 std::atomic<bool> Shell::valid_fuzz_script_{false};
 base::LazyMutex Shell::cached_code_mutex_;
-std::map<std::string, std::unique_ptr<ScriptCompiler::CachedData>>
-    Shell::cached_code_map_;
+Shell::CodeCacheMap Shell::cached_code_map_;
 std::atomic<int> Shell::unhandled_promise_rejections_{0};
 bool Shell::fuzzilli_reprl_failed_ = false;
 
@@ -681,14 +680,16 @@ ShellOptions Shell::options;
 base::OnceType Shell::quit_once_ = V8_ONCE_INIT;
 
 ScriptCompiler::CachedData* Shell::LookupCodeCache(Isolate* isolate,
-                                                   Local<Value> source) {
+                                                   Local<Value> source,
+                                                   ScriptType type) {
   i::ParkedMutexGuard lock_guard(
       reinterpret_cast<i::Isolate*>(isolate)->main_thread_local_isolate(),
       cached_code_mutex_.Pointer());
   CHECK(source->IsString());
-  v8::String::Utf8Value key(isolate, source);
-  DCHECK(*key);
-  auto entry = cached_code_map_.find(*key);
+  v8::String::Utf8Value source_str(isolate, source);
+  DCHECK(*source_str);
+  CodeCacheKey key(*source_str, type);
+  auto entry = cached_code_map_.find(key);
   if (entry != cached_code_map_.end() && entry->second) {
     int length = entry->second->length;
     uint8_t* cache = new uint8_t[length];
@@ -701,18 +702,20 @@ ScriptCompiler::CachedData* Shell::LookupCodeCache(Isolate* isolate,
 }
 
 void Shell::StoreInCodeCache(Isolate* isolate, Local<Value> source,
-                             const ScriptCompiler::CachedData* cache_data) {
+                             const ScriptCompiler::CachedData* cache_data,
+                             ScriptType type) {
   i::ParkedMutexGuard lock_guard(
       reinterpret_cast<i::Isolate*>(isolate)->main_thread_local_isolate(),
       cached_code_mutex_.Pointer());
   CHECK(source->IsString());
   if (cache_data == nullptr) return;
-  v8::String::Utf8Value key(isolate, source);
-  DCHECK(*key);
+  v8::String::Utf8Value source_str(isolate, source);
+  DCHECK(*source_str);
   int length = cache_data->length;
   uint8_t* cache = new uint8_t[length];
   memcpy(cache, cache_data->data, length);
-  cached_code_map_[*key] = std::unique_ptr<ScriptCompiler::CachedData>(
+  CodeCacheKey key(*source_str, type);
+  cached_code_map_[key] = std::unique_ptr<ScriptCompiler::CachedData>(
       new ScriptCompiler::CachedData(cache, length,
                                      ScriptCompiler::CachedData::BufferOwned));
 }
@@ -955,7 +958,13 @@ MaybeLocal<T> Shell::CompileSource(Isolate* isolate, Local<Context> context,
 
   ScriptCompiler::CachedData* cached_code = nullptr;
   if (options.compile_options & ScriptCompiler::kConsumeCodeCache) {
-    cached_code = LookupCodeCache(isolate, source_string);
+    if constexpr (std::is_same_v<T, Script>) {
+      cached_code =
+          LookupCodeCache(isolate, source_string, ScriptType::kClassic);
+    } else if constexpr (std::is_same_v<T, Module>) {
+      cached_code =
+          LookupCodeCache(isolate, source_string, ScriptType::kModule);
+    }
   }
   ScriptCompiler::Source script_source(source_string, origin, cached_code);
   MaybeLocal<T> result =
@@ -1074,6 +1083,10 @@ class ModuleEmbedderData {
 
   // Origin location used for resolving modules when referrer is null.
   std::string origin;
+
+  // List of compiled JavaScript modules awaiting code cache production.
+  std::vector<std::pair<Global<String>, Global<Module>>>
+      modules_pending_code_cache;
 };
 
 enum { kModuleEmbedderDataIndex, kInspectorClientIndex };
@@ -1186,6 +1199,10 @@ bool Shell::ExecuteSource(Isolate* isolate, const Source& source,
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   if (i_isolate->is_execution_terminating()) return true;
 
+  HandleScope handle_scope(isolate);
+  TryCatch try_catch(isolate);
+  try_catch.SetVerbose(report_exceptions == kReportExceptions);
+
   Local<String> source_str;
   if (i::v8_flags.parse_only ||
       options.code_cache_options ==
@@ -1196,10 +1213,6 @@ bool Shell::ExecuteSource(Isolate* isolate, const Source& source,
       return false;
     }
   }
-
-  HandleScope handle_scope(isolate);
-  TryCatch try_catch(isolate);
-  try_catch.SetVerbose(report_exceptions == kReportExceptions);
 
   if (i::v8_flags.parse_only) {
     i::VMState<PARSER> state(i_isolate);
@@ -1619,6 +1632,19 @@ MaybeLocal<Module> Shell::FetchModuleTree(Local<Module> referrer,
                                origin)
              .ToLocal(&module)) {
       return MaybeLocal<Module>();
+    }
+    if (options.code_cache_options ==
+        ShellOptions::CodeCacheOptions::kProduceCache) {
+      ScriptCompiler::CachedData* cached_data =
+          ScriptCompiler::CreateCodeCache(module->GetUnboundModuleScript());
+      StoreInCodeCache(isolate, source_text.ToLocalChecked(), cached_data,
+                       ScriptType::kModule);
+      delete cached_data;
+    } else if (options.code_cache_options ==
+               ShellOptions::CodeCacheOptions::kProduceCacheAfterExecute) {
+      module_data->modules_pending_code_cache.emplace_back(
+          Global<String>(isolate, source_text.ToLocalChecked()),
+          Global<Module>(isolate, module));
     }
   } else if (module_type == ModuleType::kJSON) {
     Local<Value> parsed_json;
@@ -2194,6 +2220,30 @@ void Shell::DoHostImportModuleDynamically(v8::Local<v8::Data> data) {
   }
 }
 
+void Shell::ProduceModuleCodeCacheAfterExecute(Isolate* isolate) {
+  if (options.code_cache_options !=
+          ShellOptions::CodeCacheOptions::kProduceCacheAfterExecute ||
+      isolate->IsExecutionTerminating()) {
+    return;
+  }
+  PerIsolateData* data = PerIsolateData::Get(isolate);
+  Local<Context> realm =
+      data->realms_[data->realm_current_].context.Get(isolate);
+  Context::Scope context_scope(realm);
+  i::CppGCManaged<ModuleEmbedderData>::Ptr module_data =
+      GetModuleDataFromContext(realm);
+  for (const auto& [source_str, mod] :
+       module_data->modules_pending_code_cache) {
+    Local<Module> m = mod.Get(isolate);
+    ScriptCompiler::CachedData* cached_data =
+        ScriptCompiler::CreateCodeCache(m->GetUnboundModuleScript());
+    StoreInCodeCache(isolate, source_str.Get(isolate), cached_data,
+                     ScriptType::kModule);
+    delete cached_data;
+  }
+  module_data->modules_pending_code_cache.clear();
+}
+
 bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
   HandleScope handle_scope(isolate);
   Global<Module> global_root_module;
@@ -2232,6 +2282,8 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
     global_root_module.Reset(isolate, root_module);
 
     module_data->origin = absolute_path;
+
+    if (options.compile_only) return true;
 
     if (root_module
             ->InstantiateModule(realm, ResolveModuleCallback,
@@ -2305,6 +2357,8 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
       return false;
     }
   }
+
+  ProduceModuleCodeCacheAfterExecute(isolate);
 
   DCHECK(!try_catch.HasCaught());
   return true;
@@ -2551,10 +2605,10 @@ int PerIsolateData::RealmIndexOrThrow(
 }
 
 // GetTimestamp() returns a time stamp as double, measured in milliseconds.
-// When v8_flags.verify_predictable mode is enabled it returns result of
+// When v8_flags.predictable mode is enabled it returns result of
 // v8::Platform::MonotonicallyIncreasingTime().
 double Shell::GetTimestamp() {
-  if (i::v8_flags.verify_predictable) {
+  if (i::v8_flags.predictable) {
     return g_platform->MonotonicallyIncreasingTime();
   } else {
     base::TimeDelta delta = base::TimeTicks::Now() - kInitialTicks;
@@ -2563,9 +2617,9 @@ double Shell::GetTimestamp() {
 }
 uint64_t Shell::GetTracingTimestampFromPerformanceTimestamp(
     double performance_timestamp) {
-  // Don't use this in --verify-predictable mode, predictable timestamps don't
+  // Don't use this in --predictable mode, predictable timestamps don't
   // work well with tracing.
-  DCHECK(!i::v8_flags.verify_predictable);
+  DCHECK(!i::v8_flags.predictable);
   base::TimeDelta delta =
       base::TimeDelta::FromMillisecondsD(performance_timestamp);
   // See TracingController::CurrentTimestampMicroseconds().
@@ -2912,19 +2966,9 @@ MaybeLocal<Context> Shell::CreateRealm(
   Local<ObjectTemplate> global_template = CreateGlobalTemplate(isolate);
 
   v8::MicrotaskQueue* microtask_queue = nullptr;
-#ifdef V8_CPPGC_MICROTASK_QUEUE
   if (create_own_microtask_queue) {
     microtask_queue = v8::MicrotaskQueue::New(isolate);
   }
-#else
-  std::unique_ptr<v8::MicrotaskQueue> new_mq;
-  if (create_own_microtask_queue) {
-    START_ALLOW_USE_DEPRECATED()
-    new_mq = v8::MicrotaskQueue::New(isolate);
-    END_ALLOW_USE_DEPRECATED()
-    microtask_queue = new_mq.get();
-  }
-#endif  // V8_CPPGC_MICROTASK_QUEUE
 
   Local<Context> context =
       Context::New(isolate, nullptr, global_template, global_object,
@@ -2935,16 +2979,9 @@ MaybeLocal<Context> Shell::CreateRealm(
 
   if (index < 0) {
     index = static_cast<int>(data->realms_.size());
-#ifdef V8_CPPGC_MICROTASK_QUEUE
     data->realms_.emplace_back(isolate, context);
-#else
-    data->realms_.emplace_back(isolate, context, std::move(new_mq));
-#endif
   } else {
     data->realms_[index].context.Reset(isolate, context);
-#ifndef V8_CPPGC_MICROTASK_QUEUE
-    data->realms_[index].microtask_queue = std::move(new_mq);
-#endif
   }
 
   data->realms_[index].context.AnnotateStrongRetainer(kGlobalHandleLabel);
@@ -2960,9 +2997,6 @@ void Shell::DisposeRealm(const v8::FunctionCallbackInfo<v8::Value>& info,
   PerIsolateData* data = PerIsolateData::Get(isolate);
   Local<Context> context = data->realms_[index].context.Get(isolate);
   data->realms_[index].context.Reset();
-#ifndef V8_CPPGC_MICROTASK_QUEUE
-  data->realms_[index].microtask_queue.reset();
-#endif
   context->DetachGlobal();
   // ContextDisposedNotification expects the disposed context to be entered.
   v8::Context::Scope scope(context);
@@ -5023,6 +5057,18 @@ Local<ObjectTemplate> Shell::CreateD8Template(Isolate* isolate) {
         isolate, "setFlushDenormals",
         FunctionTemplate::New(isolate, Shell::SetFlushDenormals));
 
+    test_template->Set(
+        isolate, "createInterceptorObject",
+        FunctionTemplate::New(isolate, Shell::CreateInterceptorObject));
+    test_template->Set(
+        isolate, "createAccessCheckedObject",
+        FunctionTemplate::New(isolate, Shell::CreateAccessCheckedObject));
+    test_template->Set(
+        isolate, "createSpecialObject",
+        FunctionTemplate::New(isolate, Shell::CreateSpecialObject));
+    test_template->Set(isolate, "setAccessPolicy",
+                       FunctionTemplate::New(isolate, Shell::SetAccessPolicy));
+
     d8_template->Set(isolate, "test", test_template);
   }
   {
@@ -6077,9 +6123,9 @@ class InspectorClient : public v8_inspector::V8InspectorClient {
 
   static const int kContextGroupId = 1;
 
+  std::unique_ptr<v8_inspector::V8Inspector::Channel> channel_;
   std::unique_ptr<v8_inspector::V8Inspector> inspector_;
   std::unique_ptr<v8_inspector::V8InspectorSession> session_;
-  std::unique_ptr<v8_inspector::V8Inspector::Channel> channel_;
   bool is_paused = false;
   Global<Context> context_;
   Isolate* isolate_ = nullptr;
@@ -6475,7 +6521,8 @@ Worker::Worker(Isolate* parent_isolate, const char* script,
                bool flush_denormals)
     : script_(i::StrDup(script)),
       flush_denormals_(flush_denormals),
-      parent_isolate_(parent_isolate) {
+      parent_isolate_(parent_isolate),
+      parent_task_runner_(g_platform->GetForegroundTaskRunner(parent_isolate)) {
   state_.store(State::kReady);
 }
 
@@ -6848,9 +6895,8 @@ void Worker::ExecuteInThread() {
   out_semaphore_.Signal();
   // Also post an cleanup task to the parent isolate, so that it sees that this
   // worker is terminated and can clean it up in a thread-safe way.
-  g_platform->GetForegroundTaskRunner(parent_isolate_)
-      ->PostTask(std::make_unique<CleanUpWorkerTask>(parent_isolate_,
-                                                     this->shared_from_this()));
+  parent_task_runner_->PostTask(std::make_unique<CleanUpWorkerTask>(
+      parent_isolate_, this->shared_from_this()));
 }
 
 void Worker::PostMessageOut(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -6875,8 +6921,8 @@ void Worker::PostMessageOut(const v8::FunctionCallbackInfo<v8::Value>& info) {
 
     worker->out_queue_.Enqueue(std::move(data));
     worker->out_semaphore_.Signal();
-    g_platform->GetForegroundTaskRunner(worker->parent_isolate_)
-        ->PostTask(std::make_unique<CheckMessageFromWorkerTask>(
+    worker->parent_task_runner_->PostTask(
+        std::make_unique<CheckMessageFromWorkerTask>(
             worker->parent_isolate_, worker->shared_from_this()));
   }
 }
@@ -7269,6 +7315,17 @@ bool Shell::SetOptions(int argc, char* argv[]) {
   }
 #endif
 
+  if (options.compile_only &&
+      options.code_cache_options ==
+          ShellOptions::CodeCacheOptions::kProduceCacheAfterExecute) {
+    fprintf(stderr,
+            "Flag --compile-only is incompatible with --cache=after-execute:\n"
+            "  --compile-only: Only parse and compile; do not execute.\n"
+            "  --cache=after-execute: Execute first, then serialize and cache "
+            "the post-execution state.\n");
+    return false;
+  }
+
   const char* usage =
       "Synopsis:\n"
       "  shell [options] [--shell] [<file>...]\n"
@@ -7298,6 +7355,17 @@ bool Shell::SetOptions(int argc, char* argv[]) {
   if (i::v8_flags.stress_snapshot && options.expose_fast_api &&
       check_d8_flag_contradictions) {
     FATAL("Flag --expose-fast-api is incompatible with --stress-snapshot.");
+  }
+
+  if (options.trace_enabled && i::v8_flags.predictable) {
+    if (check_d8_flag_contradictions) {
+      FATAL("Flag --enable-tracing is incompatible with --predictable.");
+    } else {
+      fprintf(stderr,
+              "Warning: disabling flag --enable-tracing due to conflicting "
+              "flags\n");
+      options.trace_enabled = false;
+    }
   }
 
   // Set up isolated source groups.
@@ -7516,7 +7584,7 @@ bool ProcessMessages(
     // task queue of the {kProcessGlobalPredictablePlatformWorkerTaskQueue}
     // isolate. We execute all background tasks after running one foreground
     // task.
-    if (i::v8_flags.verify_predictable) {
+    if (i::v8_flags.predictable) {
       TryCatch inner_try_catch(isolate);
       inner_try_catch.SetVerbose(true);
       while (v8::platform::PumpMessageLoop(
@@ -7551,7 +7619,7 @@ bool Shell::CompleteMessageLoop(Isolate* isolate) {
     }
     return platform::MessageLoopBehavior::kDoNotWait;
   };
-  if (i::v8_flags.verify_predictable) {
+  if (i::v8_flags.predictable) {
     bool ran_tasks = ProcessMessages(
         isolate, [] { return platform::MessageLoopBehavior::kDoNotWait; });
     if (get_waiting_behaviour() ==
@@ -8011,7 +8079,7 @@ int Shell::Main(int argc, char* argv[]) {
 
   std::ofstream trace_file;
   std::unique_ptr<platform::tracing::TracingController> tracing;
-  if (options.trace_enabled && !i::v8_flags.verify_predictable) {
+  if (options.trace_enabled && !i::v8_flags.predictable) {
     tracing = std::make_unique<platform::tracing::TracingController>();
 
     if (!options.enable_etw_stack_walking) {
@@ -8403,12 +8471,14 @@ int Shell::Main(int argc, char* argv[]) {
                  << bitmap.size() << std::endl;
           iteration_counter++;
         }
-        uint8_t* shmem_edges = cov_get_shmem_edges();
+        // This is run once per REPRL loop. In case of crash the coverage of
+        // crash will not be stored in shared memory. Therefore, it would be
+        // useful, if we could store these coverage information into shared
+        // memory in real time.
         if (options.fuzzilli_enable_builtins_coverage &&
-            cov_has_builtins_edges() && shmem_edges != nullptr) {
-          i::BasicBlockProfiler::Get()->UpdateBuiltinsCoverageAndReset(
-              reinterpret_cast<i::Isolate*>(isolate), cov_get_builtins_start(),
-              shmem_edges);
+            cov_has_builtins_edges()) {
+          i::BasicBlockProfiler::Get()->ForEachExecutedBlockAndReset(
+              reinterpret_cast<i::Isolate*>(isolate), cov_set_builtin_edge);
         }
         // In REPRL mode, stdout and stderr can be regular files, so they need
         // to be flushed after every execution

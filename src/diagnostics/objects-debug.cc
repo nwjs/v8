@@ -329,15 +329,12 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
       Cast<HashSeedWrapper>(this)->HashSeedWrapperVerify(isolate);
       break;
 
-#define MAKE_TORQUE_CASE(Name, TYPE)                \
+#define MAKE_VERIFY_CASE(Name, TYPE)                \
   case TYPE:                                        \
     TrustedCast<Name>(this)->Name##Verify(isolate); \
     break;
-      // Every class that has its fields defined in a .tq file and corresponds
-      // to exactly one InstanceType value is included in the following list.
-      TORQUE_INSTANCE_CHECKERS_SINGLE_FULLY_DEFINED(MAKE_TORQUE_CASE)
-      TORQUE_INSTANCE_CHECKERS_MULTIPLE_FULLY_DEFINED(MAKE_TORQUE_CASE)
-#undef MAKE_TORQUE_CASE
+      HEAP_OBJECT_DIAGNOSTIC_DISPATCH_LIST(MAKE_VERIFY_CASE)
+#undef MAKE_VERIFY_CASE
 
     case HOLE_TYPE:
       Cast<Hole>(this)->HoleVerify(isolate);
@@ -1139,6 +1136,9 @@ void ScopeInfo::ScopeInfoVerify(Isolate* isolate) {
 
   if (is_module) {
     CHECK_LE(0, module_variable_count());
+    if (HasModuleVariablesHashtable()) {
+      CHECK(IsNameToIndexHashTable(module_variables_hashtable()));
+    }
   }
 
   if (has_hashtable) {
@@ -1706,7 +1706,8 @@ void JSFunction::JSFunctionVerify(Isolate* isolate) {
     CHECK(IsAccessorInfo(*it.GetAccessors()));
   } else {
     CHECK(!it.IsFound() || it.state() != LookupIterator::ACCESSOR ||
-          !IsAccessorInfo(*it.GetAccessors()));
+          !IsAccessorInfo(*it.GetAccessors()) ||
+          *it.GetAccessors() == *isolate->factory()->lazy_closure_accessor());
   }
 
   CHECK_IMPLIES(shared()->HasBuiltinId(),
@@ -3130,7 +3131,7 @@ void SourceTextModule::SourceTextModuleVerify(Isolate* isolate) {
     if (status() == kLinked) {
       CHECK(IsJSGeneratorObject(code()));
     } else if (status() == kLinking) {
-      CHECK(IsJSFunction(code()));
+      CHECK(IsJSFunction(code()) || IsJSGeneratorObject(code()));
     } else if (status() == kPreLinking) {
       CHECK(IsSharedFunctionInfo(code()));
     } else if (status() == kUnlinked) {
@@ -3141,7 +3142,7 @@ void SourceTextModule::SourceTextModuleVerify(Isolate* isolate) {
     CHECK(!HasAsyncEvaluationOrdinal());
   }
 
-  CHECK_EQ(requested_modules()->length(), info()->module_requests()->length());
+  VerifyRequestedModules();
 }
 
 void SyntheticModule::SyntheticModuleVerify(Isolate* isolate) {
@@ -3508,6 +3509,14 @@ void WasmTagObject::WasmTagObjectVerify(Isolate* isolate) {
 
 void WasmStruct::WasmStructVerify(Isolate* isolate) {
   CHECK(Is<WasmStruct>(this));
+}
+
+void WasmCustomMap::WasmCustomMapVerify(Isolate* isolate) { UNIMPLEMENTED(); }
+
+void WasmCustomMapWrapper::WasmCustomMapWrapperVerify(Isolate* isolate) {
+  CHECK(Is<WasmCustomMapWrapper>(this));
+  CHECK(Is<WasmCustomMap>(wrapped()));
+  JSObjectVerify(isolate);
 }
 
 void WasmArray::WasmArrayVerify(Isolate* isolate) {

@@ -99,7 +99,7 @@ vars = {
   'chromium_jetstream_git': 'https://chromium.googlesource.com/external/github.com/WebKit/JetStream.git',
 
   # GN CIPD package version.
-  'gn_version': 'git_revision:d71c4a70bd2ece461a09cbd6321970b9247fdab2',
+  'gn_version': 'git_revision:a99d46a9d04c770d6bb87387058e1d7b151758ce',
 
   # ninja CIPD package version
   # https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/ninja
@@ -116,7 +116,7 @@ vars = {
   # Three lines of non-changing comments so that
   # the commit queue can handle CLs rolling partition_alloc_version
   # and whatever else without interference from each other.
-  'partition_alloc_version': 'f0d1e646eb41d8736261d5d8d8f094404bac62ac',
+  'partition_alloc_version': 'c029851c21b7e1154fa3964e08c97710adc92cc7',
 
   # Three lines of non-changing comments so that
   # the commit queue can handle CLs rolling android_sdk_build-tools_version
@@ -149,7 +149,7 @@ vars = {
   # Three lines of non-changing comments so that
   # the commit queue can handle CLs rolling agents-public
   # and whatever else without interference from each other.
-  'agents_public_revision': '73470db4a7810560ec92e8aa27ff3c6a8a36bea5',
+  'agents_public_revision': '4e0a8bacdfcc6b6303540aa466b05a508f349486',
 }
 
 deps = {
@@ -161,7 +161,7 @@ deps = {
     'condition': 'checkout_agents_internal',
   },
   'build':
-    Var('chromium_url') + '/chromium/src/build.git' + '@' + 'fdd530b37c6cd6c8645cdfa296d209643ab2dc26',
+    Var('chromium_url') + '/chromium/src/build.git' + '@' + '8ca8a372cab9ff143072204053d30fbc2c17bd7a',
   'buildtools':
     Var('chromium_url') + '/chromium/src/buildtools.git' + '@' + '6f6a5dbf04b734214f3b1f386567d101ec9d607e',
   'buildtools/linux64': {
@@ -218,7 +218,7 @@ deps = {
   'test/mozilla/data':
     Var('chromium_url') + '/v8/deps/third_party/mozilla-tests.git' + '@' + 'f6c578a10ea707b1a8ab0b88943fe5115ce2b9be',
   'test/test262/data':
-    Var('chromium_url') + '/external/github.com/tc39/test262.git' + '@' + '14e8c908e54ae2e770e473bcacf536f8cb654929',
+    Var('chromium_url') + '/external/github.com/tc39/test262.git' + '@' + '72faf8ec1445c55149615e8b35187830783aba1a',
   'third_party/android_platform': {
     'url': Var('chromium_url') + '/chromium/src/third_party/android_platform.git' + '@' + 'e3919359f2387399042d31401817db4a02d756ec',
     'condition': 'checkout_android',
@@ -278,7 +278,7 @@ deps = {
     'condition': 'checkout_android',
   },
   'third_party/depot_tools':
-    Var('chromium_url') + '/chromium/tools/depot_tools.git' + '@' + '2cc878ef8e3a0ae143d13e4aa04957ca3d6f9a58',
+    Var('chromium_url') + '/chromium/tools/depot_tools.git' + '@' + 'cb70c994a656601dc6a0d423f49ff57503bd70bc',
   'third_party/dragonbox/src':
     Var('chromium_url') + '/external/github.com/jk-jeon/dragonbox.git' + '@' + 'beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44',
   'third_party/fp16/src':
@@ -310,15 +310,15 @@ deps = {
     'url': Var('chromium_url') + '/external/github.com/google/benchmark.git' + '@' + '8abf1e701fbd88c8170f48fe0558247e2e5f8e7d',
   },
   'third_party/fuzztest':
-    Var('chromium_url') + '/chromium/src/third_party/fuzztest.git' + '@' + '0dcd0b87a3252a116ec59fadcfc80f2d2015bbac',
+    Var('chromium_url') + '/chromium/src/third_party/fuzztest.git' + '@' + 'f0f143db954fb311d4e7ba39972d2dab9ba47e2a',
   'third_party/fuzztest/src':
-    Var('chromium_url') + '/external/github.com/google/fuzztest.git' + '@' + '94c3cf3a4391eb0bb12999128e29cbe625bad2f3',
+    Var('chromium_url') + '/external/github.com/google/fuzztest.git' + '@' + '846bda6f291e26b7f8fb33c8de23796129bffd12',
   'third_party/googletest/src':
     Var('chromium_url') + '/external/github.com/google/googletest.git' + '@' + '4fe3307fb2d9f86d19777c7eb0e4809e9694dde7',
   'third_party/highway/src':
     Var('chromium_url') + '/external/github.com/google/highway.git' + '@' + '2607d3b5b0113992fe84d3848859eae13b3b52c1',
   'third_party/icu':
-    Var('chromium_url') + '/chromium/deps/icu.git' + '@' + '8cc91d9b6ab9991802fd208ee03a69714fd0251c',
+    Var('chromium_url') + '/chromium/deps/icu.git' + '@' + '6ebb40c594776cc2c21ea14df85a2a89a328b364',
   'third_party/instrumented_libs': {
     'url': Var('chromium_url') + '/chromium/third_party/instrumented_libraries.git' + '@' + 'd15c278eed5d38d9acf2d8054cf37baba93cef8e',
     'condition': 'checkout_instrumented_libraries',
@@ -344,7 +344,7 @@ deps = {
   'third_party/libunwind/src':
     Var('chromium_url') + '/external/github.com/llvm/llvm-project/libunwind.git' + '@' + '45120ee2331193c3650acc9c427ed267fab31d62',
   'third_party/llvm-libc/src':
-    Var('chromium_url') + '/external/github.com/llvm/llvm-project/libc.git' + '@' + '320824188c37e5c28738b9652a0ca8087c934bc9',
+    Var('chromium_url') + '/external/github.com/llvm/llvm-project/libc.git' + '@' + '43a9a99ce4b5a04954090f8a0e74bf2786f59379',
   'third_party/llvm-build/Release+Asserts': {
     'dep_type': 'gcs',
     'bucket': 'chromium-browser-clang',
@@ -531,7 +531,7 @@ deps = {
     'condition': 'not build_with_chromium',
   },
   'third_party/perfetto':
-    Var('chromium_url') + '/external/github.com/google/perfetto.git' + '@' + '18d95ebddce53d4671fd2ed99dc45c39a458ef1d',
+    Var('chromium_url') + '/external/github.com/google/perfetto.git' + '@' + '5dbeaad4ceb91470a835426b52e0cb43a3e5ef10',
   'third_party/protobuf':
     Var('chromium_url') + '/chromium/src/third_party/protobuf.git' + '@' + '5f8c379d1fc89fe8eee16ae560dd5e514a4608da',
   'third_party/re2/src':
@@ -656,7 +656,7 @@ deps = {
     'dep_type': 'cipd',
   },
   'third_party/zlib':
-    Var('chromium_url') + '/chromium/src/third_party/zlib.git'+ '@' + '5eb4d7ed380f214e7a0a23c18f629048d3ba9e00',
+    Var('chromium_url') + '/chromium/src/third_party/zlib.git'+ '@' + '285e94b8fa95ad3b7d16b80798ec8dce6febb8c8',
   'tools/clang':
     Var('chromium_url') + '/chromium/src/tools/clang.git' + '@' + '450d823868eaee61e2b2cb986e19aec287f16d58',
   'tools/protoc_wrapper':
@@ -687,10 +687,10 @@ include_rules = [
   '+third_party/fp16/src/include',
   '+third_party/fuzztest',
   '+third_party/ittapi/include',
-  '+third_party/simdutf',
   '+third_party/v8/codegen',
   '+third_party/vtune',
   '+hwy/highway.h',
+  '+simdutf.h',
   # Abseil features are allow-listed. Please use your best judgement when adding
   # to this set -- if in doubt, email v8-dev@. For general guidance, refer to
   # the Chromium guidelines (though note that some requirements in V8 may be
@@ -903,7 +903,7 @@ hooks = [
     'name': 'vpython3_common',
     'pattern': '.',
     'action': [ 'vpython3',
-                '-vpython-spec', '.vpython3',
+                '-vpython-spec', 'vpython.toml',
                 '-vpython-tool', 'install',
     ],
   },

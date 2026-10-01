@@ -646,6 +646,16 @@ TEST_F(DisasmX64Test, DisasmX64CheckOutput) {
 
   COMPARE("48f7ac8b10270000     REX.W imulq [rbx+rcx*4+0x2710]",
           imulq(Operand(rbx, rcx, times_4, 10000)));
+  Label imul_rip;
+  t.assm_.bind(&imul_rip);
+  COMPARE("48f72df9ffffff       REX.W imulq [rip+0xfffffff9]",
+          imulq(Operand(&imul_rip)));
+  COMPARE("48f729               REX.W imulq [rcx]", imulq(Operand(rcx, 0)));
+  COMPARE("48f72c24             REX.W imulq [rsp]", imulq(Operand(rsp, 0)));
+  COMPARE("48f72c39             REX.W imulq [rcx+rdi*1]",
+          imulq(Operand(rcx, rdi, times_1, 0)));
+  COMPARE("48f72c7d00000000     REX.W imulq [rdi*2+0x0]",
+          imulq(Operand(rdi, times_2, 0)));
   COMPARE("486bd10c             REX.W imulq rdx,rcx,0xc",
           imulq(rdx, rcx, Immediate(12)));
   COMPARE("4869d1e8030000       REX.W imulq rdx,rcx,0x3e8",
@@ -1933,6 +1943,25 @@ TEST_F(DisasmX64Test, DisasmX64CheckOutputAVX10) {
   COMPARE_INSTR("vpopcntb xmm2,xmm1", vpopcntb(xmm2, xmm1));
   COMPARE_INSTR("vpopcntb ymm18,ymm17", vpopcntb(ymm18, ymm17));
   COMPARE_INSTR("vpopcntb xmm2,[rbx+0x20]", vpopcntb(xmm2, Operand(rbx, 32)));
+
+  // vpternlogd/q: reg-reg, high registers, reg-mem, imm8, and masking suffix.
+  COMPARE_INSTR("vpternlogd xmm3,xmm2,xmm1,0x33",
+                vpternlogd(xmm3, xmm2, xmm1, 0x33));
+  COMPARE_INSTR("vpternlogd xmm19,xmm18,xmm17,0x33",
+                vpternlogd(xmm19, xmm18, xmm17, 0x33));
+  COMPARE_INSTR("vpternlogd xmm3,xmm2,[rbx+0x40],0x33",
+                vpternlogd(xmm3, xmm2, Operand(rbx, 64), 0x33));
+  COMPARE_INSTR("vpternlogd ymm3,ymm2,ymm1,0x33",
+                vpternlogd(ymm3, ymm2, ymm1, 0x33));
+  COMPARE_INSTR("vpternlogq xmm3,xmm2,xmm1,0xca",
+                vpternlogq(xmm3, xmm2, xmm1, 0xca));
+  COMPARE_INSTR("vpternlogq ymm19,ymm18,ymm17,0xca",
+                vpternlogq(ymm19, ymm18, ymm17, 0xca));
+  COMPARE_INSTR("vpternlogd xmm3{k1},xmm2,xmm1,0x33",
+                vpternlogd(xmm3, xmm2, xmm1, 0x33, Assembler::k1));
+  COMPARE_INSTR(
+      "vpternlogd xmm3{k1}{z},xmm2,xmm1,0x33",
+      vpternlogd(xmm3, xmm2, xmm1, 0x33, Assembler::k1, Assembler::kZeroing));
 }
 #endif  // V8_ENABLE_AVX10_1
 

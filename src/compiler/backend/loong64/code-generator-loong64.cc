@@ -1172,7 +1172,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchAtomicStoreWithWriteBarrier: {
       DCHECK_EQ(AddressingModeField::decode(instr->opcode()), kMode_MRR);
       MacroAssembler::BlockTrampolinePoolScope block_trampoline_pool(masm());
-      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+      RecordWriteMode mode =
+          AtomicStoreRecordWriteModeField::decode(instr->opcode());
       // Indirect pointer writes must use a different opcode.
       DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
       Register object = i.InputRegister(0);
@@ -1639,6 +1640,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
       break;
     case kLoong64Cmp32:
+    case kLoong64Cmp32Eq:
     case kLoong64Cmp64:
       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
       break;
@@ -4511,7 +4513,8 @@ void AssembleBranchToLabels(CodeGenerator* gen, MacroAssembler* masm,
     Condition cc = FlagsConditionToConditionTst(condition);
     UseScratchRegisterScope temps(masm);
     Register scratch = temps.Acquire();
-    __ And(scratch, i.InputRegister(0), i.InputOperand(1));
+
+    __ Tst(scratch, i.InputRegister(0), i.InputOperand(1));
     __ Branch(tlabel, cc, scratch, Operand(zero_reg));
   } else if (instr->arch_opcode() == kLoong64AddOvf_w ||
              instr->arch_opcode() == kLoong64SubOvf_w) {
@@ -4583,6 +4586,14 @@ void AssembleBranchToLabels(CodeGenerator* gen, MacroAssembler* masm,
     Register left = i.InputRegister(0);
     Operand right = i.InputOperand(1);
     __ Branch(tlabel, cc, left, right);
+  } else if (instr->arch_opcode() == kLoong64Cmp32Eq) {
+    Condition cc = FlagsConditionToConditionCmp(condition);
+    Register left = i.InputRegister(0);
+    Operand right = i.InputOperand(1);
+    UseScratchRegisterScope temps(masm);
+    Register scratch = temps.Acquire();
+    __ Sub_w(scratch, left, right);
+    __ Branch(tlabel, cc, scratch, Operand(zero_reg));
   } else if (instr->arch_opcode() == kArchStackPointerGreaterThan) {
     Condition cc = FlagsConditionToConditionCmp(condition);
     DCHECK((cc == ls) || (cc == hi));
@@ -4664,7 +4675,7 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
     Condition cc = FlagsConditionToConditionTst(condition);
     UseScratchRegisterScope temps(masm());
     Register scratch = temps.Acquire();
-    __ And(scratch, i.InputRegister(0), i.InputOperand(1));
+    __ Tst(scratch, i.InputRegister(0), i.InputOperand(1));
     if (cc == eq) {
       __ Sltu(result, scratch, 1);
     } else {
@@ -4728,6 +4739,16 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
     Register left = i.InputRegister(0);
     Operand right = i.InputOperand(1);
     __ CompareWord(cc, result, left, right);
+    return;
+  } else if (instr->arch_opcode() == kLoong64Cmp32Eq) {
+    Register left = i.InputRegister(0);
+    Operand right = i.InputOperand(1);
+    __ Sub_w(result, left, right);
+    if (condition == kEqual) {
+      __ sltui(result, result, 1);
+    } else {
+      __ sltu(result, zero_reg, result);
+    }
     return;
   } else if (instr->arch_opcode() == kLoong64Float64Cmp ||
              instr->arch_opcode() == kLoong64Float32Cmp) {
@@ -4830,7 +4851,7 @@ void CodeGenerator::AssembleArchSelect(Instruction* instr,
       v_true = v_false;
       v_false = temp;
     }
-    __ And(scratch, i.InputRegister(0), i.InputOperand(1));
+    __ Tst(scratch, i.InputRegister(0), i.InputOperand(1));
     __ SelectWord(result, scratch, v_true, v_false);
     return;
   } else if (instr->arch_opcode() == kLoong64Cmp64 ||
@@ -4883,6 +4904,19 @@ void CodeGenerator::AssembleArchSelect(Instruction* instr,
       __ bind(&done);
     }
     return;
+  } else if (instr->arch_opcode() == kLoong64Cmp32Eq) {
+    Condition cc = FlagsConditionToConditionCmp(condition);
+    Register left = i.InputRegister(0);
+    Operand right = i.InputOperand(1);
+    UseScratchRegisterScope temps(masm());
+    Register scratch1 = temps.Acquire();
+    if (cc == eq) {
+      Register temp = v_true;
+      v_true = v_false;
+      v_false = temp;
+    }
+    __ Sub_w(scratch1, left, right);
+    __ SelectWord(result, scratch1, v_true, v_false);
   } else if (instr->arch_opcode() == kLoong64AddOvf_w ||
              instr->arch_opcode() == kLoong64SubOvf_w) {
     DCHECK_GE(instr->InputCount(), 4);

@@ -366,6 +366,7 @@ class Worker : public std::enable_shared_from_this<Worker> {
   // the worker_mutex_ and after checking the worker state.
   Isolate* isolate_ = nullptr;
   Isolate* parent_isolate_;
+  std::shared_ptr<TaskRunner> parent_task_runner_;
 
   // Only accessed by the worker thread.
   Global<Context> context_;
@@ -373,22 +374,10 @@ class Worker : public std::enable_shared_from_this<Worker> {
 
 struct Realm {
   Global<Context> context;
-#ifndef V8_CPPGC_MICROTASK_QUEUE
-  std::unique_ptr<v8::MicrotaskQueue> microtask_queue;
-#endif
 
   Realm() = default;
-#ifdef V8_CPPGC_MICROTASK_QUEUE
   Realm(Isolate* isolate, const Global<Context>& ctx) : context(isolate, ctx) {}
   Realm(Isolate* isolate, Local<Context> ctx) : context(isolate, ctx) {}
-#else
-  Realm(Isolate* isolate, const Global<Context>& ctx,
-        std::unique_ptr<v8::MicrotaskQueue> mq = nullptr)
-      : context(isolate, ctx), microtask_queue(std::move(mq)) {}
-  Realm(Isolate* isolate, Local<Context> ctx,
-        std::unique_ptr<v8::MicrotaskQueue> mq = nullptr)
-      : context(isolate, ctx), microtask_queue(std::move(mq)) {}
-#endif
 };
 
 class PerIsolateData {
@@ -1024,6 +1013,13 @@ class Shell : public i::AllStatic {
   static Local<FunctionTemplate> CreateTestFastCApiTemplate(Isolate* isolate);
   static Local<FunctionTemplate> CreateLeafInterfaceTypeTemplate(
       Isolate* isolate);
+  static void CreateInterceptorObject(
+      const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void CreateAccessCheckedObject(
+      const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void CreateSpecialObject(
+      const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void SetAccessPolicy(const v8::FunctionCallbackInfo<v8::Value>& info);
 
   static MaybeLocal<Context> CreateRealm(
       const v8::FunctionCallbackInfo<v8::Value>& info, int index,
@@ -1052,10 +1048,13 @@ class Shell : public i::AllStatic {
                                      const Source& source,
                                      const ScriptOrigin& origin);
 
-  static ScriptCompiler::CachedData* LookupCodeCache(Isolate* isolate,
-                                                     Local<Value> name);
+  static ScriptCompiler::CachedData* LookupCodeCache(
+      Isolate* isolate, Local<Value> name,
+      ScriptType type = ScriptType::kClassic);
   static void StoreInCodeCache(Isolate* isolate, Local<Value> name,
-                               const ScriptCompiler::CachedData* data);
+                               const ScriptCompiler::CachedData* data,
+                               ScriptType type = ScriptType::kClassic);
+  static void ProduceModuleCodeCacheAfterExecute(Isolate* isolate);
 
   // We may have multiple isolates running concurrently, so the access to
   // the isolate_status_ needs to be concurrency-safe.
@@ -1063,9 +1062,12 @@ class Shell : public i::AllStatic {
   static std::map<Isolate*, bool> isolate_status_;
   static std::map<Isolate*, int> isolate_running_streaming_tasks_;
 
+  using CodeCacheKey = std::pair<std::string, ScriptType>;
+  using CodeCacheMap =
+      std::map<CodeCacheKey, std::unique_ptr<ScriptCompiler::CachedData>>;
+
   static base::LazyMutex cached_code_mutex_;
-  static std::map<std::string, std::unique_ptr<ScriptCompiler::CachedData>>
-      cached_code_map_;
+  static CodeCacheMap cached_code_map_;
   static std::atomic<int> unhandled_promise_rejections_;
 
 #if V8_ENABLE_WEBASSEMBLY

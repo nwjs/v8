@@ -4,7 +4,13 @@
 
 #include "src/debug/debug-scope-info.h"
 
+#include <iterator>
+
+#include "include/v8-function.h"
+#include "src/api/api-inl.h"
 #include "src/ast/scopes.h"
+#include "src/debug/debug-interface.h"
+#include "src/debug/debug.h"
 #include "src/execution/isolate-inl.h"
 #include "src/heap/factory.h"
 #include "src/objects/debug-objects-inl.h"
@@ -17,7 +23,7 @@
 namespace v8 {
 namespace internal {
 
-class DebugScopeInfoTest : public TestWithIsolate {
+class DebugScopeInfoTest : public TestWithNativeContext {
  public:
   struct ParsedScript {
     std::unique_ptr<UnoptimizedCompileState> compile_state;
@@ -93,13 +99,80 @@ void VerifyScopeTreeParity(Scope* ast_scope, DebugScriptScope debug_scope) {
       EXPECT_EQ(debug_scope.receiver_info(),
                 (std::pair{expected_info, var->index()}));
     }
+    if (decl->arguments() != nullptr) {
+      EXPECT_TRUE(debug_scope.has_arguments());
+      Variable* var = decl->arguments();
+      VariableAllocationInfo expected_info =
+          var->location() == VariableLocation::CONTEXT
+              ? VariableAllocationInfo::CONTEXT
+              : VariableAllocationInfo::STACK;
+      EXPECT_EQ(debug_scope.arguments_info(),
+                (std::pair{expected_info, var->index()}));
+    } else {
+      EXPECT_FALSE(debug_scope.has_arguments());
+      EXPECT_EQ(debug_scope.arguments_info(),
+                (std::pair{VariableAllocationInfo::NONE, -1}));
+    }
+    if (decl->function_var() != nullptr) {
+      EXPECT_TRUE(debug_scope.has_function_variable());
+      Variable* var = decl->function_var();
+      VariableAllocationInfo expected_info =
+          var->location() == VariableLocation::CONTEXT
+              ? VariableAllocationInfo::CONTEXT
+              : VariableAllocationInfo::STACK;
+      EXPECT_EQ(debug_scope.function_variable_info(),
+                (std::pair{expected_info, var->index()}));
+      EXPECT_TRUE(debug_scope.function_variable_name()->Equals(*var->name()));
+    } else {
+      EXPECT_FALSE(debug_scope.has_function_variable());
+      EXPECT_EQ(debug_scope.function_variable_info(),
+                (std::pair{VariableAllocationInfo::NONE, -1}));
+      EXPECT_TRUE(debug_scope.function_variable_name().is_null());
+    }
   } else {
     EXPECT_FALSE(debug_scope.is_arrow_scope());
     EXPECT_FALSE(debug_scope.has_this_declaration());
     EXPECT_FALSE(debug_scope.has_simple_parameters());
+    EXPECT_FALSE(debug_scope.has_arguments());
+    EXPECT_FALSE(debug_scope.has_function_variable());
     EXPECT_FALSE(debug_scope.sloppy_eval_can_extend_vars());
     EXPECT_EQ(debug_scope.receiver_info(),
               (std::pair{VariableAllocationInfo::NONE, -1}));
+    EXPECT_EQ(debug_scope.arguments_info(),
+              (std::pair{VariableAllocationInfo::NONE, -1}));
+    EXPECT_EQ(debug_scope.function_variable_info(),
+              (std::pair{VariableAllocationInfo::NONE, -1}));
+    EXPECT_TRUE(debug_scope.function_variable_name().is_null());
+  }
+
+  int ast_var_count = base::checked_cast<int>(
+      std::distance(ast_scope->locals()->begin(), ast_scope->locals()->end()));
+  EXPECT_EQ(ast_var_count, debug_scope.variable_count());
+
+  int var_idx = 0;
+  for (Variable* ast_var : *ast_scope->locals()) {
+    DebugVariableInfo debug_var = debug_scope.variable(var_idx++);
+    EXPECT_EQ(ast_var->location(), debug_var.location);
+    EXPECT_EQ(ast_var->mode(), debug_var.mode);
+    EXPECT_EQ(ast_var->index(), debug_var.index);
+    EXPECT_EQ(ast_var->initializer_position(), debug_var.initializer_position);
+    const AstRawString* raw = ast_var->raw_name();
+    // Keep in sync with ScopeInfo::VariableIsSynthetic() in
+    // src/objects/scope-info.cc.
+    bool expected_synthetic =
+        raw != nullptr &&
+        (raw->IsEmpty() || raw->FirstCharacter() == '.' ||
+         raw->IsPrivateName() || raw->IsOneByteEqualTo("this"));
+    EXPECT_EQ(expected_synthetic, debug_var.is_synthetic);
+    // Keep in sync with Variable::IsReceiver() in src/ast/variables.h.
+    bool expected_receiver = ast_var->IsParameter() && ast_var->IsReceiver();
+    EXPECT_EQ(expected_receiver, debug_var.is_receiver);
+    if (raw != nullptr) {
+      ASSERT_FALSE(debug_var.name.is_null());
+      EXPECT_TRUE(debug_var.name->Equals(*ast_var->name()));
+    } else {
+      EXPECT_TRUE(debug_var.name.is_null());
+    }
   }
 
   Scope* ast_child = ast_scope->inner_scope();
@@ -444,6 +517,818 @@ TEST_F(DebugScopeInfoTest, ReceiverAllocationInfo) {
   auto [this_loc, this_idx] = with_this->receiver_info();
   EXPECT_EQ(this_loc, VariableAllocationInfo::CONTEXT);
   EXPECT_GE(this_idx, 0);
+}
+
+TEST_F(DebugScopeInfoTest, ArgumentsAllocationInfo) {
+  HandleScope scope(isolate());
+  ParsedScript parsed = ParseAndSerialize(
+      "function withArgsContext() { return () => arguments[0]; }\n"
+      "function withArgsStack() { return arguments[0]; }\n"
+      "function noArgs() { return 1; }\n"
+      "const arrow = () => 42;");
+  DirectHandle<DebugScriptScopeInfo> info = parsed.scope_info;
+
+  DebugScriptScope script = DebugScriptScope::FromIndex(info, 0);
+  VerifyScopeTreeParity(parsed.script_scope(), script);
+
+  // Arrow function (1)
+  auto arrow_scope = script.first_child();
+  ASSERT_TRUE(arrow_scope.has_value());
+  EXPECT_FALSE(arrow_scope->has_arguments());
+  EXPECT_EQ(arrow_scope->arguments_info(),
+            (std::pair{VariableAllocationInfo::NONE, -1}));
+
+  // noArgs (2)
+  auto no_args = arrow_scope->next_sibling();
+  ASSERT_TRUE(no_args.has_value());
+  EXPECT_FALSE(no_args->has_arguments());
+  EXPECT_EQ(no_args->arguments_info(),
+            (std::pair{VariableAllocationInfo::NONE, -1}));
+
+  // withArgsStack (3)
+  auto with_args_stack = no_args->next_sibling();
+  ASSERT_TRUE(with_args_stack.has_value());
+  EXPECT_TRUE(with_args_stack->has_arguments());
+  auto [stack_loc, stack_idx] = with_args_stack->arguments_info();
+  EXPECT_EQ(stack_loc, VariableAllocationInfo::STACK);
+  EXPECT_GE(stack_idx, 0);
+
+  // withArgsContext (4)
+  auto with_args_context = with_args_stack->next_sibling();
+  ASSERT_TRUE(with_args_context.has_value());
+  EXPECT_TRUE(with_args_context->has_arguments());
+  auto [ctx_loc, ctx_idx] = with_args_context->arguments_info();
+  EXPECT_EQ(ctx_loc, VariableAllocationInfo::CONTEXT);
+  EXPECT_GE(ctx_idx, 0);
+}
+
+TEST_F(DebugScopeInfoTest, FunctionVariableInfo) {
+  HandleScope scope(isolate());
+  ParsedScript parsed = ParseAndSerialize(
+      "const withFuncContext = function f1() { return () => f1; };\n"
+      "const withFuncStack = function f2() { return f2; };\n"
+      "const withFuncDup = function f1() { return f1; };\n"
+      "const unusedName = function f3() { return 1; };\n"
+      "function normalDecl() { return 1; }");
+  DirectHandle<DebugScriptScopeInfo> info = parsed.scope_info;
+  EXPECT_TRUE(IsFixedArray(info->string_table()));
+  EXPECT_EQ(info->string_table()->length().value(), 11u);
+
+  DebugScriptScope script = DebugScriptScope::FromIndex(info, 0);
+  VerifyScopeTreeParity(parsed.script_scope(), script);
+
+  // normalDecl (1)
+  auto normal_decl = script.first_child();
+  ASSERT_TRUE(normal_decl.has_value());
+  EXPECT_FALSE(normal_decl->has_function_variable());
+  EXPECT_EQ(normal_decl->function_variable_info(),
+            (std::pair{VariableAllocationInfo::NONE, -1}));
+  EXPECT_TRUE(normal_decl->function_variable_name().is_null());
+
+  // unusedName (2)
+  auto unused_name = normal_decl->next_sibling();
+  ASSERT_TRUE(unused_name.has_value());
+  EXPECT_FALSE(unused_name->has_function_variable());
+  EXPECT_EQ(unused_name->function_variable_info(),
+            (std::pair{VariableAllocationInfo::NONE, -1}));
+  EXPECT_TRUE(unused_name->function_variable_name().is_null());
+
+  // withFuncDup (3)
+  auto with_func_dup = unused_name->next_sibling();
+  ASSERT_TRUE(with_func_dup.has_value());
+  EXPECT_TRUE(with_func_dup->has_function_variable());
+  auto [dup_loc, dup_idx] = with_func_dup->function_variable_info();
+  EXPECT_EQ(dup_loc, VariableAllocationInfo::STACK);
+  EXPECT_GE(dup_idx, 0);
+  EXPECT_TRUE(with_func_dup->function_variable_name()->Equals(
+      *isolate()->factory()->NewStringFromAsciiChecked("f1")));
+
+  // withFuncStack (4)
+  auto with_func_stack = with_func_dup->next_sibling();
+  ASSERT_TRUE(with_func_stack.has_value());
+  EXPECT_TRUE(with_func_stack->has_function_variable());
+  auto [stack_loc, stack_idx] = with_func_stack->function_variable_info();
+  EXPECT_EQ(stack_loc, VariableAllocationInfo::STACK);
+  EXPECT_GE(stack_idx, 0);
+  EXPECT_TRUE(with_func_stack->function_variable_name()->Equals(
+      *isolate()->factory()->NewStringFromAsciiChecked("f2")));
+
+  // withFuncContext (5)
+  auto with_func_context = with_func_stack->next_sibling();
+  ASSERT_TRUE(with_func_context.has_value());
+  EXPECT_TRUE(with_func_context->has_function_variable());
+  auto [ctx_loc, ctx_idx] = with_func_context->function_variable_info();
+  EXPECT_EQ(ctx_loc, VariableAllocationInfo::CONTEXT);
+  EXPECT_GE(ctx_idx, 0);
+  EXPECT_TRUE(with_func_context->function_variable_name()->Equals(
+      *isolate()->factory()->NewStringFromAsciiChecked("f1")));
+  EXPECT_EQ(with_func_context->function_variable_name(),
+            with_func_dup->function_variable_name());
+}
+
+TEST_F(DebugScopeInfoTest, ScopeVariables) {
+  HandleScope scope(isolate());
+  ParsedScript parsed = ParseAndSerialize(
+      "let x = 1;\n"
+      "const y = 2;\n"
+      "var z = 3;\n"
+      "function foo(param1, param2) {\n"
+      "  let inner = () => x + param1;\n"
+      "  { let blockVar = 4; }\n"
+      "}");
+  DirectHandle<DebugScriptScopeInfo> info = parsed.scope_info;
+  DebugScriptScope script = DebugScriptScope::FromIndex(info, 0);
+  VerifyScopeTreeParity(parsed.script_scope(), script);
+
+  EXPECT_GE(script.variable_count(), 4);
+  bool found_x = false, found_y = false, found_z = false, found_foo = false;
+  for (int i = 0; i < script.variable_count(); ++i) {
+    DebugVariableInfo var = script.variable(i);
+    if (!var.name.is_null()) {
+      if (var.name->Equals(
+              *isolate()->factory()->NewStringFromAsciiChecked("x"))) {
+        found_x = true;
+        EXPECT_EQ(var.mode, VariableMode::kLet);
+      } else if (var.name->Equals(
+                     *isolate()->factory()->NewStringFromAsciiChecked("y"))) {
+        found_y = true;
+        EXPECT_EQ(var.mode, VariableMode::kConst);
+      } else if (var.name->Equals(
+                     *isolate()->factory()->NewStringFromAsciiChecked("z"))) {
+        found_z = true;
+        EXPECT_EQ(var.mode, VariableMode::kVar);
+      } else if (var.name->Equals(
+                     *isolate()->factory()->NewStringFromAsciiChecked("foo"))) {
+        found_foo = true;
+      }
+    }
+  }
+  EXPECT_TRUE(found_x);
+  EXPECT_TRUE(found_y);
+  EXPECT_TRUE(found_z);
+  EXPECT_TRUE(found_foo);
+
+  // foo function scope
+  auto foo_scope = script.first_child();
+  ASSERT_TRUE(foo_scope.has_value());
+  EXPECT_GE(foo_scope->variable_count(), 3);
+  bool found_param1 = false, found_param2 = false, found_inner = false;
+  for (int i = 0; i < foo_scope->variable_count(); ++i) {
+    DebugVariableInfo var = foo_scope->variable(i);
+    if (!var.name.is_null()) {
+      if (var.name->Equals(
+              *isolate()->factory()->NewStringFromAsciiChecked("param1"))) {
+        found_param1 = true;
+        EXPECT_EQ(var.location, VariableLocation::CONTEXT);
+      } else if (var.name->Equals(
+                     *isolate()->factory()->NewStringFromAsciiChecked(
+                         "param2"))) {
+        found_param2 = true;
+        EXPECT_EQ(var.location, VariableLocation::PARAMETER);
+      } else if (var.name->Equals(
+                     *isolate()->factory()->NewStringFromAsciiChecked(
+                         "inner"))) {
+        found_inner = true;
+        EXPECT_EQ(var.mode, VariableMode::kLet);
+      }
+    }
+  }
+  EXPECT_TRUE(found_param1);
+  EXPECT_TRUE(found_param2);
+  EXPECT_TRUE(found_inner);
+}
+
+TEST_F(DebugScopeInfoTest, SyntheticAndReceiverVariables) {
+  HandleScope scope(isolate());
+  ParsedScript parsed = ParseAndSerialize(
+      "let normalVar = 1;\n"
+      "function normalFunc(param) { return this; }\n"
+      "function withThisContext() { return () => this; }\n"
+      "const arrowFunc = () => 42;\n"
+      "function* gen() { yield 1; }\n"
+      "class C { #priv() {} }");
+  DirectHandle<DebugScriptScopeInfo> info = parsed.scope_info;
+  DebugScriptScope script = DebugScriptScope::FromIndex(info, 0);
+  VerifyScopeTreeParity(parsed.script_scope(), script);
+
+  // Verify normal script variable is neither synthetic nor receiver.
+  bool found_normal_var = false;
+  for (int i = 0; i < script.variable_count(); ++i) {
+    DebugVariableInfo var = script.variable(i);
+    if (!var.name.is_null() &&
+        var.name->Equals(
+            *isolate()->factory()->NewStringFromAsciiChecked("normalVar"))) {
+      found_normal_var = true;
+      EXPECT_FALSE(var.is_synthetic);
+      EXPECT_FALSE(var.is_receiver);
+    }
+  }
+  EXPECT_TRUE(found_normal_var);
+
+  bool found_normal_this = false;
+  bool found_param = false;
+  bool found_context_this = false;
+  bool arrow_has_receiver = false;
+  bool found_generator_obj = false;
+  bool found_private_member = false;
+
+  auto inspect_scope = [&](auto& self,
+                           const DebugScriptScope& current) -> void {
+    for (int i = 0; i < current.variable_count(); ++i) {
+      DebugVariableInfo var = current.variable(i);
+      if (var.name.is_null()) continue;
+
+      if (var.name->Equals(*isolate()->factory()->this_string())) {
+        EXPECT_TRUE(var.is_synthetic);
+        if (var.is_receiver) {
+          EXPECT_EQ(var.location, VariableLocation::PARAMETER);
+          EXPECT_EQ(var.index, -1);
+          found_normal_this = true;
+        } else if (var.location == VariableLocation::CONTEXT) {
+          EXPECT_GE(var.index, 0);
+          found_context_this = true;
+        }
+      }
+
+      if (var.name->Equals(
+              *isolate()->factory()->NewStringFromAsciiChecked("param"))) {
+        found_param = true;
+        EXPECT_FALSE(var.is_synthetic);
+        EXPECT_FALSE(var.is_receiver);
+      }
+
+      if (var.name->Equals(*isolate()->factory()->NewStringFromAsciiChecked(
+              ".generator_object"))) {
+        found_generator_obj = true;
+        EXPECT_TRUE(var.is_synthetic);
+        EXPECT_FALSE(var.is_receiver);
+      }
+
+      if (var.name->length() > 0 &&
+          (var.name->Get(0) == '#' || var.name->Get(0) == '.')) {
+        EXPECT_TRUE(var.is_synthetic);
+        EXPECT_FALSE(var.is_receiver);
+        if (var.name->Get(0) == '#') {
+          found_private_member = true;
+        }
+      }
+    }
+
+    if (current.is_arrow_scope()) {
+      for (int i = 0; i < current.variable_count(); ++i) {
+        if (current.variable(i).is_receiver) {
+          arrow_has_receiver = true;
+        }
+      }
+    }
+
+    for (auto child = current.first_child(); child.has_value();
+         child = child->next_sibling()) {
+      self(self, *child);
+    }
+  };
+
+  inspect_scope(inspect_scope, script);
+
+  EXPECT_TRUE(found_normal_this);
+  EXPECT_TRUE(found_param);
+  EXPECT_TRUE(found_context_this);
+  EXPECT_FALSE(arrow_has_receiver);
+  EXPECT_TRUE(found_generator_obj);
+  EXPECT_TRUE(found_private_member);
+}
+
+TEST_F(DebugScopeInfoTest, DebugScriptScopeInfoSideTable) {
+  HandleScope scope(isolate());
+  ParsedScript parsed1 = ParseAndSerialize("let a = 1;");
+  ParsedScript parsed2 = ParseAndSerialize("let b = 2;");
+
+  Handle<String> src1 =
+      isolate()->factory()->NewStringFromAsciiChecked("let a = 1;");
+  Handle<Script> script1 = isolate()->factory()->NewScript(src1);
+
+  Handle<String> src2 =
+      isolate()->factory()->NewStringFromAsciiChecked("let b = 2;");
+  Handle<Script> script2 = isolate()->factory()->NewScript(src2);
+
+  Debug* debug = isolate()->debug();
+
+  // Initially, no scope info in the debug side table.
+  EXPECT_TRUE(debug->GetScriptScopeInfo(script1).is_null());
+  EXPECT_TRUE(debug->GetScriptScopeInfo(script2).is_null());
+
+  // Set scope infos.
+  debug->SetScriptScopeInfo(script1, parsed1.scope_info);
+  debug->SetScriptScopeInfo(script2, parsed2.scope_info);
+
+  // Retrieve and verify cached scope infos.
+  auto cached1 = debug->GetScriptScopeInfo(script1);
+  ASSERT_FALSE(cached1.is_null());
+  EXPECT_EQ(*cached1, *parsed1.scope_info);
+
+  auto cached2 = debug->GetScriptScopeInfo(script2);
+  ASSERT_FALSE(cached2.is_null());
+  EXPECT_EQ(*cached2, *parsed2.scope_info);
+
+  // Update existing entry.
+  debug->SetScriptScopeInfo(script1, parsed2.scope_info);
+  auto updated1 = debug->GetScriptScopeInfo(script1);
+  ASSERT_FALSE(updated1.is_null());
+  EXPECT_EQ(*updated1, *parsed2.scope_info);
+
+  // ClearScriptScopeInfos clears all entries.
+  debug->ClearScriptScopeInfos();
+  EXPECT_TRUE(debug->GetScriptScopeInfo(script1).is_null());
+  EXPECT_TRUE(debug->GetScriptScopeInfo(script2).is_null());
+}
+
+TEST_F(DebugScopeInfoTest, SideTableClearedOnUnload) {
+  HandleScope scope(isolate());
+  ParsedScript parsed = ParseAndSerialize("let x = 42;");
+  Handle<String> src =
+      isolate()->factory()->NewStringFromAsciiChecked("let x = 42;");
+  Handle<Script> script = isolate()->factory()->NewScript(src);
+
+  Debug* debug = isolate()->debug();
+  debug->SetScriptScopeInfo(script, parsed.scope_info);
+  EXPECT_FALSE(debug->GetScriptScopeInfo(script).is_null());
+
+  struct EmptyDelegate : public v8::debug::DebugDelegate {
+  } delegate;
+  v8::debug::SetDebugDelegate(v8_isolate(), &delegate);
+  v8::debug::SetDebugDelegate(v8_isolate(), nullptr);
+
+  EXPECT_TRUE(debug->GetScriptScopeInfo(script).is_null());
+}
+
+TEST_F(DebugScopeInfoTest, EnsureDebugScriptScopeInfo) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> foo = RunJS<JSFunction>(
+      "function foo() { let a = 1; function bar() { return a; } return bar; } "
+      "foo;");
+  DirectHandle<Script> script(Cast<Script>(foo->shared()->script()), isolate());
+
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(script).is_null());
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), script);
+  ASSERT_FALSE(info.is_null());
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+
+  EXPECT_EQ(*info, *EnsureDebugScriptScopeInfo(isolate(), script));
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(script).is_null());
+}
+
+TEST_F(DebugScopeInfoTest, EnsureDebugScriptScopeInfo_DirectEval) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> inner = RunJS<JSFunction>(
+      "function outer() {\n"
+      "  'use strict';\n"
+      "  let outer_lexical = 42;\n"
+      "  return eval('function inner() { return outer_lexical; } inner;');\n"
+      "}\n"
+      "outer();");
+  DirectHandle<Script> eval_script(Cast<Script>(inner->shared()->script()),
+                                   isolate());
+  EXPECT_TRUE(eval_script->is_eval());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(eval_script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), eval_script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kStrict);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(eval_script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest, EnsureDebugScriptScopeInfo_IndirectEval) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> indirect_fn = RunJS<JSFunction>(
+      "function outer() {\n"
+      "  'use strict';\n"
+      "  return (0, eval)('function indirectInner() { return 1; } "
+      "indirectInner;');\n"
+      "}\n"
+      "outer();");
+  DirectHandle<Script> eval_script(
+      Cast<Script>(indirect_fn->shared()->script()), isolate());
+  EXPECT_TRUE(eval_script->is_eval());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(eval_script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), eval_script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kSloppy);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(eval_script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest,
+       EnsureDebugScriptScopeInfo_DirectEval_StrictCallerNoContext) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> inner = RunJS<JSFunction>(
+      "'use strict';\n"
+      "eval('function inner() { return 1; } inner;');");
+  DirectHandle<Script> eval_script(Cast<Script>(inner->shared()->script()),
+                                   isolate());
+  EXPECT_TRUE(eval_script->is_eval());
+  EXPECT_FALSE(eval_script->has_eval_from_scope_info());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(eval_script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), eval_script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kStrict);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(eval_script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest,
+       EnsureDebugScriptScopeInfo_DirectEval_StrictFunctionNoContext) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> inner = RunJS<JSFunction>(
+      "function outer() {\n"
+      "  'use strict';\n"
+      "  return eval('function inner() { return 1; } inner;');\n"
+      "}\n"
+      "outer();");
+  DirectHandle<Script> eval_script(Cast<Script>(inner->shared()->script()),
+                                   isolate());
+  EXPECT_TRUE(eval_script->is_eval());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(eval_script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), eval_script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kStrict);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(eval_script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest,
+       EnsureDebugScriptScopeInfo_DirectEval_SloppyCallerSloppyEval) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> inner = RunJS<JSFunction>(
+      "function outer() {\n"
+      "  var x = 1;\n"
+      "  return eval('function inner() { return x; } inner;');\n"
+      "}\n"
+      "outer();");
+  DirectHandle<Script> eval_script(Cast<Script>(inner->shared()->script()),
+                                   isolate());
+  EXPECT_TRUE(eval_script->is_eval());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(eval_script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), eval_script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kSloppy);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(eval_script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest,
+       EnsureDebugScriptScopeInfo_DirectEval_SloppyCallerStrictEval) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> inner = RunJS<JSFunction>(
+      "function outer() {\n"
+      "  var x = 1;\n"
+      "  return eval('\"use strict\"; function inner() { return x; } "
+      "inner;');\n"
+      "}\n"
+      "outer();");
+  DirectHandle<Script> eval_script(Cast<Script>(inner->shared()->script()),
+                                   isolate());
+  EXPECT_TRUE(eval_script->is_eval());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(eval_script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), eval_script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kStrict);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(eval_script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest, EnsureDebugScriptScopeInfo_IndirectEval_StrictBody) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> indirect_fn = RunJS<JSFunction>(
+      "(0, eval)('\"use strict\"; function indirectInner() { return 1; } "
+      "indirectInner;');");
+  DirectHandle<Script> eval_script(
+      Cast<Script>(indirect_fn->shared()->script()), isolate());
+  EXPECT_TRUE(eval_script->is_eval());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(eval_script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), eval_script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kStrict);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(eval_script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest, EnsureDebugScriptScopeInfo_DirectEval_PostGC) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> inner = RunJS<JSFunction>(
+      "function outer() {\n"
+      "  'use strict';\n"
+      "  let outer_lexical = 42;\n"
+      "  return eval('function inner() { return outer_lexical; } inner;');\n"
+      "}\n"
+      "outer();");
+  DirectHandle<Script> eval_script(Cast<Script>(inner->shared()->script()),
+                                   isolate());
+  EXPECT_TRUE(eval_script->is_eval());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  isolate()->heap()->CollectAllGarbage(i::GCFlag::kNoFlags,
+                                       i::GarbageCollectionReason::kTesting);
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), eval_script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kStrict);
+}
+
+TEST_F(DebugScopeInfoTest, EnsureDebugScriptScopeInfo_WrappedScript) {
+  v8::HandleScope scope(v8_isolate());
+  v8::ScriptCompiler::Source script_source(
+      NewString("let wrapped_x = 10; return wrapped_x;"));
+  v8::Local<v8::Function> fun =
+      v8::ScriptCompiler::CompileFunction(context(), &script_source)
+          .ToLocalChecked();
+  Handle<JSFunction> function = Cast<JSFunction>(Utils::OpenHandle(*fun));
+  DirectHandle<Script> script(Cast<Script>(function->shared()->script()),
+                              isolate());
+  EXPECT_TRUE(script->is_wrapped());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kSloppy);
+
+  auto inner_scope = root_scope.first_child();
+  ASSERT_TRUE(inner_scope.has_value());
+  EXPECT_TRUE(inner_scope->is_function_scope());
+  EXPECT_EQ(inner_scope->language_mode(), LanguageMode::kSloppy);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest,
+       EnsureDebugScriptScopeInfo_WrappedScript_StrictMode) {
+  v8::HandleScope scope(v8_isolate());
+  v8::ScriptCompiler::Source script_source(
+      NewString("'use strict'; let wrapped_x = 10; return wrapped_x;"));
+  v8::Local<v8::Function> fun =
+      v8::ScriptCompiler::CompileFunction(context(), &script_source)
+          .ToLocalChecked();
+  Handle<JSFunction> function = Cast<JSFunction>(Utils::OpenHandle(*fun));
+  DirectHandle<Script> script(Cast<Script>(function->shared()->script()),
+                              isolate());
+  EXPECT_TRUE(script->is_wrapped());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), script);
+  ASSERT_FALSE(info.is_null());
+
+  // The outer wrapper declaration scope (eval scope) is always sloppy mode.
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kSloppy);
+
+  // The inner wrapped function inherits the 'use strict' directive.
+  auto inner_scope = root_scope.first_child();
+  ASSERT_TRUE(inner_scope.has_value());
+  EXPECT_TRUE(inner_scope->is_function_scope());
+  EXPECT_EQ(inner_scope->language_mode(), LanguageMode::kStrict);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest,
+       EnsureDebugScriptScopeInfo_WrappedScript_ContextExtension) {
+  v8::HandleScope scope(v8_isolate());
+  RunJS("var ext_obj = {x: 42};");
+  v8::Local<v8::Object> ext[1];
+  ext[0] =
+      v8::Local<v8::Object>::Cast(context()
+                                      ->Global()
+                                      ->Get(context(), NewString("ext_obj"))
+                                      .ToLocalChecked());
+  v8::ScriptCompiler::Source script_source(
+      NewString("let local_y = 100; return x + local_y;"));
+  v8::Local<v8::Function> fun =
+      v8::ScriptCompiler::CompileFunction(context(), &script_source, 0, nullptr,
+                                          1, ext)
+          .ToLocalChecked();
+  Handle<JSFunction> function = Cast<JSFunction>(Utils::OpenHandle(*fun));
+  DirectHandle<Script> script(Cast<Script>(function->shared()->script()),
+                              isolate());
+  EXPECT_TRUE(script->is_wrapped());
+
+  DirectHandle<Context> fn_context(function->context(), isolate());
+  EXPECT_FALSE(IsNativeContext(*fn_context));
+
+  // Verify runtime execution resolves `x` from the context extension.
+  v8::Local<v8::Value> call_result =
+      fun->Call(context(), context()->Global(), 0, nullptr).ToLocalChecked();
+  EXPECT_EQ(142, call_result->Int32Value(context()).ToChecked());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(script).is_null());
+
+  // Reparsing does not require the runtime context extension; it faithfully
+  // extracts internal AST scope topology and local variables without it.
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kSloppy);
+
+  auto inner_scope = root_scope.first_child();
+  ASSERT_TRUE(inner_scope.has_value());
+  EXPECT_TRUE(inner_scope->is_function_scope());
+  EXPECT_EQ(inner_scope->language_mode(), LanguageMode::kSloppy);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest, EnsureDebugScriptScopeInfo_CacheMissDefaultArgs) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> foo = RunJS<JSFunction>(
+      "function foo() { let a = 1; function bar() { return a; } return bar; } "
+      "foo;");
+  DirectHandle<Script> script(Cast<Script>(foo->shared()->script()), isolate());
+
+  // Verify on regular script without any handles.
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), script);
+  ASSERT_FALSE(info.is_null());
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+
+  // Also verify cache miss with default args on direct eval script.
+  Handle<JSFunction> inner = RunJS<JSFunction>(
+      "function outer() {\n"
+      "  'use strict';\n"
+      "  let outer_lexical = 42;\n"
+      "  return eval('function inner() { return outer_lexical; } inner;');\n"
+      "}\n"
+      "outer();");
+  DirectHandle<Script> eval_script(Cast<Script>(inner->shared()->script()),
+                                   isolate());
+  EXPECT_TRUE(eval_script->is_eval());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(eval_script).is_null());
+
+  Handle<DebugScriptScopeInfo> eval_info =
+      EnsureDebugScriptScopeInfo(isolate(), eval_script);
+  ASSERT_FALSE(eval_info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(eval_info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kStrict);
+}
+
+TEST_F(DebugScopeInfoTest, EnsureDebugScriptScopeInfo_FunctionConstructor) {
+  HandleScope scope(isolate());
+  Handle<JSFunction> fun =
+      RunJS<JSFunction>("new Function('a', 'let b = 2; return a + b;');");
+  DirectHandle<Script> script(Cast<Script>(fun->shared()->script()), isolate());
+  EXPECT_EQ(script->compilation_kind(),
+            Script::CompilationKind::kFunctionConstructor);
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_eval_scope());
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
+}
+
+TEST_F(DebugScopeInfoTest, EnsureDebugScriptScopeInfo_Module) {
+  v8::HandleScope scope(v8_isolate());
+  v8::ScriptOrigin origin(NewString("module.js"), 0, 0, false, -1,
+                          v8::Local<v8::Value>(), false, false,
+                          true /* is_module */);
+  v8::ScriptCompiler::Source script_source(
+      NewString("let module_x = 42;\n"
+                "export function getX() { return module_x; }"),
+      origin);
+  v8::Local<v8::Module> module =
+      v8::ScriptCompiler::CompileModule(v8_isolate(), &script_source)
+          .ToLocalChecked();
+  DirectHandle<SharedFunctionInfo> sfi =
+      Utils::OpenHandle(*module->GetUnboundModuleScript());
+  DirectHandle<Script> script(Cast<Script>(sfi->script()), isolate());
+  EXPECT_TRUE(script->origin_options().IsModule());
+
+  isolate()->debug()->ClearScriptScopeInfos();
+  EXPECT_TRUE(isolate()->debug()->GetScriptScopeInfo(script).is_null());
+
+  Handle<DebugScriptScopeInfo> info =
+      EnsureDebugScriptScopeInfo(isolate(), script);
+  ASSERT_FALSE(info.is_null());
+
+  DebugScriptScope root_scope = DebugScriptScope::FromIndex(info, 0);
+  EXPECT_TRUE(root_scope.is_module_scope());
+  EXPECT_EQ(root_scope.language_mode(), LanguageMode::kStrict);
+
+  auto inner_scope = root_scope.first_child();
+  ASSERT_TRUE(inner_scope.has_value());
+  EXPECT_TRUE(inner_scope->is_function_scope());
+  EXPECT_EQ(inner_scope->language_mode(), LanguageMode::kStrict);
+
+  auto cached_info = isolate()->debug()->GetScriptScopeInfo(script);
+  ASSERT_FALSE(cached_info.is_null());
+  EXPECT_EQ(*info, *cached_info);
 }
 
 }  // namespace internal

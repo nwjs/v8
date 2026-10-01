@@ -18,6 +18,19 @@ namespace internal {
 
 class DeclarationScope;
 class Isolate;
+class Script;
+class String;
+
+// Structure holding deserialized variable information for debugger inspection.
+struct DebugVariableInfo {
+  Tagged<String> name;
+  VariableLocation location;
+  int index;
+  VariableMode mode;
+  int initializer_position;
+  bool is_synthetic;
+  bool is_receiver;
+};
 
 // Stack-allocated cursor for navigating and querying serialized scope trees
 // stored in DebugScriptScopeInfo.
@@ -56,6 +69,8 @@ class V8_EXPORT_PRIVATE DebugScriptScope {
   bool has_this_declaration() const;
   bool has_this_reference() const;
   bool has_simple_parameters() const;
+  bool has_arguments() const;
+  bool has_function_variable() const;
   bool sloppy_eval_can_extend_vars() const;
   bool needs_context() const;
 
@@ -67,6 +82,16 @@ class V8_EXPORT_PRIVATE DebugScriptScope {
   // second element represents the stack slot index or context slot index of the
   // receiver variable (or -1 if none/unallocated).
   std::pair<VariableAllocationInfo, int> receiver_info() const;
+  // Returns a pair of {VariableAllocationInfo, index}. When allocated, the
+  // second element represents the stack slot index or context slot index of the
+  // arguments variable (or -1 if none/unallocated).
+  std::pair<VariableAllocationInfo, int> arguments_info() const;
+  std::pair<VariableAllocationInfo, int> function_variable_info() const;
+  Tagged<String> function_variable_name() const;
+
+  // Local Variables Info
+  int variable_count() const;
+  DebugVariableInfo variable(int index) const;
 
  private:
   DebugScriptScope(DirectHandle<DebugScriptScopeInfo> info, int scope_index,
@@ -74,8 +99,21 @@ class V8_EXPORT_PRIVATE DebugScriptScope {
       : info_(info), scope_index_(scope_index), offset_(offset) {}
 
   const uint8_t* payload() const;
+  const uint8_t* function_variable_payload() const;
+  const uint8_t* variables_payload() const;
   uint16_t flags() const;
   int parent_index() const;
+
+  // Chained offset calculation methods (private to DebugScriptScope).
+  size_t next_sibling_offset() const;
+  size_t context_id_offset() const;
+  size_t receiver_info_offset() const;
+  size_t arguments_info_offset() const;
+  size_t function_variable_offset() const;
+  size_t variables_offset() const;
+  size_t record_size() const;
+
+  friend class DebugScriptScopeInfo;
 
   DirectHandle<DebugScriptScopeInfo> info_;
   int scope_index_;
@@ -86,6 +124,15 @@ class V8_EXPORT_PRIVATE DebugScriptScope {
 // into a DebugScriptScopeInfo.
 V8_EXPORT_PRIVATE Handle<DebugScriptScopeInfo> SerializeDebugScriptScopeInfo(
     Isolate* isolate, DeclarationScope* script_scope);
+
+// Ensures that `script` has an associated DebugScriptScopeInfo. If not yet
+// created, parses the script once eagerly, builds the scope info, and
+// caches it in the Debug ephemeron side table.
+//
+// All necessary scoping information (caller ScopeInfo for eval scripts,
+// wrapped arguments for wrapped scripts) is retained on the Script itself.
+V8_EXPORT_PRIVATE Handle<DebugScriptScopeInfo> EnsureDebugScriptScopeInfo(
+    Isolate* isolate, DirectHandle<Script> script);
 
 }  // namespace internal
 }  // namespace v8
