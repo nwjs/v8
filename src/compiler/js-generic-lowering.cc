@@ -221,7 +221,8 @@ bool ShouldUseMegamorphicAccessBuiltin(FeedbackSource const& source,
     return feedback.AsElementAccess().transition_groups().empty();
   } else if (feedback.kind() == ProcessedFeedback::kNamedAccess) {
     return feedback.AsNamedAccess().maps().empty();
-  } else if (feedback.kind() == ProcessedFeedback::kInsufficient) {
+  } else if (feedback.kind() == ProcessedFeedback::kInsufficient ||
+             feedback.kind() == ProcessedFeedback::kProxy) {
     return false;
   }
   UNREACHABLE();
@@ -758,9 +759,6 @@ void JSGenericLowering::LowerJSGetTemplateObject(Node* node) {
   GetTemplateObjectParameters const& p = n.Parameters();
   SharedFunctionInfoRef shared = p.shared();
   TemplateObjectDescriptionRef description = p.description();
-
-  DCHECK_EQ(node->op()->ControlInputCount(), 1);
-  node->RemoveInput(NodeProperties::FirstControlIndex(node));
 
   static_assert(JSGetTemplateObjectNode::FeedbackVectorIndex() == 0);
   node->InsertInput(zone(), 0, jsgraph()->ConstantNoHole(shared, broker()));

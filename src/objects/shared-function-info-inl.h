@@ -31,6 +31,7 @@
 #include "src/objects/oddball-predicates-inl.h"
 #include "src/objects/scope-info-inl.h"
 #include "src/objects/script-inl.h"
+#include "src/objects/slots-inl.h"
 #include "src/objects/string.h"
 #include "src/objects/templates-inl.h"
 
@@ -42,6 +43,18 @@
 #include "src/objects/object-macros.h"
 
 namespace v8::internal {
+
+PreparseData::PreparseData(const AllocationWitness& witness, int data_length,
+                           int children_length)
+    : HeapObject(witness.roots().preparse_data_map()),
+      data_length_(data_length),
+      children_length_(children_length) {
+  DCHECK_LE(0, data_length);
+  DCHECK_LE(0, children_length);
+  MemsetTagged(ObjectSlot(children()), witness.roots().null_value(),
+               children_length);
+  clear_padding();
+}
 
 // static
 int PreparseData::SizeFor(int data_length, int children_length) {
@@ -511,6 +524,9 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags,
                     SharedFunctionInfo::PrivateNameLookupSkipsOuterClassBit)
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags, is_hoisted_in_context,
                     SharedFunctionInfo::IsHoistedInContextBit)
+BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags,
+                    class_initializer_allows_await,
+                    SharedFunctionInfo::ClassInitializerAllowsAwaitBit)
 
 bool SharedFunctionInfo::optimization_disabled(CodeKind kind) const {
   switch (kind) {
