@@ -756,7 +756,8 @@ IGNITION_HANDLER(DefineNamedOwnProperty, InterpreterSetNamedPropertyAssembler) {
 // this.
 IGNITION_HANDLER(DefineNamedOwnPropertyInLiteral,
                  InterpreterSetNamedPropertyAssembler) {
-  SetNamedProperty(Builtin::kDefineNamedOwnIC, NamedPropertyType::kOwn);
+  SetNamedProperty(Builtin::kDefineNamedOwnInLiteralIC,
+                   NamedPropertyType::kOwn);
 }
 
 // SetKeyedProperty <object> <key> <slot>
@@ -2499,10 +2500,10 @@ IGNITION_HANDLER(JumpLoop, InterpreterAssembler) {
   Label maybe_osr_because_osr_state(this, Label::kDeferred);
   // The quick initial OSR check. If it passes, we proceed on to more expensive
   // OSR logic.
-  static_assert(FeedbackVector::MaybeHasMaglevOsrCodeBit::encode(true) >
-                FeedbackVector::kMaxOsrUrgency);
-  static_assert(FeedbackVector::MaybeHasTurbofanOsrCodeBit::encode(true) >
-                FeedbackVector::kMaxOsrUrgency);
+  static_assert(FeedbackVector::OsrState::MaybeHasMaglevOsrCodeBit::encode(
+                    true) > FeedbackVector::kMaxOsrUrgency);
+  static_assert(FeedbackVector::OsrState::MaybeHasTurbofanOsrCodeBit::encode(
+                    true) > FeedbackVector::kMaxOsrUrgency);
 
   GotoIfNot(Uint32GreaterThanOrEqual(loop_depth, osr_state),
             &maybe_osr_because_osr_state);
@@ -2887,14 +2888,14 @@ IGNITION_HANDLER(GetTemplateObject, InterpreterAssembler) {
 // CreateClosure <index> <slot> <flags>
 //
 // Creates a new closure for SharedFunctionInfo at position |index| in the
-// constant pool and with pretenuring controlled by |flags|.
+// constant pool. Uses the FastNewClosure builtin if FastNewClosureBit is set
+// in |flags|, otherwise calls the runtime.
 IGNITION_HANDLER(CreateClosure, InterpreterAssembler) {
   TNode<Object> shared = LoadConstantPoolEntryAtOperandIndex(0);
   TNode<Uint32T> flags = BytecodeOperandFlag8(2);
   TNode<Context> context = GetContext();
   TNode<UintPtrT> slot = BytecodeOperandFeedbackSlot(1);
 
-  Label if_undefined(this);
   TNode<ClosureFeedbackCellArray> feedback_cell_array =
       LoadClosureFeedbackArray(LoadFunctionClosure());
   TNode<FeedbackCell> feedback_cell =
@@ -2914,25 +2915,10 @@ IGNITION_HANDLER(CreateClosure, InterpreterAssembler) {
 
   BIND(&if_slow);
   {
-    Label if_newspace(this), if_oldspace(this);
-    Branch(IsSetWord32<CreateClosureFlags::PretenuredBit>(flags), &if_oldspace,
-           &if_newspace);
-
-    BIND(&if_newspace);
-    {
-      TNode<Object> result =
-          CallRuntime(Runtime::kNewClosure, context, shared, feedback_cell);
-      SetAccumulator(result);
-      Dispatch();
-    }
-
-    BIND(&if_oldspace);
-    {
-      TNode<Object> result = CallRuntime(Runtime::kNewClosure_Tenured, context,
-                                         shared, feedback_cell);
-      SetAccumulator(result);
-      Dispatch();
-    }
+    TNode<Object> result =
+        CallRuntime(Runtime::kNewClosure, context, shared, feedback_cell);
+    SetAccumulator(result);
+    Dispatch();
   }
 }
 
@@ -3034,7 +3020,7 @@ IGNITION_HANDLER(CreateMappedArguments, InterpreterAssembler) {
   TNode<Uint32T> flags = LoadObjectField<Uint32T>(
       shared_info, offsetof(SharedFunctionInfo, flags_));
   TNode<BoolT> has_duplicate_parameters =
-      IsSetWord32<SharedFunctionInfo::HasDuplicateParametersBit>(flags);
+      IsSetWord32<SharedFunctionInfo::Flags::HasDuplicateParametersBit>(flags);
   Branch(has_duplicate_parameters, &if_duplicate_parameters,
          &if_not_duplicate_parameters);
 

@@ -502,7 +502,7 @@ void JSObject::FastPropertyAtPut(FieldIndex index, Tagged<Object> value,
 }
 
 void JSObject::WriteToField(InternalIndex descriptor, PropertyDetails details,
-                            Tagged<Object> value, bool initializing_store) {
+                            Tagged<Object> value) {
   DCHECK_EQ(PropertyLocation::kField, details.location());
   DCHECK_EQ(PropertyKind::kData, details.kind());
   DisallowGarbageCollection no_gc;
@@ -526,12 +526,9 @@ void JSObject::WriteToField(InternalIndex descriptor, PropertyDetails details,
     }
     if (IsUninitializedHeapNumber(box)) {
       Cast<UninitializedHeapNumber>(box)->set_value_as_bits(bits);
-      // The map store must follow the value write and use release semantics so
-      // background threads (e.g. concurrent compiler) see a consistent
-      // initialized state upon observing the HeapNumber map.
       Isolate* isolate = Isolate::Current();
       box->set_map_safe_transition_no_write_barrier(
-          isolate, ReadOnlyRoots(isolate).heap_number_map(), kReleaseStore);
+          isolate, ReadOnlyRoots(isolate).heap_number_map(), kRelaxedStore);
     } else {
       Cast<HeapNumber>(box)->set_value_as_bits(bits);
     }
@@ -1136,7 +1133,12 @@ void JSObject::EnsureWritableFastElements(Isolate* isolate,
 std::optional<Tagged<NativeContext>> JSReceiver::GetCreationContext() const {
   DisallowGarbageCollection no_gc;
   Tagged<Map> meta_map = map()->map();
-  DCHECK(IsMapMap(meta_map));
+#if V8_ENABLE_WEBASSEMBLY
+  if (!IsMetaMap(meta_map)) {
+    return GetCreationContext_Slow(map());
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
+  DCHECK(IsMetaMap(meta_map));
   Tagged<Object> maybe_native_context = meta_map->native_context_or_null();
   if (V8_UNLIKELY(IsNull(maybe_native_context))) return {};
   DCHECK(IsNativeContext(maybe_native_context));

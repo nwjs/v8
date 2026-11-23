@@ -1609,7 +1609,7 @@ Reduction JSTypedLowering::ReduceJSHasContextExtension(Node* node) {
       UseInfo::TruncatingWord32());
   TNode<Word32T> flags_masked = gasm.Word32And(
       scope_info_flags,
-      gasm.Uint32Constant(ScopeInfo::HasContextExtensionSlotBit::kMask));
+      gasm.Uint32Constant(ScopeInfo::Flags::HasContextExtensionSlotBit::kMask));
   TNode<Word32T> no_extension =
       gasm.Word32Equal(flags_masked, gasm.Uint32Constant(0));
   TNode<Word32T> has_extension =
@@ -2084,9 +2084,7 @@ Reduction JSTypedLowering::ReduceJSCall(Node* node) {
     function = target_type.AsHeapConstant()->Ref().AsJSFunction();
     shared = function->shared(broker());
   } else if (target->opcode() == IrOpcode::kJSCreateClosure) {
-    CreateClosureParameters const& ccp =
-        JSCreateClosureNode{target}.Parameters();
-    shared = ccp.shared_info();
+    shared = JSCreateClosureNode{target}.shared_info();
   } else if (target->opcode() == IrOpcode::kCheckClosure) {
     FeedbackCellRef cell = MakeRef(broker(), FeedbackCellOf(target->op()));
     shared = cell.shared_function_info(broker());
@@ -2171,8 +2169,7 @@ Reduction JSTypedLowering::ReduceJSCall(Node* node) {
       NodeProperties::ChangeOp(
           node, common()->Call(Linkage::GetJSCallDescriptor(
                     graph()->zone(), false, JSParameterCount(formal_count),
-                    expected_formal_parameter_count,
-                    flags | CallDescriptor::kCanUseRoots)));
+                    expected_formal_parameter_count, flags)));
     } else if (shared->HasBuiltinId() &&
                Builtins::IsCpp(shared->builtin_id())) {
       // Patch {node} to a direct CEntry call.
@@ -2218,8 +2215,7 @@ Reduction JSTypedLowering::ReduceJSCall(Node* node) {
       NodeProperties::ChangeOp(
           node, common()->Call(Linkage::GetJSCallDescriptor(
                     graph()->zone(), false, JSParameterCount(arity),
-                    expected_formal_parameter_count,
-                    flags | CallDescriptor::kCanUseRoots)));
+                    expected_formal_parameter_count, flags)));
     }
     return Changed(node);
   }
@@ -2513,7 +2509,7 @@ Reduction JSTypedLowering::ReduceJSForInPrepare(Node* node) {
 Reduction JSTypedLowering::ReduceJSLoadMessage(Node* node) {
   DCHECK_EQ(IrOpcode::kJSLoadMessage, node->opcode());
   ExternalReference const ref =
-      ExternalReference::address_of_pending_message(isolate());
+      ExternalReference::Create(IsolateFieldId::kPendingMessage);
   node->ReplaceInput(0, jsgraph()->ExternalConstant(ref));
   NodeProperties::ChangeOp(node, simplified()->LoadMessage());
   return Changed(node);
@@ -2522,7 +2518,7 @@ Reduction JSTypedLowering::ReduceJSLoadMessage(Node* node) {
 Reduction JSTypedLowering::ReduceJSStoreMessage(Node* node) {
   DCHECK_EQ(IrOpcode::kJSStoreMessage, node->opcode());
   ExternalReference const ref =
-      ExternalReference::address_of_pending_message(isolate());
+      ExternalReference::Create(IsolateFieldId::kPendingMessage);
   Node* value = NodeProperties::GetValueInput(node, 0);
   node->ReplaceInput(0, jsgraph()->ExternalConstant(ref));
   node->ReplaceInput(1, value);
@@ -2839,7 +2835,7 @@ Reduction JSTypedLowering::ReduceJSAsyncFunctionAwait(Node* node) {
           AccessBuilder::ForJSObjectOffset(offsetof(JSPromise, flags_))),
       value,
       jsgraph()->SmiConstant(v8::Promise::kFulfilled |
-                             JSPromise::HasHandlerBit::kMask),
+                             JSPromise::Flags::HasHandlerBit::kMask),
       fast_effect, fast_control);
 
   // Note: resume_mode is NOT set here — the AsyncResumeTask handler in

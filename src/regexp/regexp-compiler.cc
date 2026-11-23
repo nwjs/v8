@@ -369,6 +369,17 @@ Compiler::CompilationResult Compiler::Assemble(
     // the pattern never backtracks and drop the push (and the stack) entirely.
     macro_assembler_->PushBacktrack(&fail);
   }
+  const bool may_step_back =
+      !one_byte() && ShouldOptionallyStepBackToLeadSurrogate(flags());
+  NonAssertingLabel check_lead_surrogate(this);
+  Label not_in_surrogate_pair;
+  if (may_step_back) {
+    // Normalize the starting position before matching.
+    macro_assembler_->LoadCurrentCharacter(0, &not_in_surrogate_pair);
+    macro_assembler_->CheckCharacterInRange(
+        kTrailSurrogateStart, kTrailSurrogateEnd, &check_lead_surrogate);
+    macro_assembler_->Bind(&not_in_surrogate_pair);
+  }
   Trace new_trace;
   if (start->Emit(this, &new_trace).IsError()) {
     work_list_ = nullptr;
@@ -376,6 +387,14 @@ Compiler::CompilationResult Compiler::Assemble(
   }
   macro_assembler_->BindJumpTarget(&fail);
   macro_assembler_->Fail();
+  if (may_step_back) {
+    macro_assembler_->Bind(&check_lead_surrogate);
+    macro_assembler_->LoadCurrentCharacter(-1, &not_in_surrogate_pair);
+    macro_assembler_->CheckCharacterNotInRange(
+        kLeadSurrogateStart, kLeadSurrogateEnd, &not_in_surrogate_pair);
+    macro_assembler_->AdvanceCurrentPosition(-1);
+    macro_assembler_->GoTo(&not_in_surrogate_pair);
+  }
   while (!work_list.empty()) {
     WorkItem item = work_list.back();
     Node* node = item.node;
@@ -389,10 +408,8 @@ Compiler::CompilationResult Compiler::Assemble(
       }
     }
   }
-  if (IsRegExpTooBig()) {
-    work_list_ = nullptr;
-    return ReportError();
-  }
+  // Emit must report every code generation error.
+  CHECK(!IsRegExpTooBig());
 
   DirectHandle<HeapObject> code = macro_assembler_->GetCode(re_data, flags_);
   work_list_ = nullptr;
@@ -1746,9 +1763,9 @@ Node::LimitResult Node::LimitVersions(Compiler* compiler, Trace* trace) {
   TRACE("* Limit Versions: Switch to generic version");
   bool was_limiting = compiler->limiting_recursion();
   compiler->set_limiting_recursion(true);
-  trace->Flush(compiler, this);
+  EmitResult result = trace->Flush(compiler, this);
   compiler->set_limiting_recursion(was_limiting);
-  return DONE;
+  return result.IsError() ? FAILED : DONE;
 }
 
 bool Node::KeepRecursing(Compiler* compiler) {
@@ -2794,6 +2811,7 @@ EmitResult TextNode::Emit(Compiler* compiler, Trace* trace) {
   TRACE_EMIT("TextNode");
   LimitResult limit_result = LimitVersions(compiler, trace);
   if (limit_result == DONE) return EmitResult::Success();
+  if (limit_result == FAILED) return EmitResult::Error();
   DCHECK(limit_result == CONTINUE);
 
   const int max_offset = read_backward() ? trace->cp_offset() - Length()
@@ -4223,6 +4241,7 @@ EmitResult ChoiceNode::Emit(Compiler* compiler, Trace* trace) {
 
   LimitResult limit_result = LimitVersions(compiler, trace);
   if (limit_result == DONE) return EmitResult::Success();
+  if (limit_result == FAILED) return EmitResult::Error();
   DCHECK(limit_result == CONTINUE);
 
   // For loop nodes we already flushed (see LoopChoiceNode::Emit), but for
@@ -5883,6 +5902,7 @@ EmitResult ActionNode::Emit(Compiler* compiler, Trace* trace) {
   RegExpMacroAssembler* assembler = compiler->macro_assembler();
   LimitResult limit_result = LimitVersions(compiler, trace);
   if (limit_result == DONE) return EmitResult::Success();
+  if (limit_result == FAILED) return EmitResult::Error();
   DCHECK(limit_result == CONTINUE);
 
   RecursionCheck rc(compiler);
@@ -5911,7 +5931,7 @@ EmitResult ActionNode::Emit(Compiler* compiler, Trace* trace) {
         // Complex situation: Flush the trace state to the assembler and
         // generate a generic version of this action.  This call will
         // recurse back to the else clause here.
-        trace->Flush(compiler, this);
+        return trace->Flush(compiler, this);
       } else {
         assembler->WriteCurrentPositionToRegister(
             data_.u_submatch.current_position_register, 0);
@@ -5935,7 +5955,7 @@ EmitResult ActionNode::Emit(Compiler* compiler, Trace* trace) {
         // immediately.
         RETURN_IF_ERROR(on_success()->Emit(compiler, trace));
       } else if (!trace->is_trivial()) {
-        trace->Flush(compiler, this);
+        return trace->Flush(compiler, this);
       } else {
         Label skip_empty_check;
         // If we have a minimum number of repetitions we check the current
@@ -6024,6 +6044,7 @@ EmitResult BackReferenceNode::Emit(Compiler* compiler, Trace* trace) {
 
   LimitResult limit_result = LimitVersions(compiler, trace);
   if (limit_result == DONE) return EmitResult::Success();
+  if (limit_result == FAILED) return EmitResult::Error();
   DCHECK(limit_result == CONTINUE);
 
   RecursionCheck rc(compiler);
@@ -6445,35 +6466,6 @@ void TextNode::FillInBMInfo(Isolate* isolate, int initial_offset, int budget,
   if (initial_offset == 0) set_bm_info(not_at_start, bm);
 }
 
-Node* Compiler::OptionallyStepBackToLeadSurrogate(Node* on_success) {
-  TRACE_COMPILER(this, "* Optionally step back to lead surrogate");
-  DCHECK(!read_backward());
-  ZoneList<CharacterRange>* lead_surrogates = CharacterRange::List(
-      zone(), CharacterRange::Range(kLeadSurrogateStart, kLeadSurrogateEnd));
-  ZoneList<CharacterRange>* trail_surrogates = CharacterRange::List(
-      zone(), CharacterRange::Range(kTrailSurrogateStart, kTrailSurrogateEnd));
-
-  ChoiceNode* optional_step_back = zone()->New<ChoiceNode>(2, flags(), zone());
-
-  int stack_register = UnicodeLookaroundStackRegister();
-  int position_register = UnicodeLookaroundPositionRegister();
-  Node* step_back = TextNode::CreateForCharacterRanges(
-      zone(), lead_surrogates, true, on_success, flags());
-  Lookaround::Builder builder(true, step_back, this, stack_register,
-                              position_register);
-  REGISTER_NODE(step_back);
-  Node* match_trail = TextNode::CreateForCharacterRanges(
-      zone(), trail_surrogates, false, builder.on_match_success(), flags());
-  REGISTER_NODE(match_trail);
-
-  optional_step_back->AddAlternative(
-      GuardedAlternative(builder.ForMatch(this, match_trail)));
-  optional_step_back->AddAlternative(GuardedAlternative(on_success));
-
-  REGISTER_NODE(optional_step_back);
-  return optional_step_back;
-}
-
 Node* Compiler::PreprocessRegExp(CompileData* data, bool is_one_byte) {
 #ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
   TraceTreeScope trace_tree_scope(diagnostics());
@@ -6500,20 +6492,18 @@ Node* Compiler::PreprocessRegExp(CompileData* data, bool is_one_byte) {
       TRACE_GRAPH("* Unroll loop once");
       ChoiceNode* first_step_node = zone()->New<ChoiceNode>(2, flags(), zone());
       first_step_node->AddAlternative(GuardedAlternative(captured_body));
-      first_step_node->AddAlternative(GuardedAlternative(zone()->New<TextNode>(
-          zone()->New<ClassRanges>(StandardCharacterSet::kEverything), false,
-          loop_node, flags())));
+      // Use code point advancement in Unicode mode to avoid matching between
+      // surrogate halves.
+      Node* step = zone()
+                       ->New<ClassRanges>(StandardCharacterSet::kEverything)
+                       ->ToNode(this, loop_node);
+      first_step_node->AddAlternative(GuardedAlternative(step));
       REGISTER_NODE(first_step_node);
       node = first_step_node;
     } else {
       node = loop_node;
     }
   }
-  if (!is_one_byte && IsEitherUnicode(flags()) &&
-      (IsGlobal(flags()) || IsSticky(flags()))) {
-    node = OptionallyStepBackToLeadSurrogate(node);
-  }
-
   // We can run out of registers during preprocessing, or we can recurse too
   // deep during ToNode. Indicate an error in either case.
   if (reg_exp_too_big_) {

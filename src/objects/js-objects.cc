@@ -42,7 +42,6 @@
 #include "src/objects/heap-object.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
-#include "src/objects/js-atomics-synchronization.h"
 #include "src/objects/js-collection.h"
 #include "src/objects/js-disposable-stack.h"
 #include "src/objects/js-generator-inl.h"
@@ -84,7 +83,7 @@
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug-wasm-objects.h"
-#include "src/wasm/wasm-objects.h"
+#include "src/wasm/wasm-objects-inl.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 #ifdef V8_INTL_SUPPORT
@@ -235,6 +234,52 @@ Handle<Object> JSReceiver::GetDataProperty(LookupIterator* it,
 }
 
 // static
+MaybeHandle<Object> JSReceiver::TryGetDataProperty(LookupIterator* it) {
+  for (;; it->Next()) {
+    switch (it->state()) {
+      case LookupIterator::TRANSITION:
+      case LookupIterator::STRING_LOOKUP_START_OBJECT:
+        UNREACHABLE();
+      case LookupIterator::ACCESS_CHECK:
+        if (it->HasAccess()) continue;
+        return {};
+      case LookupIterator::INTERCEPTOR:
+      case LookupIterator::JSPROXY:
+        return {};
+      case LookupIterator::WASM_OBJECT:
+        continue;  // Continue to the prototype, if present.
+      case LookupIterator::MODULE_NAMESPACE:
+        if (JSDeferredModuleNamespace::TriggersEvaluation(it)) return {};
+        continue;
+      case LookupIterator::ACCESSOR: {
+        // Only AccessorInfos can behave like data properties. Getters of
+        // AccessorPairs are never called, not even API functions declared
+        // side-effect free, as script can install them on arbitrary objects.
+        DirectHandle<Object> accessors = it->GetAccessors();
+        if (!IsAccessorInfo(*accessors) ||
+            Cast<AccessorInfo>(*accessors)->getter_side_effect_type() !=
+                SideEffectType::kHasNoSideEffect) {
+          return {};
+        }
+        v8::TryCatch try_catch(reinterpret_cast<v8::Isolate*>(it->isolate()));
+        try_catch.SetVerbose(false);
+        try_catch.SetCaptureMessage(false);
+        Handle<Object> result;
+        if (!Object::GetPropertyWithAccessor(it).ToHandle(&result)) return {};
+        return result;
+      }
+      case LookupIterator::DATA:
+        // Unlike GetDataValue(), this also instantiates lazy closures.
+        return Object::GetProperty(it);
+      case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
+      case LookupIterator::NOT_FOUND:
+        return {};
+    }
+    UNREACHABLE();
+  }
+}
+
+// static
 Maybe<bool> JSReceiver::HasInPrototypeChain(Isolate* isolate,
                                             DirectHandle<JSReceiver> object,
                                             DirectHandle<Object> proto) {
@@ -282,7 +327,7 @@ Maybe<bool> JSReceiver::CheckPrivateNameStore(LookupIterator* it,
                   : MessageTemplate::kInvalidPrivateFieldReinitialization;
           RETURN_FAILURE(isolate,
                          GetShouldThrow(isolate, Nothing<ShouldThrow>()),
-                         NewTypeError(message, name_string, it->GetReceiver()));
+                         NewTypeError(message, name_string));
         }
         return Just(true);
       case LookupIterator::WASM_OBJECT:
@@ -293,7 +338,7 @@ Maybe<bool> JSReceiver::CheckPrivateNameStore(LookupIterator* it,
           RETURN_FAILURE(
               isolate, GetShouldThrow(isolate, Nothing<ShouldThrow>()),
               NewTypeError(MessageTemplate::kInvalidPrivateMemberWrite,
-                           name_string, it->GetReceiver()));
+                           name_string));
 
         } else if (it->ExtendingNonExtensible(
                        it->GetStoreTarget<JSReceiver>())) {
@@ -597,8 +642,6 @@ Tagged<String> JSReceiver::class_name() {
   if (IsShared(this)) {
     if (Is<JSSharedStruct>(this)) return roots.SharedStruct_string();
     if (Is<JSSharedArray>(this)) return roots.SharedArray_string();
-    if (Is<JSAtomicsMutex>(this)) return roots.AtomicsMutex_string();
-    if (Is<JSAtomicsCondition>(this)) return roots.AtomicsCondition_string();
 #if V8_ENABLE_WEBASSEMBLY
     if (Is<WasmObject>(this)) return roots.Object_string();
 #endif
@@ -720,6 +763,17 @@ DirectHandle<String> JSReceiver::GetConstructorName(
 }
 
 // static
+Tagged<NativeContext> JSReceiver::GetCreationContext_Slow(Tagged<Map> map) {
+  // Currently only WasmCustomMaps use this slow path.
+#if V8_ENABLE_WEBASSEMBLY
+  DCHECK(IsWasmCustomMap(map));
+  return Cast<WasmCustomMap>(map)->native_context_for_wrapper();
+#else
+  UNREACHABLE();
+#endif  // V8_ENABLE_WEBASSEMBLY
+}
+
+// static
 MaybeDirectHandle<NativeContext> JSReceiver::GetFunctionRealm(
     DirectHandle<JSReceiver> receiver) {
   Isolate* isolate = Isolate::Current();
@@ -735,7 +789,10 @@ MaybeDirectHandle<NativeContext> JSReceiver::GetFunctionRealm(
       Tagged<JSProxy> proxy = Cast<JSProxy>(current);
       if (proxy->IsRevoked()) {
         AllowGarbageCollection allow_allocating_errors;
-        THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kProxyRevoked));
+        THROW_NEW_ERROR(
+            isolate, NewTypeError(MessageTemplate::kProxyRevoked,
+                                  isolate->factory()->NewStringFromAsciiChecked(
+                                      "GetFunctionRealm")));
       }
       current = Cast<JSReceiver>(proxy->target());
       continue;
@@ -968,6 +1025,7 @@ void JSReceiver::DeleteNormalizedProperty(DirectHandle<JSReceiver> object,
                                           InternalIndex entry) {
   DCHECK(!object->HasFastProperties());
   Isolate* isolate = Isolate::Current();
+  CHECK(AllowJSObjectModification::IsAllowed(isolate));
   DCHECK(entry.is_found());
 
   if (IsJSGlobalObject(*object)) {
@@ -2690,10 +2748,6 @@ int JSObject::GetHeaderSize(InstanceType type) {
       return JSSharedArray::kHeaderSize;
     case JS_SHARED_STRUCT_TYPE:
       return JSSharedStruct::kHeaderSize;
-    case JS_ATOMICS_MUTEX_TYPE:
-      return JSAtomicsMutex::kHeaderSize;
-    case JS_ATOMICS_CONDITION_TYPE:
-      return JSAtomicsCondition::kHeaderSize;
 #ifdef V8_TEMPORAL_SUPPORT
     case JS_TEMPORAL_DURATION_TYPE:
       return sizeof(JSTemporalDuration);
@@ -2864,6 +2918,7 @@ Maybe<bool> JSObject::SetNormalizedProperty(DirectHandle<JSObject> object,
   DCHECK(!object->HasFastProperties());
   DCHECK(IsUniqueName(*name));
   Isolate* isolate = Isolate::Current();
+  CHECK(AllowJSObjectModification::IsAllowed(isolate));
 
   uint32_t hash = name->hash();
 
@@ -3034,12 +3089,6 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
       break;
     case JS_SHARED_STRUCT_TYPE:
       accumulator->Add("<JSSharedStruct>");
-      break;
-    case JS_ATOMICS_MUTEX_TYPE:
-      accumulator->Add("<JSAtomicsMutex>");
-      break;
-    case JS_ATOMICS_CONDITION_TYPE:
-      accumulator->Add("<JSAtomicsCondition>");
       break;
     case JS_MESSAGE_OBJECT_TYPE:
       accumulator->Add("<JSMessageObject>");
@@ -3566,6 +3615,7 @@ void MigrateFastToSlow(Isolate* isolate, DirectHandle<JSObject> object,
 void JSObject::MigrateToMap(Isolate* isolate, DirectHandle<JSObject> object,
                             DirectHandle<Map> new_map,
                             int expected_additional_properties) {
+  CHECK(AllowJSObjectModification::IsAllowed(isolate));
   if (object->map() == *new_map) return;
   DirectHandle<Map> old_map(object->map(), isolate);
   NotifyMapChange(old_map, new_map, isolate);
@@ -3756,12 +3806,6 @@ bool TryFastAddDataProperty(Isolate* isolate, DirectHandle<JSObject> object,
   // loaded in PrepareForDataProperty.
   PropertyDetails details =
       new_map->instance_descriptors()->GetDetails(descriptor);
-  if (details.representation().IsDouble()) {
-    if (Tagged<HeapNumber> heap_number;
-        TryCast(*value, &heap_number) && std::isnan(heap_number->value())) {
-      value = isolate->factory()->nan_value();
-    }
-  }
   object->WriteToField(descriptor, details, *value);
   return true;
 }
@@ -4005,9 +4049,10 @@ void JSObject::NormalizeProperties(Isolate* isolate,
 void JSObject::MigrateSlowToFast(DirectHandle<JSObject> object,
                                  int unused_property_fields,
                                  const char* reason) {
+  Isolate* isolate = Isolate::Current();
+  CHECK(AllowJSObjectModification::IsAllowed(isolate));
   if (object->HasFastProperties()) return;
   DCHECK(!IsJSGlobalObject(*object));
-  Isolate* isolate = Isolate::Current();
   Factory* factory = isolate->factory();
 
   DirectHandle<NameDictionary> dictionary;
@@ -5525,6 +5570,7 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate,
 // static
 void JSObject::SetImmutableProto(Isolate* isolate,
                                  DirectHandle<JSObject> object) {
+  CHECK(AllowJSObjectModification::IsAllowed(isolate));
   DirectHandle<Map> map(object->map(), isolate);
 
   // Nothing to do if prototype is already set.
@@ -5621,6 +5667,7 @@ Maybe<bool> JSObject::AddDataElement(Isolate* isolate,
                                      DirectHandle<JSObject> object,
                                      uint32_t index, DirectHandle<Object> value,
                                      PropertyAttributes attributes) {
+  CHECK(AllowJSObjectModification::IsAllowed(isolate));
   DCHECK(object->map()->is_extensible());
 
   uint32_t old_length = 0;

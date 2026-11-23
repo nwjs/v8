@@ -318,9 +318,15 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
 
 void MacroAssembler::LoadTrustedPointerField(Register destination,
                                              MemOperand field_operand,
-                                             IndirectPointerTag tag) {
+                                             TrustedPointerTagRange tag_range) {
 #ifdef V8_ENABLE_SANDBOX
-  LoadIndirectPointerField(destination, field_operand, tag);
+  ASM_CODE_COMMENT(this);
+  UseScratchRegisterScope temps(this);
+  Register handle = t6;
+  DCHECK_NE(handle, destination);
+  Lwu(handle, field_operand);
+
+  ResolveTrustedPointerHandle(destination, handle, tag_range);
 #else
   LoadTaggedField(destination, field_operand);
 #endif
@@ -345,10 +351,10 @@ void MacroAssembler::LoadTrustedUnknownPointerField(
     Register handle = scratch1;
     Lw(handle, field_operand);
 
-    static_assert(kNullIndirectPointerHandle == 0);
+    static_assert(kNullTrustedPointerHandle == 0);
     Branch(is_unavailable, eq, handle, Operand(zero_reg));
 
-    ResolveIndirectPointerHandle(destination, handle, kAllIndirectPointerTags);
+    ResolveTrustedPointerHandle(destination, handle, kAllTrustedPointerTags);
   }
 #else
   LoadTaggedField(destination, field_operand);
@@ -377,17 +383,22 @@ void MacroAssembler::LoadTrustedUnknownPointerField(
 }
 
 void MacroAssembler::StoreTrustedPointerField(Register value,
-                                              MemOperand dst_field_operand) {
+                                              MemOperand dst_field_operand,
+                                              Trapper&& trapper) {
 #ifdef V8_ENABLE_SANDBOX
-  StoreIndirectPointerField(value, dst_field_operand);
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+  Lw(scratch, FieldMemOperand(value, offsetof(ExposedTrustedObject,
+                                              self_trusted_pointer_)));
+  Sw(scratch, dst_field_operand, std::forward<Trapper>(trapper));
 #else
-  StoreTaggedField(value, dst_field_operand);
+  StoreTaggedField(value, dst_field_operand, std::forward<Trapper>(trapper));
 #endif
 }
 
 #ifdef V8_ENABLE_SANDBOX
-void MacroAssembler::ResolveIndirectPointerHandle(
-    Register destination, Register handle, IndirectPointerTagRange tag_range) {
+void MacroAssembler::ResolveTrustedPointerHandle(
+    Register destination, Register handle, TrustedPointerTagRange tag_range) {
   DCHECK(!AreAliased(handle, destination));
   ASM_CODE_COMMENT(this);
   Register table = destination;
@@ -479,38 +490,6 @@ void MacroAssembler::LoadExternalPointerField(Register destination,
 #endif  // V8_ENABLE_SANDBOX
 }
 
-#ifdef V8_TARGET_ARCH_RISCV64
-void MacroAssembler::LoadIndirectPointerField(
-    Register destination, MemOperand field_operand,
-    IndirectPointerTagRange tag_range) {
-#ifdef V8_ENABLE_SANDBOX
-  ASM_CODE_COMMENT(this);
-  UseScratchRegisterScope temps(this);
-  Register handle = t6;
-  DCHECK_NE(handle, destination);
-  Lwu(handle, field_operand);
-
-  ResolveIndirectPointerHandle(destination, handle, tag_range);
-#else
-  UNREACHABLE();
-#endif  // V8_ENABLE_SANDBOX
-}
-
-void MacroAssembler::StoreIndirectPointerField(Register value,
-                                               MemOperand dst_field_operand,
-                                               Trapper&& trapper) {
-#ifdef V8_ENABLE_SANDBOX
-  UseScratchRegisterScope temps(this);
-  Register scratch = temps.Acquire();
-  Lw(scratch, FieldMemOperand(value, offsetof(ExposedTrustedObject,
-                                              self_indirect_pointer_)));
-  Sw(scratch, dst_field_operand, std::forward<Trapper>(trapper));
-#else
-  UNREACHABLE();
-#endif  // V8_ENABLE_SANDBOX
-}
-#endif  // V8_TARGET_ARCH_RISCV64
-
 void MacroAssembler::MaybeSaveRegisters(RegList registers) {
   if (registers.is_empty()) return;
   MultiPush(registers);
@@ -537,22 +516,21 @@ void MacroAssembler::CallEphemeronKeyBarrier(Register object, Operand offset,
   MaybeRestoreRegisters(registers);
 }
 
-void MacroAssembler::CallIndirectPointerBarrier(Register object, Operand offset,
-                                                SaveFPRegsMode fp_mode,
-                                                IndirectPointerTag tag) {
+void MacroAssembler::CallTrustedPointerBarrier(Register object, Operand offset,
+                                               SaveFPRegsMode fp_mode,
+                                               TrustedPointerTag tag) {
   ASM_CODE_COMMENT(this);
   RegList registers =
-      IndirectPointerWriteBarrierDescriptor::ComputeSavedRegisters(object);
+      TrustedPointerWriteBarrierDescriptor::ComputeSavedRegisters(object);
   MaybeSaveRegisters(registers);
 
-  MoveObjectAndSlot(
-      IndirectPointerWriteBarrierDescriptor::ObjectRegister(),
-      IndirectPointerWriteBarrierDescriptor::SlotAddressRegister(), object,
-      offset);
-  li(IndirectPointerWriteBarrierDescriptor::IndirectPointerTagRegister(),
+  MoveObjectAndSlot(TrustedPointerWriteBarrierDescriptor::ObjectRegister(),
+                    TrustedPointerWriteBarrierDescriptor::SlotAddressRegister(),
+                    object, offset);
+  li(TrustedPointerWriteBarrierDescriptor::TrustedPointerTagRegister(),
      Operand(tag));
 
-  CallBuiltin(Builtins::IndirectPointerBarrier(fp_mode));
+  CallBuiltin(Builtins::TrustedPointerBarrier(fp_mode));
   MaybeRestoreRegisters(registers);
 }
 
@@ -730,9 +708,9 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
     DCHECK(!AreAliased(object, value, temp));
     AddWord(temp, object, offset);
 #ifdef V8_TARGET_ARCH_RISCV64
-    if (slot.contains_indirect_pointer()) {
-      LoadIndirectPointerField(temp, MemOperand(temp, 0),
-                               slot.indirect_pointer_tag());
+    if (slot.contains_trusted_pointer()) {
+      LoadTrustedPointerField(temp, MemOperand(temp, 0),
+                              slot.trusted_pointer_tag());
     } else {
       DCHECK(slot.contains_direct_pointer());
       LoadTaggedField(temp, MemOperand(temp, 0));
@@ -762,7 +740,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
     JumpIfSmi(value, &done);
   }
 
-  if (slot.contains_indirect_pointer()) {
+  if (slot.contains_trusted_pointer()) {
     // The indirect pointer write barrier is only enabled during marking.
     JumpIfNotMarking(&done);
   } else {
@@ -793,9 +771,9 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
     CallRecordWriteStub(object, slot_address, fp_mode,
                         StubCallMode::kCallBuiltinPointer);
   } else {
-    DCHECK(slot.contains_indirect_pointer());
-    CallIndirectPointerBarrier(object, offset, fp_mode,
-                               slot.indirect_pointer_tag());
+    DCHECK(slot.contains_trusted_pointer());
+    CallTrustedPointerBarrier(object, offset, fp_mode,
+                              slot.trusted_pointer_tag());
   }
   if (ra_status == kRAHasNotBeenSaved) {
     pop(ra);

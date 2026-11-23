@@ -11,7 +11,7 @@
 #include "src/objects/fixed-array.h"
 #include "src/objects/objects.h"
 #include "src/objects/struct.h"
-#include "src/objects/trusted-pointer.h"
+#include "src/sandbox/trusted-pointer.h"
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-limits.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -301,7 +301,6 @@ V8_OBJECT class CoverageInfo : public HeapObject {
   using Slot = CoverageInfoSlot;
 
   V8_TQ_CONST const int32_t slot_count_;
-  V8_TQ_TAIL_NAME(slots);
   V8_TQ_TAIL_LENGTH(slot_count);
   FLEXIBLE_ARRAY_MEMBER(CoverageInfoSlot, slots);
 } V8_OBJECT_END;

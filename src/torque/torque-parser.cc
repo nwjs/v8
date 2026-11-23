@@ -117,6 +117,12 @@ V8_EXPORT_PRIVATE const ParseResultTypeId ParseResultHolder<bool>::id =
 template <>
 V8_EXPORT_PRIVATE const ParseResultTypeId ParseResultHolder<int32_t>::id =
     ParseResultTypeId::kInt32;
+
+template <>
+V8_EXPORT_PRIVATE const ParseResultTypeId
+    ParseResultHolder<std::optional<int32_t>>::id =
+        ParseResultTypeId::kOptionalInt32;
+
 template <>
 V8_EXPORT_PRIVATE const ParseResultTypeId ParseResultHolder<double>::id =
     ParseResultTypeId::kDouble;
@@ -2269,7 +2275,8 @@ std::optional<ParseResult> MakeBitFieldDeclaration(
   auto name = child_results->NextAs<Identifier*>();
   auto type = child_results->NextAs<TypeExpression*>();
   auto num_bits = child_results->NextAs<int32_t>();
-  return ParseResult{BitFieldDeclaration{{name, type}, num_bits}};
+  auto offset = child_results->NextAs<std::optional<int32_t>>();
+  return ParseResult{BitFieldDeclaration{{name, type}, num_bits, offset}};
 }
 
 std::optional<ParseResult> ExtractAssignmentOperator(
@@ -2432,7 +2439,8 @@ struct TorqueGrammar : Grammar {
 
   // Result: std::string
   Symbol identifier = {Rule({Pattern(MatchIdentifier)}, YieldMatchedInput),
-                       Rule({Token("runtime")}, YieldMatchedInput)};
+                       Rule({Token("runtime")}, YieldMatchedInput),
+                       Rule({Token("type")}, YieldMatchedInput)};
 
   // Result: Identifier*
   Symbol name = {Rule({&identifier}, MakeIdentifier)};
@@ -2578,20 +2586,16 @@ struct TorqueGrammar : Grammar {
             Token(";")},
            MakeClassField)};
 
-  // Result: std::vector<ClassFieldExpression>
-  // Entry point for V8_TQ_TAIL_SECTIONS payloads; not reachable from
-  // `declaration`.
-  Symbol* classFieldList = List<ClassFieldExpression>(&classField);
-
   // Result: StructFieldExpression
   Symbol structField = {
       Rule({CheckIf(Token("const")), &name, Token(":"), &type, Token(";")},
            MakeStructField)};
 
   // Result: BitFieldDeclaration
-  Symbol bitFieldDeclaration = {Rule({&name, Token(":"), &type, Token(":"),
-                                      &int32Literal, Token("bit"), Token(";")},
-                                     MakeBitFieldDeclaration)};
+  Symbol bitFieldDeclaration = {Rule(
+      {&name, Token(":"), &type, Token(":"), &int32Literal, Token("bit"),
+       Optional<int32_t>(Sequence({Token("at"), &int32Literal})), Token(";")},
+      MakeBitFieldDeclaration)};
 
   // Result: ParameterList
   Symbol parameterListNoVararg = {
@@ -3006,18 +3010,6 @@ TypeExpression* ParseTorqueTypeExpression(const std::string& input) {
     ReportError("cannot parse Torque type expression: ", input);
   }
   return std::move(*result).Cast<TypeExpression*>();
-}
-
-std::vector<ClassFieldExpression> ParseTorqueClassFields(
-    const std::string& input) {
-  BuildFlags::Scope build_flags_scope;
-  TorqueGrammar& grammar = AnnotationGrammar();
-  std::optional<ParseResult> result = grammar.Parse(
-      grammar.classFieldList, input, CurrentSourcePosition::Get());
-  if (!result.has_value()) {
-    ReportError("cannot parse Torque field declarations: ", input);
-  }
-  return std::move(*result).Cast<std::vector<ClassFieldExpression>>();
 }
 
 Expression* ParseTorqueExpression(const std::string& input) {

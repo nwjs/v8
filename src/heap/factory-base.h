@@ -5,6 +5,7 @@
 #ifndef V8_HEAP_FACTORY_BASE_H_
 #define V8_HEAP_FACTORY_BASE_H_
 
+#include <algorithm>
 #include <string_view>
 
 #include "src/base/export-template.h"
@@ -19,8 +20,14 @@
 #ifndef V8_METAGEN_GENERATION_PASS
 // Forward declarations only, and generated after the metagen harvest
 // parses this header. The harvest reads class definitions, so nothing
-// it collects comes from here.
-#include "torque-generated/class-forward-declarations.h"
+// it collects comes from here. The checked-in copy under src/gen/ if
+// v8_use_checked_in_generated_headers, the generated header otherwise.
+// See src/gen/README.md.
+#ifdef V8_USE_CHECKED_IN_GENERATED_HEADERS
+#include "src/gen/intl-wasm/class-forward-declarations.h"  // IWYU pragma: export
+#else
+#include "torque-generated/class-forward-declarations.h"  // IWYU pragma: export, nogncheck
+#endif
 #endif
 
 namespace v8 {
@@ -303,6 +310,14 @@ class FactoryBase {
       base::Vector<const uint8_t> string, bool convert_encoding = false);
   Handle<InternalizedString> InternalizeString(
       base::Vector<const uint16_t> string, bool convert_encoding = false);
+  Handle<InternalizedString> InternalizeString(std::string_view str,
+                                               bool convert_encoding = false) {
+    DCHECK(std::all_of(str.begin(), str.end(), [](char c) {
+      return static_cast<unsigned char>(c) <= 0x7f;
+    }));
+    return InternalizeString(base::OneByteVector(str.data(), str.size()),
+                             convert_encoding);
+  }
 
   template <class StringTableKey>
   Handle<InternalizedString> InternalizeStringWithKey(StringTableKey* key);

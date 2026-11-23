@@ -12,6 +12,8 @@
 #include "src/codegen/script-details.h"
 #include "src/snapshot/serializer.h"
 #include "src/snapshot/snapshot-data.h"
+#include "src/snapshot/snapshot-source-sink.h"
+#include "src/snapshot/trusted-section-serializer.h"
 #include "src/utils/sha-256.h"
 
 namespace v8 {
@@ -146,8 +148,10 @@ class SerializedCodeData : public SerializedData {
       const ScriptDetails& script_details,
       SerializedCodeSanityCheckResult* rejection_result);
 
-  // Used when producing.
+  // Used when producing. The trusted section starts with the external
+  // references.
   SerializedCodeData(const std::vector<uint8_t>* untrusted_payload,
+                     const std::vector<uint8_t>* external_references_payload,
                      const std::vector<uint8_t>* trusted_payload,
                      const CodeSerializer* cs);
 
@@ -187,6 +191,10 @@ class CodeSerializer : public Serializer {
  public:
   using SourceHash = SerializedCodeData::SourceHash;
 
+  // The external pointer tags that a code cache may contain.
+  static constexpr ExternalPointerTag kSerializableExternalPointerTags[] = {
+      kExternalStringResourceTag};
+
   CodeSerializer(const CodeSerializer&) = delete;
   CodeSerializer& operator=(const CodeSerializer&) = delete;
   V8_EXPORT_PRIVATE static ScriptCompiler::CachedData* Serialize(
@@ -225,30 +233,22 @@ class CodeSerializer : public Serializer {
   void SerializeGeneric(Handle<HeapObject> heap_object, SlotType slot_type);
 
  private:
-  class TrustedSectionSerializer final : public Serializer {
-   public:
-    explicit TrustedSectionSerializer(Isolate* isolate)
-        : Serializer(isolate, Snapshot::kDefaultSerializerFlags) {}
-    ~TrustedSectionSerializer() override {
-      OutputStatistics("TrustedSectionSerializer");
-    }
-
-    void FinishSection() {
-      sink_.Put(kSynchronize, "EndOfTrustedSection");
-      Pad();
-    }
-
-   private:
-    void SerializeObjectImpl(Handle<HeapObject> o,
-                             SlotType slot_type) override {
-      UNREACHABLE();
-    }
-  };
-
   void SerializeObjectImpl(Handle<HeapObject> o, SlotType slot_type) override;
+  void SerializeDeferredObject(Handle<HeapObject> obj) override;
+  bool SerializeTrustedExport(Tagged<HeapObject> obj);
+  bool SerializeTrustedExternalReference(
+      ExternalReferenceEncoder::Value reference,
+      ExternalPointerTag tag) override;
   void FinishSection() {
     sink_.Put(kSynchronize, "EndOfUntrustedSection");
+    OptimizeBackReferences();
     Pad();
+  }
+  // Slices usually refer to the script source (e.g. debug magic comment
+  // values), which is an attached object: off-thread deserialization attaches
+  // a placeholder instead of the source.
+  bool SerializeSlicedStringsAsSequentialStrings() const override {
+    return true;
   }
 
   DISALLOW_GARBAGE_COLLECTION(no_gc_)

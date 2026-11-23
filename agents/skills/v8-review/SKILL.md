@@ -29,7 +29,7 @@ Call `invoke_subagent` ONCE with 8 entries (`TypeName: "self"`,
      direct `TrustedObject` refs in-sandbox; require `ExternalPointerTable`,
      `TrustedPointerTable`, `CodePointerTable`, `JSDispatchTable`, or
      `CppHeapPointerTable` with narrow tags (`ExternalPointerTag`,
-     `IndirectPointerTag`), and `ProtectedPointerSlot` between `TrustedObject`s.
+     `TrustedPointerTag`), and `ProtectedPointerSlot` between `TrustedObject`s.
      Never use `TrustedCast<T>` on untrusted or 1:N TPT-tagged inputs (use
      `SbxCast<T>` / `TryCast<T>`). Guard against **pointer-swap attacks** across
      same-tag handles: never assume a `TrustedObject` (`BytecodeArray`, `Code`,
@@ -69,7 +69,7 @@ Call `invoke_subagent` ONCE with 8 entries (`TypeName: "self"`,
      on the stack or raw `GarbageCollected<T>*` in heap objects (trace all
      `Member<T>` in `Trace(Visitor*)` and call `Base::Trace(visitor)`).
    - **Write barriers & heap invariants**: Missing `WriteBarrier`,
-     `CONDITIONAL_WRITE_BARRIER`, `IndirectPointerWriteBarrier`, or
+     `CONDITIONAL_WRITE_BARRIER`, `TrustedPointerWriteBarrier`, or
      `ProtectedPointerWriteBarrier`, unsafe `SKIP_WRITE_BARRIER`, `Smi` vs.
      `HeapObject` assumptions.
 
@@ -120,9 +120,11 @@ Call `invoke_subagent` ONCE with 8 entries (`TypeName: "self"`,
      analysis to check if the same bug pattern exists in sibling opcodes,
      builtins, reducers, or tiers.
    - **Optimization preservation & design**: Fix specific invariant flaws rather
-     than disabling fast paths wholesale; reuse existing helpers/passes; avoid
-     `#if V8_TARGET_ARCH_...` in shared code; flag edits to generated files
-     (`out/`) or unrelated drive-by refactors.
+     than disabling fast paths wholesale; reuse existing helpers/passes and
+     encapsulate state mutations on the owning class; keep headers lean (`.cc`
+     definitions for non-hot methods, `namespace {}` in `.cc` for helpers not
+     using `this`); avoid `#if V8_TARGET_ARCH_...` in shared code; flag edits to
+     generated files (`out/`) or unrelated drive-by refactors.
    - **API surface, flags & presubmit**: Swallowed errors or defensive
      workarounds instead of `CHECK`/`DCHECK`/`UNREACHABLE()` (never suggest
      defensive fallbacks that mask unexpected states or invariant violations),
@@ -157,11 +159,12 @@ Call `invoke_subagent` ONCE with 8 entries (`TypeName: "self"`,
    - **Boundary coverage**: Edge cases (`0`, `-0`, `NaN`, `INT32_MIN`,
      `INT32_MAX`, `UINT32_MAX`, `Smi` range, empty/max-size buffers or Wasm
      modules).
-   - **V8 test guidelines**: `assertEquals(expected, found)` order; never
+   - **V8 test guidelines**: Component-specific subdirectory over catch-all
+     `test/mjsunit/regress/`; `assertEquals(expected, found)` order; never
      include `d8.file.execute('test/mjsunit/mjsunit.js')`; minimal leaf flags
-     over `--fuzzing`/`--jit-fuzzing`; no hardcoded tier flags (`--no-liftoff`,
-     `--turboshaft`, `--maglev`) already covered by test variants unless testing
-     tier-up/OSR (`assertOptimized()` requires
+     over `--fuzzing`/`--jit-fuzzing`/`--experimental-fuzzing`; no hardcoded
+     tier flags (`--no-liftoff`, `--turboshaft`, `--maglev`) already covered by
+     test variants unless testing tier-up/OSR (`assertOptimized()` requires
      `--maglev`/`--turbolev`/`--turbofan`); `--allow-natives-syntax` with no
      space after `%` (`%Foo()`); `--stack-size=100` on stack-exhaustion tests;
      no CPU-burning warmup loops or fuzzer boilerplate (`__f_0`, `__v_0`,
@@ -170,14 +173,14 @@ Call `invoke_subagent` ONCE with 8 entries (`TypeName: "self"`,
 8. `style-comments`:
 
    - **V8 C++ style & presubmit**: Spell out types instead of `auto` unless
-     obvious or overly long; `const`-correctness and `std::forward`;
-     `base::bit_cast` (never `std::bit_cast`), `UNREACHABLE()`; V8 banned
-     constructs (`<regex>`, `std::mutex`, `absl::FunctionRef`, `dynamic_cast`,
-     exceptions, trailing whitespace); `-inl.h` rules (never
-     `#include "*-inl.h"` in normal `.h`; `foo-inl.h` must `#include "foo.h"`
-     first); `V8_NOEXCEPT` on copy/move constructors and assignment operators;
-     `{}` braces on all multi-line `if` statements; copyright header on new
-     files.
+     obvious or overly long; tight local variable scope (declared at first use);
+     `const`-correctness and `std::forward`; `base::bit_cast` (never
+     `std::bit_cast`), `UNREACHABLE()`; V8 banned constructs (`<regex>`,
+     `std::mutex`, `absl::FunctionRef`, `dynamic_cast`, exceptions, trailing
+     whitespace); `-inl.h` rules (never `#include "*-inl.h"` in normal `.h`;
+     `foo-inl.h` must `#include "foo.h"` first); `V8_NOEXCEPT` on copy/move
+     constructors and assignment operators; `{}` braces on all multi-line `if`
+     statements; copyright header on new files.
    - **Comments & readability**: Documenting class invariants and non-obvious
      rationale; updating stale adjacent comments contradicted by the diff;
      identifying pure code moves.
@@ -195,6 +198,11 @@ Instructions for every subagent:
   or relies on a pre-existing bug, or misses a bug variant in adjacent code,
   flag it anchored on the relevant modified line; if an issue exists in moved
   code, note that it is pre-existing).
+- Treat each test case (`TEST`, `UNINITIALIZED_TEST`, `TEST_F`, `TEST_P`) in
+  `test/cctest/`, `test/unittests/`, and `test/mjsunit/` as running in its own
+  isolated OS process (`tools/run-tests.py` runs one test per process/fork);
+  only flag static, global, or `v8_flags` state issues in those suites if they
+  cause a bug within a single test execution.
 - Send ONLY a JSON array (`[]` if clean):
   `[{"file": "src/...", "line": 123, "type": "security|bug|design|question|nit", "comment": "Issue, impact, and suggested fix.", "suggestion": "..."}]`
 
@@ -205,12 +213,13 @@ Instructions for every subagent:
    comments on unmodified lines (unless flagging a newly exposed bug or missed
    variant anchored to the diff).
 2. **Commit Message** (if reviewing a commit/CL): Verify factual accuracy
-   against the diff. Check `[subsystem] Imperative subject` (\<= 72 chars, no
-   period), concise body (\<= 10 lines, wrapped at \<= 72 chars, explaining
-   *why* and high-level *what*), CL references as `https://crrev.com/c/<number>`
-   (not git hashes), and trailers (`Bug: <id>` or `Fixed: <id>` with plain
-   numeric ID for Chromium or `b:<id>` for Buganizer, never `BUG=`; plus
-   `TAG=agy` and `R=<reviewer>@chromium.org` for agent-authored CLs).
+   against the diff. Check `[subsystem] Imperative subject` (\<= 64 chars,
+   aiming for ~50, no period), concise body (\<= 10 lines, wrapped at \<= 72
+   chars, explaining *why* and high-level *what*), CL references as
+   `https://crrev.com/c/<number>` (not git hashes), and trailers (`Bug: <id>` or
+   `Fixed: <id>` with plain numeric ID for Chromium or `b:<id>` for Buganizer,
+   never `BUG=`; plus `TAG=agy` and `R=<reviewer>@chromium.org` for
+   agent-authored CLs).
 3. **Deduplicate**: Merge overlapping comments on the same `file:line` (within 2
    lines) or the same root cause repeated across architectures/files. Keep \<=
    25 comments ordered by `security` > `bug` > `design` > `question` > `nit`.

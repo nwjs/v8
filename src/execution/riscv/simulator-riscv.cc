@@ -299,7 +299,7 @@ struct type_sew_t<128> {
 
 #define VX_SLIDE1DOWN_PARAMS(x, off)                                          \
   auto& vd = Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true);              \
-  if ((i + off) == rvv_vlmax()) {                                             \
+  if ((i + off) == rvv_vl()) {                                                \
     type_sew_t<x>::type src = (type_sew_t<x>::type)(get_register(rs1_reg())); \
     vd = src;                                                                 \
   } else {                                                                    \
@@ -319,7 +319,7 @@ struct type_sew_t<128> {
 
 #define VF_SLIDE1DOWN_PARAMS(x, offset)                                \
   auto& vd = Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true);       \
-  if ((i + offset) == rvv_vlmax()) {                                   \
+  if ((i + offset) == rvv_vl()) {                                      \
     auto src = base::bit_cast<type_sew_t<x>::type>(                    \
         get_fpu_register_Float##x(rs1_reg()).get_bits());              \
     vd = src;                                                          \
@@ -9482,7 +9482,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
       if (1) {
         std::cout << "Unrecognized instruction [@pc=0x" << std::hex
                   << registers_[pc] << "]: 0x" << instr->InstructionBits()
-                  << std::endl;
+                  << std::dec << std::endl;
       }
       UNSUPPORTED();
   }
@@ -9627,8 +9627,8 @@ void Simulator::PushShadowStack(uintptr_t value) {
     size_t new_size = old_size * 2;
     size_t new_ssp = new_size - old_size;
     auto new_stack = base::UniqueArray<uintptr_t>::New(new_size);
-    new_stack.as_vector().SubVectorFrom(new_ssp).OverwriteWith(
-        shadow_stack_.as_vector());
+    std::copy(shadow_stack_.begin(), shadow_stack_.end(),
+              new_stack.subspan(new_ssp).begin());
     shadow_stack_ = std::move(new_stack);
     csr_ssp_ = new_ssp;
   }
@@ -9711,7 +9711,7 @@ void Simulator::CallImpl(Address entry, CallArgument* args) {
               << " fa3 = 0x" << get_fpu_register(fa3) << " fa4 = 0x"
               << get_fpu_register(fa4) << " fa5 = 0x" << get_fpu_register(fa5)
               << " fa6 = 0x" << get_fpu_register(fa6) << " fa7 = 0x"
-              << get_fpu_register(fa7) << std::endl;
+              << get_fpu_register(fa7) << std::dec << std::endl;
   }
   // Remaining arguments passed on stack.
   int64_t original_stack = get_register(sp);
@@ -9754,7 +9754,7 @@ intptr_t Simulator::CallImpl(Address entry, int argument_count,
               << " a2 (func/target) = 0x" << get_register(a2)
               << " a3 (receiver) = 0x" << get_register(a3) << " a4 (argc) = 0x"
               << get_register(a4) << " a5 (argv) = 0x" << get_register(a5)
-              << std::endl;
+              << std::dec << std::endl;
   }
   // Remaining arguments passed on stack.
   sreg_t original_stack = get_register(sp);

@@ -4,6 +4,7 @@
 
 #include <optional>
 
+#include "src/base/bits.h"
 #include "src/base/unique-array.h"
 #include "src/builtins/builtins-inl.h"
 #include "src/builtins/data-view-ops.h"
@@ -121,7 +122,15 @@ RUNTIME_FUNCTION(Runtime_WasmWasmToJSObject) {
   HandleScope handle_scope(isolate);
   DCHECK_EQ(1, args.length());
   DirectHandle<Object> value(args[0], isolate);
-  return *wasm::WasmToJSObject(isolate, value);
+  return *wasm::WasmToJSObject(isolate, value, wasm::kUnshareStrings);
+}
+
+// Identical to Runtime_WasmWasmToJSObject, except it keeps shared strings.
+RUNTIME_FUNCTION(Runtime_WasmExternConvertAny) {
+  HandleScope handle_scope(isolate);
+  DCHECK_EQ(1, args.length());
+  DirectHandle<Object> value(args[0], isolate);
+  return *wasm::WasmToJSObject(isolate, value, wasm::kKeepSharedStrings);
 }
 
 // Parameters:
@@ -424,9 +433,7 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateFeedbackVector) {
 
 RUNTIME_FUNCTION(Runtime_WasmLiftoffDeoptFinish) {
   HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  DirectHandle<WasmTrustedInstanceData> trusted_instance_data(
-      TrustedCast<WasmTrustedInstanceData>(args[0]), isolate);
+  DCHECK_EQ(0, args.length());
   // Destroy the Deoptimizer object stored on the isolate.
   size_t deopt_frame_count = Deoptimizer::DeleteForWasm(isolate);
   size_t i = 0;
@@ -438,8 +445,11 @@ RUNTIME_FUNCTION(Runtime_WasmLiftoffDeoptFinish) {
   for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
     StackFrame* frame = it.frame();
     if (frame->is_wasm() && WasmFrame::cast(frame)->wasm_code()->is_liftoff()) {
+      WasmFrame* wasm_frame = WasmFrame::cast(frame);
+      DirectHandle<WasmTrustedInstanceData> trusted_instance_data(
+          wasm_frame->trusted_instance_data(), isolate);
       Address vector_address =
-          frame->fp() - WasmLiftoffFrameConstants::kFeedbackVectorOffset;
+          wasm_frame->fp() - WasmLiftoffFrameConstants::kFeedbackVectorOffset;
       Tagged<Object> feedback_slot_value(Memory<intptr_t>(vector_address));
       CHECK(feedback_slot_value.IsSmi());
       int declared_func_index = Cast<Smi>(feedback_slot_value).value();
@@ -1026,6 +1036,7 @@ bool ExecuteWasmDebugBreaks(
     DCHECK(!trusted_instance_data->break_on_entry());
     if (!maybe_on_entry_breakpoints.is_null()) {
       isolate->debug()->OnInstrumentationBreak();
+      if (isolate->debug()->IsRestartFrameScheduled()) return true;
       paused_on_instrumentation = true;
     }
   }
@@ -1077,6 +1088,10 @@ RUNTIME_FUNCTION(Runtime_WasmDebugBreak) {
     // function).
     auto* debug_info = trusted_data->native_module()->GetDebugInfo();
     debug_info->ClearStepping(frame);
+  }
+
+  if (isolate->debug()->IsRestartFrameScheduled()) {
+    return isolate->TerminateExecution();
   }
 
   // Execute a stack check before leaving this function. This is to handle any
@@ -1164,13 +1179,14 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateDescriptorStruct) {
 
 RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
   HandleScope scope(isolate);
-  DCHECK_EQ(5, args.length());
+  DCHECK_EQ(6, args.length());
   DirectHandle<WasmTrustedInstanceData> trusted_instance_data(
       TrustedCast<WasmTrustedInstanceData>(args[0]), isolate);
-  uint32_t segment_index = args.positive_smi_value_at(1);
-  uint32_t offset = args.positive_smi_value_at(2);
-  uint32_t length = args.positive_smi_value_at(3);
-  DirectHandle<Map> rtt(Cast<Map>(args[4]), isolate);
+  bool is_numeric = args.positive_smi_value_at(1) == 0;
+  uint32_t segment_index = args.positive_smi_value_at(2);
+  uint32_t offset = args.positive_smi_value_at(3);
+  uint32_t length = args.positive_smi_value_at(4);
+  DirectHandle<Map> rtt(Cast<Map>(args[5]), isolate);
 
   Tagged<WasmTypeInfo> type_info = rtt->wasm_type_info();
   wasm::CanonicalValueType element_type = type_info->element_type();
@@ -1184,8 +1200,9 @@ RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
     return ThrowWasmError(isolate, MessageTemplate::kWasmTrapArrayTooLarge);
   }
 
-  if (element_type.is_numeric()) {
-    // No chance of overflow due to the check above.
+  if (is_numeric) {
+    DCHECK(element_type.is_numeric());
+    // No chance of overflow due to the check a few lines above.
     uint32_t length_in_bytes = length * element_size;
 
     wasm::WireBytesRef segment_source =
@@ -1202,6 +1219,7 @@ RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
     return *isolate->factory()->NewWasmArrayFromMemory(length, rtt, allocation,
                                                        element_type, source);
   } else {
+    DCHECK(element_type.is_ref());
     DirectHandle<Object> elem_segment_raw(
         trusted_instance_data->element_segments()->get(segment_index), isolate);
     const wasm::WasmElemSegment* module_elem_segment =
@@ -1234,12 +1252,13 @@ namespace {
 DISABLE_TSAN Tagged<Object> WasmArrayInitSegmentImpl(
     Isolate* isolate,
     DirectHandle<WasmTrustedInstanceData> trusted_instance_data,
-    uint32_t segment_index, DirectHandle<WasmArray> array, uint32_t array_index,
-    uint32_t segment_offset, uint32_t length) {
+    bool is_numeric, uint32_t segment_index, DirectHandle<WasmArray> array,
+    uint32_t array_index, uint32_t segment_offset, uint32_t length) {
   wasm::CanonicalValueType element_type =
       array->map()->wasm_type_info()->element_type();
 
-  if (element_type.is_numeric()) {
+  if (is_numeric) {
+    DCHECK(element_type.is_numeric());
     if (!base::IsInBounds<uint32_t>(array_index, length, array->length())) {
       return ThrowWasmError(isolate,
                             MessageTemplate::kWasmTrapArrayOutOfBounds);
@@ -1270,6 +1289,7 @@ DISABLE_TSAN Tagged<Object> WasmArrayInitSegmentImpl(
 #endif
     return *isolate->factory()->undefined_value();
   } else {
+    DCHECK(element_type.is_ref());
     DirectHandle<Object> elem_segment_raw(
         trusted_instance_data->element_segments()->get(segment_index), isolate);
     const wasm::WasmElemSegment* module_elem_segment =
@@ -1314,16 +1334,18 @@ DISABLE_TSAN Tagged<Object> WasmArrayInitSegmentImpl(
 
 RUNTIME_FUNCTION(Runtime_WasmArrayInitSegment) {
   HandleScope scope(isolate);
-  DCHECK_EQ(6, args.length());
+  DCHECK_EQ(7, args.length());
   DirectHandle<WasmTrustedInstanceData> trusted_instance_data(
       TrustedCast<WasmTrustedInstanceData>(args[0]), isolate);
-  uint32_t segment_index = args.positive_smi_value_at(1);
-  DirectHandle<WasmArray> array(Cast<WasmArray>(args[2]), isolate);
-  uint32_t array_index = args.positive_smi_value_at(3);
-  uint32_t segment_offset = args.positive_smi_value_at(4);
-  uint32_t length = args.positive_smi_value_at(5);
-  return WasmArrayInitSegmentImpl(isolate, trusted_instance_data, segment_index,
-                                  array, array_index, segment_offset, length);
+  bool is_numeric = args.positive_smi_value_at(1) == 0;
+  uint32_t segment_index = args.positive_smi_value_at(2);
+  DirectHandle<WasmArray> array(Cast<WasmArray>(args[3]), isolate);
+  uint32_t array_index = args.positive_smi_value_at(4);
+  uint32_t segment_offset = args.positive_smi_value_at(5);
+  uint32_t length = args.positive_smi_value_at(6);
+  return WasmArrayInitSegmentImpl(isolate, trusted_instance_data, is_numeric,
+                                  segment_index, array, array_index,
+                                  segment_offset, length);
 }
 
 // Allocate a new suspender, and prepare for stack switching by updating the
@@ -1500,8 +1522,6 @@ class PrototypesSetup : public wasm::Decoder {
         return ReadOnlyRoots(isolate()).exception();
       }
 
-      bool fast_path = CheckFastPathEligibility(prototype);
-
       uint32_t has_constructor = consume_u32v("constructor");
       if (!ok()) break;
 
@@ -1569,13 +1589,40 @@ class PrototypesSetup : public wasm::Decoder {
                 "too many methods in configureAll")));
         return ReadOnlyRoots(isolate()).exception();
       }
+      // Important: installing {constructor} on {constructors} can invoke
+      // user code. Only determine fast path eligibility after that.
+      bool fast_path = false;
       DirectHandle<NameDictionary> dictionary;
       if (!prototype_is_null) {
         if (IsJSObject(*prototype)) {
           DirectHandle<JSObject> proto = Cast<JSObject>(prototype);
+          if (!proto->map()->is_prototype_map()) {
+            // Important for correctness: switch to a non-shared map.
+            // Important for performance: switch to dictionary mode.
+            JSObject::OptimizeAsPrototype(proto);
+          } else {
+            // Prepare the fast path by invalidating any ICs that might already
+            // rely on this prototype.
+            JSObject::InvalidatePrototypeChains(proto->map());
+          }
           ToDictionaryMode(proto, num_methods);
-          if (fast_path) {
+          DisallowGarbageCollection using_plain_tagged_values;
+          Tagged<Map> map = proto->map();
+          if (map->instance_type() == JS_OBJECT_TYPE) {
+            if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
+              // Support for swiss name dictionaries isn't implemented here yet.
+              UNIMPLEMENTED();
+            }
+            // JS_OBJECT_TYPE implies no access checks or interceptors.
+            DCHECK(!map->is_access_check_needed());
+            DCHECK(!map->has_indexed_interceptor());
+            DCHECK(!map->has_named_interceptor());
+            DCHECK(!IsJSGlobalObject(*proto));
+            DCHECK(map->is_dictionary_map());
             dictionary = handle(proto->property_dictionary(), isolate_);
+            if (map->is_extensible() && dictionary->NumberOfElements() == 0) {
+              fast_path = true;
+            }
           }
         }
       } else if (num_methods > 0) {
@@ -1604,8 +1651,7 @@ class PrototypesSetup : public wasm::Decoder {
         context->SetNoCell(wasm::kMethodWrapperContextSlot, *function);
         function =
             Factory::JSFunctionBuilder{isolate_, method_wrapper(), context}
-                .set_map(
-                    isolate_->strict_function_with_readonly_prototype_map())
+                .set_map(isolate_->function_with_readonly_prototype_map())
                 .Build();
         // For nicer stack traces, we could call
         //   JSFunction::SetName(..., function, name, ...);
@@ -1613,7 +1659,7 @@ class PrototypesSetup : public wasm::Decoder {
         // to hide the wrappers on stack traces instead.
         // Note to our future selves: if we wanted names, the most performant
         // way would likely be to add a pre-created
-        //   strict_function_with_NAME_AND_readonly_prototype_map
+        //   function_with_NAME_AND_readonly_prototype_map
         // and use that for these wrappers, to avoid needing individual SFIs
         // for storing their names.
 
@@ -1712,11 +1758,10 @@ class PrototypesSetup : public wasm::Decoder {
     if (HasMorePrototypes()) error("unconsumed prototypes");
     if (more()) error("unconsumed data");
     if (!ok()) {
-      DirectHandle<String> message =
-          isolate()
-              ->factory()
-              ->NewStringFromUtf8(base::VectorOf(error().message()))
-              .ToHandleChecked();
+      DirectHandle<String> message = isolate()
+                                         ->factory()
+                                         ->NewStringFromUtf8(error().message())
+                                         .ToHandleChecked();
       DirectHandle<JSObject> error = isolate()->factory()->NewError(
           isolate()->wasm_runtime_error_function(), message);
       return isolate()->Throw(*error);
@@ -1776,17 +1821,7 @@ class PrototypesSetup : public wasm::Decoder {
           ThrowWasmError(isolate_, MessageTemplate::kWasmTrapIllegalCast);
           return {};
         }
-        DirectHandle<JSObject> proto = Cast<JSObject>(heap_proto);
-        if (!proto->map()->is_prototype_map()) {
-          // Important for correctness: switch to a non-shared map.
-          // Important for performance: switch to dictionary mode.
-          JSObject::OptimizeAsPrototype(proto);
-        } else {
-          // Prepare the fast path by invalidating any ICs that might already
-          // rely on this prototype.
-          JSObject::InvalidatePrototypeChains(proto->map());
-        }
-        return proto;
+        return Cast<JSObject>(heap_proto);
       }
       if (IsJSReceiver(*heap_proto)) {
         return Cast<JSReceiver>(heap_proto);
@@ -1860,7 +1895,7 @@ class PrototypesSetup : public wasm::Decoder {
     sfi->set_language_mode(LanguageMode::kStrict);
     DirectHandle<JSFunction> constructor =
         Factory::JSFunctionBuilder{isolate_, sfi, context}
-            .set_map(isolate_->strict_function_with_readonly_prototype_map())
+            .set_map(isolate_->function_with_readonly_prototype_map())
             .Build();
     constructor->set_prototype_or_initial_map(*prototype, kReleaseStore);
 
@@ -1888,33 +1923,6 @@ class PrototypesSetup : public wasm::Decoder {
       return {};
     }
     return constructor;
-  }
-
-  // Fast path, skipping the LookupIterator.
-  bool CheckFastPathEligibility(DirectHandle<JSReceiver> prototype) {
-    if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
-      // Support for swiss name dictionaries isn't implemented here yet.
-      UNIMPLEMENTED();
-    }
-    if (prototype.is_null()) return false;
-    Tagged<Map> map = prototype->map();
-    if (map->instance_type() != JS_OBJECT_TYPE) return false;
-    if (!map->is_extensible()) return false;
-    // JS_OBJECT_TYPE implies no access checks or interceptors.
-    DCHECK(!map->is_access_check_needed());
-    DCHECK(!map->has_indexed_interceptor());
-    DCHECK(!map->has_named_interceptor());
-    DCHECK(!IsJSGlobalObject(*prototype));
-    if (map->is_dictionary_map()) {
-      if (Cast<JSObject>(prototype)
-              ->property_dictionary()
-              ->NumberOfElements() != 0) {
-        return false;
-      }
-    } else {
-      if (map->NumberOfOwnDescriptors() != 0) return false;
-    }
-    return true;
   }
 
   bool MayBeArrayIndex(base::Vector<const uint8_t> name) {
@@ -2179,8 +2187,8 @@ RUNTIME_FUNCTION(Runtime_WasmConfigureAllPrototypes) {
         reinterpret_cast<const uint8_t*>(data->ElementAddress(0)), length);
   }
 
-  PrototypesSetup_Arrays decoder(isolate, immovable_data.as_vector(),
-                                 prototypes, functions);
+  PrototypesSetup_Arrays decoder(isolate, immovable_data.as_span(), prototypes,
+                                 functions);
   return decoder.SetupPrototypes(constructors);
 }
 
@@ -2767,21 +2775,16 @@ RUNTIME_FUNCTION(Runtime_WasmStringEncodeWtf16) {
     return ThrowWasmError(isolate, MessageTemplate::kWasmTrapUnalignedAccess);
   }
 
-#if defined(V8_TARGET_LITTLE_ENDIAN)
   uint16_t* dst = reinterpret_cast<uint16_t*>(
       trusted_instance_data->memory_base(memory) + offset);
   String::WriteToFlat(string, dst, start, length);
+#if defined(V8_TARGET_BIG_ENDIAN)
+  for (uint32_t i = 0; i < length; i++) {
+    dst[i] = base::bits::ByteReverse16(dst[i]);
+  }
+#endif
 
   return Smi::zero();  // Unused.
-#elif defined(V8_TARGET_BIG_ENDIAN)
-  // TODO(12868): The host is big-endian but we need to write the string
-  // contents as little-endian.
-  USE(string);
-  USE(start);
-  UNIMPLEMENTED();
-#else
-#error Unknown endianness
-#endif
 }
 
 RUNTIME_FUNCTION(Runtime_WasmStringAsWtf8) {
@@ -2997,9 +3000,16 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateContinuation) {
   alignment = RoundUp(alignment, 2 * kSystemPointerSize);
 #endif
   stack->jmpbuf()->fp = kNullAddress;
-  stack->jmpbuf()->sp = RoundDown(stack->base() - arg_buffer_size, alignment);
-  Address arg_buffer = stack->jmpbuf()->sp;
+  Address arg_buffer = RoundDown(stack->base() - arg_buffer_size, alignment);
   stack->set_arg_buffer(arg_buffer);
+  stack->jmpbuf()->sp = arg_buffer;
+#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32
+  // Return address slot. The wrapper returns by switching to the parent
+  // jump buffer and does not actually use this slot, but it is read by the
+  // profiler.
+  stack->jmpbuf()->sp -= kSystemPointerSize;
+  base::Memory<Address>(stack->jmpbuf()->sp) = kNullAddress;
+#endif
   stack->jmpbuf()->state = wasm::JumpBuffer::Suspended;
   stack->jmpbuf()->stack_limit = stack->jslimit();
   stack->jmpbuf()->is_on_central_stack = false;

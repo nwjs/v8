@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <memory>
 
-#include "src/base/fpu.h"
+#include "src/base/container-utils.h"
 #include "src/base/logging.h"
 #include "src/base/numerics/safe_conversions.h"
 #include "src/base/platform/elapsed-timer.h"
@@ -18,7 +18,7 @@
 #include "src/handles/maybe-handles.h"
 #include "src/handles/persistent-handles.h"
 #include "src/heap/heap-inl.h"
-#include "src/heap/parked-scope.h"
+#include "src/heap/parked-scope-inl.h"
 #include "src/logging/counters-scopes.h"
 #include "src/logging/log.h"
 #include "src/logging/runtime-call-stats-scope.h"
@@ -27,6 +27,8 @@
 #include "src/objects/slots.h"
 #include "src/objects/string-inl.h"
 #include "src/objects/visitors.h"
+#include "src/sandbox/check.h"
+#include "src/sandbox/sandbox.h"
 #include "src/snapshot/object-deserializer.h"
 #include "src/snapshot/snapshot-utils.h"
 #include "src/snapshot/snapshot.h"
@@ -50,7 +52,7 @@ AlignedCachedData::AlignedCachedData(const uint8_t* data, int length)
 CodeSerializer::CodeSerializer(Isolate* isolate, SourceHash source_hash)
     : Serializer(isolate, Snapshot::kDefaultSerializerFlags),
       source_hash_(source_hash),
-      trusted_serializer_(isolate) {}
+      trusted_serializer_(isolate, this) {}
 
 // static
 ScriptCompiler::CachedData* CodeSerializer::Serialize(
@@ -111,36 +113,101 @@ AlignedCachedData* CodeSerializer::SerializeSharedFunctionInfo(
   VisitRootPointer(Root::kHandleScope, nullptr,
                    FullObjectSlot(info.location()));
   SerializeDeferredObjects();
+  trusted_serializer_.SerializeExports();
   trusted_serializer_.FinishSection();
   FinishSection();
 
-  SerializedCodeData data(Payload(), trusted_serializer_.Payload(), this);
+  SerializedCodeData data(Payload(),
+                          trusted_serializer_.ExternalReferencesPayload(),
+                          trusted_serializer_.Payload(), this);
 
   return data.GetScriptData();
 }
 
+// The untrusted section can only reach exposed trusted objects, and exports
+// all of them. Which trusted objects a code cache may contain is decided by
+// SERIALIZABLE_TRUSTED_OBJECT_MAP_ROOT_LIST (see Serializer::PutRoot).
+bool CodeSerializer::SerializeTrustedExport(Tagged<HeapObject> obj) {
+  if (!V8_ENABLE_SANDBOX_BOOL || !IsExposedTrustedObject(obj)) return false;
+  if (v8_flags.trace_serializer) {
+    PrintF(" Encoding trusted export reference to: ");
+    ShortPrint(obj);
+    PrintF("\n");
+  }
+  sink_.Put(kTrustedExportRef, "TrustedExportRef");
+  sink_.PutUint30(trusted_serializer_.Export(obj), "TrustedExportIndex");
+  return true;
+}
+
+// The untrusted section must not contain external pointers or their tags, so
+// it refers to them by index into a table in the trusted section.
+bool CodeSerializer::SerializeTrustedExternalReference(
+    ExternalReferenceEncoder::Value reference, ExternalPointerTag tag) {
+  // The tag is read from the external pointer table entry that an in-sandbox
+  // object refers to, so it can be the tag of any entry.
+  SBXCHECK(base::contains(kSerializableExternalPointerTags, tag));
+  sink_.Put(kTrustedExternalRef, "TrustedExternalRef");
+  sink_.PutUint30(trusted_serializer_.AddExternalReference(reference, tag),
+                  "TrustedExternalRefIndex");
+  return true;
+}
+
 void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
                                          SlotType slot_type) {
-  ReadOnlyRoots roots(isolate());
+  // NOTE(mmarchini): If we try to serialize an InterpreterData our process
+  // will crash since it stores a code object. Instead, we serialize the
+  // bytecode array stored within the InterpreterData, which is the important
+  // information. On deserialization we'll create our code objects again, if
+  // --interpreted-frames-native-stack is on. See v8:9122 for more context
+  if (V8_UNLIKELY(isolate()->interpreted_frames_native_stack()) &&
+      IsInterpreterData(*obj)) {
+    SBXCHECK(OutsideSandbox(obj->address()));
+    obj =
+        handle(TrustedCast<InterpreterData>(*obj)->bytecode_array(), isolate());
+  }
+
   InstanceType instance_type;
   {
     DisallowGarbageCollection no_gc;
     Tagged<HeapObject> raw = *obj;
-    if (SerializeHotObject(raw)) return;
+    if (SerializeTrustedExport(raw)) return;
     if (SerializeRoot(raw)) return;
-    if (SerializeBackReference(raw)) return;
     if (SerializeReadOnlyObjectReference(raw, &sink_)) return;
+    if (SerializeBackReference(raw)) return;
+    DCHECK(!trusted_serializer_.ReferenceMapContains(obj));
 
     instance_type = raw->map()->instance_type();
     CHECK(!InstanceTypeChecker::IsInstructionStream(instance_type));
   }
 
+  // Past this point we should not see any (context-specific) maps anymore.
+  CHECK(!InstanceTypeChecker::IsMap(instance_type));
+  // There should be no references to the global object embedded.
+  CHECK(!InstanceTypeChecker::IsJSGlobalProxy(instance_type) &&
+        !InstanceTypeChecker::IsJSGlobalObject(instance_type));
+  // Embedded FixedArrays that need rehashing must support rehashing.
+  CHECK_IMPLIES(obj->NeedsRehashing(), obj->CanBeRehashed());
+  // We expect no instantiated function objects or contexts.
+  CHECK(!InstanceTypeChecker::IsJSFunction(instance_type) &&
+        !InstanceTypeChecker::IsContext(instance_type));
+
+  SerializeGeneric(obj, slot_type);
+}
+
+void CodeSerializer::SerializeDeferredObject(Handle<HeapObject> obj) {
+  SerializeGeneric(obj, SlotType::kAnySlot);
+}
+
+void CodeSerializer::SerializeGeneric(Handle<HeapObject> heap_object,
+                                      SlotType slot_type) {
+  ReadOnlyRoots roots(isolate());
+  InstanceType instance_type = heap_object->map()->instance_type();
   if (InstanceTypeChecker::IsScript(instance_type)) {
     DirectHandle<FixedArray> host_options;
     DirectHandle<UnionOf<Smi, Symbol, Undefined>> context_data;
     {
       DisallowGarbageCollection no_gc;
-      Tagged<Script> script_obj = Cast<Script>(*obj);
+      Tagged<Script> script_obj = Cast<Script>(*heap_object);
       DCHECK(!script_obj->has_eval_origin());
       // We want to differentiate between undefined and uninitialized_symbol for
       // context_data for now. It is hack to allow debugging for scripts that
@@ -159,10 +226,13 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
           direct_handle(script_obj->host_defined_options(), isolate());
       script_obj->set_host_defined_options(roots.empty_fixed_array());
     }
-    SerializeGeneric(obj, slot_type);
+    {
+      ObjectSerializer serializer(this, heap_object, &sink_);
+      serializer.Serialize(slot_type);
+    }
     {
       DisallowGarbageCollection no_gc;
-      Tagged<Script> script_obj = Cast<Script>(*obj);
+      Tagged<Script> script_obj = Cast<Script>(*heap_object);
       script_obj->set_host_defined_options(*host_options);
       script_obj->set_context_data(*context_data);
     }
@@ -173,7 +243,7 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
     bool restore_bytecode = false;
     {
       DisallowGarbageCollection no_gc;
-      Tagged<SharedFunctionInfo> sfi = Cast<SharedFunctionInfo>(*obj);
+      Tagged<SharedFunctionInfo> sfi = Cast<SharedFunctionInfo>(*heap_object);
       DCHECK(!sfi->IsApiFunction());
 
       if (auto maybe_debug_info = sfi->TryGetDebugInfo(isolate())) {
@@ -193,9 +263,12 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
         }
       }
     }
-    SerializeGeneric(obj, slot_type);
+    {
+      ObjectSerializer serializer(this, heap_object, &sink_);
+      serializer.Serialize(slot_type);
+    }
     DisallowGarbageCollection no_gc;
-    Tagged<SharedFunctionInfo> sfi = Cast<SharedFunctionInfo>(*obj);
+    Tagged<SharedFunctionInfo> sfi = Cast<SharedFunctionInfo>(*heap_object);
     if (restore_bytecode) {
       sfi->SetActiveBytecodeArray(debug_info->debug_bytecode_array(),
                                   isolate());
@@ -205,30 +278,12 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
       sfi->set_cached_tiering_decision(cached_tiering_decision);
     }
     return;
-  } else if (InstanceTypeChecker::IsUncompiledDataWithoutPreparseDataWithJob(
-                 instance_type)) {
-    Handle<UncompiledDataWithoutPreparseDataWithJob> data =
-        TrustedCast<UncompiledDataWithoutPreparseDataWithJob>(obj);
-    Address job = data->job();
-    data->set_job(kNullAddress);
-    SerializeGeneric(data, slot_type);
-    data->set_job(job);
-    return;
-  } else if (InstanceTypeChecker::IsUncompiledDataWithPreparseDataAndJob(
-                 instance_type)) {
-    Handle<UncompiledDataWithPreparseDataAndJob> data =
-        TrustedCast<UncompiledDataWithPreparseDataAndJob>(obj);
-    Address job = data->job();
-    data->set_job(kNullAddress);
-    SerializeGeneric(data, slot_type);
-    data->set_job(job);
-    return;
   } else if (InstanceTypeChecker::IsScopeInfo(instance_type)) {
     // TODO(ishell): define a dedicated instance type for DependentCode and
     // serialize DependentCode objects as an empty_dependent_code instead
     // of customizing ScopeInfo serialization.
     static_assert(DEPENDENT_CODE_TYPE == WEAK_ARRAY_LIST_TYPE);
-    Handle<ScopeInfo> scope_info = Cast<ScopeInfo>(obj);
+    Handle<ScopeInfo> scope_info = Cast<ScopeInfo>(heap_object);
     DirectHandle<DependentCode> dependent_code;
     bool restore_dependent_code = false;
     if (scope_info->SloppyEvalCanExtendVars()) {
@@ -243,40 +298,16 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
         scope_info->set_dependent_code(empty_dependent_code);
       }
     }
-    SerializeGeneric(scope_info, slot_type);
+    {
+      ObjectSerializer serializer(this, scope_info, &sink_);
+      serializer.Serialize(slot_type);
+    }
     if (restore_dependent_code) {
       scope_info->set_dependent_code(*dependent_code);
     }
     return;
   }
 
-  // NOTE(mmarchini): If we try to serialize an InterpreterData our process
-  // will crash since it stores a code object. Instead, we serialize the
-  // bytecode array stored within the InterpreterData, which is the important
-  // information. On deserialization we'll create our code objects again, if
-  // --interpreted-frames-native-stack is on. See v8:9122 for more context
-  if (V8_UNLIKELY(isolate()->interpreted_frames_native_stack()) &&
-      IsInterpreterData(*obj)) {
-    obj =
-        handle(TrustedCast<InterpreterData>(*obj)->bytecode_array(), isolate());
-  }
-
-  // Past this point we should not see any (context-specific) maps anymore.
-  CHECK(!InstanceTypeChecker::IsMap(instance_type));
-  // There should be no references to the global object embedded.
-  CHECK(!InstanceTypeChecker::IsJSGlobalProxy(instance_type) &&
-        !InstanceTypeChecker::IsJSGlobalObject(instance_type));
-  // Embedded FixedArrays that need rehashing must support rehashing.
-  CHECK_IMPLIES(obj->NeedsRehashing(), obj->CanBeRehashed());
-  // We expect no instantiated function objects or contexts.
-  CHECK(!InstanceTypeChecker::IsJSFunction(instance_type) &&
-        !InstanceTypeChecker::IsContext(instance_type));
-
-  SerializeGeneric(obj, slot_type);
-}
-
-void CodeSerializer::SerializeGeneric(Handle<HeapObject> heap_object,
-                                      SlotType slot_type) {
   // Object has not yet been serialized.  Serialize it here.
   ObjectSerializer serializer(this, heap_object, &sink_);
   serializer.Serialize(slot_type);
@@ -335,17 +366,16 @@ void CreateInterpreterDataForDeserializedCode(
   }
 }
 
-class StressOffThreadDeserializeThread final : public base::Thread {
+class StressOffThreadDeserializeThread final : public ParkingThread {
  public:
   explicit StressOffThreadDeserializeThread(Isolate* isolate,
                                             AlignedCachedData* cached_data)
-      : Thread(
+      : ParkingThread(
             base::Thread::Options("StressOffThreadDeserializeThread", 2 * MB)),
         isolate_(isolate),
         cached_data_(cached_data) {}
 
   void Run() final {
-    base::FlushDenormalsScope denormals_scope(isolate_->flush_denormals());
     LocalIsolate local_isolate(isolate_, ThreadKind::kBackground);
     UnparkedScope unparked_scope(&local_isolate);
     LocalHandleScope handle_scope(&local_isolate);
@@ -484,7 +514,7 @@ MaybeDirectHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
   if (v8_flags.stress_background_compile) {
     StressOffThreadDeserializeThread thread(isolate, cached_data);
     CHECK(thread.Start());
-    thread.Join();
+    thread.ParkedJoin(isolate->main_thread_local_isolate());
     return thread.Finalize(isolate, source, script_details);
     // TODO(leszeks): Compare off-thread deserialized data to on-thread.
   }
@@ -738,10 +768,12 @@ CodeSerializer::FinishOffThreadDeserialize(
 
 SerializedCodeData::SerializedCodeData(
     const std::vector<uint8_t>* untrusted_payload,
+    const std::vector<uint8_t>* external_references_payload,
     const std::vector<uint8_t>* trusted_payload, const CodeSerializer* cs) {
   DisallowGarbageCollection no_gc;
 
-  size_t trusted_length = trusted_payload->size();
+  size_t trusted_length =
+      external_references_payload->size() + trusted_payload->size();
   size_t payload_length = trusted_length + untrusted_payload->size();
 
   // Calculate sizes.
@@ -775,7 +807,10 @@ SerializedCodeData::SerializedCodeData(
               0);
 
   // Copy serialized data.
-  CopyBytes(data_ + kHeaderSize, trusted_payload->data(), trusted_length);
+  CopyBytes(data_ + kHeaderSize, external_references_payload->data(),
+            external_references_payload->size());
+  CopyBytes(data_ + kHeaderSize + external_references_payload->size(),
+            trusted_payload->data(), trusted_payload->size());
   CopyBytes(data_ + kHeaderSize + trusted_length, untrusted_payload->data(),
             untrusted_payload->size());
   uint32_t checksum =

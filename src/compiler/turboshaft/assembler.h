@@ -2953,14 +2953,15 @@ class AssemblerOpInterface : public Next {
 
   // Load a trusted (indirect) pointer. Returns Smi or ExposedTrustedObject.
   V<Object> LoadTrustedPointer(V<HeapObject> base, LoadOp::Kind kind,
-                               IndirectPointerTagRange tag_range, int offset) {
+                               TrustedPointerTagRange tag_range, int offset) {
 #if V8_ENABLE_SANDBOX
     static_assert(COMPRESS_POINTERS_BOOL);
+    V<WordPtr> table_address =
+        IsolateField(IsolateFieldId::kTrustedPointerTable);
     V<WordPtr> table =
-        Load(LoadRootRegister(), LoadOp::Kind::RawAligned().Immutable(),
+        Load(table_address, LoadOp::Kind::RawAligned().Immutable(),
              MemoryRepresentation::UintPtr(),
-             IsolateData::trusted_pointer_table_offset() +
-                 Internals::kExternalEntityTableBasePointerOffset);
+             Internals::kExternalEntityTableBasePointerOffset);
     return LoadTrustedPointer(base, table, kind, tag_range, offset);
 #else
     return Load(base, kind, MemoryRepresentation::TaggedPointer(), offset);
@@ -2970,7 +2971,7 @@ class AssemblerOpInterface : public Next {
 #if V8_ENABLE_SANDBOX
   V<Object> LoadTrustedPointer(V<HeapObject> base, V<WordPtr> table,
                                LoadOp::Kind kind,
-                               IndirectPointerTagRange tag_range,
+                               TrustedPointerTagRange tag_range,
                                int32_t offset) {
     return ReduceIfReachableLoadTrustedPointer(base, table, kind, tag_range,
                                                offset);
@@ -3101,31 +3102,31 @@ class AssemblerOpInterface : public Next {
       std::optional<AtomicMemoryOrder> memory_order, int32_t offset = 0,
       uint8_t element_size_log2 = 0,
       bool maybe_initializing_or_transitioning = false,
-      IndirectPointerTag maybe_indirect_pointer_tag = kIndirectPointerNullTag) {
+      TrustedPointerTag maybe_trusted_pointer_tag = kTrustedPointerNullTag) {
     DCHECK_EQ(kind.is_atomic, memory_order.has_value());
     ReduceIfReachableStore(base, index, value, kind, stored_rep, write_barrier,
                            memory_order, offset, element_size_log2,
                            maybe_initializing_or_transitioning,
-                           maybe_indirect_pointer_tag);
+                           maybe_trusted_pointer_tag);
   }
   void Store(
       OpIndex base, OptionalOpIndex index, OpIndex value, StoreOp::Kind kind,
       MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
       int32_t offset = 0, uint8_t element_size_log2 = 0,
       bool maybe_initializing_or_transitioning = false,
-      IndirectPointerTag maybe_indirect_pointer_tag = kIndirectPointerNullTag) {
+      TrustedPointerTag maybe_trusted_pointer_tag = kTrustedPointerNullTag) {
     Store(base, index, value, kind, stored_rep, write_barrier, std::nullopt,
           offset, element_size_log2, maybe_initializing_or_transitioning,
-          maybe_indirect_pointer_tag);
+          maybe_trusted_pointer_tag);
   }
   void Store(
       OpIndex base, OpIndex value, StoreOp::Kind kind,
       MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
       int32_t offset = 0, bool maybe_initializing_or_transitioning = false,
-      IndirectPointerTag maybe_indirect_pointer_tag = kIndirectPointerNullTag) {
+      TrustedPointerTag maybe_trusted_pointer_tag = kTrustedPointerNullTag) {
     Store(base, OpIndex::Invalid(), value, kind, stored_rep, write_barrier,
           offset, 0, maybe_initializing_or_transitioning,
-          maybe_indirect_pointer_tag);
+          maybe_trusted_pointer_tag);
   }
   void Store(
       OpIndex base, OpIndex value, StoreOp::Kind kind,
@@ -3133,10 +3134,10 @@ class AssemblerOpInterface : public Next {
       std::optional<AtomicMemoryOrder> memory_order, int32_t offset = 0,
       uint8_t element_size_log2 = 0,
       bool maybe_initializing_or_transitioning = false,
-      IndirectPointerTag maybe_indirect_pointer_tag = kIndirectPointerNullTag) {
+      TrustedPointerTag maybe_trusted_pointer_tag = kTrustedPointerNullTag) {
     Store(base, OpIndex::Invalid(), value, kind, stored_rep, write_barrier,
           memory_order, offset, 0, maybe_initializing_or_transitioning,
-          maybe_indirect_pointer_tag);
+          maybe_trusted_pointer_tag);
   }
 
   template <typename T>
@@ -3225,6 +3226,12 @@ class AssemblerOpInterface : public Next {
                       SharedFlag shared_base = SharedFlag{false}) {
     return LoadField<Map>(object,
                           AccessBuilder::ForMap(kMapWriteBarrier, shared_base));
+  }
+
+  V<Map> LoadImmutableMapField(V<HeapObject> object) {
+    FieldAccessTS<Object, Map> access = AccessBuilderTS::ForMap();
+    access.is_immutable = true;
+    return LoadField<Map>(object, access);
   }
 
   V<Word32> LoadInstanceTypeField(V<Map> map) {
@@ -4349,19 +4356,19 @@ class AssemblerOpInterface : public Next {
     ReduceIfReachableCheckMaglevType(input, type);
   }
 
+#ifdef DEBUG
   // This is currently only usable during graph building on the main thread.
-  void Dcheck(V<Word32> condition, const char* message, const char* file,
+  template <typename Condition>
+  void Dcheck(Condition condition, const char* message, const char* file,
               int line, SourceLocation loc = SourceLocation::CurrentIfDebug()) {
     Isolate* isolate = Asm().data()->isolate();
-    USE(isolate);
     DCHECK_NOT_NULL(isolate);
     DCHECK_EQ(ThreadId::Current(), isolate->thread_id());
-#ifdef DEBUG
     if (v8_flags.debug_code) {
-      Check(condition, message, file, line, loc);
+      Check(condition(), message, file, line, loc);
     }
-#endif
   }
+#endif
 
   // This is currently only usable during graph building on the main thread.
   void Check(V<Word32> condition, const char* message, const char* file,
@@ -4407,8 +4414,8 @@ class AssemblerOpInterface : public Next {
     DCHECK_NOT_NULL(isolate);
     DCHECK_EQ(ThreadId::Current(), isolate->thread_id());
     const std::string str = stream.str();
-    Handle<String> internalized_string = isolate->factory()->InternalizeString(
-        base::OneByteVector(str.c_str(), str.length()));
+    Handle<String> internalized_string =
+        isolate->factory()->InternalizeString(str);
     CanonicalizeEmbeddedBuiltinsConstantIfNeeded(internalized_string);
     V<String> string_constant = __ HeapConstantNoHole(internalized_string);
 
@@ -4651,8 +4658,7 @@ class AssemblerOpInterface : public Next {
       if (broker) {
         UnparkedScopeIfNeeded scope(broker);
         LocalIsolate* isolate = broker->local_isolate_or_isolate();
-        internalized_string = isolate->factory()->InternalizeString(
-            base::OneByteVector(label.c_str(), label.length()));
+        internalized_string = isolate->factory()->InternalizeString(label);
         internalized_string =
             broker->CanonicalPersistentHandle(internalized_string);
       } else {
@@ -4660,8 +4666,7 @@ class AssemblerOpInterface : public Next {
         // If we don't have a broker, we can only allocate the string on the
         // main thread.
         DCHECK_EQ(ThreadId::Current(), isolate->thread_id());
-        internalized_string = isolate->factory()->InternalizeString(
-            base::OneByteVector(label.c_str(), label.length()));
+        internalized_string = isolate->factory()->InternalizeString(label);
         CanonicalizeEmbeddedBuiltinsConstantIfNeeded(internalized_string);
       }
       label_string = __ HeapConstantNoHole(internalized_string);
@@ -4679,8 +4684,7 @@ class AssemblerOpInterface : public Next {
     if (broker) {
       UnparkedScopeIfNeeded scope(broker);
       LocalIsolate* isolate = broker->local_isolate_or_isolate();
-      internalized_string = isolate->factory()->InternalizeString(
-          base::OneByteVector(str.c_str(), str.length()));
+      internalized_string = isolate->factory()->InternalizeString(str);
       internalized_string =
           broker->CanonicalPersistentHandle(internalized_string);
     } else {
@@ -4688,8 +4692,7 @@ class AssemblerOpInterface : public Next {
       // If we don't have a broker, we can only allocate the string on the main
       // thread.
       DCHECK_EQ(ThreadId::Current(), isolate->thread_id());
-      internalized_string = isolate->factory()->InternalizeString(
-          base::OneByteVector(str.c_str(), str.length()));
+      internalized_string = isolate->factory()->InternalizeString(str);
       CanonicalizeEmbeddedBuiltinsConstantIfNeeded(internalized_string);
     }
     V<String> string_constant = __ HeapConstantNoHole(internalized_string);
@@ -5165,6 +5168,11 @@ class AssemblerOpInterface : public Next {
 
   V<HeapObject> RootConstant(RootIndex index) {
     return ReduceIfReachableRootConstant(index);
+  }
+
+  template <RootIndex index>
+  V<root_type_t<index>> RootConstant() {
+    return V<root_type_t<index>>::Cast(RootConstant(index));
   }
 
   V<Word32> IsRootConstant(V<Object> input, RootIndex index) {

@@ -12,7 +12,6 @@
 
 #include "src/api/api-inl.h"
 #include "src/base/enum-set.h"
-#include "src/base/fpu.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/platform/semaphore.h"
 #include "src/base/platform/time.h"
@@ -21,7 +20,7 @@
 #include "src/compiler/wasm-compiler.h"
 #include "src/debug/debug.h"
 #include "src/handles/global-handles-inl.h"
-#include "src/logging/counters-scopes.h"
+#include "src/logging/counters.h"
 #include "src/logging/metrics.h"
 #include "src/objects/managed.h"
 #include "src/tracing/trace-event.h"
@@ -1146,6 +1145,14 @@ void CompileLazy(Isolate* isolate, NativeModule* native_module,
   WasmCodeRefScope code_ref_scope;
   WasmCode* code =
       native_module->PublishCode(native_module->AddCompiledCode(result));
+  if (code == nullptr) {
+    // Publishing only fails when well-known import assumptions in TurboFan code
+    // were invalidated concurrently. Simply return; jumping to the jump table
+    // slot will retry lazy compilation (unless another thread compiled the
+    // function in the meantime).
+    DCHECK_EQ(ExecutionTier::kTurbofan, result.result_tier);
+    return;
+  }
   DCHECK_EQ(func_index, code->index());
 
   if (V8_UNLIKELY(native_module->log_code())) {
@@ -1364,7 +1371,7 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
   Tagged<FixedArray> feedback = Cast<FixedArray>(maybe_feedback);
   base::Vector<uint32_t> call_targets =
       module_->type_feedback.feedback_for_function[func_index]
-          .call_targets.as_vector();
+          .call_targets.as_span();
 
   // For each entry in {call_targets}, there are two {Object} slots in the
   // {feedback} vector:
@@ -1502,7 +1509,7 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
     fm.FinalizeCall();
   }
   base::UniqueArray<CallSiteFeedback> result = std::move(fm).GetResult();
-  EnqueueCallees(result.as_vector());
+  EnqueueCallees(result.as_span());
   DCHECK_EQ(result.size(),
             feedback_for_function_[func_index].call_targets.size());
   feedback_for_function_[func_index].feedback_vector = std::move(result);
@@ -1892,7 +1899,6 @@ CompilationExecutionResult ExecuteCompilationUnits(
   // These fields are initialized in a {BackgroundCompileScope} before
   // starting compilation.
   std::optional<CompilationEnv> env;
-  std::optional<base::FlushDenormalsScope> disable_denormals;
   std::shared_ptr<WireBytesStorage> wire_bytes;
   std::shared_ptr<const WasmModule> module;
   // Task 0 is any main thread (there might be multiple from multiple isolates),
@@ -1915,11 +1921,6 @@ CompilationExecutionResult ExecuteCompilationUnits(
     BackgroundCompileScope compile_scope(native_module);
     if (compile_scope.cancelled()) return kYield;
     env.emplace(CompilationEnv::ForModule(compile_scope.native_module()));
-    // We only really need this for optimized compilation, but for simplicity
-    // set it just once for everything.
-    disable_denormals.emplace(
-        compile_scope.native_module()->compile_imports().contains(
-            CompileTimeImport::kDisableDenormalFloats));
     wire_bytes = compile_scope.compilation_state()->GetWireBytesStorage();
     module = compile_scope.native_module()->shared_module();
     queue = compile_scope.compilation_state()->GetQueueForCompileTask(task_id);
@@ -2080,7 +2081,7 @@ std::shared_ptr<NativeModule> GetOrCompileNewNativeModule(
   if (base::TimeTicks::IsHighResolution()) start_time = base::TimeTicks::Now();
 
   std::shared_ptr<NativeModule> native_module =
-      GetWasmEngine()->MaybeGetNativeModule(wire_bytes.as_vector(),
+      GetWasmEngine()->MaybeGetNativeModule(wire_bytes.as_span(),
                                             enabled_features, compile_imports);
   if (native_module) {
     GetWasmEngine()->UseNativeModuleInIsolate(native_module.get(), isolate);
@@ -2248,7 +2249,7 @@ AsyncCompileJob::AsyncCompileJob(
       start_time_(base::TimeTicks::IsHighResolution() ? base::TimeTicks::Now()
                                                       : base::TimeTicks{}),
       bytes_copy_(std::move(bytes)),
-      wire_bytes_(bytes_copy_.as_vector()),
+      wire_bytes_(bytes_copy_.as_span()),
       resolver_(std::move(resolver)),
       compilation_id_(compilation_id) {
   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
@@ -2571,8 +2572,8 @@ void AsyncCompileJob::FinishCompile(
   bool is_after_deserialization = !deserialized_module_object.is_null();
   if (!is_after_deserialization) {
     // Prepare runtime objects.
-    auto source_url =
-        stream_ ? base::VectorOf(stream_->url()) : base::Vector<const char>();
+    std::string_view source_url =
+        stream_ ? std::string_view(stream_->url()) : std::string_view();
     auto script =
         GetWasmEngine()->GetOrCreateScript(isolate, native_module, source_url);
     module_object = WasmModuleObject::New(isolate, script);
@@ -2635,10 +2636,11 @@ void AsyncCompileJob::FinishCompile(
   if (sourcemap_symbol.type != WasmDebugSymbols::Type::None &&
       !sourcemap_symbol.external_url.is_empty()) {
     ModuleWireBytes wire_bytes(native_module->wire_bytes());
+    WasmName external_url =
+        wire_bytes.GetNameOrNull(sourcemap_symbol.external_url);
     MaybeDirectHandle<String> src_map_str =
         isolate->factory()->NewStringFromUtf8(
-            wire_bytes.GetNameOrNull(sourcemap_symbol.external_url),
-            AllocationType::kOld);
+            {external_url.data(), external_url.size()}, AllocationType::kOld);
     script->set_source_mapping_url(*src_map_str.ToHandleChecked());
   }
   {
@@ -2666,7 +2668,7 @@ void AsyncCompileJob::FinishCompile(
 
   // Finally, log all generated code (it does not matter if this happens
   // repeatedly in case the script is shared).
-  native_module->LogWasmCodes(isolate, *script);
+  native_module->LogWasmCodes(isolate, script);
 
   {
     TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
@@ -3222,7 +3224,7 @@ void AsyncStreamingProcessor::OnFinishedStream(
             std::memory_order_relaxed);
   }
 
-  job_->wire_bytes_ = ModuleWireBytes(bytes.as_vector());
+  job_->wire_bytes_ = ModuleWireBytes(bytes.as_span());
   job_->bytes_copy_ = std::move(bytes);
 
   if (!after_error) {
@@ -3276,9 +3278,9 @@ void AsyncStreamingProcessor::OnFinishedStream(
   // validating function bodies. Overall this does not add a lot of overhead.
 #ifdef DEBUG
   WasmDetectedFeatures detected_module_features;
-  DCHECK(DecodeWasmModule(
-             job_->enabled_features_, job_->bytes_copy_.as_vector(),
-             /* validate functions */ false, &detected_module_features)
+  DCHECK(DecodeWasmModule(job_->enabled_features_, job_->bytes_copy_.as_span(),
+                          /* validate functions */ false,
+                          &detected_module_features)
              .ok());
   // Module decoding should not detect any new features.
   DCHECK(job_->detected_features_.contains_all(detected_module_features));
@@ -3386,11 +3388,6 @@ bool AsyncStreamingProcessor::Deserialize(
     base::UniqueArray<const uint8_t>& wire_bytes) {
   TRACE_EVENT("v8.wasm", "wasm.Deserialize");
   Isolate* isolate = job_->isolate_specific_info_.isolate_;
-  std::optional<TimedHistogramScope> time_scope;
-  if (base::TimeTicks::IsHighResolution()) {
-    time_scope.emplace(isolate->counters()->wasm_deserialization_time(),
-                       isolate);
-  }
   // DeserializeNativeModule and FinishCompile assume that they are executed in
   // a HandleScope, and that a context is set on the isolate.
   HandleScope scope(isolate);
@@ -3402,7 +3399,7 @@ bool AsyncStreamingProcessor::Deserialize(
   DirectHandle<WasmModuleObject> module_object;
   if (!DeserializeNativeModule(isolate, job_->enabled_features_, module_bytes,
                                wire_bytes, job_->compile_imports_,
-                               base::VectorOf(job_->stream_->url()))
+                               job_->stream_->url())
            .ToHandle(&module_object)) {
     return false;
   }
@@ -3741,10 +3738,6 @@ void CompilationStateImpl::InitializeCompilationProgressAfterDeserialization(
   TRACE_EVENT("v8.wasm", "wasm.CompilationAfterDeserialization",
               "num_lazy_functions", lazy_functions.size(),
               "num_eager_functions", eager_functions.size());
-  base::ElapsedTimer lazy_compile_time;
-  if (base::TimeTicks::IsHighResolution()) {
-    lazy_compile_time.Start();
-  }
 
   auto* module = native_module_->module();
   {
@@ -3799,11 +3792,6 @@ void CompilationStateImpl::InitializeCompilationProgressAfterDeserialization(
   InitializeCompilationUnits(std::move(builder));
   if (!v8_flags.wasm_lazy_compilation) {
     WaitForBaselineCompileJob();
-  }
-
-  if (lazy_compile_time.IsStarted()) {
-    native_module_->counter_updates()->AddTimedSample(
-        &Counters::wasm_compile_after_deserialize, lazy_compile_time.Elapsed());
   }
 }
 
@@ -3930,24 +3918,22 @@ void CompilationStateImpl::OnFinishedUnits(
       }
       // Allow another top tier compilation if deopts are enabled and the
       // currently installed code object is a Liftoff object.
-      // Ideally, this would be done only if the code->tier() ==
-      // ExecutionTier::Liftoff as the code object for which we run this
-      // function should be the same as the one installed on the native_module.
-      // This is unfortunately not the case as installing a code object on the
-      // native module and updating the compilation_progress_ and the
-      // CompilationUnitQueues::top_tier_compiled_ are not synchronized.
+      // Allow another top tier compilation if deopts are enabled and the
+      // currently installed code object is a Liftoff object. We check the code
+      // installed on {native_module_} rather than {code->tier()} because
+      // baseline compilation can finish after top-tier compilation (without
+      // replacing the top-tier code), and publishing code and updating
+      // {compilation_progress_} are not synchronized.
       // Note: GetCode() acquires the NativeModule::allocation_mutex_, so this
       // could cause deadlocks if any other place acquires
       // NativeModule::allocation_mutex_ first and then
       // CompilationStateImpl::callbacks_mutex_!
-      const bool is_liftoff = code->tier() == ExecutionTier::kLiftoff;
       auto published_code_is_liftoff = [this](int index) {
         WasmCode* code = native_module_->GetCode(index);
         if (code == nullptr) return false;
         return code->is_liftoff();
       };
-      if (v8_flags.wasm_deopt &&
-          (is_liftoff || published_code_is_liftoff(code->index()))) {
+      if (v8_flags.wasm_deopt && published_code_is_liftoff(code->index())) {
         // Setting the reached tier below the baseline tier would create an
         // inconsistent state and has actually led to crashes before (see
         // https://crbug.com/379086474).
@@ -4075,12 +4061,19 @@ void CompilationStateImpl::TriggerCallbacks(
 void CompilationStateImpl::TriggerCachingAfterTimeout() {
   base::MutexGuard guard{&callbacks_mutex_};
 
-  // It can happen that we reached the hard threshold while waiting for the
-  // timeout to expire. In that case, {bytes_since_last_chunk_} might be zero
-  // and there is nothing new to cache.
-  if (bytes_since_last_chunk_ == 0) return;
-
   DCHECK(!last_top_tier_compilation_timestamp_.IsNull());
+
+  // It can happen that we reached the hard threshold while waiting for the
+  // timeout to expire. In that case, {bytes_since_last_chunk_} was reset to
+  // zero and might still be below the caching threshold (or zero), so there is
+  // nothing new to cache yet.
+  if (bytes_since_last_chunk_ == 0 ||
+      bytes_since_last_chunk_ <
+          static_cast<size_t>(v8_flags.wasm_caching_threshold)) {
+    last_top_tier_compilation_timestamp_ = {};
+    return;
+  }
+
   base::TimeTicks caching_time =
       last_top_tier_compilation_timestamp_ +
       base::TimeDelta::FromMilliseconds(v8_flags.wasm_caching_timeout_ms);
@@ -4088,14 +4081,12 @@ void CompilationStateImpl::TriggerCachingAfterTimeout() {
   // If we are still half a millisecond or more away from the timeout,
   // reschedule the task. Otherwise, call the caching callback.
   if (time_until_caching >= base::TimeDelta::FromMicroseconds(500)) {
-    int ms_remaining =
-        static_cast<int>(time_until_caching.InMillisecondsRoundedUp());
-    DCHECK_LE(1, ms_remaining);
+    double seconds_remaining = time_until_caching.InSecondsF();
     V8::GetCurrentPlatform()->PostDelayedTaskOnWorkerThread(
         TaskPriority::kUserVisible,
         std::make_unique<TriggerCodeCachingAfterTimeoutTask>(
             native_module_weak_),
-        ms_remaining);
+        seconds_remaining);
     return;
   }
 
@@ -4136,7 +4127,7 @@ void CompilationStateImpl::PublishCompilationResults(
 
 #if DEBUG
   // We don't compile import wrappers eagerly.
-  for (const auto& [code, assumptions] : unpublished_code) {
+  for (const auto& [code, assumptions, for_deopt] : unpublished_code) {
     int func_index = code->index();
     DCHECK_LE(native_module_->num_imported_functions(), func_index);
     DCHECK_LT(func_index, native_module_->num_functions());

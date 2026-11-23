@@ -619,11 +619,8 @@ class PromiseBuiltinReducerAssembler : public JSCallReducerAssembler {
     DCHECK(shared.HasBuiltinId());
     Handle<FeedbackCell> feedback_cell =
         isolate()->factory()->many_closures_cell();
-    Callable const callable =
-        Builtins::CallableFor(isolate(), shared.builtin_id());
-    CodeRef code = MakeRef(broker(), *callable.code());
     return AddNode<JSFunction>(graph()->NewNode(
-        javascript()->CreateClosure(shared, code), HeapConstant(feedback_cell),
+        javascript()->CreateClosure(shared), HeapConstant(feedback_cell),
         context, effect(), control()));
   }
 
@@ -5269,9 +5266,8 @@ Reduction JSCallReducer::ReduceJSCall(Node* node) {
   // the {target} must have the same native context as the call site.
   // Same if the {target} is the result of a CheckClosure operation.
   if (target->opcode() == IrOpcode::kJSCreateClosure) {
-    CreateClosureParameters const& params =
-        JSCreateClosureNode{target}.Parameters();
-    Reduction res = ReduceJSCall(node, params.shared_info());
+    Reduction res =
+        ReduceJSCall(node, JSCreateClosureNode{target}.shared_info());
     if (!res.Changed()) return NoChangeOrSoftDeopt();
     return res;
   } else if (target->opcode() == IrOpcode::kCheckClosure) {
@@ -5893,9 +5889,7 @@ bool TargetIsClassConstructor(Node* node, JSHeapBroker* broker) {
       shared = function.shared(broker);
     }
   } else if (target->opcode() == IrOpcode::kJSCreateClosure) {
-    CreateClosureParameters const& ccp =
-        JSCreateClosureNode{target}.Parameters();
-    shared = ccp.shared_info();
+    shared = JSCreateClosureNode{target}.shared_info();
   } else if (target->opcode() == IrOpcode::kCheckClosure) {
     FeedbackCellRef cell = MakeRef(broker, FeedbackCellOf(target->op()));
     shared = cell.shared_function_info(broker);
@@ -7521,9 +7515,9 @@ Reduction JSCallReducer::ReduceArrayIteratorPrototypeNext(Node* node) {
           buffer, effect, control);
       Node* check = graph()->NewNode(
           simplified()->NumberEqual(),
-          graph()->NewNode(
-              simplified()->NumberBitwiseAnd(), buffer_bit_field,
-              jsgraph()->ConstantNoHole(JSArrayBuffer::WasDetachedBit::kMask)),
+          graph()->NewNode(simplified()->NumberBitwiseAnd(), buffer_bit_field,
+                           jsgraph()->ConstantNoHole(
+                               JSArrayBuffer::Bits::WasDetachedBit::kMask)),
           jsgraph()->ZeroConstant());
       effect = graph()->NewNode(
           simplified()->CheckIf(DeoptimizeReason::kArrayBufferWasDetached,
@@ -8309,10 +8303,7 @@ Node* JSCallReducer::CreateClosureFromBuiltinSharedFunctionInfo(
   DCHECK(shared.HasBuiltinId());
   Handle<FeedbackCell> feedback_cell =
       isolate()->factory()->many_closures_cell();
-  Callable const callable =
-      Builtins::CallableFor(isolate(), shared.builtin_id());
-  CodeRef code = MakeRef(broker(), *callable.code());
-  return graph()->NewNode(javascript()->CreateClosure(shared, code),
+  return graph()->NewNode(javascript()->CreateClosure(shared),
                           jsgraph()->HeapConstantNoHole(feedback_cell), context,
                           effect, control);
 }
@@ -8696,6 +8687,15 @@ Reduction JSCallReducer::ReduceArrayBufferViewByteLengthAccessor(
       TNode<JSTypedArray>::UncheckedCast(receiver);
   TNode<Number> length = a.ArrayBufferViewByteLength(
       typed_array, instance_type, std::move(elements_kinds), a.ContextInput());
+
+  if (!depended_on_detaching_protector) {
+    length =
+        a.MachineSelectIf<Number>(a.ArrayBufferViewDetachedBit(typed_array))
+            .Then([&]() { return a.NumberConstant(0); })
+            .Else([&]() { return length; })
+            .ExpectFalse()
+            .Value();
+  }
 
   return ReplaceWithSubgraph(&a, length);
 }

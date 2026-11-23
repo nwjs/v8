@@ -66,22 +66,7 @@ enum class IsolateFieldId : uint8_t;
     "regexp::Stack::thread_local_address()")                                   \
   V(address_of_regexp_static_result_offsets_vector,                            \
     "Isolate::address_of_regexp_static_result_offsets_vector")                 \
-  EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_SANDBOX(V)                              \
   EXTERNAL_REFERENCE_LIST_LEAPTIERING(V)
-
-#ifdef V8_ENABLE_SANDBOX
-#define EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_SANDBOX(V)         \
-  V(external_pointer_table_address,                             \
-    "Isolate::external_pointer_table_address()")                \
-  V(shared_external_pointer_table_address_address,              \
-    "Isolate::shared_external_pointer_table_address_address()") \
-  V(trusted_pointer_table_base_address,                         \
-    "Isolate::trusted_pointer_table_base_address()")            \
-  V(shared_trusted_pointer_table_base_address,                  \
-    "Isolate::shared_trusted_pointer_table_base_address()")
-#else
-#define EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_SANDBOX(V)
-#endif  // V8_ENABLE_SANDBOX
 
 #ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
 #define EXTERNAL_REFERENCE_LIST_REGEXP_DIAGNOSTICS(V)             \
@@ -112,7 +97,6 @@ enum class IsolateFieldId : uint8_t;
     "v8_flags.mock_arraybuffer_allocator")                                     \
   V(address_of_one_half, "LDoubleConstant::one_half")                          \
   V(address_of_runtime_stats_flag, "TracingFlags::runtime_stats")              \
-  V(address_of_shared_string_table_flag, "v8_flags.shared_string_table")       \
   V(address_of_the_hole_nan, "the_hole_nan")                                   \
   V(address_of_track_array_buffer_views_flag,                                  \
     "v8_flags.track_array_buffer_view")                                        \
@@ -259,8 +243,8 @@ enum class IsolateFieldId : uint8_t;
     "simple_name_dictionary_lookup_forwarded_string")                          \
   V(simple_name_dictionary_find_insertion_entry_forwarded_string,              \
     "simple_name_dictionary_find_insertion_entry_forwarded_string")            \
-  V(verify_skipped_indirect_write_barrier,                                     \
-    "Heap::VerifySkippedIndirectWriteBarrier")                                 \
+  V(verify_skipped_trusted_write_barrier,                                      \
+    "Heap::VerifySkippedTrustedWriteBarrier")                                  \
   V(verify_skipped_write_barrier, "Heap::VerifySkippedWriteBarrier")           \
   IF_WASM(V, wasm_start_stack, "wasm_start_stack")                             \
   IF_WASM(V, wasm_suspender_has_js_frames, "wasm_suspender_has_js_frames")     \
@@ -437,8 +421,8 @@ enum class IsolateFieldId : uint8_t;
     "wasm_i32x8_int32_overflow_as_float")                                      \
   V(supports_cetss_address, "CpuFeatures::supports_cetss_address")             \
   V(write_barrier_marking_from_code_function, "WriteBarrier::MarkingFromCode") \
-  V(write_barrier_indirect_pointer_marking_from_code_function,                 \
-    "WriteBarrier::IndirectPointerMarkingFromCode")                            \
+  V(write_barrier_trusted_pointer_marking_from_code_function,                  \
+    "WriteBarrier::TrustedPointerMarkingFromCode")                             \
   V(write_barrier_shared_marking_from_code_function,                           \
     "WriteBarrier::SharedMarkingFromCode")                                     \
   V(shared_barrier_from_code_function, "WriteBarrier::SharedFromCode")         \

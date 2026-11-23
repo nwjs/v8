@@ -575,8 +575,8 @@ std::optional<ValueNode*> MaglevReducer<BaseT>::TryGetConstantAlternative(
 
 template <typename BaseT>
 ReduceResult MaglevReducer<BaseT>::BuildLoadTaggedField(
-    ValueNode* object, uint32_t offset, NodeType type, bool is_const,
-    PropertyKey key, IsArrayLength is_array_length,
+    ValueNode* object, uint32_t offset, NodeType type,
+    PropertyConstness constness, PropertyKey key, IsArrayLength is_array_length,
     compiler::OptionalMapRef stable_field_map) {
   if constexpr (ReducerBaseWithAllocationTracking<BaseT>) {
     if (std::optional<ValueNode*> val =
@@ -584,7 +584,7 @@ ReduceResult MaglevReducer<BaseT>::BuildLoadTaggedField(
       return *val;
     }
   }
-  return AddNewNode<LoadTaggedField>({object}, offset, type, is_const, key,
+  return AddNewNode<LoadTaggedField>({object}, offset, type, constness, key,
                                      is_array_length, stable_field_map);
 }
 
@@ -665,7 +665,7 @@ ReduceResult MaglevReducer<BaseT>::BuildStoreTaggedFieldNoWriteBarrier(
 
 template <typename BaseT>
 ReduceResult MaglevReducer<BaseT>::BuildStoreTrustedPointerField(
-    ValueNode* object, ValueNode* value, int offset, IndirectPointerTag tag,
+    ValueNode* object, ValueNode* value, int offset, TrustedPointerTag tag,
     StoreTaggedMode store_mode) {
 #ifdef V8_ENABLE_SANDBOX
   return AddNewNode<StoreTrustedPointerFieldWithWriteBarrier>(
@@ -914,6 +914,8 @@ ReduceResult MaglevReducer<BaseT>::BuildInitializeStore_Tagged(
   }
 
   DCHECK(value->is_tagged());
+  RETURN_IF_ABORT(BuildStoreTaggedField(object, value, desc.offset, store_mode,
+                                        PropertyKey::None(), maybe_assigned));
   if (InlinedAllocation* inlined_value = value->TryCast<InlinedAllocation>()) {
     // Add to the escape set.
     auto escape_deps = graph()->allocations_escape_map().find(object);
@@ -923,11 +925,10 @@ ReduceResult MaglevReducer<BaseT>::BuildInitializeStore_Tagged(
     auto& elided_map = graph()->allocations_elide_map();
     auto elided_deps = elided_map.try_emplace(inlined_value, zone()).first;
     elided_deps->second.push_back(object);
-    inlined_value->AddNonEscapingUses();
+    AddNonEscapingUses(inlined_value, 1);
   }
 
-  return BuildStoreTaggedField(object, value, desc.offset, store_mode,
-                               PropertyKey::None(), maybe_assigned);
+  return ReduceResult::Done();
 }
 
 template <typename BaseT>
@@ -1114,11 +1115,12 @@ ReduceResult MaglevReducer<BaseT>::BuildLoadJSArrayLength(
 
   ValueNode* length;
   GET_VALUE_OR_ABORT(
-      length, BuildLoadTaggedField(
-                  js_array, offsetof(JSArray, length_), length_type, false,
-                  broker()->length_string(), IsArrayLength::kYes));
-  RecordKnownProperty(js_array, broker()->length_string(), length, false,
-                      compiler::AccessMode::kLoad);
+      length,
+      BuildLoadTaggedField(js_array, offsetof(JSArray, length_), length_type,
+                           PropertyConstness::kMutable,
+                           broker()->length_string(), IsArrayLength::kYes));
+  RecordKnownProperty(js_array, broker()->length_string(), length,
+                      PropertyConstness::kMutable, compiler::AccessMode::kLoad);
   return length;
 }
 
@@ -1324,13 +1326,13 @@ ReduceResult MaglevReducer<BaseT>::BuildLoadElements(
   }
 
   ValueNode* elements;
-  GET_VALUE_OR_ABORT(
-      elements,
-      BuildLoadTaggedField(object, offsetof(JSObject, elements_),
-                           NodeType::kAnyHeapObject,
-                           /*is_const=*/false, PropertyKey::Elements()));
-  RecordKnownProperty(object, PropertyKey::Elements(), elements, false,
-                      compiler::AccessMode::kLoad);
+  GET_VALUE_OR_ABORT(elements,
+                     BuildLoadTaggedField(object, offsetof(JSObject, elements_),
+                                          NodeType::kAnyHeapObject,
+                                          PropertyConstness::kMutable,
+                                          PropertyKey::Elements()));
+  RecordKnownProperty(object, PropertyKey::Elements(), elements,
+                      PropertyConstness::kMutable, compiler::AccessMode::kLoad);
   if (is_turbolev() && kind.has_value()) {
     // We record a map hint for Turbolev so that LateEscapeAnalysis knows that
     // we just loaded an elements array, which means that it can't alias with
@@ -2181,11 +2183,11 @@ std::optional<Float64> MaglevReducer<BaseT>::TryGetFloatConstantImpl(
     case Opcode::kRootConstant: {
       Tagged<Object> root_object =
           broker()->local_isolate()->root(value->Cast<RootConstant>()->index());
-      if (NodeTypeIs(NodeType::kBoolean, assumed_input_type) &&
+      if (NodeTypeCanBe(assumed_input_type, NodeType::kBoolean) &&
           IsBoolean(root_object)) {
         return Float64{Cast<Oddball>(root_object)->to_number_raw()};
       }
-      if (NodeTypeIs(NodeType::kUndefined, assumed_input_type) &&
+      if (NodeTypeCanBe(assumed_input_type, NodeType::kUndefined) &&
           IsUndefined(root_object)) {
 #ifdef V8_ENABLE_UNDEFINED_DOUBLE
         // We use the undefined nan and silence it to produce the same result
@@ -2200,7 +2202,7 @@ std::optional<Float64> MaglevReducer<BaseT>::TryGetFloatConstantImpl(
             Cast<Oddball>(root_object)->to_number_raw()));
 #endif
       }
-      if (NodeTypeIs(NodeType::kNull, assumed_input_type) &&
+      if (NodeTypeCanBe(assumed_input_type, NodeType::kNull) &&
           IsNull(root_object)) {
         return Float64::FromBits(base::double_to_uint64(
             Cast<Oddball>(root_object)->to_number_raw()));
@@ -2280,6 +2282,11 @@ bool MaglevReducer<BaseT>::CanInlineCall(
     compiler::SharedFunctionInfoRef shared, float call_frequency,
     base::Vector<ValueNode*> arguments, UseRepresentationSet use_repr_hints) {
   auto tracer_ = tracer();
+  if (broker()->StackHasOverflowed()) {
+    graph()->compilation_info()->set_could_not_inline_all_candidates();
+    TRACE_CANNOT_INLINE("stack overflow");
+    return false;
+  }
   if (static_cast<int>(graph()->inlined_functions().size()) >=
       SourcePosition::MaxInliningId()) {
     graph()->compilation_info()->set_could_not_inline_all_candidates();
@@ -2397,8 +2404,9 @@ MaglevReducer<BaseT>::TryBuildLoadFixedArrayElementConstantIndex(
   }
   int offset = FixedArray::OffsetOfElementAt(index);
   return AddNewNodeNoInputConversion<LoadTaggedField>(
-      {elements}, offset, NodeTypeFromLoadType(type), false,
-      PropertyKey::None(), IsArrayLength::kNo, compiler::OptionalMapRef{});
+      {elements}, offset, NodeTypeFromLoadType(type),
+      PropertyConstness::kMutable, PropertyKey::None(), IsArrayLength::kNo,
+      compiler::OptionalMapRef{});
 }
 
 template <typename BaseT>
@@ -2476,7 +2484,7 @@ void MaglevReducer<BaseT>::SetKnownValue(ValueNode* node,
     DCHECK(IsInstanceOfNodeType(ref.AsHeapObject().map(broker()),
                                 known_info->type(), broker()));
   } else {
-    DCHECK(!NodeTypeIs(known_info->type(), NodeType::kAnyHeapObject));
+    DCHECK(NodeTypeCanBe(known_info->type(), NodeType::kSmi));
   }
   known_info->IntersectType(new_node_type);
   known_info->alternative().set_checked_value(GetConstant(ref));
@@ -3800,8 +3808,14 @@ MaybeReduceResult MaglevReducer<BaseT>::TryFoldInt32BinaryOperation(
       // TODO(v8:7700): Constant fold mod.
       return {};
     case Operation::kDivide:
-      // TODO(v8:7700): Constant fold division.
-      return {};
+      if (cst_right == 0) return {};
+      if (cst_left == kMinInt && cst_right == -1) return {};
+      if (cst_left == 0 && cst_right < 0) {
+        // Deopt since -0 is not representable as Int32.
+        return EmitUnconditionalDeopt(DeoptimizeReason::kMinusZero);
+      }
+      if (cst_left % cst_right != 0) return {};
+      return GetInt32Constant(cst_left / cst_right);
     case Operation::kBitwiseAnd:
       return GetInt32Constant(cst_left & cst_right);
     case Operation::kBitwiseOr:
@@ -4436,6 +4450,15 @@ template <typename BaseT>
 template <typename BranchBuilderT>
 BranchResult MaglevReducer<BaseT>::BuildBranchIfInt32ToBooleanTrue(
     BranchBuilderT& b, ValueNode* node) {
+  // Fuse `Int32BitwiseAnd(x, mask)` feeding a ToBoolean branch into a single
+  // test-and-branch, avoiding a separate `and` and compare against zero.
+  if (auto* and_node = node->TryCast<Int32BitwiseAnd>()) {
+    ValueNode* lhs = and_node->input_node(0);
+    ValueNode* rhs = and_node->input_node(1);
+    if (auto mask = TryGetInt32Constant(rhs); mask && *mask != 0) {
+      return b.template Build<BranchIfInt32BitwiseAndNonZero>({lhs}, *mask);
+    }
+  }
   return b.template Build<BranchIfInt32ToBooleanTrue>({node});
 }
 
@@ -5048,11 +5071,11 @@ MaybeReduceResult MaglevReducer<BaseT>::TryReuseKnownPropertyLoad(
 template <typename BaseT>
 void MaglevReducer<BaseT>::RecordKnownProperty(
     ValueNode* lookup_start_object, PropertyKey key, ValueNode* value,
-    bool is_const, compiler::AccessMode access_mode) {
+    PropertyConstness constness, compiler::AccessMode access_mode) {
   DCHECK(!value->is_conversion());
   auto& props_for_key =
-      known_node_aspects().GetLoadedPropertiesForKey(zone(), is_const, key);
-  if (!is_const && IsAnyStore(access_mode)) {
+      known_node_aspects().GetLoadedPropertiesForKey(zone(), constness, key);
+  if (constness == PropertyConstness::kMutable && IsAnyStore(access_mode)) {
     if constexpr (ReducerBaseWithLoopEffectTracking<BaseT>) {
       if (base_->loop_effects()) {
         base_->loop_effects()->keys_cleared.insert(key);
@@ -5068,7 +5091,9 @@ void MaglevReducer<BaseT>::RecordKnownProperty(
     props_for_key.clear();
   }
 
-  TRACE("  * Recording " << (is_const ? "constant" : "non-constant")
+  TRACE("  * Recording " << (constness == PropertyConstness::kConst
+                                 ? "constant"
+                                 : "non-constant")
                          << " known property "
                          << PrintNodeLabel(lookup_start_object) << ": "
                          << PrintNode(lookup_start_object) << " [" << key
@@ -5076,7 +5101,8 @@ void MaglevReducer<BaseT>::RecordKnownProperty(
                          << PrintNode(value));
 
   if constexpr (ReducerBaseWithLoopEffectTracking<BaseT>) {
-    if (IsAnyStore(access_mode) && !is_const && base_->loop_effects()) {
+    if (IsAnyStore(access_mode) && constness == PropertyConstness::kMutable &&
+        base_->loop_effects()) {
       auto updated = props_for_key.emplace(lookup_start_object, value);
       if (updated.second) {
         base_->loop_effects()->objects_written.insert(lookup_start_object);
@@ -5093,11 +5119,13 @@ void MaglevReducer<BaseT>::RecordKnownProperty(
 template <typename BaseT>
 ReduceResult MaglevReducer<BaseT>::BuildLoadJSDataViewByteLength(
     ValueNode* js_data_view) {
-  bool is_const = !v8_flags.track_array_buffer_views;
+  PropertyConstness constness = v8_flags.track_array_buffer_views
+                                    ? PropertyConstness::kMutable
+                                    : PropertyConstness::kConst;
   // Note: We can't use broker()->byte_length_string() here, because it could
   // conflict with redefinitions of the ArrayBufferView byteLength property.
   if (ValueNode* byte_length = known_node_aspects().TryFindLoadedProperty(
-          js_data_view, PropertyKey::ArrayBufferViewByteLength(), is_const)) {
+          js_data_view, PropertyKey::ArrayBufferViewByteLength(), constness)) {
     return byte_length;
   }
 
@@ -5105,16 +5133,18 @@ ReduceResult MaglevReducer<BaseT>::BuildLoadJSDataViewByteLength(
   GET_VALUE_OR_ABORT(result,
                      AddNewNode<LoadDataViewByteLength>({js_data_view}));
   RecordKnownProperty(js_data_view, PropertyKey::ArrayBufferViewByteLength(),
-                      result, is_const, compiler::AccessMode::kLoad);
+                      result, constness, compiler::AccessMode::kLoad);
   return result;
 }
 
 template <typename BaseT>
 ReduceResult MaglevReducer<BaseT>::BuildLoadJSDataViewDataPointer(
     ValueNode* js_data_view) {
-  bool is_const = !v8_flags.track_array_buffer_views;
+  PropertyConstness constness = v8_flags.track_array_buffer_views
+                                    ? PropertyConstness::kMutable
+                                    : PropertyConstness::kConst;
   if (ValueNode* backing_store = known_node_aspects().TryFindLoadedProperty(
-          js_data_view, PropertyKey::ArrayBufferViewDataPointer(), is_const)) {
+          js_data_view, PropertyKey::ArrayBufferViewDataPointer(), constness)) {
     return backing_store;
   }
 
@@ -5122,7 +5152,7 @@ ReduceResult MaglevReducer<BaseT>::BuildLoadJSDataViewDataPointer(
   GET_VALUE_OR_ABORT(result,
                      AddNewNode<LoadDataViewDataPointer>({js_data_view}));
   RecordKnownProperty(js_data_view, PropertyKey::ArrayBufferViewDataPointer(),
-                      result, is_const, compiler::AccessMode::kLoad);
+                      result, constness, compiler::AccessMode::kLoad);
   return result;
 }
 
@@ -5214,8 +5244,8 @@ ReduceResult MaglevReducer<BaseT>::BuildLoadStringLength(ValueNode* string) {
   RETURN_IF_DONE(TryReduceStringLength(string));
   ValueNode* result;
   GET_VALUE_OR_ABORT(result, AddNewNode<StringLength>({string}));
-  RecordKnownProperty(string, PropertyKey::StringLength(), result, true,
-                      compiler::AccessMode::kLoad);
+  RecordKnownProperty(string, PropertyKey::StringLength(), result,
+                      PropertyConstness::kConst, compiler::AccessMode::kLoad);
   return result;
 }
 
@@ -5797,6 +5827,7 @@ ReduceResult MaglevReducer<BaseT>::GetSmiValue(
 
 template <typename BaseT>
 VirtualObject* MaglevReducer<BaseT>::CreateHeapNumber(ValueNode* value) {
+  DCHECK(value->is_float64());
   using Shape = VirtualHeapNumberShape;
   int slot_count = Shape::header_slot_count;
   SBXCHECK_EQ(slot_count, 2);
@@ -6123,9 +6154,9 @@ VirtualObject* MaglevReducer<BaseT>::CreateRegExpLiteralObject(
             GetRootConstant(RootIndex::kEmptyFixedArray));
   vobj->set(offsetof(JSObject, elements_),
             GetRootConstant(RootIndex::kEmptyFixedArray));
-  vobj->set(offsetof(JSRegExp, data_),
-            GetTrustedConstant(literal.data(broker()),
-                               kRegExpDataIndirectPointerTag));
+  vobj->set(
+      offsetof(JSRegExp, data_),
+      GetTrustedConstant(literal.data(broker()), kRegExpDataTrustedPointerTag));
   vobj->set(offsetof(JSRegExp, flags_), GetInt32Constant(literal.flags()));
   vobj->set(JSRegExp::kLastIndexOffset,
             GetInt32Constant(JSRegExp::kInitialLastIndexValue));

@@ -185,7 +185,7 @@ inline MapMaskAndOr CombineMinMax(MapMaskAndOr a, MapMaskAndOr b) {
 }
 // Returns true if {a} and {b} could have a map in common.
 inline bool CouldHaveSameMap(MapMaskAndOr a, MapMaskAndOr b) {
-  return ((a.and_ & b.or_) == a.and_) || ((b.and_ & a.or_) == b.and_);
+  return ((a.and_ & b.or_) == a.and_) && ((b.and_ & a.or_) == b.and_);
 }
 
 struct MemoryAddress {
@@ -516,6 +516,12 @@ class MemoryContentTable
   }
 
   void Insert(const StoreOp& store) {
+    if (store.stored_rep == MemoryRepresentation::TrustedPointer()) {
+      // We do not track stores of trusted pointers in MemoryContentTable
+      // because LoadTrustedPointerOp expects any entry with
+      // MemoryRepresentation::TrustedPointer() to be a LoadTrustedPointerOp.
+      return;
+    }
     OpIndex base = ResolveBase(store.base());
     OptionalOpIndex index = store.index();
     int32_t offset = store.offset;

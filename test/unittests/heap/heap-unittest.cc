@@ -29,7 +29,7 @@
 #include "src/api/api-inl.h"
 #include "src/base/bounded-page-allocator.h"
 #include "src/base/strings.h"
-#include "src/base/unique-array.h"
+#include "src/builtins/accessors.h"
 #include "src/builtins/builtins-inl.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/compilation-cache.h"
@@ -68,6 +68,7 @@
 #include "src/heap/trusted-range.h"
 #include "src/numbers/hash-seed-inl.h"
 #include "src/objects/allocation-site.h"
+#include "src/objects/api-callbacks.h"
 #include "src/objects/bytecode-array-inl.h"
 #include "src/objects/call-site-info-inl.h"
 #include "src/objects/elements.h"
@@ -85,6 +86,7 @@
 #include "src/objects/number-string-cache-inl.h"
 #include "src/objects/object-conversions-inl.h"
 #include "src/objects/objects-inl.h"
+#include "src/objects/property.h"
 #include "src/objects/script-inl.h"
 #include "src/objects/shared-function-info-inl.h"
 #include "src/objects/slots.h"
@@ -2425,8 +2427,8 @@ TEST_F(HeapTest, OptimizedPretenuringNestedDoubleLiterals) {
   static const int kPretenureCreationCount =
       PretenuringHandler::GetMinMementoCountForTesting() + 1;
 
-  auto source = base::UniqueArray<char>::NewForOverwrite(1024);
-  base::SNPrintF(source.as_vector(),
+  std::array<char, 1024> source;
+  base::SNPrintF(source,
                  "var number_elements = %d;"
                  "var elements = new Array(number_elements);"
                  "function f() {"
@@ -2442,7 +2444,7 @@ TEST_F(HeapTest, OptimizedPretenuringNestedDoubleLiterals) {
                  "f();",
                  kPretenureCreationCount);
 
-  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.begin()));
+  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.data()));
 
   DirectHandle<JSObject> double_array_handle_1 = Cast<JSObject>(
       JSReceiver::GetElement(i_isolate(), o, 0).ToHandleChecked());
@@ -2475,9 +2477,9 @@ TEST_F(HeapTest, OptimizedPretenuringNestedInObjectProperties) {
   static const int kPretenureCreationCount =
       PretenuringHandler::GetMinMementoCountForTesting() + 1;
 
-  auto source = base::UniqueArray<char>::NewForOverwrite(1024);
+  std::array<char, 1024> source;
   base::SNPrintF(
-      source.as_vector(),
+      source,
       "let number_elements = %d;"
       "let elements = new Array(number_elements);"
       "function f() {"
@@ -2494,7 +2496,7 @@ TEST_F(HeapTest, OptimizedPretenuringNestedInObjectProperties) {
       "f();",
       kPretenureCreationCount);
 
-  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.begin()));
+  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.data()));
 
   EXPECT_TRUE(HeapLayout::InYoungGeneration(*o));
 }
@@ -2518,8 +2520,8 @@ TEST_F(HeapTest, OptimizedPretenuringNestedObjectLiterals) {
   static const int kPretenureCreationCount =
       PretenuringHandler::GetMinMementoCountForTesting() + 1;
 
-  auto source = base::UniqueArray<char>::NewForOverwrite(1024);
-  base::SNPrintF(source.as_vector(),
+  std::array<char, 1024> source;
+  base::SNPrintF(source,
                  "var number_elements = %d;"
                  "var elements = new Array(number_elements);"
                  "function f() {"
@@ -2535,7 +2537,7 @@ TEST_F(HeapTest, OptimizedPretenuringNestedObjectLiterals) {
                  "f();",
                  kPretenureCreationCount);
 
-  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.begin()));
+  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.data()));
 
   DirectHandle<JSObject> int_array_handle_1 = Cast<JSObject>(
       JSReceiver::GetElement(i_isolate(), o, 0).ToHandleChecked());
@@ -2568,8 +2570,8 @@ TEST_F(HeapTest, OptimizedPretenuringMixedInObjectProperties) {
   static const int kPretenureCreationCount =
       PretenuringHandler::GetMinMementoCountForTesting() + 1;
 
-  auto source = base::UniqueArray<char>::NewForOverwrite(1024);
-  base::SNPrintF(source.as_vector(),
+  std::array<char, 1024> source;
+  base::SNPrintF(source,
                  "var number_elements = %d;"
                  "var elements = new Array(number_elements);"
                  "function f() {"
@@ -2585,7 +2587,7 @@ TEST_F(HeapTest, OptimizedPretenuringMixedInObjectProperties) {
                  "f();",
                  kPretenureCreationCount);
 
-  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.begin()));
+  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.data()));
 
   EXPECT_TRUE(heap()->InOldSpace(*o));
   FieldIndex idx1 = FieldIndex::ForPropertyIndex(o->map(), 0);
@@ -2619,8 +2621,8 @@ TEST_F(HeapTest, OptimizedPretenuringDoubleArrayLiterals) {
   static const int kPretenureCreationCount =
       PretenuringHandler::GetMinMementoCountForTesting() + 1;
 
-  auto source = base::UniqueArray<char>::NewForOverwrite(1024);
-  base::SNPrintF(source.as_vector(),
+  std::array<char, 1024> source;
+  base::SNPrintF(source,
                  "var number_elements = %d;"
                  "var elements = new Array(number_elements);"
                  "function f() {"
@@ -2636,7 +2638,7 @@ TEST_F(HeapTest, OptimizedPretenuringDoubleArrayLiterals) {
                  "f();",
                  kPretenureCreationCount);
 
-  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.begin()));
+  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.data()));
 
   EXPECT_TRUE(heap()->InOldSpace(o->elements()));
   EXPECT_TRUE(heap()->InOldSpace(*o));
@@ -2662,8 +2664,8 @@ TEST_F(HeapTest, OptimizedPretenuringNestedMixedArrayLiterals) {
   static const int kPretenureCreationCount =
       PretenuringHandler::GetMinMementoCountForTesting() + 1;
 
-  auto source = base::UniqueArray<char>::NewForOverwrite(1024);
-  base::SNPrintF(source.as_vector(),
+  std::array<char, 1024> source;
+  base::SNPrintF(source,
                  "var number_elements = %d;"
                  "var elements = new Array(number_elements);"
                  "function f() {"
@@ -2679,7 +2681,7 @@ TEST_F(HeapTest, OptimizedPretenuringNestedMixedArrayLiterals) {
                  "f();",
                  kPretenureCreationCount);
 
-  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.begin()));
+  Handle<JSObject> o = Cast<JSObject>(RunJS(ctx, source.data()));
 
   v8::Local<v8::Value> int_array = v8::Utils::ToLocal(o)
                                        ->ToObject(ctx)
@@ -5687,6 +5689,57 @@ TEST_F(HeapTest, RetainedMapsCleanup) {
             native_context->retained_maps());
 }
 
+TEST_F(HeapTest, TrimDescriptorArrayClearsSlackDescriptors) {
+  FlagScope<bool> no_stress_trimming(&v8_flags.stress_descriptor_array_trimming,
+                                     false);
+  ManualGCScope manual_gc_scope(i_isolate());
+  HandleScope scope(i_isolate());
+
+  IndirectHandle<JSObject> parent =
+      RunJS<JSObject>("var parent = { a: 1 }; parent");
+  IndirectHandle<WeakFixedArray> weak_getter = factory()->NewWeakFixedArray(1);
+  {
+    HandleScope inner_scope(i_isolate());
+    DirectHandle<JSFunction> getter = RunJS<JSFunction>(
+        "(function() {"
+        "  var child = { a: 1 };"
+        "  var getter = function() { return 42; };"
+        "  Object.defineProperty(child, 'b', { get: getter });"
+        "  return getter;"
+        "})()");
+    weak_getter->set(0, MakeWeak(*getter));
+  }
+  EXPECT_EQ(1, parent->map()->NumberOfOwnDescriptors());
+  EXPECT_FALSE(parent->map()->owns_descriptors());
+  EXPECT_EQ(2, parent->map()->instance_descriptors()->number_of_descriptors());
+  EXPECT_EQ(2,
+            parent->map()->instance_descriptors()->number_of_all_descriptors());
+  EXPECT_FALSE(weak_getter->get(0).IsCleared());
+
+  // The first GC clears the dead child map transition and trims
+  // `number_of_descriptors` back to 1 without right-trimming the
+  // DescriptorArray. It should clear the slack descriptor slots.
+  {
+    DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap());
+    InvokeMajorGC();
+  }
+  EXPECT_TRUE(parent->map()->owns_descriptors());
+  EXPECT_EQ(1, parent->map()->instance_descriptors()->number_of_descriptors());
+  EXPECT_EQ(2,
+            parent->map()->instance_descriptors()->number_of_all_descriptors());
+  // `getter` was still marked during the first GC before `TrimDescriptorArray`
+  // cleared the slack descriptor slot during weak clearing.
+  EXPECT_FALSE(weak_getter->get(0).IsCleared());
+
+  // The second GC should now reclaim `getter` since the slack descriptor slot
+  // was cleared.
+  {
+    DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap());
+    InvokeMajorGC();
+  }
+  EXPECT_TRUE(weak_getter->get(0).IsCleared());
+}
+
 namespace {
 void AllocateInSpace(Isolate* isolate, size_t bytes, AllocationSpace space) {
   ASSERT_LE(static_cast<size_t>(OFFSET_OF_DATA_START(FixedArray)), bytes);
@@ -7475,6 +7528,136 @@ TEST_F(HeapTest, LongTaskStatsYoung) {
   EXPECT_EQ(
       0u,
       v8::metrics::LongTaskStats::Get(isolate).gc_young_wall_clock_duration_us);
+}
+
+namespace {
+
+DirectHandle<Object> TestAllocateAfterFailures(Isolate* isolate) {
+  // Similar to what the factory's retrying logic does in the last-resort case,
+  // we wrap the allocator function in an AlwaysAllocateScope.  Test that
+  // all allocations succeed immediately without any retry.
+  Heap* heap = isolate->heap();
+  InvokeMemoryReducingMajorGCs(isolate);
+  AlwaysAllocateScopeForTesting scope(heap);
+  int size = FixedArray::SizeFor(100);
+  // Young generation.
+  Tagged<HeapObject> obj =
+      HeapTest::AllocateRawForTest(heap, size, AllocationType::kYoung)
+          .ToObjectChecked();
+  // In order to pass heap verification on Isolate teardown, mark the
+  // allocated area as a filler.
+  heap->CreateFillerObjectAt(obj.address(), size);
+
+  // Old generation.
+  HeapTest::SimulateFullSpace(heap->old_space());
+  obj = HeapTest::AllocateRawForTest(heap, size, AllocationType::kOld)
+            .ToObjectChecked();
+  heap->CreateFillerObjectAt(obj.address(), size);
+
+  // Large object space.
+  static const size_t kLargeObjectSpaceFillerLength =
+      3 * (NormalPage::kPageSize / 10);
+  static const size_t kLargeObjectSpaceFillerSize =
+      FixedArray::SizeFor(kLargeObjectSpaceFillerLength);
+  CHECK_GT(kLargeObjectSpaceFillerSize,
+           static_cast<size_t>(heap->old_space()->AreaSize()));
+  while (HeapTest::OldGenerationSpaceAvailable(heap) >
+         kLargeObjectSpaceFillerSize) {
+    obj = HeapTest::AllocateRawForTest(
+              heap, static_cast<int>(kLargeObjectSpaceFillerSize),
+              AllocationType::kOld)
+              .ToObjectChecked();
+    heap->CreateFillerObjectAt(obj.address(), size);
+  }
+  obj = HeapTest::AllocateRawForTest(
+            heap, static_cast<int>(kLargeObjectSpaceFillerSize),
+            AllocationType::kOld)
+            .ToObjectChecked();
+  heap->CreateFillerObjectAt(obj.address(), size);
+
+  // Map space.
+  HeapTest::SimulateFullSpace(heap->old_space());
+  obj = HeapTest::AllocateRawForTest(heap, Map::kSize, AllocationType::kMap)
+            .ToObjectChecked();
+  heap->CreateFillerObjectAt(obj.address(), Map::kSize);
+
+  // Code space.
+  HeapTest::SimulateFullSpace(heap->code_space());
+  size = isolate->builtins()->code(Builtin::kIllegal)->Size();
+  obj = HeapTest::AllocateRawForTest(heap, size, AllocationType::kCode,
+                                     AllocationOrigin::kRuntime)
+            .ToObjectChecked();
+  heap->CreateFillerObjectAt(obj.address(), size);
+  return isolate->factory()->true_value();
+}
+
+void TestGetter(v8::Local<v8::Name> name,
+                const v8::PropertyCallbackInfo<v8::Value>& info) {
+  Isolate* isolate = reinterpret_cast<Isolate*>(info.GetIsolate());
+  HandleScope scope(isolate);
+  info.GetReturnValue().Set(
+      v8::Utils::ToLocal(TestAllocateAfterFailures(isolate)));
+}
+
+void TestSetter(v8::Local<v8::Name> name, v8::Local<v8::Value> value,
+                const v8::PropertyCallbackInfo<v8::Boolean>& info) {
+  UNREACHABLE();
+}
+
+DirectHandle<AccessorInfo> TestAccessorInfo(Isolate* isolate) {
+  DirectHandle<String> name =
+      isolate->factory()->NewStringFromStaticChars("get");
+  return Accessors::MakeAccessor(isolate, name, &TestGetter, &TestSetter);
+}
+
+}  // namespace
+
+TEST_F(HeapTest, StressHandles) {
+  // For TestAllocateAfterFailures.
+  v8_flags.stress_concurrent_allocation = false;
+  v8::HandleScope scope(v8_isolate());
+  DirectHandle<Object> o = TestAllocateAfterFailures(i_isolate());
+  CHECK(IsTrue(*o));
+}
+
+TEST_F(HeapTest, StressJS) {
+  // For TestAllocateAfterFailures in TestGetter.
+  v8_flags.stress_concurrent_allocation = false;
+  Isolate* isolate = i_isolate();
+  Factory* factory = isolate->factory();
+  v8::HandleScope scope(v8_isolate());
+
+  DirectHandle<NativeContext> context(isolate->native_context());
+  DirectHandle<SharedFunctionInfo> info =
+      factory->NewSharedFunctionInfoForBuiltin(
+          factory->function_string(), Builtin::kEmptyFunction, 0, kDontAdapt);
+  info->set_language_mode(LanguageMode::kStrict);
+  DirectHandle<JSFunction> function =
+      Factory::JSFunctionBuilder{isolate, info, context}.Build();
+  CHECK(!function->shared()->construct_as_builtin());
+
+  // Force the creation of an initial map.
+  factory->NewJSObject(function);
+
+  // Patch the map to have an accessor for "get".
+  DirectHandle<Map> map(function->initial_map(), isolate);
+  DirectHandle<DescriptorArray> instance_descriptors(
+      map->instance_descriptors(), isolate);
+  CHECK_EQ(0, instance_descriptors->number_of_descriptors());
+
+  PropertyAttributes attrs = NONE;
+  DirectHandle<AccessorInfo> foreign = TestAccessorInfo(isolate);
+  Map::EnsureDescriptorSlack(isolate, map, 1);
+
+  Descriptor d = Descriptor::AccessorConstant(
+      DirectHandle<Name>(Cast<Name>(foreign->name()), isolate), foreign, attrs);
+  map->AppendDescriptor(isolate, &d);
+
+  // Add the Foo constructor to the global object.
+  SetGlobalProperty("Foo", v8::Utils::CallableToLocal(function));
+  // Call the accessor through JavaScript.
+  v8::Local<v8::Value> result = TryRunJS("(new Foo).get").ToLocalChecked();
+  CHECK_EQ(true, result->BooleanValue(v8_isolate()));
 }
 
 }  // namespace internal

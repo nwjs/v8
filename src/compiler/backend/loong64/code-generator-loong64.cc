@@ -152,7 +152,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
   OutOfLineRecordWrite(
       CodeGenerator* gen, Register object, Operand offset, Register value,
       RecordWriteMode mode, StubCallMode stub_mode,
-      IndirectPointerTag indirect_pointer_tag = kIndirectPointerNullTag)
+      TrustedPointerTag trusted_pointer_tag = kTrustedPointerNullTag)
       : OutOfLineCode(gen),
         object_(object),
         offset_(offset),
@@ -163,20 +163,20 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 #endif  // V8_ENABLE_WEBASSEMBLY
         must_save_ra_(!gen->frame_access_state()->has_frame()),
         zone_(gen->zone()),
-        indirect_pointer_tag_(indirect_pointer_tag) {
+        trusted_pointer_tag_(trusted_pointer_tag) {
   }
 
   void Generate() final {
     // When storing an indirect pointer, the value will always be a
     // full/decompressed pointer.
     if (COMPRESS_POINTERS_BOOL &&
-        mode_ != RecordWriteMode::kValueIsIndirectPointer) {
+        mode_ != RecordWriteMode::kValueIsTrustedPointer) {
       __ DecompressTagged(value_, value_);
     }
 
     // No need to check value page flags with the indirect pointer write barrier
     // because the value is always an ExposedTrustedObject.
-    if (mode_ != RecordWriteMode::kValueIsIndirectPointer) {
+    if (mode_ != RecordWriteMode::kValueIsTrustedPointer) {
       __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask,
                        eq, exit());
     }
@@ -190,10 +190,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     }
     if (mode_ == RecordWriteMode::kValueIsEphemeronKey) {
       __ CallEphemeronKeyBarrier(object_, offset_, save_fp_mode);
-    } else if (mode_ == RecordWriteMode::kValueIsIndirectPointer) {
-      DCHECK(IsValidIndirectPointerTag(indirect_pointer_tag_));
-      __ CallIndirectPointerBarrier(object_, offset_, save_fp_mode,
-                                    indirect_pointer_tag_);
+    } else if (mode_ == RecordWriteMode::kValueIsTrustedPointer) {
+      DCHECK(IsValidTrustedPointerTag(trusted_pointer_tag_));
+      __ CallTrustedPointerBarrier(object_, offset_, save_fp_mode,
+                                   trusted_pointer_tag_);
 #if V8_ENABLE_WEBASSEMBLY
     } else if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
       // A direct call to a wasm runtime stub defined in this module.
@@ -220,7 +220,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 #endif  // V8_ENABLE_WEBASSEMBLY
   bool must_save_ra_;
   Zone* zone_;
-  IndirectPointerTag indirect_pointer_tag_;
+  TrustedPointerTag trusted_pointer_tag_;
 };
 
 #define CREATE_OOL_CLASS(ool_name, masm_ool_name, T)                 \
@@ -334,10 +334,10 @@ class OutOfLineVerifySkippedWriteBarrier final : public OutOfLineCode {
   Zone* zone_;
 };
 
-class OutOfLineVerifySkippedIndirectWriteBarrier final : public OutOfLineCode {
+class OutOfLineVerifySkippedTrustedWriteBarrier final : public OutOfLineCode {
  public:
-  OutOfLineVerifySkippedIndirectWriteBarrier(CodeGenerator* gen,
-                                             Register object, Register value)
+  OutOfLineVerifySkippedTrustedWriteBarrier(CodeGenerator* gen, Register object,
+                                            Register value)
       : OutOfLineCode(gen),
         object_(object),
         value_(value),
@@ -354,8 +354,8 @@ class OutOfLineVerifySkippedIndirectWriteBarrier final : public OutOfLineCode {
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
 
-    __ CallVerifySkippedIndirectWriteBarrierStubSaveRegisters(object_, value_,
-                                                              save_fp_mode);
+    __ CallVerifySkippedTrustedWriteBarrierStubSaveRegisters(object_, value_,
+                                                             save_fp_mode);
     if (must_save_ra_) {
       __ Pop(ra);
     }
@@ -1090,7 +1090,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchStoreWithWriteBarrier: {
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
       // Indirect pointer writes must use a different opcode.
-      DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
+      DCHECK_NE(mode, RecordWriteMode::kValueIsTrustedPointer);
       AddressingMode addressing_mode =
           AddressingModeField::decode(instr->opcode());
       Register object = i.InputRegister(0);
@@ -1118,7 +1118,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ StoreTaggedField(value, MemOperand(object, i.InputRegister(1)),
                             &trap_pc);
         RecordTrapInfoIfNeeded(zone(), this, opcode, instr, trap_pc);
-        if (mode > RecordWriteMode::kValueIsIndirectPointer) {
+        if (mode > RecordWriteMode::kValueIsTrustedPointer) {
           __ JumpIfSmi(value, ool->exit());
         }
         __ CheckPageFlag(object,
@@ -1167,7 +1167,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       MacroAssembler::BlockTrampolinePoolScope block_trampoline_pool(masm());
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
       // Indirect pointer writes must use a different opcode.
-      DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
+      DCHECK_NE(mode, RecordWriteMode::kValueIsTrustedPointer);
       Register object = i.InputRegister(0);
       Register offset = i.InputRegister(1);
       Register value = i.InputRegister(2);
@@ -1186,7 +1186,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // valid if the value isn't an indirect pointer. Otherwise the value will
       // be a pointer table index, which will always look like a Smi (but
       // actually reference a pointer in the pointer table).
-      if (mode > RecordWriteMode::kValueIsIndirectPointer) {
+      if (mode > RecordWriteMode::kValueIsTrustedPointer) {
         __ JumpIfSmi(value, ool->exit());
       }
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
@@ -1220,13 +1220,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, trap_pc);
       break;
     }
-    case kArchStoreIndirectWithWriteBarrier: {
+    case kArchStoreTrustedWithWriteBarrier: {
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
-      DCHECK_EQ(mode, RecordWriteMode::kValueIsIndirectPointer);
+      DCHECK_EQ(mode, RecordWriteMode::kValueIsTrustedPointer);
       AddressingMode addressing_mode =
           AddressingModeField::decode(instr->opcode());
-      IndirectPointerTag tag = static_cast<IndirectPointerTag>(i.InputInt64(3));
-      DCHECK(IsValidIndirectPointerTag(tag));
+      TrustedPointerTag tag = static_cast<TrustedPointerTag>(i.InputInt64(3));
+      DCHECK(IsValidTrustedPointerTag(tag));
       Register object = i.InputRegister(0);
       Register value = i.InputRegister(2);
 
@@ -1234,8 +1234,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         auto ool = zone()->New<OutOfLineRecordWrite>(
             this, object, Operand(i.InputInt32(1)), value, mode,
             DetermineStubCallMode(), tag);
-        __ StoreIndirectPointerField(value, MemOperand(object, i.InputInt32(1)),
-                                     &trap_pc);
+        __ StoreTrustedPointerField(value, MemOperand(object, i.InputInt32(1)),
+                                    &trap_pc);
         RecordTrapInfoIfNeeded(zone(), this, opcode, instr, trap_pc);
         __ JumpIfMarking(ool->entry());
         __ bind(ool->exit());
@@ -1244,7 +1244,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         auto ool = zone()->New<OutOfLineRecordWrite>(
             this, object, Operand(i.InputRegister(1)), value, mode,
             DetermineStubCallMode(), tag);
-        __ StoreIndirectPointerField(
+        __ StoreTrustedPointerField(
             value, MemOperand(object, i.InputRegister(1)), &trap_pc);
         RecordTrapInfoIfNeeded(zone(), this, opcode, instr, trap_pc);
         __ CheckPageFlag(object,
@@ -1254,19 +1254,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     }
-    case kArchStoreIndirectSkippedWriteBarrier: {
+    case kArchStoreTrustedSkippedWriteBarrier: {
       AddressingMode addressing_mode =
           AddressingModeField::decode(instr->opcode());
       Register object = i.InputRegister(0);
       Register value = i.InputRegister(2);
 
 #if DEBUG
-      IndirectPointerTag tag = static_cast<IndirectPointerTag>(i.InputInt64(3));
-      DCHECK(IsValidIndirectPointerTag(tag));
+      TrustedPointerTag tag = static_cast<TrustedPointerTag>(i.InputInt64(3));
+      DCHECK(IsValidTrustedPointerTag(tag));
 #endif  // DEBUG
 
       DCHECK(v8_flags.verify_write_barriers);
-      auto ool = zone()->New<OutOfLineVerifySkippedIndirectWriteBarrier>(
+      auto ool = zone()->New<OutOfLineVerifySkippedTrustedWriteBarrier>(
           this, object, value);
       __ jmp(ool->entry());
       __ bind(ool->exit());
@@ -1275,11 +1275,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           masm());
       Operand offset(0);
       if (addressing_mode == kMode_MRI) {
-        __ StoreIndirectPointerField(value, MemOperand(object, i.InputInt32(1)),
-                                     &trap_pc);
+        __ StoreTrustedPointerField(value, MemOperand(object, i.InputInt32(1)),
+                                    &trap_pc);
       } else {
         DCHECK_EQ(addressing_mode, kMode_MRR);
-        __ StoreIndirectPointerField(
+        __ StoreTrustedPointerField(
             value, MemOperand(object, i.InputRegister(1)), &trap_pc);
       }
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, trap_pc);
@@ -2095,11 +2095,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Register base = i.InputRegister(0);
       int32_t offset = i.InputInt32(1);
       Register table = i.InputRegister(2);
-      IndirectPointerTag first =
-          static_cast<IndirectPointerTag>(i.InputInt32(3));
-      IndirectPointerTag last =
-          static_cast<IndirectPointerTag>(i.InputInt32(4));
-      IndirectPointerTagRange tag_range(first, last);
+      TrustedPointerTag first = static_cast<TrustedPointerTag>(i.InputInt32(3));
+      TrustedPointerTag last = static_cast<TrustedPointerTag>(i.InputInt32(4));
+      TrustedPointerTagRange tag_range(first, last);
 
       Register destination = i.OutputRegister();
       Register handle = i.TempRegister(0);
@@ -2110,9 +2108,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Alsl_d(handle, handle, table, kTrustedPointerTableEntrySizeLog2);
       __ Ld_d(destination, MemOperand(handle, 0));
 
-      if (IsFastIndirectPointerTagRange(tag_range)) {
-        uint64_t mask =
-            ComputeUntaggingMaskForFastIndirectPointerTag(tag_range);
+      if (IsFastTrustedPointerTagRange(tag_range)) {
+        uint64_t mask = ComputeUntaggingMaskForFastTrustedPointerTag(tag_range);
         __ And(destination, destination, Operand(mask));
       } else {
         Register tag = handle;  // Reuse handle for tag
@@ -2149,10 +2146,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ StoreSandboxedPointerField(i.InputOrZeroRegister(index), mem);
       break;
     }
-    case kLoong64StoreIndirectPointer: {
+    case kLoong64StoreTrustedPointer: {
       size_t index = 0;
       MemOperand mem = i.MemoryOperand(&index);
-      __ StoreIndirectPointerField(i.InputOrZeroRegister(index), mem);
+      __ StoreTrustedPointerField(i.InputOrZeroRegister(index), mem);
       break;
     }
     case kLoong64AtomicLoadDecompressTaggedSigned:
@@ -3029,30 +3026,23 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kLoong64F64x2Splat: {
       CpuFeatureScope lsx_scope(masm(), LSX);
-      UseScratchRegisterScope temps(masm());
-      Register TmpReg = temps.Acquire();
-      __ Move(TmpReg, i.InputDoubleRegister(0));
-      __ vreplgr2vr_d(i.OutputSimd128Register(), TmpReg);
+      FPURegister input0 = i.InputDoubleRegister(0);
+      __ vreplve_d(i.OutputSimd128Register(), input0.toV(), zero_reg);
       break;
     }
     case kLoong64F64x2ExtractLane: {
       CpuFeatureScope lsx_scope(masm(), LSX);
-      UseScratchRegisterScope temps(masm());
-      Register TmpReg = temps.Acquire();
-      __ vpickve2gr_d(TmpReg, i.InputSimd128Register(0), i.InputInt8(1));
-      __ Move(i.OutputDoubleRegister(), TmpReg);
+      FPURegister output = i.OutputDoubleRegister();
+      __ vreplvei_d(output.toV(), i.InputSimd128Register(0), i.InputInt8(1));
       break;
     }
     case kLoong64F64x2ReplaceLane: {
       CpuFeatureScope lsx_scope(masm(), LSX);
       UseScratchRegisterScope temps(masm());
       Register TmpReg = temps.Acquire();
-      Simd128Register src = i.InputSimd128Register(0);
       Simd128Register dst = i.OutputSimd128Register();
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
       __ Move(TmpReg, i.InputDoubleRegister(2));
-      if (dst != src) {
-        __ vaddi_du(dst, src, 0);
-      }
       __ vinsgr2vr_d(dst, TmpReg, i.InputInt8(1));
       break;
     }
@@ -3258,30 +3248,23 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kLoong64F32x4Splat: {
       CpuFeatureScope lsx_scope(masm(), LSX);
-      UseScratchRegisterScope temps(masm());
-      Register TmpReg = temps.Acquire();
-      __ FmoveLow(TmpReg, i.InputSingleRegister(0));
-      __ vreplgr2vr_w(i.OutputSimd128Register(), TmpReg);
+      FPURegister input0 = i.InputSingleRegister(0);
+      __ vreplve_w(i.OutputSimd128Register(), input0.toV(), zero_reg);
       break;
     }
     case kLoong64F32x4ExtractLane: {
       CpuFeatureScope lsx_scope(masm(), LSX);
-      UseScratchRegisterScope temps(masm());
-      Register TmpReg = temps.Acquire();
-      __ vpickve2gr_wu(TmpReg, i.InputSimd128Register(0), i.InputInt8(1));
-      __ FmoveLow(i.OutputSingleRegister(), TmpReg);
+      FPURegister output = i.OutputSingleRegister();
+      __ vreplvei_w(output.toV(), i.InputSimd128Register(0), i.InputInt8(1));
       break;
     }
     case kLoong64F32x4ReplaceLane: {
       CpuFeatureScope lsx_scope(masm(), LSX);
+      Simd128Register dst = i.OutputSimd128Register();
       UseScratchRegisterScope temps(masm());
       Register TmpReg = temps.Acquire();
-      Simd128Register src = i.InputSimd128Register(0);
-      Simd128Register dst = i.OutputSimd128Register();
-      __ FmoveLow(TmpReg, i.InputSingleRegister(2));
-      if (dst != src) {
-        __ vaddi_wu(dst, src, 0);
-      }
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
+      __ movfr2gr_s(TmpReg, i.InputSingleRegister(2));
       __ vinsgr2vr_w(dst, TmpReg, i.InputInt8(1));
       break;
     }
@@ -3404,11 +3387,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kLoong64I64x2ReplaceLane: {
       CpuFeatureScope lsx_scope(masm(), LSX);
-      Simd128Register src = i.InputSimd128Register(0);
       Simd128Register dst = i.OutputSimd128Register();
-      if (src != dst) {
-        __ vaddi_du(dst, src, 0);
-      }
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
       __ vinsgr2vr_d(dst, i.InputRegister(2), i.InputInt8(1));
       break;
     }
@@ -3577,11 +3557,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kLoong64I32x4ReplaceLane: {
       CpuFeatureScope lsx_scope(masm(), LSX);
-      Simd128Register src = i.InputSimd128Register(0);
       Simd128Register dst = i.OutputSimd128Register();
-      if (src != dst) {
-        __ vaddi_wu(dst, src, 0);
-      }
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
       __ vinsgr2vr_w(dst, i.InputRegister(2), i.InputInt8(1));
       break;
     }
@@ -3822,11 +3799,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kLoong64I16x8ReplaceLane: {
       CpuFeatureScope lsx_scope(masm(), LSX);
-      Simd128Register src = i.InputSimd128Register(0);
       Simd128Register dst = i.OutputSimd128Register();
-      if (src != dst) {
-        __ vaddi_hu(dst, src, 0);
-      }
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
       __ vinsgr2vr_h(dst, i.InputRegister(2), i.InputInt8(1));
       break;
     }
@@ -4053,11 +4027,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kLoong64I8x16ReplaceLane: {
       CpuFeatureScope lsx_scope(masm(), LSX);
-      Simd128Register src = i.InputSimd128Register(0);
       Simd128Register dst = i.OutputSimd128Register();
-      if (src != dst) {
-        __ vaddi_bu(dst, src, 0);
-      }
+      DCHECK_EQ(dst, i.InputSimd128Register(0));
       __ vinsgr2vr_b(dst, i.InputRegister(2), i.InputInt8(1));
       break;
     }

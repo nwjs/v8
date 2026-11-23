@@ -72,6 +72,7 @@ void JSArrayBuffer::Setup(SharedFlag shared, ResizableFlag resizable,
     SetEmbedderField(i, Smi::zero());
   }
   if (!backing_store) {
+    DCHECK(!resizable);
     set_backing_store(isolate, EmptyBackingStoreBuffer());
     set_byte_length(0);
     set_max_byte_length(0);
@@ -252,7 +253,7 @@ void JSArrayBuffer::DetachInternal(DirectHandle<JSArrayBuffer> array_buffer,
       HandleScope scope(isolate);
       isolate->array_buffer_detach_callback()(
           reinterpret_cast<v8::Isolate*>(isolate),
-          Utils::ToLocal(array_buffer));
+          Utils::ToLocalUnshared(array_buffer));
     }
   }
 }

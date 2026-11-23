@@ -413,8 +413,8 @@ PerfBasicLogger::PerfBasicLogger(Isolate* isolate) : CodeEventLogger(isolate) {
     // Open the perf JIT dump file.
     auto perf_dump_name = base::UniqueArray<char>::NewForOverwrite(
         strlen(base_dir) + kFilenameBufferPadding);
-    int size = SNPrintF(perf_dump_name.as_vector(), "%s/perf-%d.map", base_dir,
-                        process_id_);
+    int size = base::SNPrintF(perf_dump_name.as_span(), "%s/perf-%d.map",
+                              base_dir, process_id_);
     CHECK_NE(size, -1);
     perf_output_handle_ =
         base::OS::FOpen(perf_dump_name.begin(), base::OS::LogFileOpenMode);
@@ -2727,15 +2727,20 @@ void ExistingCodeLogger::LogCompiledFunctions(
   }
 
 #if V8_ENABLE_WEBASSEMBLY
-  HeapObjectIterator iterator(heap);
-  DisallowGarbageCollection no_gc;
+  DirectHandleVector<WasmModuleObject> module_objects(isolate_);
+  {
+    HeapObjectIterator iterator(heap);
+    DisallowGarbageCollection no_gc;
 
-  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
-       obj = iterator.Next()) {
-    if (!IsWasmModuleObject(obj)) continue;
-    auto module_object = Cast<WasmModuleObject>(obj);
-    module_object->native_module()->LogWasmCodes(isolate_,
-                                                 module_object->script());
+    for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
+         obj = iterator.Next()) {
+      if (!IsWasmModuleObject(obj)) continue;
+      module_objects.emplace_back(Cast<WasmModuleObject>(obj), isolate_);
+    }
+  }
+  for (DirectHandle<WasmModuleObject> module_object : module_objects) {
+    module_object->native_module()->LogWasmCodes(
+        isolate_, direct_handle(module_object->script(), isolate_));
   }
   wasm::GetWasmImportWrapperCache()->LogForIsolate(isolate_);
   wasm::GetWasmStackEntryWrapperCache()->LogForIsolate(isolate_);

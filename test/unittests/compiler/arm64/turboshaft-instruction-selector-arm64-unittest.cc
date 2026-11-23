@@ -477,6 +477,10 @@ TEST_P(TurboshaftInstructionSelectorAddSubTest, ImmediateOnRight) {
     StreamBuilder m(this, type, type);
     m.Return(m.Emit(dpi.mi.op, m.Parameter(0), BuildConstant(&m, type, imm)));
     Stream s = m.Build();
+    if (imm == 0) {
+      ASSERT_EQ(0U, s.size());
+      continue;
+    }
     ASSERT_EQ(1U, s.size());
     EXPECT_EQ(dpi.mi.arch_opcode, s[0]->arch_opcode());
     ASSERT_EQ(2U, s[0]->InputCount());
@@ -645,6 +649,10 @@ TEST_F(TurboshaftInstructionSelectorTest, AddImmediateOnLeft) {
     StreamBuilder m(this, MachineType::Int32(), MachineType::Int32());
     m.Return(m.Word32Add(m.Int32Constant(imm), m.Parameter(0)));
     Stream s = m.Build();
+    if (imm == 0) {
+      ASSERT_EQ(0U, s.size());
+      continue;
+    }
     ASSERT_EQ(1U, s.size());
     EXPECT_EQ(kArm64Add32, s[0]->arch_opcode());
     ASSERT_EQ(2U, s[0]->InputCount());
@@ -658,6 +666,10 @@ TEST_F(TurboshaftInstructionSelectorTest, AddImmediateOnLeft) {
     StreamBuilder m(this, MachineType::Int64(), MachineType::Int64());
     m.Return(m.Word64Add(m.Int64Constant(imm), m.Parameter(0)));
     Stream s = m.Build();
+    if (imm == 0) {
+      ASSERT_EQ(0U, s.size());
+      continue;
+    }
     ASSERT_EQ(1U, s.size());
     EXPECT_EQ(kArm64Add, s[0]->arch_opcode());
     ASSERT_EQ(2U, s[0]->InputCount());
@@ -1123,7 +1135,8 @@ TEST_F(TurboshaftInstructionSelectorTest, AddBranchWithImmediateOnRight) {
     m.Return(m.Int32Constant(0));
     Stream s = m.Build();
     ASSERT_EQ(1U, s.size());
-    EXPECT_EQ(kArm64Cmn32, s[0]->arch_opcode());
+    EXPECT_EQ((imm == 0) ? kArm64CompareAndBranch32 : kArm64Cmn32,
+              s[0]->arch_opcode());
     EXPECT_EQ(kFlags_branch, s[0]->flags_mode());
     EXPECT_EQ(kNotEqual, s[0]->flags_condition());
   }
@@ -1207,7 +1220,8 @@ TEST_F(TurboshaftInstructionSelectorTest, AddBranchWithImmediateOnLeft) {
     m.Return(m.Int32Constant(0));
     Stream s = m.Build();
     ASSERT_EQ(1U, s.size());
-    EXPECT_EQ(kArm64Cmn32, s[0]->arch_opcode());
+    EXPECT_EQ((imm == 0) ? kArm64CompareAndBranch32 : kArm64Cmn32,
+              s[0]->arch_opcode());
     ASSERT_LE(1U, s[0]->InputCount());
     EXPECT_EQ(kFlags_branch, s[0]->flags_mode());
     EXPECT_EQ(kNotEqual, s[0]->flags_condition());
@@ -3461,6 +3475,33 @@ TEST_F(TurboshaftInstructionSelectorTest, AddReduce) {
     EXPECT_EQ(s.ToVreg(m.Parameter(0)), s.ToVreg(s[0]->InputAt(0)));
     EXPECT_EQ(1U, s[0]->OutputCount());
   }
+}
+
+TEST_F(TurboshaftInstructionSelectorTest, I64x2MulSVE2) {
+  if (!CpuFeatures::IsSupported(SVE2) ||
+      CpuFeatures::svevlen() != kSimd128Size) {
+    GTEST_SKIP() << "Requires a 128-bit SVE vector-length";
+  }
+
+  StreamBuilder m(this, MachineType::Simd128(), MachineType::Simd128(),
+                  MachineType::Simd128());
+  V<Simd128> lhs = m.Parameter<Simd128>(0);
+  V<Simd128> rhs = m.Parameter<Simd128>(1);
+  V<Simd128> prod = m.Simd128Binop(lhs, rhs, Simd128BinopOp::Kind::kI64x2Mul);
+  m.Return(prod);
+  Stream s = m.Build(SVE2);
+
+  ASSERT_EQ(1U, s.size());
+
+  EXPECT_EQ(kArm64IMul, s[0]->arch_opcode());
+  EXPECT_EQ(64, LaneSizeBits(LaneSizeField::decode(s[0]->opcode())));
+  ASSERT_EQ(2U, s[0]->InputCount());
+  EXPECT_EQ(s.ToVreg(lhs), s.ToVreg(s[0]->InputAt(0)));
+  EXPECT_EQ(s.ToVreg(rhs), s.ToVreg(s[0]->InputAt(1)));
+  ASSERT_EQ(1U, s[0]->OutputCount());
+  EXPECT_EQ(s.ToVreg(prod), s.ToVreg(s[0]->Output()));
+
+  return;
 }
 
 TEST_F(TurboshaftInstructionSelectorTest, I64x2Mul) {
@@ -7726,7 +7767,7 @@ TEST_F(TurboshaftInstructionSelectorTest, LoadTransform) {
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-// This list doesn't contain kIndirectPointerWriteBarrier because only indirect
+// This list doesn't contain kTrustedPointerWriteBarrier because only trusted
 // pointer fields can be stored to with that barrier kind.
 static const WriteBarrierKind kWriteBarrierKinds[] = {
     kMapWriteBarrier, kPointerWriteBarrier, kEphemeronKeyWriteBarrier,

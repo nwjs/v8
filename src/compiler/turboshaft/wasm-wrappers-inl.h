@@ -69,7 +69,7 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildToJSFunctionRef(
     V<WasmFuncRef> ret, V<Context> context) -> V<Object> {
   V<WasmInternalFunction> internal = V<WasmInternalFunction>::Cast(
       __ LoadTrustedPointer(ret, LoadOp::Kind::TaggedBase(),
-                            kWasmInternalFunctionIndirectPointerTag,
+                            kWasmInternalFunctionTrustedPointerTag,
                             offsetof(WasmFuncRef, trusted_internal_)));
   V<Object> maybe_external = __ Load(internal, LoadOp::Kind::TaggedBase(),
                                      MemoryRepresentation::TaggedPointer(),
@@ -84,25 +84,6 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildToJSFunctionRef(
     result = maybe_external;
   }
   return result;
-}
-
-template <typename Assembler>
-void WasmWrapperTSGraphBuilder<Assembler>::CheckAndConvertSharedString(
-    V<Object> ret, ScopedVar<Object>& result) {
-  IF (__ IsSmi(ret)) {
-    result = ret;
-  } ELSE {
-    V<Word32> instance_type = __ LoadInstanceTypeField(__ LoadMapField(ret));
-    V<Word32> is_string = __ Uint32LessThan(
-        instance_type, __ Word32Constant(FIRST_NONSTRING_TYPE));
-    IF (is_string) {
-      // Since this is a shared externref, the string will be shared.
-      result = __ WasmCallRuntime(__ phase_zone(), Runtime::kWasmWasmToJSObject,
-                                  {ret}, __ NoContextConstant());
-    } ELSE {
-      result = ret;
-    }
-  }
 }
 
 template <typename Assembler>
@@ -131,17 +112,6 @@ auto WasmWrapperTSGraphBuilder<Assembler>::ToJS(OpIndex ret,
     }
   }
 
-#ifdef V8_IS_TSAN
-  if (v8_flags.wasm_shared &&
-      (type.is_shared() || type.is_reference_to(GenericKind::kAny))) {
-    IF_NOT (__ IsSmi(ret)) {
-      __ WasmCallRuntime(__ phase_zone(),
-                         Runtime::kTsanAcquireForInitializationFence, {ret},
-                         __ NoContextConstant(), CanThrow{false});
-    }
-  }
-#endif
-
   if (type.ref_type_kind() == wasm::RefTypeKind::kFunction) {
     // Function reference. Extract the external function.
     if (type.is_nullable()) {
@@ -161,39 +131,84 @@ auto WasmWrapperTSGraphBuilder<Assembler>::ToJS(OpIndex ret,
   // Always null.
   if (type.is_none_type()) return __ template LoadRoot<RootIndex::kNullValue>();
 
-  if (wasm::IsSubtypeOf(type, wasm::kWasmSharedExternRef)) {
-    // We have to unshare shared strings before passing them to JS.
-    ScopedVar<Object> result(this, OpIndex::Invalid());
-    CheckAndConvertSharedString(ret, result);
-    return result;
+  Label<Object> done(&Asm());
+  Label<> runtime(&Asm());
+
+  bool is_abs = type.is_abstract_ref();
+  bool is_any = is_abs && type.generic_kind() == GenericKind::kAny;
+  bool is_eq = is_abs && type.generic_kind() == GenericKind::kEq;
+  bool is_i31 = is_abs && type.generic_kind() == GenericKind::kI31;
+  bool is_struct = is_abs && type.generic_kind() == GenericKind::kStruct;
+  bool is_extern = is_abs && type.generic_kind() == GenericKind::kExtern;
+
+  bool can_be_smi = is_any || is_eq || is_i31 || is_extern;
+
+  bool can_be_shared_string =
+      wasm::IsSubtypeOf(type, wasm::kWasmSharedExternRef) ||
+      (type.is_shared() && is_any);
+
+  bool must_be_descriptor =
+      type.has_index() &&
+      wasm::GetTypeCanonicalizer()->is_descriptor(type.ref_index());
+  bool can_be_descriptor = must_be_descriptor || is_any || is_eq || is_struct;
+
+  if (can_be_smi) {
+    GOTO_IF(__ IsSmi(ret), done, ret);
+  }
+  if (type.is_nullable() && type.use_wasm_null()) {
+    GOTO_IF(__ TaggedEqual(ret, __ template LoadRoot<RootIndex::kWasmNull>()),
+            done, __ template LoadRoot<RootIndex::kNullValue>());
   }
 
-  if (type.is_reference_to(GenericKind::kAny) && type.is_shared()) {
-    ScopedVar<Object> result(this, OpIndex::Invalid());
-    if (type.is_nullable()) {
-      IF (__ TaggedEqual(ret, __ template LoadRoot<RootIndex::kWasmNull>())) {
-        result = __ template LoadRoot<RootIndex::kNullValue>();
-      } ELSE {
-        CheckAndConvertSharedString(ret, result);
-      }
-    } else {
-      CheckAndConvertSharedString(ret, result);
+#ifdef V8_IS_TSAN
+  if (v8_flags.wasm_shared) {
+    // Unshared anyref can hold shared objects.
+    // TODO(jkummerow): ...but only when they came from any.convert_extern,
+    // which means we would have previously applied the barrier on the
+    // preceding to-extern conversion; so "|| is_any" is unnecessary here?
+    if (type.is_shared() || is_any) {
+      __ WasmCallRuntime(__ phase_zone(),
+                         Runtime::kTsanAcquireForInitializationFence, {ret},
+                         __ NoContextConstant(), CanThrow{false});
     }
-    return result;
+  }
+#endif  // V8_IS_TSAN
+
+  // If we don't need the instance type, the load will be eliminated.
+  V<Word32> instance_type = __ LoadInstanceTypeField(__ LoadMapField(ret));
+
+  // We have to unshare shared strings before passing them to JS.
+  if (can_be_shared_string) {
+    V<Word32> is_string = __ Uint32LessThan(
+        instance_type, __ Word32Constant(FIRST_NONSTRING_TYPE));
+    GOTO_IF(is_string, runtime);
   }
 
-  // At this point, we only have to process WasmNull.
-  // These two cases are never WasmNull.
-  if (!type.is_nullable()) return ret;
-  if (!type.use_wasm_null()) return ret;
-
-  // Nullable reference. Convert WasmNull if needed.
-  ScopedVar<Object> result(this, OpIndex::Invalid());
-  IF_NOT (__ TaggedEqual(ret, __ template LoadRoot<RootIndex::kWasmNull>())) {
-    result = ret;
-  } ELSE {
-    result = __ template LoadRoot<RootIndex::kNullValue>();
+  // Indexed and generic types that could be a descriptor struct have to
+  // check for {ret} being a descriptor, and load its JS wrapper if so.
+  if (v8_flags.wasm_merged_descriptors && can_be_descriptor) {
+    if (!must_be_descriptor) {
+      GOTO_IF_NOT(__ Word32Equal(instance_type, WASM_CUSTOM_MAP_TYPE), done,
+                  ret);
+    }
+    // At this point, it's guaranteed that {ret} is a WasmCustomMap.
+    V<HeapObject> maybe_wrapper = __ Load(ret, LoadOp::Kind::TaggedBase(),
+                                          MemoryRepresentation::TaggedPointer(),
+                                          offsetof(WasmCustomMap, js_wrapper_));
+    // The wrapper is lazily created on first use.
+    V<Word32> no_wrapper = __ TaggedEqual(
+        maybe_wrapper, __ template LoadRoot<RootIndex::kNullValue>());
+    GOTO_IF(UNLIKELY(no_wrapper), runtime);
+    GOTO(done, maybe_wrapper);
+  } else {
+    GOTO(done, ret);
   }
+
+  BIND(runtime);
+  GOTO(done, __ WasmCallRuntime(__ phase_zone(), Runtime::kWasmWasmToJSObject,
+                                {ret}, __ NoContextConstant()));
+
+  BIND(done, result);
   return result;
 }
 
@@ -364,7 +379,7 @@ auto WasmWrapperTSGraphBuilder<Assembler>::BuildJSToWasmWrapper(
     V<WasmFunctionData> function_data =
         V<WasmFunctionData>::Cast(__ LoadTrustedPointer(
             sfi, LoadOp::Kind::TaggedBase().Immutable(),
-            kWasmExportedFunctionDataIndirectPointerTag,
+            kWasmExportedFunctionDataTrustedPointerTag,
             offsetof(SharedFunctionInfo, trusted_function_data_)));
     V<WasmInternalFunction> internal =
         V<WasmInternalFunction>::Cast(__ LoadProtectedPointerField(
@@ -426,9 +441,9 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmToJSWrapper(
   auto [old_sp, old_limit] = this->BuildSwitchToTheCentralStackIfNeeded();
   OpIndex suspender = OpIndex::Invalid();
   if (suspend == wasm::kSuspend) {
-    suspender = __ Load(__ LoadRootRegister(), LoadOp::Kind::RawAligned(),
-                        MemoryRepresentation::AnyUncompressedTagged(),
-                        IsolateData::active_suspender_offset());
+    suspender = __ Load(__ IsolateField(IsolateFieldId::kActiveSuspender),
+                        LoadOp::Kind::RawAligned(),
+                        MemoryRepresentation::AnyUncompressedTagged());
 
     if (v8_flags.stress_wasm_stack_switching) {
       V<Word32> for_stress_testing = __ TaggedEqual(
@@ -469,9 +484,10 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmToJSWrapper(
   }
 
   // Check that the central stack has enough space for the outgoing parameters.
-  V<WordPtr> stack_limit = __ Load(
-      __ LoadRootRegister(), LoadOp::Kind::RawAligned().NotLoadEliminable(),
-      MemoryRepresentation::UintPtr(), IsolateData::real_jslimit_offset());
+  V<WordPtr> stack_limit =
+      __ Load(__ IsolateField(IsolateFieldId::kRealJsLimit),
+              LoadOp::Kind::RawAligned().NotLoadEliminable(),
+              MemoryRepresentation::UintPtr());
   IF_NOT (LIKELY(
               __ StackPointerGreaterThan(stack_limit, StackCheckKind::kWasm))) {
     __ WasmCallRuntime(__ phase_zone(), Runtime::kThrowStackOverflow, {},
@@ -625,7 +641,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildWasmStackEntryWrapper() {
       AbortReason::kUnexpectedInstanceType);
   V<WasmInternalFunction> internal_function = V<WasmInternalFunction>::Cast(
       __ LoadTrustedPointer(func_ref, LoadOp::Kind::TaggedBase().Immutable(),
-                            kWasmInternalFunctionIndirectPointerTag,
+                            kWasmInternalFunctionTrustedPointerTag,
                             offsetof(WasmFuncRef, trusted_internal_)));
   auto [target, instance] =
       this->BuildFunctionTargetAndImplicitArg(internal_function);
@@ -712,16 +728,15 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildCapiCallWrapper() {
   V<WasmFunctionData> function_data =
       V<WasmFunctionData>::Cast(__ LoadTrustedPointer(
           shared, LoadOp::Kind::TaggedBase(),
-          kWasmCapiFunctionDataIndirectPointerTag,
+          kWasmCapiFunctionDataTrustedPointerTag,
           offsetof(SharedFunctionInfo, trusted_function_data_)));
   V<Object> host_data_foreign = __ LoadTaggedField(
       function_data, offsetof(WasmCapiFunctionData, embedder_data_));
 
-  OpIndex isolate_root = __ LoadRootRegister();
+  V<WordPtr> c_entry_fp = __ IsolateField(IsolateFieldId::kCEntryFP);
   OpIndex fp_value = __ FramePointer();
-  __ Store(isolate_root, fp_value, StoreOp::Kind::RawAligned(),
-           MemoryRepresentation::UintPtr(), compiler::kNoWriteBarrier,
-           Isolate::c_entry_fp_offset());
+  __ Store(c_entry_fp, fp_value, StoreOp::Kind::RawAligned(),
+           MemoryRepresentation::UintPtr(), compiler::kNoWriteBarrier);
 
   V<WordPtr> call_target =
       BuildLoadCallTargetFromExportedFunctionData(function_data);
@@ -794,7 +809,7 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildCWasmEntryWrapper() {
   V<WasmTrustedInstanceData> instance_data = V<WasmTrustedInstanceData>::Cast(
       __ LoadTrustedPointer(V<HeapObject>::Cast(object_ref),
                             LoadOp::Kind::TaggedBase().Immutable(),
-                            kWasmTrustedInstanceDataIndirectPointerTag,
+                            kWasmTrustedInstanceDataTrustedPointerTag,
                             offsetof(WasmInstanceObject, trusted_data_)));
   args[pos++] = instance_data;
 
@@ -857,9 +872,10 @@ void WasmWrapperTSGraphBuilder<Assembler>::BuildJSFastApiCallWrapper(
   V<NativeContext> native_context = __ template LoadTaggedField<NativeContext>(
       import_data, offsetof(WasmImportData, native_context_));
 
-  __ StoreOffHeap(__ LoadRootRegister(),
+  V<WordPtr> context_address = __ IsolateField(IsolateFieldId::kContext);
+  __ StoreOffHeap(context_address,
                   __ BitcastHeapObjectToWordPtr(native_context),
-                  MemoryRepresentation::UintPtr(), Isolate::context_offset());
+                  MemoryRepresentation::UintPtr());
 
   Tagged<JSFunction> target;
   V<JSFunction> target_node;

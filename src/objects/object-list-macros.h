@@ -155,8 +155,6 @@ namespace internal {
   V(JSAsyncFromSyncIterator)                    \
   V(JSAsyncFunctionObject)                      \
   V(JSAsyncGeneratorObject)                     \
-  V(JSAtomicsCondition)                         \
-  V(JSAtomicsMutex)                             \
   V(JSBoundFunction)                            \
   V(JSCollection)                               \
   V(JSCollectionIterator)                       \
@@ -209,7 +207,6 @@ namespace internal {
   V(JSSharedStruct)                             \
   V(JSSpecialObject)                            \
   V(JSStringIterator)                           \
-  V(JSSynchronizationPrimitive)                 \
   V(JSDetachedTypedArray)                       \
   V(JSTypedArray)                               \
   V(JSValidIteratorWrapper)                     \
@@ -495,6 +492,7 @@ namespace internal {
   V(JSSetIteratorPrototype)                  \
   V(JSStringIteratorPrototype)               \
   V(TypedArrayConstructor)                   \
+  V(Uint8JSTypedArray)                       \
   V(Uint8TypedArrayConstructor)              \
   V(Int8TypedArrayConstructor)               \
   V(Uint16TypedArrayConstructor)             \

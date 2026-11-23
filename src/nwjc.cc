@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
 
     i::Isolate* iso = reinterpret_cast<i::Isolate*>(isolate);
     i::Handle<i::String> orig_source = iso->factory()
-      ->NewStringFromUtf8(base::CStrVector(chars)).ToHandleChecked();
+      ->NewStringFromUtf8(std::string_view(chars)).ToHandleChecked();
 
     ScriptCompiler::CompilationDetails compilation_details;
     ScriptCompiler::CachedData* cache = NULL;

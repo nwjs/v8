@@ -247,6 +247,12 @@ void LateLoadEliminationAnalyzer::ProcessBlock(const Block& block,
         break;
 
       case Opcode::kCatchBlockBegin:
+        // Throwing an exception can have arbitrary side effects (e.g., via
+        // debugger pause-on-exception), even when the throwing operation itself
+        // does not have `can_write` effects on its non-throwing path.
+        memory_.InvalidateMaybeAliasing();
+        break;
+
       case Opcode::kRetain:
       case Opcode::kDidntThrow:
       case Opcode::kCheckException:
@@ -460,10 +466,11 @@ void LateLoadEliminationAnalyzer::ProcessStore(OpIndex op_idx,
     // eliminates more): We need to add a field allow_seq_cst_replacement to
     // keys. We set this field to true in the beginning.  Only if this field is
     // true should a seq_cst load be eliminated. The DisallowSeqCstReplacement
-    // should iterate all valid keys, and set theirallow_seq_cst_replacement bit
-    // to false.
-    // memory_.DisallowSeqCstReplacement();
+    // should iterate all valid keys, and set their allow_seq_cst_replacement
+    // bit to false.
 
+    // Updating aliases if the value stored was known as non-aliasing.
+    InvalidateIfAlias(store.value());
     return;
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -537,6 +544,9 @@ void LateLoadEliminationAnalyzer::ProcessAtomicRMW(OpIndex op_idx,
   // TODO(manoskouk): Can we fine-grain this?
   TRACE(">> Invalidating whole memory");
   memory_.InvalidateEverything();
+
+  // Updating aliases if the value stored was known as non-aliasing.
+  InvalidateIfAlias(store.value());
 #endif
 }
 

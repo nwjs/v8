@@ -215,7 +215,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
   OutOfLineRecordWrite(
       CodeGenerator* gen, Register object, Operand offset, Register value,
       RecordWriteMode mode, StubCallMode stub_mode,
-      IndirectPointerTag indirect_pointer_tag = kIndirectPointerNullTag)
+      TrustedPointerTag trusted_pointer_tag = kTrustedPointerNullTag)
       : OutOfLineCode(gen),
         object_(object),
         offset_(offset),
@@ -226,7 +226,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 #endif  // V8_ENABLE_WEBASSEMBLY
         must_save_ra_(!gen->frame_access_state()->has_frame()),
         zone_(gen->zone()),
-        indirect_pointer_tag_(indirect_pointer_tag) {
+        trusted_pointer_tag_(trusted_pointer_tag) {
   }
 
   void Generate() final {
@@ -234,7 +234,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     // When storing an indirect pointer, the value will always be a
     // full/decompressed pointer.
     if (COMPRESS_POINTERS_BOOL &&
-        mode_ != RecordWriteMode::kValueIsIndirectPointer) {
+        mode_ != RecordWriteMode::kValueIsTrustedPointer) {
       __ DecompressTagged(value_, value_);
     }
 #endif
@@ -253,10 +253,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     }
     if (mode_ == RecordWriteMode::kValueIsEphemeronKey) {
       __ CallEphemeronKeyBarrier(object_, offset_, save_fp_mode);
-    } else if (mode_ == RecordWriteMode::kValueIsIndirectPointer) {
-      DCHECK(IsValidIndirectPointerTag(indirect_pointer_tag_));
-      __ CallIndirectPointerBarrier(object_, offset_, save_fp_mode,
-                                    indirect_pointer_tag_);
+    } else if (mode_ == RecordWriteMode::kValueIsTrustedPointer) {
+      DCHECK(IsValidTrustedPointerTag(trusted_pointer_tag_));
+      __ CallTrustedPointerBarrier(object_, offset_, save_fp_mode,
+                                   trusted_pointer_tag_);
 #if V8_ENABLE_WEBASSEMBLY
     } else if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
       // A direct call to a wasm runtime stub defined in this module.
@@ -286,7 +286,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 #endif  // V8_ENABLE_WEBASSEMBLY
   const bool must_save_ra_;
   Zone* zone_;
-  IndirectPointerTag indirect_pointer_tag_;
+  TrustedPointerTag trusted_pointer_tag_;
 };
 
 class OutOfLineVerifySkippedWriteBarrier final : public OutOfLineCode {
@@ -1302,7 +1302,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchStoreWithWriteBarrier: {
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
       // Indirect pointer writes must use a different opcode.
-      DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
+      DCHECK_NE(mode, RecordWriteMode::kValueIsTrustedPointer);
       Register object = i.InputRegister(0);
       Operand offset = i.InputOperand(1);
       Register value = i.InputRegister(2);
@@ -1310,7 +1310,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       auto ool = zone()->New<OutOfLineRecordWrite>(
           this, object, offset, value, mode, DetermineStubCallMode());
       __ StoreTaggedField(value, MemOperand(kScratchReg, 0), trapper);
-      if (mode > RecordWriteMode::kValueIsIndirectPointer) {
+      if (mode > RecordWriteMode::kValueIsTrustedPointer) {
         __ JumpIfSmi(value, ool->exit());
       }
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
@@ -1350,7 +1350,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       MacroAssembler::BlockPoolsScope block_pools(masm());
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
       // Indirect pointer writes must use a different opcode.
-      DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
+      DCHECK_NE(mode, RecordWriteMode::kValueIsTrustedPointer);
       Register object = i.InputRegister(0);
       Operand offset = i.InputOperand(1);
       Register value = i.InputRegister(2);
@@ -1363,7 +1363,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // valid if the value isn't an indirect pointer. Otherwise the value will
       // be a pointer table index, which will always look like a Smi (but
       // actually reference a pointer in the pointer table).
-      if (mode > RecordWriteMode::kValueIsIndirectPointer) {
+      if (mode > RecordWriteMode::kValueIsTrustedPointer) {
         __ JumpIfSmi(value, ool->exit());
       }
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
@@ -1395,19 +1395,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       UNREACHABLE();
 #endif
     }
-    case kArchStoreIndirectWithWriteBarrier: {
+    case kArchStoreTrustedWithWriteBarrier: {
 #ifdef V8_TARGET_ARCH_RISCV64
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
-      DCHECK_EQ(mode, RecordWriteMode::kValueIsIndirectPointer);
-      IndirectPointerTag tag = static_cast<IndirectPointerTag>(i.InputInt64(3));
-      DCHECK(IsValidIndirectPointerTag(tag));
+      DCHECK_EQ(mode, RecordWriteMode::kValueIsTrustedPointer);
+      TrustedPointerTag tag = static_cast<TrustedPointerTag>(i.InputInt64(3));
+      DCHECK(IsValidTrustedPointerTag(tag));
       Register object = i.InputRegister(0);
       Operand offset = i.InputOperand(1);
       Register value = i.InputRegister(2);
       __ AddWord(kScratchReg, object, offset);
       auto ool = zone()->New<OutOfLineRecordWrite>(
           this, object, offset, value, mode, DetermineStubCallMode(), tag);
-      __ StoreIndirectPointerField(value, MemOperand(kScratchReg, 0), trapper);
+      __ StoreTrustedPointerField(value, MemOperand(kScratchReg, 0), trapper);
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
                        ne, ool->entry());
       __ bind(ool->exit());
@@ -1416,19 +1416,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       UNREACHABLE();
 #endif
     }
-    case kArchStoreIndirectSkippedWriteBarrier: {
+    case kArchStoreTrustedSkippedWriteBarrier: {
 #ifdef V8_TARGET_ARCH_RISCV64
       Register object = i.InputRegister(0);
       Operand offset = i.InputOperand(1);
       Register value = i.InputRegister(2);
 
 #if DEBUG
-      IndirectPointerTag tag = static_cast<IndirectPointerTag>(i.InputInt64(3));
-      DCHECK(IsValidIndirectPointerTag(tag));
+      TrustedPointerTag tag = static_cast<TrustedPointerTag>(i.InputInt64(3));
+      DCHECK(IsValidTrustedPointerTag(tag));
 #endif  // DEBUG
 
       __ AddWord(kScratchReg, object, offset);
-      __ StoreIndirectPointerField(value, MemOperand(kScratchReg, 0), trapper);
+      __ StoreTrustedPointerField(value, MemOperand(kScratchReg, 0), trapper);
       break;
 #else
       UNREACHABLE();
@@ -2829,9 +2829,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ StoreSandboxedPointerField(i.InputOrZeroRegister(0), mem, trapper);
       break;
     }
-    case kRiscvStoreIndirectPointer: {
+    case kRiscvStoreTrustedPointer: {
       MemOperand mem = i.MemoryOperand(1);
-      __ StoreIndirectPointerField(i.InputOrZeroRegister(0), mem, trapper);
+      __ StoreTrustedPointerField(i.InputOrZeroRegister(0), mem, trapper);
       break;
     }
     case kRiscvAtomicLoadDecompressTaggedSigned: {
@@ -2858,11 +2858,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Register base = i.InputRegister(0);
       int32_t offset = i.InputInt32(1);
       Register table = i.InputRegister(2);
-      IndirectPointerTag first =
-          static_cast<IndirectPointerTag>(i.InputInt32(3));
-      IndirectPointerTag last =
-          static_cast<IndirectPointerTag>(i.InputInt32(4));
-      IndirectPointerTagRange tag_range(first, last);
+      TrustedPointerTag first = static_cast<TrustedPointerTag>(i.InputInt32(3));
+      TrustedPointerTag last = static_cast<TrustedPointerTag>(i.InputInt32(4));
+      TrustedPointerTagRange tag_range(first, last);
       Register destination = i.OutputRegister();
       Register handle = i.TempRegister(0);
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
@@ -2871,9 +2869,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ CalcScaledAddress(destination, table, handle,
                            kTrustedPointerTableEntrySizeLog2);
       __ LoadWord(destination, MemOperand(destination, 0));
-      if (IsFastIndirectPointerTagRange(tag_range)) {
-        uint64_t mask =
-            ComputeUntaggingMaskForFastIndirectPointerTag(tag_range);
+      if (IsFastTrustedPointerTagRange(tag_range)) {
+        uint64_t mask = ComputeUntaggingMaskForFastTrustedPointerTag(tag_range);
         __ And(destination, destination, Operand(mask));
       } else {
         Register tag = handle;  // Reuse handle for tag
@@ -5370,11 +5367,11 @@ void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
   for (size_t index = 2; index < instr->InputCount(); index += 2) {
     cases.push_back({i.InputInt32(index + 0), GetLabel(i.InputRpo(index + 1))});
   }
-#ifdef V8_COMPRESS_POINTERS
   // AssembleArchBinarySearchSwitchRange use JumpIfEqual and JumpIfLessThan to
   // compare the input value with the case values.
-  // In V8_COMPRESS_POINTERS, the compare is done with the lower 32 bits of the
-  // input, requiring a sign extension.
+  // The compare is performed on the full 64-bit registers, but the switch
+  // input is a 32-bit value whose upper 32 bits are not guaranteed to be
+  // sign-extended, so a sign extension is required.
   // Since the input value remains unchanged throughout
   // AssembleArchBinarySearchSwitch, we perform the sign extension once here,
   // rather than repeatedly in JumpIfEqual and JumpIfLessThan. This reduces the
@@ -5382,7 +5379,6 @@ void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
   UseScratchRegisterScope temps(masm());
   scratch = temps.Acquire();
   __ SignExtendWord(scratch, input);
-#endif
   AssembleArchBinarySearchSwitchRange(scratch, i.InputRpo(1), cases.data(),
                                       cases.data() + cases.size());
 }

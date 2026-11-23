@@ -267,8 +267,7 @@ class Worker : public std::enable_shared_from_this<Worker> {
  public:
   static constexpr i::ManagedTypeId kTypeID = i::ManagedTypeId::kD8Worker;
 
-  explicit Worker(Isolate* parent_isolate, const char* script,
-                  bool flush_denormals);
+  explicit Worker(Isolate* parent_isolate, const char* script);
   ~Worker();
 
   // Post a message to the worker. The worker will take ownership of the
@@ -348,7 +347,6 @@ class Worker : public std::enable_shared_from_this<Worker> {
 
   base::Thread* thread_ = nullptr;
   char* script_;
-  bool flush_denormals_;
   std::atomic<State> state_;
   bool is_joined_ = false;
   // For signalling that the worker has started.
@@ -641,7 +639,6 @@ class ShellOptions {
   DisallowReassignment<bool> wasm_trap_handler = {"wasm-trap-handler", true};
 #endif  // V8_ENABLE_WEBASSEMBLY
   DisallowReassignment<bool> expose_fast_api = {"expose-fast-api", false};
-  DisallowReassignment<bool> flush_denormals = {"flush-denormals", false};
   DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                         1 * i::MB};
   DisallowReassignment<bool> bundle = {"bundle", false};
@@ -765,8 +762,6 @@ class Shell : public i::AllStatic {
 
   static void InstallConditionalFeatures(
       const v8::FunctionCallbackInfo<v8::Value>& info);
-  static void SetFlushDenormals(
-      const v8::FunctionCallbackInfo<v8::Value>& info);
 
   static void AsyncHooksCreateHook(
       const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -819,7 +814,7 @@ class Shell : public i::AllStatic {
   static void ReadFile(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void CreateWasmMemoryMapDescriptor(
       const v8::FunctionCallbackInfo<v8::Value>& info);
-  static base::UniqueArray<char> ReadChars(const char* name);
+  static std::optional<base::UniqueArray<char>> ReadChars(const char* name);
   static MaybeLocal<PrimitiveArray> ReadLines(Isolate* isolate,
                                               const char* name);
   static void ReadBuffer(const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -933,7 +928,8 @@ class Shell : public i::AllStatic {
 
   static void SetWaitUntilDone(Isolate* isolate, bool value);
 
-  static base::UniqueArray<char> ReadCharsFromTcpPort(const char* name);
+  static std::optional<base::UniqueArray<char>> ReadCharsFromTcpPort(
+      const char* name);
 
   static void set_script_executed() { script_executed_.store(true); }
   static bool ChangeWorkingDirectory(const std::string& path,

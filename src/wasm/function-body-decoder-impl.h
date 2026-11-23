@@ -210,6 +210,18 @@ V8_INLINE void DecodeError(Decoder* decoder, const char* str, Args&&... args) {
 
 namespace value_type_reader {
 
+#ifdef V8_ENABLE_DRUMBRAKE
+template <typename ValidationTag>
+bool IsExnRefUnsupportedByDrumBrake(Decoder* decoder, const uint8_t* pc) {
+  if (!VALIDATE(!v8_flags.wasm_jitless || v8_flags.drumbrake_exnref)) {
+    DecodeError<ValidationTag>(decoder, pc,
+                               "exnref not supported by the Wasm interpreter");
+    return true;
+  }
+  return false;
+}
+#endif  // V8_ENABLE_DRUMBRAKE
+
 template <typename ValidationTag>
 std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
                                              const uint8_t* pc,
@@ -220,12 +232,15 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
   Exactness exactness = Exactness::kAnySubtype;
   uint32_t type_index;
   if (heap_index < 0) {
-    int64_t min_1_byte_leb128 = -64;
-    if (!VALIDATE(heap_index >= min_1_byte_leb128)) {
+    // Concrete type indices (heap_index >= 0) are encoded as multi-byte s33
+    // LEB128, whereas abstract heap types and type prefixes ('shared', 'exact')
+    // are encoded as single bytes.
+    if (!VALIDATE(length == 1)) {
       DecodeError<ValidationTag>(decoder, pc, "Unknown heap type %" PRId64,
                                  heap_index);
       return {kWasmBottom, length};
     }
+    DCHECK_GE(heap_index, -64);
     uint8_t uint_7_mask = 0x7F;
     uint8_t code = static_cast<ValueTypeCode>(heap_index) & uint_7_mask;
     SharedFlag is_shared = SharedFlag{false};
@@ -236,8 +251,10 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
             kSharedFlagCode);
         return {kWasmBottom, length};
       }
-      code = decoder->read_u8<ValidationTag>(pc + length, "heap type");
-      length++;
+      // 'shared' can only be followed by an abstract heap type, which is
+      // encoded as a single byte.
+      code = decoder->read_u8<ValidationTag>(pc + 1, "heap type");
+      length = 2;
       is_shared = SharedFlag{true};
     }
     switch (code) {
@@ -263,6 +280,11 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
         return {HeapType::from_code(code, is_shared), length};
       case kNoExnCode:
       case kExnRefCode:
+#ifdef V8_ENABLE_DRUMBRAKE
+        if (IsExnRefUnsupportedByDrumBrake<ValidationTag>(decoder, pc)) {
+          return {kWasmBottom, 0};
+        }
+#endif  // V8_ENABLE_DRUMBRAKE
         if (!VALIDATE(!detected->has_legacy_eh() ||
                       v8_flags.wasm_allow_mixed_eh_for_testing)) {
           DecodeError<ValidationTag>(
@@ -333,6 +355,16 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
                                      "--wasm-custom-descriptors");
           return {kWasmBottom, 0};
         }
+        if (!VALIDATE(!is_shared)) {
+          DecodeError<ValidationTag>(
+              decoder, pc,
+              "invalid heap type 'shared exact', 'shared' is only allowed on "
+              "abstract heap types");
+          return {kWasmBottom, 0};
+        }
+        // 'exact' is a single-byte prefix followed by a concrete type index
+        // encoded as a (potentially multi-byte) u32v.
+        DCHECK_EQ(1, length);
         auto [nested_index, index_length] =
             decoder->read_u32v<ValidationTag>(pc + 1, "type index");
         type_index = nested_index;
@@ -346,6 +378,7 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
         return {kWasmBottom, length};
     }
   } else {
+    // Concrete type indices are encoded as non-negative s33 LEB128 values.
     type_index = static_cast<uint32_t>(heap_index);
   }
   if (!VALIDATE(type_index < kV8MaxWasmTypes)) {
@@ -392,6 +425,11 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
               1};
     case kNoExnCode:
     case kExnRefCode:
+#ifdef V8_ENABLE_DRUMBRAKE
+      if (IsExnRefUnsupportedByDrumBrake<ValidationTag>(decoder, pc)) {
+        return {kWasmBottom, 0};
+      }
+#endif  // V8_ENABLE_DRUMBRAKE
       if (!VALIDATE(!detected->has_legacy_eh() ||
                     v8_flags.wasm_allow_mixed_eh_for_testing)) {
         DecodeError<ValidationTag>(
@@ -468,7 +506,7 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
     case kS128Code: {
       if (!VALIDATE(CheckHardwareSupportsSimd())) {
         if (v8_flags.correctness_fuzzer_suppressions) {
-          FATAL("Aborting on missing Wasm SIMD support");
+          base::FatalNoSecurityImpact("Aborting on missing Wasm SIMD support");
         }
         DecodeError<ValidationTag>(decoder, pc, "Wasm SIMD unsupported");
         return {kWasmBottom, 0};
@@ -754,7 +792,7 @@ struct SelectTypeImmediate {
   SelectTypeImmediate(WasmEnabledFeatures enabled,
                       WasmDetectedFeatures* detected, Decoder* decoder,
                       const uint8_t* pc, ValidationTag = {}) {
-    uint8_t num_types;
+    uint32_t num_types;
     std::tie(num_types, length) =
         decoder->read_u32v<ValidationTag>(pc, "number of select types");
     if (!VALIDATE(num_types == 1)) {
@@ -795,14 +833,15 @@ struct BlockTypeImmediate {
     std::tie(block_type, length) =
         decoder->read_i33v<ValidationTag>(pc, "block type");
     if (block_type < 0) {
-      // All valid negative types are 1 byte in length, so we check against the
-      // minimum 1-byte LEB128 value.
-      constexpr int64_t min_1_byte_leb128 = -64;
-      if (!VALIDATE(block_type >= min_1_byte_leb128)) {
+      // Concrete type indices (block_type >= 0) are encoded as multi-byte s33
+      // LEB128, whereas kVoidCode (0x40) and value type opcodes are single
+      // bytes.
+      if (!VALIDATE(length == 1)) {
         DecodeError<ValidationTag>(decoder, pc, "invalid block type %" PRId64,
                                    block_type);
         return;
       }
+      DCHECK_GE(block_type, -64);
       if (static_cast<ValueTypeCode>(block_type & 0x7F) != kVoidCode) {
         sig = FunctionSig{1, 0, single_return_sig_storage};
         std::tie(single_return_sig_storage[0], length) =
@@ -3797,6 +3836,12 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(TryTable) {
+#ifdef V8_ENABLE_DRUMBRAKE
+    if (value_type_reader::IsExnRefUnsupportedByDrumBrake<ValidationTag>(
+            this, this->pc_)) {
+      return 0;
+    }
+#endif  // V8_ENABLE_DRUMBRAKE
     this->detected_->add_exnref();
     if (!VALIDATE(!this->detected_->has_legacy_eh() ||
                   v8_flags.wasm_allow_mixed_eh_for_testing)) {
@@ -3880,6 +3925,12 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(ThrowRef) {
+#ifdef V8_ENABLE_DRUMBRAKE
+    if (value_type_reader::IsExnRefUnsupportedByDrumBrake<ValidationTag>(
+            this, this->pc_)) {
+      return 0;
+    }
+#endif  // V8_ENABLE_DRUMBRAKE
     this->detected_->add_exnref();
     if (!VALIDATE(!this->detected_->has_legacy_eh() ||
                   v8_flags.wasm_allow_mixed_eh_for_testing)) {
@@ -5069,7 +5120,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     this->detected_->add_simd();
     if (!CheckHardwareSupportsSimd()) {
       if (v8_flags.correctness_fuzzer_suppressions) {
-        FATAL("Aborting on missing Wasm SIMD support");
+        base::FatalNoSecurityImpact("Aborting on missing Wasm SIMD support");
       }
       this->DecodeError("Wasm SIMD unsupported");
       return 0;
@@ -6302,8 +6353,9 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
           // All other generic types would have failed validation above.
           DCHECK(ref.type.has_index());
           // Exactness is only propagated if the actual type on the stack
-          // exactly matched the type immediate.
-          if (ref.type.ref_index() != imm.index) {
+          // is equivalent to the type immediate.
+          if (!EquivalentIndices(ref.type.ref_index(), imm.index,
+                                 this->module_)) {
             result_exactness = kAnySubtype;
           }
         }
@@ -7581,9 +7633,15 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         auto [array_obj, index] =
             Pop(ValueType::RefNull(imm.heap_type()), kWasmI32);
         Value* value = Push(element_type.Unpacked());
-        CALL_INTERFACE_IF_OK_AND_REACHABLE(ArrayGet, array_obj, imm, index,
-                                           opcode == kExprArrayAtomicGetS,
-                                           value);
+        const bool is_signed = opcode == kExprArrayAtomicGetS;
+        if (array_obj.type.is_shared()) {
+          CALL_INTERFACE_IF_OK_AND_REACHABLE(ArrayAtomicGet, array_obj, imm,
+                                             index, is_signed,
+                                             memory_order.order, value);
+        } else {
+          CALL_INTERFACE_IF_OK_AND_REACHABLE(ArrayGet, array_obj, imm, index,
+                                             is_signed, value);
+        }
         return opcode_length + memory_order.length + imm.length;
       }
       case kExprArrayAtomicSet: {
@@ -7870,7 +7928,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
               "invalid numeric opcode: 0x%x, enable with --wasm-fp16", opcode);
           return 0;
         }
-        return DecodeLoadMem(LoadType::kF32LoadF16, 2);
+        return DecodeLoadMem(LoadType::kF32LoadF16, opcode_length);
       }
       case kExprF32StoreMemF16: {
         if (!this->enabled_.has_fp16()) {
@@ -7878,7 +7936,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
               "invalid numeric opcode: 0x%x, enable with --wasm-fp16", opcode);
           return 0;
         }
-        return DecodeStoreMem(StoreType::kF32StoreF16, 2);
+        return DecodeStoreMem(StoreType::kF32StoreF16, opcode_length);
       }
       case kExprI64Add128: {
         CHECK_PROTOTYPE_OPCODE(wide_arithmetic);

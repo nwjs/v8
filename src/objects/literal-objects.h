@@ -11,7 +11,7 @@
 #include "src/objects/fixed-array.h"
 #include "src/objects/objects-body-descriptors.h"
 #include "src/objects/struct.h"
-#include "src/objects/trusted-pointer.h"
+#include "src/sandbox/trusted-pointer.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -21,6 +21,7 @@ namespace internal {
 
 class ClassLiteral;
 class StructBodyDescriptor;
+class SandboxTesting;
 
 V8_OBJECT class PrototypeSharedClosureInfo : public Struct {
  public:
@@ -100,7 +101,6 @@ V8_OBJECT class ObjectBoilerplateDescription
   // length_ / optional_padding_ live in FixedArrayBase.
   TaggedMember<Smi> backing_store_size_;
   TaggedMember<Smi> flags_;
-  V8_TQ_TAIL_NAME(raw_entries);
   V8_TQ_TAIL_LENGTH(length);
   FLEXIBLE_ARRAY_MEMBER(typename Super::ElementMemberT, objects);
 } V8_OBJECT_END;
@@ -156,7 +156,7 @@ V8_OBJECT class RegExpBoilerplateDescription : public Struct {
   friend class ConstructorBuiltinsAssembler;
   friend struct ObjectTraits<RegExpBoilerplateDescription>;
 
-  const TrustedPointerMember<RegExpData, kRegExpDataIndirectPointerTag> data_;
+  const TrustedPointerMember<RegExpData, kRegExpDataTrustedPointerTag> data_;
   const TaggedMember<Smi> flags_ V8_TQ_TYPE(SmiTagged<JSRegExpFlags>);
 } V8_OBJECT_END;
 
@@ -167,7 +167,7 @@ struct ObjectTraits<RegExpBoilerplateDescription> {
                           sizeof(RegExpBoilerplateDescription),
                           sizeof(RegExpBoilerplateDescription)>,
       WithStrongTrustedPointer<offsetof(RegExpBoilerplateDescription, data_),
-                               kRegExpDataIndirectPointerTag>>;
+                               kRegExpDataTrustedPointerTag>>;
 };
 
 V8_OBJECT class ClassBoilerplate : public Struct {
@@ -235,6 +235,7 @@ V8_OBJECT class ClassBoilerplate : public Struct {
  private:
   friend class Factory;
   friend class TorqueGeneratedClassBoilerplateAsserts;
+  friend class SandboxTesting;
 
   const TaggedMember<Smi> arguments_count_;
   const TaggedMember<Object> static_properties_template_;

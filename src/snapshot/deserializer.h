@@ -133,43 +133,9 @@ class Deserializer : public SerializerDeserializer {
   bool valid_ = true;
 
  private:
-  // A circular queue of hot objects. This is added to in the same order as in
-  // Serializer::HotObjectsList, but this stores the objects as a vector of
-  // existing handles. This allows us to add Handles to the queue without having
-  // to create new handles. Note that this depends on those Handles staying
-  // valid as long as the HotObjectsList is alive.
-  class HotObjectsList {
-   public:
-    HotObjectsList() = default;
-    HotObjectsList(const HotObjectsList&) = delete;
-    HotObjectsList& operator=(const HotObjectsList&) = delete;
-
-    void Add(DirectHandle<HeapObject> object) {
-      circular_queue_[index_] = object;
-      index_ = (index_ + 1) & kSizeMask;
-    }
-
-    DirectHandle<HeapObject> Get(int index) {
-      DCHECK(!circular_queue_[index].is_null());
-      return circular_queue_[index];
-    }
-
-    void Reset() {
-      for (auto& entry : circular_queue_) entry = {};
-      index_ = 0;
-    }
-
-   private:
-    static const int kSize = kHotObjectCount;
-    static const int kSizeMask = kSize - 1;
-    static_assert(base::bits::IsPowerOfTwo(kSize));
-    DirectHandle<HeapObject> circular_queue_[kSize];
-    int index_ = 0;
-  };
-
   struct ReferenceDescriptor {
     HeapObjectReferenceType type;
-    bool is_indirect_pointer;
+    bool is_trusted_pointer;
     bool is_protected_pointer;
   };
 
@@ -192,8 +158,8 @@ class Deserializer : public SerializerDeserializer {
   inline int WriteExternalPointer(Tagged<HeapObject> host,
                                   ExternalPointerSlot dest, Address value,
                                   ExternalPointerTag tag);
-  inline int WriteIndirectPointer(IndirectPointerSlot dest,
-                                  Tagged<HeapObject> value);
+  inline int WriteTrustedPointer(TrustedPointerSlot dest,
+                                 Tagged<HeapObject> value);
 
   // Fills in a heap object's data from start to end (exclusive). Start and end
   // are slot indices within the object.
@@ -247,10 +213,10 @@ class Deserializer : public SerializerDeserializer {
   template <typename SlotAccessor>
   int ReadWeakPrefix(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadIndirectPointerPrefix(uint8_t data, SlotAccessor slot_accessor);
+  int ReadTrustedPointerPrefix(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadInitializeSelfIndirectPointer(uint8_t data,
-                                        SlotAccessor slot_accessor);
+  int ReadInitializeSelfTrustedPointer(uint8_t data,
+                                       SlotAccessor slot_accessor);
   template <typename SlotAccessor>
   int ReadAllocateJSDispatchEntry(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
@@ -258,18 +224,27 @@ class Deserializer : public SerializerDeserializer {
   template <typename SlotAccessor>
   int ReadProtectedPointerPrefix(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadRootArrayConstants(uint8_t data, SlotAccessor slot_accessor);
+  int ReadTrustedExportRef(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
-  int ReadHotObject(uint8_t data, SlotAccessor slot_accessor);
+  int ReadUntrustedRef(uint8_t data, SlotAccessor slot_accessor);
+  template <typename SlotAccessor>
+  int ReadTrustedExternalRef(uint8_t data, SlotAccessor slot_accessor);
+  template <typename SlotAccessor>
+  int ReadRegisterFixedBackref(uint8_t data, SlotAccessor slot_accessor);
+  template <typename SlotAccessor>
+  int ReadRootArrayConstants(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
   int ReadFixedRawData(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
   int ReadExtendedMapBitfieldEx(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
   int ReadFixedRepeatRoot(uint8_t data, SlotAccessor slot_accessor);
+  template <typename SlotAccessor>
+  int ReadFixedBackref(uint8_t data, SlotAccessor slot_accessor);
 
   // A helper function for ReadData for reading external references.
   inline Address ReadExternalReferenceCase();
+  Address GetApiReferenceAddress(uint32_t reference_id);
 
   // A helper function for reading external pointer tags.
   ExternalPointerTag ReadExternalPointerTag();
@@ -301,7 +276,6 @@ class Deserializer : public SerializerDeserializer {
   SnapshotByteSource source_;
   uint32_t magic_number_;
 
-  HotObjectsList hot_objects_;
   DirectHandleVector<Map> new_maps_;
   DirectHandleVector<AllocationSite> new_allocation_sites_;
   DirectHandleVector<InstructionStream> new_instruction_stream_objects_;
@@ -314,6 +288,8 @@ class Deserializer : public SerializerDeserializer {
 
   // Vector of allocated objects that can be accessed by a backref, by index.
   std::vector<IndirectHandle<HeapObject>> back_refs_;
+  Address* fixed_back_refs_[kFixedBackrefCount];
+  uint32_t num_fixed_back_refs_ = 0;
 
   // Vector of already allocated JSDispatchTable entries.
   std::vector<JSDispatchHandle> js_dispatch_entries_;
@@ -336,13 +312,32 @@ class Deserializer : public SerializerDeserializer {
   std::vector<UnresolvedForwardRef> unresolved_forward_refs_;
   int num_unresolved_forward_refs_ = 0;
 
-  const base::Vector<const uint8_t> trusted_payload_;
+  base::Vector<const uint8_t> trusted_payload_;
+  std::vector<EncodedExternalReference> external_references_;
   std::vector<IndirectHandle<HeapObject>> untrusted_back_refs_;
+  std::vector<std::pair<uint32_t, UnresolvedForwardRef>> trusted_export_refs_;
+
+  // With the sandbox, a code cache has an untrusted and a trusted section.
+  // Snapshots and code caches without the sandbox have a single section that
+  // combines both and is trusted as a whole.
+  enum class Section : uint8_t {
+    kUntrusted = 1 << 0,
+    kTrusted = 1 << 1,
+    kCombined = kUntrusted | kTrusted,
+  };
+  // Bytecodes that could corrupt memory outside the sandbox are only allowed in
+  // the trusted and the combined section.
+  V8_INLINE bool InTrustedSection() const {
+    return static_cast<uint8_t>(section_) &
+           static_cast<uint8_t>(Section::kTrusted);
+  }
+  V8_INLINE bool InUntrustedSection() const { return !InTrustedSection(); }
+  Section section_;
 
   const bool deserializing_user_code_;
 
   bool next_reference_is_weak_ = false;
-  bool next_reference_is_indirect_pointer_ = false;
+  bool next_reference_is_trusted_pointer_ = false;
   bool next_reference_is_protected_pointer = false;
 
   // TODO(6593): generalize rehashing, and remove this flag.

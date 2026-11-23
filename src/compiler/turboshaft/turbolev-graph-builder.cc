@@ -1608,8 +1608,7 @@ class GraphBuildingNodeProcessor {
           graph_zone(), false,
           std::max<int>(actual_parameter_count,
                         node->expected_parameter_count()),
-          node->expected_parameter_count(),
-          CallDescriptor::kNeedsFrameState | CallDescriptor::kCanUseRoots);
+          node->expected_parameter_count(), CallDescriptor::kNeedsFrameState);
 
       LazyDeoptOnThrow lazy_deopt_on_throw = ShouldLazyDeoptOnThrow(node);
 
@@ -2012,16 +2011,9 @@ class GraphBuildingNodeProcessor {
     V<FeedbackCell> feedback_cell =
         __ HeapConstant(node->feedback_cell().object());
 
-    V<JSFunction> closure;
-    if (node->pretenured()) {
-      closure = __ template CallRuntime<runtime::NewClosure_Tenured>(
-          context, {.shared_function_info = shared_function_info,
-                    .feedback_cell = feedback_cell});
-    } else {
-      closure = __ template CallRuntime<runtime::NewClosure>(
-          context, {.shared_function_info = shared_function_info,
-                    .feedback_cell = feedback_cell});
-    }
+    V<JSFunction> closure = __ template CallRuntime<runtime::NewClosure>(
+        context, {.shared_function_info = shared_function_info,
+                  .feedback_cell = feedback_cell});
 
     SetMap(node, closure);
 
@@ -2373,8 +2365,11 @@ class GraphBuildingNodeProcessor {
                            __ HeapConstant(node->feedback().vector),
                            Map(node->ContextInput())};
 
-    GENERATE_AND_MAP_BUILTIN_CALL(node, Builtin::kDefineNamedOwnIC, frame_state,
-                                  base::VectorOf(arguments));
+    GENERATE_AND_MAP_BUILTIN_CALL(node,
+                                  node->in_literal()
+                                      ? Builtin::kDefineNamedOwnInLiteralIC
+                                      : Builtin::kDefineNamedOwnIC,
+                                  frame_state, base::VectorOf(arguments));
     return maglev::ProcessResult::kContinue;
   }
 
@@ -3646,8 +3641,8 @@ class GraphBuildingNodeProcessor {
       const maglev::ProcessingState& state) {
     __ Store(Map(node->ObjectInput()), Map(node->ValueInput()),
              StoreOp::Kind::TaggedBase(),
-             MemoryRepresentation::IndirectPointer(),
-             WriteBarrierKind::kIndirectPointerWriteBarrier, node->offset(),
+             MemoryRepresentation::TrustedPointer(),
+             WriteBarrierKind::kTrustedPointerWriteBarrier, node->offset(),
              node->initializing_or_transitioning(), node->tag());
     return maglev::ProcessResult::kContinue;
   }
@@ -4350,6 +4345,14 @@ class GraphBuildingNodeProcessor {
                                 const maglev::ProcessingState& state) {
     V<Word32> condition = Map(node->ConditionInput());
     __ Branch(condition, Map(node->if_true()), Map(node->if_false()));
+    return maglev::ProcessResult::kContinue;
+  }
+
+  maglev::ProcessResult Process(maglev::BranchIfInt32BitwiseAndNonZero* node,
+                                const maglev::ProcessingState& state) {
+    V<Word32> masked =
+        __ Word32BitwiseAnd(Map(node->ValueInput()), node->mask());
+    __ Branch(masked, Map(node->if_true()), Map(node->if_false()));
     return maglev::ProcessResult::kContinue;
   }
 
@@ -5703,8 +5706,8 @@ class GraphBuildingNodeProcessor {
 
   maglev::ProcessResult Process(maglev::SetPendingMessage* node,
                                 const maglev::ProcessingState& state) {
-    V<WordPtr> message_address = __ ExternalConstant(
-        ExternalReference::address_of_pending_message(isolate_));
+    V<WordPtr> message_address =
+        __ IsolateField(IsolateFieldId::kPendingMessage);
     V<Object> old_message = __ LoadMessage(message_address);
     __ StoreMessage(message_address, Map(node->ValueInput()));
     SetMap(node, old_message);

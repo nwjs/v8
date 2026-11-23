@@ -123,6 +123,7 @@
 #include "src/objects/heap-object-field-inl.h"
 #include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type.h"
+#include "src/objects/js-struct.h"
 #include "src/objects/js-weak-refs-inl.h"
 #include "src/objects/maybe-object.h"
 #include "src/objects/objects.h"
@@ -1419,6 +1420,7 @@ namespace {
 template <typename Callback>
 void InvokeExternalCallbacks(Isolate* isolate, Callback callback) {
   DCHECK(!AllowJavascriptExecution::IsAllowed(isolate));
+  DCHECK(!AllowJSObjectModification::IsAllowed(isolate));
   AllowGarbageCollection allow_gc;
   // Temporary override any embedder stack state as callbacks may create
   // their own state on the stack and recursively trigger GC.
@@ -1466,8 +1468,14 @@ void Heap::CollectGarbage(
   // collection is triggered. Note that these callbacks may trigger another
   // garbage collection since they may allocate.
 
-  // JS execution is not allowed in any of the callbacks.
+  // JS execution and object modifications are not allowed during GC or in any
+  // of the embedder callbacks triggered below: first-pass weak callbacks
+  // (GlobalHandles::InvokeFirstPassWeakCallbacks), second-pass phantom
+  // callbacks (PostGarbageCollectionProcessing), GC prologue and epilogue
+  // callbacks (v8::Isolate::GCCallback), and CppHeap pre-finalizers and object
+  // finalizers (C++ destructors).
   DisallowJavascriptExecution no_js(isolate());
+  DisallowJSObjectModification no_js_object_modification(isolate());
 
   // Some custom flushing (currently: FlushBytecodeFromSFI) can create
   // fresh TrustedPointerTableEntries during GC. These must not be affected
@@ -1828,6 +1836,13 @@ void Heap::StartIncrementalMarking(GCFlags gc_flags,
     // guarantee.
     return;
   }
+
+  // Completing sweeping below may trigger embedder CppHeap object finalizers
+  // (C++ destructors, via FinishSweepingIfRunning / FinishSweepingIfOutOfWork),
+  // and incremental_marking()->Start() triggers embedder GC prologue and
+  // epilogue callbacks.
+  DisallowJavascriptExecution no_js(isolate());
+  DisallowJSObjectModification no_js_object_modification(isolate());
 
   TRACE_EVENT(
       "v8",
@@ -3487,9 +3502,7 @@ namespace {
 
 double ComputeMutatorUtilizationImpl(double mutator_speed,
                                      std::optional<double> gc_speed) {
-  constexpr double kMinMutatorUtilization = 0.0;
   constexpr double kConservativeGcSpeedInBytesPerMillisecond = 200000;
-  if (mutator_speed == 0) return kMinMutatorUtilization;
   if (!gc_speed) gc_speed = kConservativeGcSpeedInBytesPerMillisecond;
   // Derivation:
   // mutator_utilization = mutator_time / (mutator_time + gc_time)
@@ -4581,12 +4594,14 @@ void Heap::IterateRoots(RootVisitor* v, base::EnumSet<SkipRoot> options,
   isolate_->compilation_cache()->Iterate(v);
   v->Synchronize(VisitorSynchronization::kCompilationCache);
 
+  Tagged<Object> first_builtin(isolate_->builtin_table()[0]);
   const bool skip_iterate_builtins =
       options.contains(SkipRoot::kOldGeneration) ||
       (Builtins::kCodeObjectsAreInROSpace &&
        options.contains(SkipRoot::kReadOnlyBuiltins) &&
        // Prior to ReadOnlyPromotion, builtins may be on the mutable heap.
-       !isolate_->serializer_enabled());
+       IsHeapObject(first_builtin) &&
+       HeapLayout::InReadOnlySpace(Cast<HeapObject>(first_builtin)));
   if (!skip_iterate_builtins) {
     IterateBuiltins(v);
     v->Synchronize(VisitorSynchronization::kBuiltins);
@@ -6235,7 +6250,8 @@ void Heap::SetStackStart() {
   // deserialization process), we don't need to set the stack start.
   if (main_thread_local_heap_ == nullptr) return;
 
-  void* actual_stack_start = v8::base::Stack::GetStackStart();
+  void* actual_stack_start = v8::base::Stack::GetEffectiveStackStart();
+  const bool check_for_tls = ShouldCheckForTLSOnStack();
 
   // Because of v8::Locker an isolate might be migrated between threads. In such
   // situations the provided stack start marker should only be used on the right
@@ -6243,9 +6259,9 @@ void Heap::SetStackStart() {
   if (stack_start_marker_ && actual_stack_start >= stack_start_marker_ &&
       reinterpret_cast<uintptr_t>(stack_start_marker_) >=
           static_cast<uintptr_t>(GetCurrentStackPosition())) {
-    stack().SetStackStart(stack_start_marker_);
+    stack().SetStackStart(stack_start_marker_, check_for_tls);
   } else {
-    stack().SetStackStart(actual_stack_start);
+    stack().SetStackStart(actual_stack_start, check_for_tls);
   }
 }
 
@@ -6257,6 +6273,16 @@ void Heap::SetStackStart() {
 const ::heap::base::Stack& Heap::stack() const {
   CHECK_NOT_NULL(main_thread_local_heap_);
   return main_thread_local_heap_->stack_;
+}
+
+bool Heap::ShouldCheckForTLSOnStack() const {
+#ifdef VERIFY_HEAP
+  if (v8_flags.verify_heap) return true;
+#endif  // VERIFY_HEAP
+  if (const auto* cpp_heap = CppHeap::From(cpp_heap_)) {
+    return cpp_heap->ShouldCheckForTLSOnStack();
+  }
+  return true;
 }
 
 void Heap::StartTearDown() {
@@ -6685,7 +6711,7 @@ void Heap::VerifySkippedWriteBarrier(Address object, Address value) {
 }
 
 // static
-void Heap::VerifySkippedIndirectWriteBarrier(Address object) {
+void Heap::VerifySkippedTrustedWriteBarrier(Address object) {
 #if V8_VERIFY_WRITE_BARRIERS
   DCHECK(v8_flags.verify_write_barriers);
   LocalHeap* local_heap = LocalHeap::Current();
@@ -7851,10 +7877,9 @@ ConservativePinningScope::ConservativePinningScope(Heap* heap) : heap_(heap) {
   // frame layouts). In such cases, we scan the stack either from the last
   // c_entry_fp or the whole stack.
   const Address c_entry_fp = *heap_->isolate()->c_entry_fp_address();
-  const void* frame_address =
-      (c_entry_fp == kNullAddress)
-          ? static_cast<void*>(v8::base::Stack::GetStackStart())
-          : reinterpret_cast<const void*>(c_entry_fp);
+  const void* frame_address = (c_entry_fp == kNullAddress)
+                                  ? heap_->stack().stack_start()
+                                  : reinterpret_cast<const void*>(c_entry_fp);
   // The stack segment covered by this scope should include the scope itself.
   DCHECK_NOT_NULL(frame_address);
   DCHECK_LE(this, frame_address);

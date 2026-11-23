@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <array>
 #include <span>
 
 #include "include/v8-function.h"
 #include "src/api/api-inl.h"
 #include "src/base/strings.h"
-#include "src/base/unique-array.h"
 #include "test/cctest/test-api.h"
 
 using ::v8::Array;
@@ -747,11 +747,11 @@ TEST(SourceURLInStackTrace) {
       "}\n"
       "eval('(' + outer +')()%s');";
 
-  auto code = v8::base::UniqueArray<char>::NewForOverwrite(1024);
-  v8::base::SNPrintF(code.as_vector(), source, "//# sourceURL=eval_url");
-  CHECK(CompileRun(code.begin())->IsUndefined());
-  v8::base::SNPrintF(code.as_vector(), source, "//@ sourceURL=eval_url");
-  CHECK(CompileRun(code.begin())->IsUndefined());
+  std::array<char, 1024> code;
+  v8::base::SNPrintF(code, source, "//# sourceURL=eval_url");
+  CHECK(CompileRun(code.data())->IsUndefined());
+  v8::base::SNPrintF(code, source, "//@ sourceURL=eval_url");
+  CHECK(CompileRun(code.data())->IsUndefined());
 }
 
 static int scriptIdInStack[2];
@@ -1668,8 +1668,16 @@ TEST(CurrentScriptData_DynamicScriptCompiledFromEmbedder_Eval) {
   // When eval is called from a normal JS script with a JS caller on the stack,
   // DynamicScriptCompiledFromEmbedderCallback should not be called.
   dynamicScriptCompiledEvents.clear();
-  CompileRun("eval('CaptureStack();');");
+  CompileRun("(0, eval)('CaptureStack()');");
   CHECK(dynamicScriptCompiledEvents.empty());
+
+  // A subsequent embedder call with the same source string must not hit the
+  // compilation cache and must trigger the callback with a fresh script ID.
+  eval_fn->Call(context.local(), context->Global(), 1, &arg).ToLocalChecked();
+  CHECK_EQ(dynamicScriptCompiledEvents.size(), 1);
+  CHECK_NE(dynamicScriptCompiledEvents[0].script_id, script_id);
+  CHECK_EQ(capturedFramesScriptData[0].id,
+           dynamicScriptCompiledEvents[0].script_id);
 }
 
 TEST(CurrentScriptData_DynamicScriptCompiledFromEmbedder_FunctionConstructor) {
@@ -1712,8 +1720,21 @@ TEST(CurrentScriptData_DynamicScriptCompiledFromEmbedder_FunctionConstructor) {
   // caller on the stack, DynamicScriptCompiledFromEmbedderCallback should not
   // be called.
   dynamicScriptCompiledEvents.clear();
-  CompileRun("new Function('CaptureStack();')();");
+  CompileRun("new Function('CaptureStack()')();");
   CHECK(dynamicScriptCompiledEvents.empty());
+
+  // A subsequent embedder call with the same source string must not hit the
+  // compilation cache and must trigger the callback with a fresh script ID.
+  v8::Local<v8::Function> created_fn2 =
+      func_ctor->CallAsConstructor(context.local(), 1, &arg)
+          .ToLocalChecked()
+          .As<v8::Function>();
+  CHECK_EQ(dynamicScriptCompiledEvents.size(), 1);
+  CHECK_NE(dynamicScriptCompiledEvents[0].script_id, script_id);
+  created_fn2->Call(context.local(), context->Global(), 0, nullptr)
+      .ToLocalChecked();
+  CHECK_EQ(capturedFramesScriptData[0].id,
+           dynamicScriptCompiledEvents[0].script_id);
 }
 
 void AnalyzeStackOfInlineScriptWithSourceURL(
@@ -1754,11 +1775,11 @@ TEST(InlineScriptWithSourceURLInStackTrace) {
       "}\n"
       "outer()\n%s";
 
-  auto code = v8::base::UniqueArray<char>::NewForOverwrite(1024);
-  v8::base::SNPrintF(code.as_vector(), source, "//# sourceURL=source_url");
-  CHECK(CompileRunWithOrigin(code.begin(), "url", 0, 1)->IsUndefined());
-  v8::base::SNPrintF(code.as_vector(), source, "//@ sourceURL=source_url");
-  CHECK(CompileRunWithOrigin(code.begin(), "url", 0, 1)->IsUndefined());
+  std::array<char, 1024> code;
+  v8::base::SNPrintF(code, source, "//# sourceURL=source_url");
+  CHECK(CompileRunWithOrigin(code.data(), "url", 0, 1)->IsUndefined());
+  v8::base::SNPrintF(code, source, "//@ sourceURL=source_url");
+  CHECK(CompileRunWithOrigin(code.data(), "url", 0, 1)->IsUndefined());
 }
 
 void AnalyzeStackOfDynamicScriptWithSourceURL(
@@ -1799,11 +1820,11 @@ TEST(DynamicWithSourceURLInStackTrace) {
       "}\n"
       "outer()\n%s";
 
-  auto code = v8::base::UniqueArray<char>::NewForOverwrite(1024);
-  v8::base::SNPrintF(code.as_vector(), source, "//# sourceURL=source_url");
-  CHECK(CompileRunWithOrigin(code.begin(), "url", 0, 0)->IsUndefined());
-  v8::base::SNPrintF(code.as_vector(), source, "//@ sourceURL=source_url");
-  CHECK(CompileRunWithOrigin(code.begin(), "url", 0, 0)->IsUndefined());
+  std::array<char, 1024> code;
+  v8::base::SNPrintF(code, source, "//# sourceURL=source_url");
+  CHECK(CompileRunWithOrigin(code.data(), "url", 0, 0)->IsUndefined());
+  v8::base::SNPrintF(code, source, "//@ sourceURL=source_url");
+  CHECK(CompileRunWithOrigin(code.data(), "url", 0, 0)->IsUndefined());
 }
 
 TEST(DynamicWithSourceURLInStackTraceString) {
@@ -1819,10 +1840,10 @@ TEST(DynamicWithSourceURLInStackTraceString) {
       "}\n"
       "outer()\n%s";
 
-  auto code = v8::base::UniqueArray<char>::NewForOverwrite(1024);
-  v8::base::SNPrintF(code.as_vector(), source, "//# sourceURL=source_url");
+  std::array<char, 1024> code;
+  v8::base::SNPrintF(code, source, "//# sourceURL=source_url");
   v8::TryCatch try_catch(context.isolate());
-  CompileRunWithOrigin(code.begin(), "", 0, 0);
+  CompileRunWithOrigin(code.data(), "", 0, 0);
   CHECK(try_catch.HasCaught());
   v8::String::Utf8Value stack(
       context.isolate(),

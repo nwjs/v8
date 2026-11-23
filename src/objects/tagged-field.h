@@ -11,6 +11,7 @@
 #include "src/base/template-meta-programming/functional.h"
 #include "src/common/globals.h"
 #include "src/common/ptr-compr.h"
+#include "src/objects/bit-field-group.h"
 #include "src/objects/tagged-value.h"
 #include "src/utils/boxed-float.h"
 
@@ -90,6 +91,25 @@ class V8_GSL_POINTER TaggedMember : public TaggedMemberBase {
 static_assert(alignof(TaggedMember<Object>) == alignof(Tagged_t));
 static_assert(sizeof(TaggedMember<Object>) == sizeof(Tagged_t));
 
+// Stores a BitFieldGroup<Group, uint32_t> as a Smi. The bits must fit in
+// 31 bits. Torque uses SmiTagged<GroupName>, where GroupName extends uint31.
+template <typename Group>
+class SmiBitFieldMember : private TaggedMember<Smi> {
+ public:
+  static_assert(std::is_base_of_v<BitFieldGroup<Group, uint32_t>, Group>);
+
+  constexpr SmiBitFieldMember() = default;
+
+  inline Group load() const;
+  inline void store(Group value);
+
+  inline Group Relaxed_Load() const;
+  inline void Relaxed_Store(Group value);
+
+  // Used by heap verification.
+  using TaggedMember<Smi>::IsSmi;
+};
+
 template <typename T>
 class UnalignedValueMember {
  public:
@@ -160,7 +180,7 @@ class JSDispatchHandleMember {
   inline void Relaxed_Clear();
 
   // Stores a new handle and emits the JSDispatchHandle write barrier.
-  inline void Relaxed_Store(HeapObject* host, JSDispatchHandle handle,
+  inline void Release_Store(HeapObject* host, JSDispatchHandle handle,
                             WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
  private:
@@ -198,6 +218,7 @@ static_assert(sizeof(JSDispatchHandleMember) == sizeof(uint32_t));
   const FlexibleDataReturnType& name() const {                             \
     return flexible_array_member_data_;                                    \
   }                                                                        \
+  V8_TQ_FIELD_MARK("V8_TQ_NAME(" #name ")")                                \
   __VA_ARGS__ Type flexible_array_member_data_[0];                         \
                                                                            \
  public:                                                                   \

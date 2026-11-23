@@ -137,7 +137,7 @@ inline void StoreToMemory(LiftoffAssembler* assm, Operand dst,
   if (src.is_reg()) {
     liftoff::StoreToMemory(assm, dst, src.reg(), src.kind());
   } else if (src.is_const()) {
-    if (src.kind() == kI32) {
+    if (src.kind() == kI32 || src.kind() == kF32) {
       assm->movl(dst, Immediate(src.i32_const()));
     } else {
       assm->MacroAssembler::Move(dst, static_cast<int64_t>(src.i32_const()));
@@ -243,13 +243,17 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   // pushed as part of frame construction, so we don't need to allocate memory
   // for them anymore.
   int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
-  // The frame setup builtin also pushes the feedback vector.
   if (feedback_vector_slot) {
-    frame_size -= kSystemPointerSize;
+    // WasmLiftoffFrameSetup also pushes the feedback vector, and (with 16-byte
+    // alignment) a zero into the OSR target slot so that sp stays aligned.
+    static_assert(kOSRTargetOffset == 4 * kSystemPointerSize);
+    frame_size -= V8_X64_16BYTE_STACK_ALIGNMENT_BOOL ? 2 * kSystemPointerSize
+                                                     : kSystemPointerSize;
   }
+  DCHECK_GE(frame_size, 0);
   DCHECK_EQ(0, frame_size % kSystemPointerSize);
 #if V8_X64_16BYTE_STACK_ALIGNMENT
-  DCHECK_EQ(0, GetTotalFrameSize() % (2 * kSystemPointerSize));
+  DCHECK_EQ(0, frame_size % (2 * kSystemPointerSize));
 #endif
 
   // We can't run out of space when patching, just pass anything big enough to
@@ -329,6 +333,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
     safepoint_table_builder->DefineSafepoint(this);
     PopRegisters(regs_to_save);
   } else {
+    AssertSpAlignedForCall();
     near_call(static_cast<intptr_t>(Builtin::kWasmStackOverflow),
               RelocInfo::WASM_STUB_CALL);
     // The call will not return; just define an empty safepoint.
@@ -417,7 +422,7 @@ void LiftoffAssembler::LoadInstanceDataFromFrame(Register dst) {
 }
 
 void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
-                                          int offset, IndirectPointerTag tag) {
+                                          int offset, TrustedPointerTag tag) {
   LoadTrustedPointerField(dst, Operand{src_addr, offset}, tag,
                           kScratchRegister);
 }
@@ -695,11 +700,13 @@ void LiftoffAssembler::StoreConst(Register dst_addr, Register offset_reg,
       break;
     case StoreType::kI32Store:
     case StoreType::kI64Store32:
+    case StoreType::kF32Store:
       movl(dst_op, Immediate(value));
       break;
     case StoreType::kI64Store:
-      // The 32-bit immediate is sign-extended, matching how Liftoff keeps i64
-      // constants.
+    case StoreType::kF64Store:
+      // The 32-bit immediate is sign-extended, matching how Liftoff keeps
+      // 64-bit constants.
       movq(dst_op, Immediate(value));
       break;
     default:
@@ -1270,22 +1277,28 @@ void LiftoffAssembler::Spill(int offset, WasmValue value) {
     case kI32:
       movl(dst, Immediate(value.to_i32()));
       break;
-    case kI64: {
-      if (is_int32(value.to_i64())) {
+    case kF32:
+      movl(dst, Immediate(value.to_f32_boxed().get_bits()));
+      break;
+    case kI64:
+    case kF64: {
+      int64_t val64 = value.type().kind() == kI64
+                          ? value.to_i64()
+                          : value.to_f64_boxed().get_bits();
+      if (is_int32(val64)) {
         // Sign extend low word.
-        movq(dst, Immediate(static_cast<int32_t>(value.to_i64())));
-      } else if (is_uint32(value.to_i64())) {
+        movq(dst, Immediate(static_cast<int32_t>(val64)));
+      } else if (is_uint32(val64)) {
         // Zero extend low word.
-        movl(kScratchRegister, Immediate(static_cast<int32_t>(value.to_i64())));
+        movl(kScratchRegister, Immediate(static_cast<int32_t>(val64)));
         movq(dst, kScratchRegister);
       } else {
-        movq(kScratchRegister, value.to_i64());
+        movq(kScratchRegister, val64);
         movq(dst, kScratchRegister);
       }
       break;
     }
     default:
-      // We do not track f32 and f64 constants, hence they are unreachable.
       UNREACHABLE();
   }
 }
@@ -4852,6 +4865,11 @@ bool LiftoffAssembler::emit_f16x8_add(LiftoffRegister dst, LiftoffRegister lhs,
 
 bool LiftoffAssembler::emit_f16x8_sub(LiftoffRegister dst, LiftoffRegister lhs,
                                       LiftoffRegister rhs) {
+  if (UseAvx10_1()) {
+    CpuFeatureScope avx10_1_scope(this, AVX10_1);
+    vsubph(dst.fp(), lhs.fp(), rhs.fp());
+    return true;
+  }
   return F16x8BinOpViaF32<&Assembler::vsubps>(this, dst, lhs, rhs);
 }
 
@@ -4987,10 +5005,31 @@ bool LiftoffAssembler::emit_f32x4_promote_low_f16x8(LiftoffRegister dst,
   return true;
 }
 
+template <void (Assembler::*avx10_op)(XMMRegister, XMMRegister, XMMRegister)>
+void F16x8FmaNative(LiftoffAssembler* assm, LiftoffRegister dst,
+                    LiftoffRegister src1, LiftoffRegister src2,
+                    LiftoffRegister src3) {
+  CpuFeatureScope avx10_scope(assm, AVX10_1);
+  if (dst == src1) {
+    (assm->*avx10_op)(dst.fp(), src2.fp(), src3.fp());
+  } else if (dst == src2) {
+    (assm->*avx10_op)(dst.fp(), src1.fp(), src3.fp());
+  } else {
+    XMMRegister result = dst == src3 ? kScratchDoubleReg : dst.fp();
+    assm->Movdqa(result, src1.fp());
+    (assm->*avx10_op)(result, src2.fp(), src3.fp());
+    if (result != dst.fp()) assm->Movdqa(dst.fp(), result);
+  }
+}
+
 bool LiftoffAssembler::emit_f16x8_qfma(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
+  if (UseAvx10_1()) {
+    F16x8FmaNative<&Assembler::vfmadd213ph>(this, dst, src1, src2, src3);
+    return true;
+  }
   if (!CpuFeatures::IsSupported(F16C)) return false;
 
   YMMRegister ydst = YMMRegister::from_code(dst.fp().code());
@@ -5004,6 +5043,10 @@ bool LiftoffAssembler::emit_f16x8_qfms(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
+  if (UseAvx10_1()) {
+    F16x8FmaNative<&Assembler::vfnmadd213ph>(this, dst, src1, src2, src3);
+    return true;
+  }
   if (!CpuFeatures::IsSupported(F16C)) return false;
 
   YMMRegister ydst = YMMRegister::from_code(dst.fp().code());
@@ -5045,6 +5088,10 @@ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
 
 void LiftoffAssembler::PushRegisters(LiftoffRegList regs) {
   LiftoffRegList gp_regs = regs & kGpCacheRegList;
+  if (V8_X64_16BYTE_STACK_ALIGNMENT_BOOL &&
+      (gp_regs.GetNumRegsSet() & 1) != 0) {
+    pushq(Immediate(0));
+  }
   while (!gp_regs.is_empty()) {
     LiftoffRegister reg = gp_regs.GetFirstRegSet();
     pushq(reg.gp());
@@ -5076,10 +5123,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
   }
   if (fp_offset) addq(rsp, Immediate(fp_offset));
   LiftoffRegList gp_regs = regs & kGpCacheRegList;
+  bool pad_gp =
+      V8_X64_16BYTE_STACK_ALIGNMENT_BOOL && (gp_regs.GetNumRegsSet() & 1) != 0;
   while (!gp_regs.is_empty()) {
     LiftoffRegister reg = gp_regs.GetLastRegSet();
     popq(reg.gp());
     gp_regs.clear(reg);
+  }
+  if (pad_gp) {
+    addq(rsp, Immediate(kSystemPointerSize));
   }
 }
 
@@ -5089,6 +5141,11 @@ void LiftoffAssembler::RecordSpillsInSafepoint(
   LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
   int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
   LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
+  if (V8_X64_16BYTE_STACK_ALIGNMENT_BOOL &&
+      (gp_spills.GetNumRegsSet() & 1) != 0) {
+    ++spill_offset;
+    spill_space_size += kSystemPointerSize;
+  }
   while (!gp_spills.is_empty()) {
     LiftoffRegister reg = gp_spills.GetFirstRegSet();
     if (ref_spills.has(reg)) {
@@ -5204,17 +5261,29 @@ void LiftoffAssembler::TailCallIndirect(
 }
 
 void LiftoffAssembler::CallBuiltin(Builtin builtin) {
+  if (builtin != Builtin::kWasmLiftoffFrameSetup) {
+    // {kWasmLiftoffFrameSetup} is called at function entry before {rbp} is
+    // pushed, while {rsp} still points to the caller's return address
+    // ({rsp % 16 == 8}).
+    AssertSpAlignedForCall();
+  }
   // A direct call to a builtin. Just encode the builtin index. This will be
   // patched at relocation.
   near_call(static_cast<Address>(builtin), RelocInfo::WASM_STUB_CALL);
 }
 
 void LiftoffAssembler::AllocateStackSlot(Register addr, uint32_t size) {
+  if (V8_X64_16BYTE_STACK_ALIGNMENT_BOOL) {
+    size = RoundUp(size, 2 * kSystemPointerSize);
+  }
   AllocateStackSpace(size);
   movq(addr, rsp);
 }
 
 void LiftoffAssembler::DeallocateStackSlot(uint32_t size) {
+  if (V8_X64_16BYTE_STACK_ALIGNMENT_BOOL) {
+    size = RoundUp(size, 2 * kSystemPointerSize);
+  }
   addq(rsp, Immediate(size));
 }
 

@@ -10,7 +10,6 @@
 #include "include/v8-script.h"
 #include "src/api/api-inl.h"
 #include "src/ast/scopes.h"
-#include "src/base/fpu.h"
 #include "src/base/logging.h"
 #include "src/base/platform/time.h"
 #include "src/base/strong-alias.h"
@@ -1938,9 +1937,6 @@ bool BackgroundCompileTask::is_streaming_compilation() const {
 }
 
 void BackgroundCompileTask::Run() {
-  base::FlushDenormalsScope flush_denormals_scope(
-      isolate_for_local_isolate_->flush_denormals());
-
   DCHECK_NE(ThreadId::Current(), isolate_for_local_isolate_->thread_id());
   LocalIsolate isolate(isolate_for_local_isolate_, ThreadKind::kBackground);
   UnparkedScope unparked_scope(&isolate);
@@ -2047,6 +2043,9 @@ void BackgroundCompileTask::Run(
   parser.ParseOnBackground(isolate, &info, script_, start_position_,
                            end_position_, function_literal_id_);
   parser.UpdateStatistics(script_, &use_counts_, &total_preparse_skipped_);
+  if (toplevel_script_compilation) {
+    debug_magic_comment_locations_ = parser.debug_magic_comment_locations();
+  }
 
   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
               "V8.CompileCodeBackground");
@@ -2198,6 +2197,11 @@ class ConstantPoolPointerForwarder {
     } else {
       parent->set_outer_scope_info(*it->second);
     }
+  }
+
+  bool HasScopeInfoToUpdate(Tagged<ScopeInfo> scope_info) const {
+    return scope_infos_to_update_.find(scope_info->UniqueIdInScript()) !=
+           scope_infos_to_update_.end();
   }
 
   void UpdateStandaloneScopeInfo(Tagged<ScopeInfo> scope_info) {
@@ -2377,6 +2381,23 @@ void VerifyCodeMerge(Isolate* isolate, DirectHandle<Script> script) {
   //   * All constant pool SFI entries point to an SFI referring to the old
   //     script (i.e. references were updated correctly).
   std::unordered_map<int, Tagged<ScopeInfo>> scope_infos;
+  auto verify_scope_info = [&](Tagged<ScopeInfo> scope_info) {
+    while (true) {
+      auto it = scope_infos.find(scope_info->UniqueIdInScript());
+      if (it != scope_infos.end()) {
+        if (it->second != scope_info) {
+          isolate->PushParamsAndDie("duplicate scope info unique id",
+                                    reinterpret_cast<void*>(it->second.ptr()),
+                                    reinterpret_cast<void*>(scope_info.ptr()));
+          UNREACHABLE();
+        }
+        break;
+      }
+      scope_infos[scope_info->UniqueIdInScript()] = scope_info;
+      if (!scope_info->HasOuterScopeInfo()) break;
+      scope_info = scope_info->OuterScopeInfo();
+    }
+  };
   uint32_t script_infos_len = script->infos()->ulength().value();
   for (uint32_t info_idx = 0; info_idx < script_infos_len; info_idx++) {
     Tagged<ScopeInfo> scope_info;
@@ -2400,6 +2421,8 @@ void VerifyCodeMerge(Isolate* isolate, DirectHandle<Script> script) {
             int id = inner_sfi->function_literal_id(kRelaxedLoad);
             CHECK_EQ(MakeWeak(inner_sfi), script->infos()->get(id));
             CHECK_EQ(inner_sfi->script(), *script);
+          } else if (Is<ScopeInfo>(entry)) {
+            verify_scope_info(Cast<ScopeInfo>(entry));
           }
         }
       }
@@ -2414,21 +2437,7 @@ void VerifyCodeMerge(Isolate* isolate, DirectHandle<Script> script) {
     } else {
       scope_info = Cast<ScopeInfo>(info);
     }
-    while (true) {
-      auto it = scope_infos.find(scope_info->UniqueIdInScript());
-      if (it != scope_infos.end()) {
-        if (it->second != scope_info) {
-          isolate->PushParamsAndDie("duplicate scope info unique id",
-                                    reinterpret_cast<void*>(it->second.ptr()),
-                                    reinterpret_cast<void*>(scope_info.ptr()));
-          UNREACHABLE();
-        }
-        break;
-      }
-      scope_infos[scope_info->UniqueIdInScript()] = scope_info;
-      if (!scope_info->HasOuterScopeInfo()) break;
-      scope_info = scope_info->OuterScopeInfo();
-    }
+    verify_scope_info(scope_info);
   }
 }
 }  // namespace
@@ -2576,6 +2585,9 @@ void BackgroundMergeTask::BeginMergeInBackground(
     for (DirectHandle<SharedFunctionInfo> new_sfi : used_new_sfis_) {
       forwarder.UpdateScopeInfo(*new_sfi);
     }
+    for (DirectHandle<ScopeInfo> new_scope : used_new_scope_infos_) {
+      forwarder.UpdateStandaloneScopeInfo(*new_scope);
+    }
     for (const auto& new_compiled_data : new_compiled_data_for_cached_sfis_) {
       // It's possible that new_compiled_data.cached_sfi had
       // scope_info()->IsEmpty() while an inner function has scope info if the
@@ -2682,6 +2694,14 @@ Handle<SharedFunctionInfo> BackgroundMergeTask::CompleteMergeInForeground(
         compiled_data_it++;
       }
     } else if (!maybe_old_info.IsWeak()) {
+      // Standalone eval ScopeInfos are only recorded for scopes within their
+      // owning closure, so if the slot in old_script was cleared, the ScopeInfo
+      // itself cannot still be alive in old_script.
+      DCHECK_IMPLIES(
+          maybe_new_info.IsWeak() &&
+              Is<ScopeInfo>(maybe_new_info.GetHeapObjectAssumeWeak()),
+          !forwarder.HasScopeInfoToUpdate(
+              Cast<ScopeInfo>(maybe_new_info.GetHeapObjectAssumeWeak())));
       old_script->infos()->set(i, maybe_new_info, kReleaseStore);
     }
   }
@@ -2790,8 +2810,14 @@ MaybeHandle<SharedFunctionInfo> BackgroundCompileTask::FinalizeScript(
     {
       DisallowGarbageCollection no_gc;
       SetScriptFieldsFromDetails(isolate, *script, script_details, &no_gc);
-      LOG(isolate, ScriptDetails(*script));
     }
+    // After SetScriptFieldsFromDetails, so that a source map URL provided
+    // through the API takes precedence. The locations come from the streamed
+    // source; the embedder is expected to pass the same source here, but an
+    // out-of-bounds location is ignored.
+    Parser::SetDebugMagicCommentFields(isolate, script, source,
+                                       debug_magic_comment_locations_);
+    LOG(isolate, ScriptDetails(*script));
   }
 
   ReportStatistics(isolate);
@@ -2866,9 +2892,6 @@ BackgroundDeserializeTask::BackgroundDeserializeTask(
 }
 
 void BackgroundDeserializeTask::Run() {
-  base::FlushDenormalsScope flush_denormals_scope(
-      isolate_for_local_isolate_->flush_denormals());
-
   TimedHistogramScope timer(timer_, nullptr, &background_time_in_microseconds_);
   LazyTimedHistogramScope script_type_timer;
   LocalIsolate isolate(isolate_for_local_isolate_, ThreadKind::kBackground);
@@ -2917,9 +2940,6 @@ bool BackgroundDeserializeTask::ShouldMergeWithExistingScript() const {
 
 void BackgroundDeserializeTask::MergeWithExistingScript() {
   DCHECK(ShouldMergeWithExistingScript());
-
-  base::FlushDenormalsScope flush_denormals_scope(
-      isolate_for_local_isolate_->flush_denormals());
 
   LocalIsolate isolate(isolate_for_local_isolate_, ThreadKind::kBackground);
   UnparkedScope unparked_scope(&isolate);
@@ -3353,7 +3373,8 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
     DirectHandle<SharedFunctionInfo> outer_info, DirectHandle<Context> context,
     LanguageMode language_mode, ParseRestriction restriction,
     int parameters_end_pos, int eval_position,
-    ParsingWhileDebugging parsing_while_debugging) {
+    ParsingWhileDebugging parsing_while_debugging,
+    bool private_name_lookup_skips_outer_class) {
   // The cache lookup key needs to be aware of the separation between the
   // parameters and the body to prevent this valid invocation:
   //   Function("", "function anonymous(\n/**/) {\n}");
@@ -3370,9 +3391,36 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
     DCHECK_EQ(eval_position, kNoSourcePosition);
     eval_cache_position = -parameters_end_pos;
   }
+
+  Script::CompilationKind compilation_kind;
+  bool allow_eval_cache = true;
+  if (eval_position == kNoSourcePosition) {
+    compilation_kind = restriction == ONLY_SINGLE_FUNCTION_LITERAL
+                           ? Script::CompilationKind::kFunctionConstructor
+                           : Script::CompilationKind::kIndirectEval;
+    // If the position is missing, attempt to get the code offset by
+    // walking the stack. Do not translate the code offset into source
+    // position, but store it as negative value for lazy translation.
+    DebuggableStackFrameIterator it(isolate);
+    if (!it.done() && it.is_javascript()) {
+      FrameSummary summary = it.GetTopValidFrame();
+      outer_info =
+          direct_handle(summary.AsJavaScript().function()->shared(), isolate);
+      eval_position = -summary.code_offset();
+    } else {
+      eval_position = 0;
+      allow_eval_cache = false;
+    }
+  } else {
+    compilation_kind = Script::CompilationKind::kDirectEval;
+  }
+
   CompilationCache* compilation_cache = isolate->compilation_cache();
-  InfoCellPair eval_result = compilation_cache->LookupEval(
-      source, outer_info, context, language_mode, eval_cache_position);
+  InfoCellPair eval_result;
+  if (allow_eval_cache) {
+    eval_result = compilation_cache->LookupEval(
+        source, outer_info, context, language_mode, eval_cache_position);
+  }
   if (eval_result.has_js_function()) {
     DirectHandle<JSFunction> result =
         direct_handle(eval_result.js_function(), isolate);
@@ -3391,7 +3439,6 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
   DirectHandle<SharedFunctionInfo> shared_info;
   Handle<Script> script;
   IsCompiledScope is_compiled_scope;
-  bool allow_eval_cache;
   if (eval_result.has_shared()) {
     // Make sure that the scope_info of the context we're eval-ing in matches
     // the scope_info we compiled the code for.
@@ -3402,13 +3449,14 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
         DirectHandle<SharedFunctionInfo>(eval_result.shared(), isolate);
     script = Handle<Script>(Cast<Script>(shared_info->script()), isolate);
     is_compiled_scope = shared_info->is_compiled_scope(isolate);
-    allow_eval_cache = true;
   } else {
     UnoptimizedCompileFlags flags = UnoptimizedCompileFlags::ForToplevelCompile(
         isolate, true, language_mode, REPLMode::kNo, ScriptType::kClassic,
         v8_flags.lazy_eval);
     flags.set_is_eval(true);
     flags.set_parsing_while_debugging(parsing_while_debugging);
+    flags.set_private_name_lookup_skips_outer_class(
+        private_name_lookup_skips_outer_class);
     DCHECK(!flags.is_module());
     flags.set_parse_restriction(restriction);
 
@@ -3425,31 +3473,8 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
         isolate, source, kNullMaybeHandle,
         OriginOptionsForEval(outer_info->script(), parsing_while_debugging));
     script->set_outer_language_mode(language_mode);
-    if (eval_position == kNoSourcePosition) {
-      script->set_compilation_kind(
-          restriction == ONLY_SINGLE_FUNCTION_LITERAL
-              ? Script::CompilationKind::kFunctionConstructor
-              : Script::CompilationKind::kIndirectEval);
-    } else {
-      script->set_compilation_kind(Script::CompilationKind::kDirectEval);
-    }
+    script->set_compilation_kind(compilation_kind);
     script->set_eval_from_shared(*outer_info);
-    if (eval_position == kNoSourcePosition) {
-      // If the position is missing, attempt to get the code offset by
-      // walking the stack. Do not translate the code offset into source
-      // position, but store it as negative value for lazy translation.
-      DebuggableStackFrameIterator it(isolate);
-      if (!it.done() && it.is_javascript()) {
-        FrameSummary summary = it.GetTopValidFrame();
-        script->set_eval_from_shared(
-            summary.AsJavaScript().function()->shared());
-        script->set_origin_options(
-            OriginOptionsForEval(*summary.script(), parsing_while_debugging));
-        eval_position = -summary.code_offset();
-      } else {
-        eval_position = 0;
-      }
-    }
     script->set_eval_from_position(eval_position);
     if (!maybe_outer_scope_info.is_null()) {
       script->set_eval_from_scope_info(
@@ -3462,7 +3487,9 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
              .ToHandle(&shared_info)) {
       return MaybeDirectHandle<JSFunction>();
     }
-    allow_eval_cache = parse_info.allow_eval_cache();
+    if (!parse_info.allow_eval_cache()) {
+      allow_eval_cache = false;
+    }
   }
 
   // If caller is strict mode, the result must be in strict mode as well.

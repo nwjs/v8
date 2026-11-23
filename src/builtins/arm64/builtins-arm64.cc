@@ -223,7 +223,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   __ LoadTaggedField(
       x4, FieldMemOperand(x1, offsetof(JSFunction, shared_function_info_)));
   __ Ldr(w4, FieldMemOperand(x4, offsetof(SharedFunctionInfo, flags_)));
-  __ DecodeField<SharedFunctionInfo::FunctionKindBits>(w4);
+  __ DecodeField<SharedFunctionInfo::Flags::FunctionKindBits>(w4);
   __ JumpIfIsInRange(
       w4, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
       static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
@@ -1135,7 +1135,8 @@ void ResetFeedbackVectorOsrUrgency(MacroAssembler* masm,
   DCHECK(!AreAliased(feedback_vector, scratch));
   __ Ldrb(scratch, FieldMemOperand(feedback_vector,
                                    offsetof(FeedbackVector, osr_state_)));
-  __ And(scratch, scratch, Operand(~FeedbackVector::OsrUrgencyBits::kMask));
+  __ And(scratch, scratch,
+         Operand(~FeedbackVector::OsrState::OsrUrgencyBits::kMask));
   __ Strb(scratch, FieldMemOperand(feedback_vector,
                                    offsetof(FeedbackVector, osr_state_)));
 }
@@ -1859,12 +1860,13 @@ void Builtins::Generate_InterpreterPushArgsThenFastConstructFunction(
   __ LoadTaggedField(
       x2, FieldMemOperand(x1, offsetof(JSFunction, shared_function_info_)));
   __ Ldr(w2, FieldMemOperand(x2, offsetof(SharedFunctionInfo, flags_)));
-  __ TestAndBranchIfAnySet(w2, SharedFunctionInfo::ConstructAsBuiltinBit::kMask,
-                           &builtin_call);
+  __ TestAndBranchIfAnySet(
+      w2, SharedFunctionInfo::Flags::ConstructAsBuiltinBit::kMask,
+      &builtin_call);
 
   // Check if we need to create an implicit receiver.
   Label not_create_implicit_receiver;
-  __ DecodeField<SharedFunctionInfo::FunctionKindBits>(w2);
+  __ DecodeField<SharedFunctionInfo::Flags::FunctionKindBits>(w2);
   __ JumpIfIsInRange(
       w2, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
       static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
@@ -2959,8 +2961,8 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   Label done_convert;
   __ Ldr(w3, FieldMemOperand(x2, offsetof(SharedFunctionInfo, flags_)));
   __ TestAndBranchIfAnySet(w3,
-                           SharedFunctionInfo::IsNativeBit::kMask |
-                               SharedFunctionInfo::IsStrictBit::kMask,
+                           SharedFunctionInfo::Flags::IsNativeBit::kMask |
+                               SharedFunctionInfo::Flags::IsStrictBit::kMask,
                            &done_convert);
   {
     // ----------- S t a t e -------------
@@ -3206,7 +3208,8 @@ void Builtins::Generate_ConstructFunction(MacroAssembler* masm) {
       x4, FieldMemOperand(x1, offsetof(JSFunction, shared_function_info_)));
   __ Ldr(w4, FieldMemOperand(x4, offsetof(SharedFunctionInfo, flags_)));
   __ TestAndBranchIfAllClear(
-      w4, SharedFunctionInfo::ConstructAsBuiltinBit::kMask, &call_generic_stub);
+      w4, SharedFunctionInfo::Flags::ConstructAsBuiltinBit::kMask,
+      &call_generic_stub);
 
   __ TailCallBuiltin(Builtin::kJSBuiltinsConstructStub);
 
@@ -3907,7 +3910,7 @@ void Generate_WasmResumeHelper(MacroAssembler* masm, wasm::OnResume on_resume) {
       suspender,
       FieldMemOperand(resume_data,
                       offsetof(WasmResumeData, trusted_suspender_)),
-      kWasmSuspenderIndirectPointerTag);
+      kWasmSuspenderTrustedPointerTag);
   regs.ResetExcept(suspender);
 
   // -------------------------------------------
@@ -5001,9 +5004,9 @@ void Builtins::Generate_WasmReturnFromSegment(MacroAssembler* masm) {
   __ PopAll(fp_saves, kSimd128Size);
   __ PopAll(gp_saves);
 
+  SwitchSimulatorStackLimit(masm);
   __ Mov(sp, fp);
   __ Pop<MacroAssembler::kAuthLR>(fp, lr);
-  SwitchSimulatorStackLimit(masm);
   __ Ret();
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -5765,7 +5768,7 @@ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
       code_obj,
       FieldMemOperand(code_obj,
                       offsetof(SharedFunctionInfo, trusted_function_data_)),
-      kCodeIndirectPointerTag);
+      kCodeTrustedPointerTag);
 
   // For OSR entry it is safe to assume we always have baseline code.
   if (v8_flags.debug_code) {

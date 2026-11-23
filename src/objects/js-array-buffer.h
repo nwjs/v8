@@ -10,6 +10,7 @@
 #include "src/base/bit-field.h"
 #include "src/handles/maybe-handles.h"
 #include "src/objects/backing-store.h"
+#include "src/objects/bit-field-group.h"
 #include "src/objects/js-function.h"
 #include "src/objects/js-objects.h"
 #include "src/sandbox/check.h"
@@ -63,33 +64,44 @@ V8_OBJECT class JSArrayBuffer : public JSAPIObjectWithEmbedderSlots {
       Isolate* isolate,
       const DisallowGarbageCollection& disallow_gc V8_LIFETIME_BOUND);
 
-  // [bit_field]: boolean flags
-  inline uint32_t bit_field() const;
-  inline void set_bit_field(uint32_t value);
-
   // Clear uninitialized padding space. This ensures that the snapshot content
   // is deterministic. Depending on the V8 build mode there could be no padding.
   V8_INLINE void clear_padding();
 
   // Bit positions for [bit_field].
-  using IsExternalBit = base::BitField<bool, 0, 1, uint32_t>;
-  using IsDetachableBit = IsExternalBit::Next<bool, 1>;
-  using WasDetachedBit = IsDetachableBit::Next<bool, 1>;
-  using IsSharedBit = WasDetachedBit::Next<SharedFlag, 1>;
-  using IsResizableByJsBit = IsSharedBit::Next<ResizableFlag, 1>;
-  using IsImmutableBit = IsResizableByJsBit::Next<ImmutableFlag, 1>;
-  using IsNodejsBit = IsImmutableBit::Next<bool, 1>;
+  struct Bits : BitFieldGroup<Bits, uint32_t> {
+    using BitFieldGroup::BitFieldGroup;
+
+    using IsExternalBit = First<bool, 1>;
+    using IsDetachableBit = IsExternalBit::Next<bool, 1>;
+    using WasDetachedBit = IsDetachableBit::Next<bool, 1>;
+    using IsSharedBit = WasDetachedBit::Next<SharedFlag, 1>;
+    using IsResizableByJsBit = IsSharedBit::Next<ResizableFlag, 1>;
+    using IsImmutableBit = IsResizableByJsBit::Next<ImmutableFlag, 1>;
+    using IsNodejsBit = IsImmutableBit::Next<bool, 1>;
+
+    BIT_FIELD_GROUP_ACCESSORS(is_external, IsExternalBit)
+    BIT_FIELD_GROUP_ACCESSORS(is_detachable, IsDetachableBit)
+    BIT_FIELD_GROUP_ACCESSORS(was_detached, WasDetachedBit)
+    BIT_FIELD_GROUP_ACCESSORS(is_shared, IsSharedBit)
+    BIT_FIELD_GROUP_ACCESSORS(is_resizable_by_js, IsResizableByJsBit)
+    BIT_FIELD_GROUP_ACCESSORS(is_immutable, IsImmutableBit)
+    BIT_FIELD_GROUP_ACCESSORS(is_node_js, IsNodejsBit)
+  };
+
+  inline Bits bit_field() const;
+  inline void set_bit_field(Bits value);
+
   enum Flag : uint32_t {
     kNone = 0,
-    kIsExternal = IsExternalBit::kMask,
-    kIsDetachable = IsDetachableBit::kMask,
-    kWasDetached = WasDetachedBit::kMask,
-    kIsShared = IsSharedBit::kMask,
-    kIsResizableByJs = IsResizableByJsBit::kMask,
-    kIsImmutable = IsImmutableBit::kMask,
-    kIsNodeJs = IsNodejsBit::kMask,
+    kIsExternal = Bits::IsExternalBit::kMask,
+    kIsDetachable = Bits::IsDetachableBit::kMask,
+    kWasDetached = Bits::WasDetachedBit::kMask,
+    kIsShared = Bits::IsSharedBit::kMask,
+    kIsResizableByJs = Bits::IsResizableByJsBit::kMask,
+    kIsImmutable = Bits::IsImmutableBit::kMask,
+    kIsNodeJs = Bits::IsNodejsBit::kMask,
   };
-  using Flags = base::Flags<Flag>;
   static constexpr int kFlagCount = 7;
 
   // [is_external]: true indicates that the embedder is in charge of freeing the
@@ -205,10 +217,10 @@ V8_OBJECT class JSArrayBuffer : public JSAPIObjectWithEmbedderSlots {
   static uint32_t NotValidMask(TypedArrayAccessMode mode) {
     switch (mode) {
       case TypedArrayAccessMode::kRead:
-        return JSArrayBuffer::WasDetachedBit::kMask;
+        return JSArrayBuffer::Bits::WasDetachedBit::kMask;
       case TypedArrayAccessMode::kWrite:
-        return JSArrayBuffer::WasDetachedBit::kMask |
-               JSArrayBuffer::IsImmutableBit::kMask;
+        return JSArrayBuffer::Bits::WasDetachedBit::kMask |
+               JSArrayBuffer::Bits::IsImmutableBit::kMask;
     }
     UNREACHABLE();
   }
@@ -251,7 +263,7 @@ V8_OBJECT class JSArrayBuffer : public JSAPIObjectWithEmbedderSlots {
   UnalignedValueMember<uintptr_t> raw_max_byte_length_;
   UnalignedValueMember<Address> backing_store_;
   ExternalPointerMember<kArrayBufferExtensionTag> extension_;
-  uint32_t bit_field_ V8_TQ_TYPE(JSArrayBufferFlags);
+  std::atomic<Bits> bit_field_;
 #if TAGGED_SIZE_8_BYTES
   uint32_t optional_padding_;
 #endif
@@ -302,18 +314,7 @@ class ArrayBufferExtension final
                               backing_store_->PerIsolateAccountingLength())) |
                           AgeField::encode(static_cast<uint8_t>(age))),
         is_shared_(is_shared),
-        is_resizable_by_js_(is_resizable_by_js) {
-    initialized_for_gc_.store(true, std::memory_order_release);
-  }
-
-  // Barrier used for publishing the object. This barrier must be used whenever
-  // the extension is accessed off the main thread.
-  //
-  // The constructor sets a value with release that is read with acquire in this
-  // varrier.
-  void InitializationBarrier() const {
-    std::ignore = initialized_for_gc_.load(std::memory_order_acquire);
-  }
+        is_resizable_by_js_(is_resizable_by_js) {}
 
   void Mark() { marked_.store(true, std::memory_order_relaxed); }
   void Unmark() { marked_.store(false, std::memory_order_relaxed); }
@@ -414,7 +415,6 @@ class ArrayBufferExtension final
   std::shared_ptr<BackingStore> backing_store_;
   ArrayBufferExtension* next_ = nullptr;
   std::atomic<uint64_t> accounting_state_;
-  std::atomic<bool> initialized_for_gc_{false};
   std::atomic<bool> marked_{false};
   std::atomic<GcState> young_gc_state_{GcState::Dead};
 
@@ -443,21 +443,27 @@ V8_OBJECT class JSArrayBufferView : public JSAPIObjectWithEmbedderSlots {
   inline size_t byte_length() const;
   inline void set_byte_length(size_t value);
 
-  // [bit_field]: boolean flags
-  inline uint32_t bit_field() const;
-  inline void set_bit_field(uint32_t value);
-
   DECL_VERIFIER(JSArrayBufferView)
 
   // Bit positions for [bit_field].
-  using IsLengthTrackingBit = base::BitField<bool, 0, 1, uint32_t>;
-  using IsBackedByRabBit = IsLengthTrackingBit::Next<bool, 1>;
+  struct Bits : BitFieldGroup<Bits, uint32_t> {
+    using BitFieldGroup::BitFieldGroup;
+
+    using IsLengthTrackingBit = First<bool, 1>;
+    using IsBackedByRabBit = IsLengthTrackingBit::Next<bool, 1>;
+
+    BIT_FIELD_GROUP_ACCESSORS(is_length_tracking, IsLengthTrackingBit)
+    BIT_FIELD_GROUP_ACCESSORS(is_backed_by_rab, IsBackedByRabBit)
+  };
+
+  inline Bits bit_field() const;
+  inline void set_bit_field(Bits value);
+
   enum Flag : uint32_t {
     kNone = 0,
-    kIsLengthTracking = IsLengthTrackingBit::kMask,
-    kIsBackedByRab = IsBackedByRabBit::kMask,
+    kIsLengthTracking = Bits::IsLengthTrackingBit::kMask,
+    kIsBackedByRab = Bits::IsBackedByRabBit::kMask,
   };
-  using Flags = base::Flags<Flag>;
   static constexpr int kFlagCount = 2;
 
   inline bool WasDetached() const;
@@ -473,7 +479,7 @@ V8_OBJECT class JSArrayBufferView : public JSAPIObjectWithEmbedderSlots {
 
  public:
   TaggedMember<JSArrayBuffer> buffer_;
-  uint32_t bit_field_ V8_TQ_TYPE(JSArrayBufferViewFlags);
+  std::atomic<Bits> bit_field_;
 #if TAGGED_SIZE_8_BYTES
   uint32_t optional_padding_;
 #endif
@@ -622,6 +628,10 @@ V8_OBJECT class JSDetachedTypedArray : public JSTypedArray {
  public:
   DECL_PRINTER(JSDetachedTypedArray)
   DECL_VERIFIER(JSDetachedTypedArray)
+} V8_OBJECT_END;
+
+V8_OBJECT class Uint8JSTypedArray : public JSTypedArray {
+  V8_IT_NO_AUTO_CHECKER;
 } V8_OBJECT_END;
 
 V8_OBJECT class JSDataViewOrRabGsabDataView : public JSArrayBufferView {

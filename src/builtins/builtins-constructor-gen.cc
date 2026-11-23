@@ -248,7 +248,8 @@ TF_BUILTIN(FastNewClosure, ConstructorBuiltinsAssembler) {
   TNode<Uint32T> flags = LoadObjectField<Uint32T>(
       shared_function_info, offsetof(SharedFunctionInfo, flags_));
   const TNode<IntPtrT> function_map_index = Signed(IntPtrAdd(
-      DecodeWordFromWord32<SharedFunctionInfo::FunctionMapIndexBits>(flags),
+      DecodeWordFromWord32<SharedFunctionInfo::Flags::FunctionMapIndexBits>(
+          flags),
       IntPtrConstant(Context::FIRST_FUNCTION_MAP_INDEX)));
   CSA_DCHECK(this, UintPtrLessThanOrEqual(
                        function_map_index,
@@ -505,8 +506,8 @@ TNode<JSRegExp> ConstructorBuiltinsAssembler::CreateRegExpLiteral(
                          RootIndex::kEmptyFixedArray);
     // Initialize JSRegExp fields.
     StoreTrustedPointerField(
-        new_object, offsetof(JSRegExp, data_), kRegExpDataIndirectPointerTag,
-        LoadTrustedPointerFromObject<kRegExpDataIndirectPointerTag>(
+        new_object, offsetof(JSRegExp, data_), kRegExpDataTrustedPointerTag,
+        LoadTrustedPointerFromObject<kRegExpDataTrustedPointerTag>(
             boilerplate, offsetof(RegExpBoilerplateDescription, data_)));
     StoreObjectFieldNoWriteBarrier(
         new_object, offsetof(JSRegExp, flags_),

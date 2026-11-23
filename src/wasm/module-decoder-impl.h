@@ -136,25 +136,21 @@ inline SectionCode IdentifyUnknownSectionInternal(Decoder* decoder,
         static_cast<int>(section_name_start - decoder->start()),
         string.length() < 20 ? string.length() : 20, section_name_start);
 
-  using SpecialSectionPair = std::pair<base::Vector<const char>, SectionCode>;
+  using SpecialSectionPair = std::pair<std::string_view, SectionCode>;
   static constexpr SpecialSectionPair kSpecialSections[]{
-      {base::StaticCharVector(kNameString), kNameSectionCode},
-      {base::StaticCharVector(kSourceMappingURLString),
-       kSourceMappingURLSectionCode},
-      {base::StaticCharVector(kInstTraceString), kInstTraceSectionCode},
-      {base::StaticCharVector(kBranchHintsString), kBranchHintsSectionCode},
-      {base::StaticCharVector(kCompilationPriorityString),
-       kCompilationPrioritySectionCode},
-      {base::StaticCharVector(kInstructionFrequenciesString),
-       kInstFrequenciesSectionCode},
-      {base::StaticCharVector(kCallTargetsString), kCallTargetsSectionCode},
-      {base::StaticCharVector(kDebugInfoString), kDebugInfoSectionCode},
-      {base::StaticCharVector(kExternalDebugInfoString),
-       kExternalDebugInfoSectionCode},
-      {base::StaticCharVector(kBuildIdString), kBuildIdSectionCode}};
+      {kNameString, kNameSectionCode},
+      {kSourceMappingURLString, kSourceMappingURLSectionCode},
+      {kInstTraceString, kInstTraceSectionCode},
+      {kBranchHintsString, kBranchHintsSectionCode},
+      {kCompilationPriorityString, kCompilationPrioritySectionCode},
+      {kInstructionFrequenciesString, kInstFrequenciesSectionCode},
+      {kCallTargetsString, kCallTargetsSectionCode},
+      {kDebugInfoString, kDebugInfoSectionCode},
+      {kExternalDebugInfoString, kExternalDebugInfoSectionCode},
+      {kBuildIdString, kBuildIdSectionCode}};
 
-  auto name_vec = base::Vector<const char>::cast(
-      base::VectorOf(section_name_start, string.length()));
+  std::string_view name_vec(reinterpret_cast<const char*>(section_name_start),
+                            string.length());
   for (auto& special_section : kSpecialSections) {
     if (name_vec == special_section.first) return special_section.second;
   }
@@ -600,10 +596,13 @@ class ModuleDecoderImpl : public Decoder {
           return {};
         }
 
+        // TODO(clemensb): Clarify whether cont types take a heaptype (s33) or a
+        // typeidx (u32v); see
+        // https://github.com/WebAssembly/stack-switching/issues/157.
         const uint8_t* pos = pc();
         HeapType hp = consume_heap_type();
 
-        if (V8_UNLIKELY(!hp.has_index())) {
+        if (V8_UNLIKELY(!hp.has_index() || hp.is_exact())) {
           error(pos, "cont type must refer to a signature index");
           return {};
         }

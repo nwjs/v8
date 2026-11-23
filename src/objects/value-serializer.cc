@@ -704,9 +704,6 @@ Maybe<bool> ValueSerializer::WriteJSReceiver(
       return WriteJSSharedArray(Cast<JSSharedArray>(receiver));
     case JS_SHARED_STRUCT_TYPE:
       return WriteJSSharedStruct(Cast<JSSharedStruct>(receiver));
-    case JS_ATOMICS_MUTEX_TYPE:
-    case JS_ATOMICS_CONDITION_TYPE:
-      return WriteSharedObject(receiver);
 #if V8_ENABLE_WEBASSEMBLY
     case WASM_MODULE_OBJECT_TYPE:
       return WriteWasmModule(Cast<WasmModuleObject>(receiver));
@@ -1374,14 +1371,15 @@ Maybe<bool> ValueSerializer::ThrowIfOutOfMemory() {
 
 Maybe<bool> ValueSerializer::ThrowDataCloneError(
     MessageTemplate template_index) {
-  return ThrowDataCloneError(template_index,
-                             isolate_->factory()->empty_string());
+  return ThrowDataCloneError(template_index, {});
 }
 
 Maybe<bool> ValueSerializer::ThrowDataCloneError(MessageTemplate index,
                                                  DirectHandle<Object> arg0) {
-  DirectHandle<String> message =
-      MessageFormatter::Format(isolate_, index, base::VectorOf({arg0}));
+  DirectHandle<String> message = MessageFormatter::Format(
+      isolate_, index,
+      arg0.is_null() ? base::Vector<const DirectHandle<Object>>{}
+                     : base::VectorOf({arg0}));
   if (delegate_) {
     delegate_->ThrowDataCloneError(Utils::ToLocal(message));
   } else {
@@ -1847,7 +1845,7 @@ MaybeDirectHandle<String> ValueDeserializer::ReadUtf8String(
   base::Vector<const uint8_t> utf8_bytes;
   if (!ReadRawBytes(utf8_length).To(&utf8_bytes)) return {};
   return isolate_->factory()->NewStringFromUtf8(
-      base::Vector<const char>::cast(utf8_bytes), allocation);
+      utf8_bytes, unibrow::Utf8Variant::kLossyUtf8, allocation);
 }
 
 MaybeDirectHandle<String> ValueDeserializer::ReadOneByteString(
@@ -2743,8 +2741,12 @@ Maybe<uint32_t> ValueDeserializer::ReadJSObjectProperties(
           }
         } else if (tag == SerializationTag::kUtf8String) {
           base::Vector<const uint8_t> key_chars;
-          if (ReadRawBytes(byte_length).To(&key_chars) &&
-              String::IsAscii(key_chars.begin(), key_chars.length())) {
+          // For ASCII strings, the UTF-8 byte length equals the character
+          // length, so an ASCII string cannot exceed String::kMaxLength.
+          // Non-ASCII or overly long strings fall back to ReadObject() below.
+          if (byte_length <= String::kMaxLength &&
+              ReadRawBytes(byte_length).To(&key_chars) &&
+              String::IsAscii(key_chars.begin(), byte_length)) {
             expected_transition = transitions.ExpectedTransition(key_chars);
           }
         }

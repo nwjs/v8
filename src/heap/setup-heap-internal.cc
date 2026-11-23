@@ -30,7 +30,6 @@
 #include "src/objects/heap-number.h"
 #include "src/objects/heap-object-set-map-inl.h"
 #include "src/objects/instance-type-inl.h"
-#include "src/objects/js-atomics-synchronization.h"
 #include "src/objects/js-generator.h"
 #include "src/objects/js-shared-array.h"
 #include "src/objects/js-weak-refs.h"
@@ -108,7 +107,7 @@ bool IsMutableMap(InstanceType instance_type, ElementsKind elements_kind) {
 #endif
 
 struct ConstantStringInit {
-  base::Vector<const char> contents;
+  std::string_view contents;
   RootIndex index;
 };
 
@@ -875,19 +874,6 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
 }
 
 bool Heap::CreateLateReadOnlyJSReceiverMaps() {
-#define ALLOCATE_ALWAYS_SHARED_SPACE_JSOBJECT_MAP(instance_type, size, \
-                                                  field_name)          \
-  {                                                                    \
-    Tagged<Map> map;                                                   \
-    if (!AllocateMap(AllocationType::kReadOnly, (instance_type), size, \
-                     DICTIONARY_ELEMENTS)                              \
-             .To(&map)) {                                              \
-      return false;                                                    \
-    }                                                                  \
-    AlwaysSharedSpaceJSObject::PrepareMapNoEnumerableProperties(map);  \
-    set_##field_name##_map(map);                                       \
-  }
-
   HandleScope late_jsreceiver_maps_handle_scope(isolate());
   Factory* factory = isolate()->factory();
   ReadOnlyRoots roots(this);
@@ -936,13 +922,6 @@ bool Heap::CreateLateReadOnlyJSReceiverMaps() {
     set_js_shared_array_map(shared_array_map);
   }
 
-  ALLOCATE_ALWAYS_SHARED_SPACE_JSOBJECT_MAP(
-      JS_ATOMICS_MUTEX_TYPE, JSAtomicsMutex::kHeaderSize, js_atomics_mutex)
-  ALLOCATE_ALWAYS_SHARED_SPACE_JSOBJECT_MAP(JS_ATOMICS_CONDITION_TYPE,
-                                            JSAtomicsCondition::kHeaderSize,
-                                            js_atomics_condition)
-
-#undef ALLOCATE_ALWAYS_SHARED_SPACE_JSOBJECT_MAP
 #undef ALLOCATE_PRIMITIVE_MAP
 #undef ALLOCATE_VARSIZE_MAP
 #undef ALLOCATE_MAP
@@ -991,7 +970,8 @@ bool Heap::CreateImportantReadOnlyObjects() {
       // the initial section.
       isolate()->string_table()->InsertEmptyStringForBootstrapping(isolate());
     } else {
-      DirectHandle<String> str = factory->InternalizeString(entry.contents);
+      DirectHandle<String> str = factory->InternalizeString(
+          base::OneByteVector(entry.contents.data(), entry.contents.size()));
       roots_table()[entry.index] = str->ptr();
     }
   }
@@ -1039,10 +1019,11 @@ bool Heap::CreateImportantReadOnlyObjects() {
     obj->set_map_after_allocation(isolate(), roots.scope_info_map(),
                                   SKIP_WRITE_BARRIER);
     int flags = 0;
-    DCHECK_EQ(ScopeInfo::LanguageModeBit::decode(flags), LanguageMode::kSloppy);
-    DCHECK_EQ(ScopeInfo::ReceiverVariableBits::decode(flags),
+    DCHECK_EQ(ScopeInfo::Flags::LanguageModeBit::decode(flags),
+              LanguageMode::kSloppy);
+    DCHECK_EQ(ScopeInfo::Flags::ReceiverVariableBits::decode(flags),
               VariableAllocationInfo::NONE);
-    DCHECK_EQ(ScopeInfo::FunctionVariableBits::decode(flags),
+    DCHECK_EQ(ScopeInfo::Flags::FunctionVariableBits::decode(flags),
               VariableAllocationInfo::NONE);
     Cast<ScopeInfo>(obj)->set_flags(flags, kRelaxedStore);
     Cast<ScopeInfo>(obj)->set_context_local_count(0);
@@ -1169,7 +1150,8 @@ bool Heap::CreateReadOnlyObjects() {
       Context::BIGINT_FUNCTION_INDEX);
 
   for (const ConstantStringInit& entry : kNotImportantConstantStringTable) {
-    DirectHandle<String> str = factory->InternalizeString(entry.contents);
+    DirectHandle<String> str = factory->InternalizeString(
+        base::OneByteVector(entry.contents.data(), entry.contents.size()));
     roots_table()[entry.index] = str->ptr();
   }
 
@@ -1341,48 +1323,13 @@ bool Heap::CreateReadOnlyObjects() {
     // This code duplicates FactoryBase::SmiToNumber.
     for (uint32_t i = 10; i < kPreallocatedNumberStringTableSize; ++i) {
       std::string_view string = IntToStringView(i, buffer);
-      Handle<String> str = factory->InternalizeString(
-          base::OneByteVector(string.data(), string.length()));
+      Handle<String> str = factory->InternalizeString(string);
 
       DCHECK(ReadOnlyHeap::Contains(*str));
       preallocated_number_string_table->set(i, *str);
     }
     set_preallocated_number_string_table(*preallocated_number_string_table);
   }
-
-  // Initialize the wasm null_value.
-
-#ifdef V8_ENABLE_WEBASSEMBLY
-  // Allocate the wasm-null object. It is a regular V8 heap object contained in
-  // a V8 page.
-  // In static-roots builds, it is large enough so that it can be mprotected on
-  // OS page granularity, so we fill up the rest of the current OS page with
-  // a filler.
-  // In non-static-roots builds, it is a regular object of size {kTaggedSize}
-  // and does not need padding.
-#define V8_UNMAP_WASM_NULL_PAYLOAD \
-  (V8_STATIC_ROOTS_BOOL || V8_STATIC_ROOTS_GENERATION_BOOL)
-
-#if V8_UNMAP_WASM_NULL_PAYLOAD
-  // Allocate an unmappable WasmNull.
-  {
-    Tagged<HeapObject> wasm_null_obj =
-        read_only_space_->AllocateRawUnmappableAllocation(0, WasmNull::kSize)
-            .ToObjectChecked();
-    set_wasm_null(UncheckedCast<WasmNull>(wasm_null_obj));
-  }
-#else
-  // Allocate the WasmNull.
-  {
-    Tagged<HeapObject> wasm_null_obj;
-    CHECK(AllocateRaw(WasmNull::kSize, AllocationType::kReadOnly)
-              .To(&wasm_null_obj));
-    wasm_null_obj->set_map_after_allocation(isolate(), roots.wasm_null_map(),
-                                            SKIP_WRITE_BARRIER);
-    set_wasm_null(Cast<WasmNull>(wasm_null_obj));
-  }
-#endif  // V8_UNMAP_WASM_NULL_PAYLOAD
-#endif  // V8_ENABLE_WEBASSEMBLY
 
   auto make_hole = [this, roots, factory]() {
     USE(factory);
@@ -1422,6 +1369,40 @@ bool Heap::CreateReadOnlyObjects() {
   set_self_reference_marker(UncheckedCast<SelfReferenceMarker>(make_hole()));
   set_basic_block_counters_marker(
       UncheckedCast<BasicBlockCountersMarker>(make_hole()));
+
+  // Initialize the wasm null_value.
+
+#ifdef V8_ENABLE_WEBASSEMBLY
+  // Allocate the wasm-null object. It is a regular V8 heap object contained in
+  // a V8 page.
+  // In static-roots builds, it is large enough so that it can be mprotected on
+  // OS page granularity, so we fill up the rest of the current OS page with
+  // a filler.
+  // In non-static-roots builds, it is a regular object of size {kTaggedSize}
+  // and does not need padding.
+#define V8_UNMAP_WASM_NULL_PAYLOAD \
+  (V8_STATIC_ROOTS_BOOL || V8_STATIC_ROOTS_GENERATION_BOOL)
+
+#if V8_UNMAP_WASM_NULL_PAYLOAD
+  // Allocate an unmappable WasmNull.
+  {
+    Tagged<HeapObject> wasm_null_obj =
+        read_only_space_->AllocateRawUnmappableAllocation(0, WasmNull::kSize)
+            .ToObjectChecked();
+    set_wasm_null(UncheckedCast<WasmNull>(wasm_null_obj));
+  }
+#else
+  // Allocate the WasmNull.
+  {
+    Tagged<HeapObject> wasm_null_obj;
+    CHECK(AllocateRaw(WasmNull::kSize, AllocationType::kReadOnly)
+              .To(&wasm_null_obj));
+    wasm_null_obj->set_map_after_allocation(isolate(), roots.wasm_null_map(),
+                                            SKIP_WRITE_BARRIER);
+    set_wasm_null(Cast<WasmNull>(wasm_null_obj));
+  }
+#endif  // V8_UNMAP_WASM_NULL_PAYLOAD
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   return true;
 }
@@ -1490,6 +1471,7 @@ void Heap::CreateInitialMutableObjects() {
 
   set_feedback_vectors_for_profiling_tools(roots.undefined_value());
   set_functions_marked_for_manual_optimization(roots.undefined_value());
+  set_functions_marked_for_disabled_eager_inlining(roots.undefined_value());
   set_shared_wasm_memories(roots.empty_weak_array_list());
   set_locals_block_list_cache(roots.undefined_value());
 #ifdef V8_ENABLE_WEBASSEMBLY
@@ -1640,16 +1622,14 @@ void Heap::CreateInitialMutableObjects() {
         isolate_, Builtin::kPromiseCapabilityDefaultResolve, 1,
         FunctionKind::kConciseMethod);
     info->set_native(true);
-    info->set_function_map_index(
-        Context::STRICT_FUNCTION_WITHOUT_PROTOTYPE_MAP_INDEX);
+    info->set_function_map_index(Context::FUNCTION_WITHOUT_PROTOTYPE_MAP_INDEX);
     set_promise_capability_default_resolve_shared_fun(*info);
 
     info = CreateSharedFunctionInfo(isolate_,
                                     Builtin::kPromiseCapabilityDefaultReject, 1,
                                     FunctionKind::kConciseMethod);
     info->set_native(true);
-    info->set_function_map_index(
-        Context::STRICT_FUNCTION_WITHOUT_PROTOTYPE_MAP_INDEX);
+    info->set_function_map_index(Context::FUNCTION_WITHOUT_PROTOTYPE_MAP_INDEX);
     set_promise_capability_default_reject_shared_fun(*info);
 
     info = CreateSharedFunctionInfo(

@@ -28,7 +28,6 @@
 #include "src/api/api-inl.h"
 #include "src/ast/ast-value-factory.h"
 #include "src/ast/scopes.h"
-#include "src/base/fpu.h"
 #include "src/base/iterator.h"
 #include "src/base/logging.h"
 #include "src/base/platform/mutex.h"
@@ -875,8 +874,6 @@ StackTraceFailureMessage::StackTraceFailureMessage(
   }
 }
 
-bool NoExtension(const v8::FunctionCallbackInfo<v8::Value>&) { return false; }
-
 namespace {
 
 bool IsBuiltinFunction(Isolate* isolate, Tagged<HeapObject> object,
@@ -1636,7 +1633,10 @@ void VisitStack_ForCallSiteBuilder(Isolate* isolate, CallSiteBuilder* visitor) {
                 CallSiteInfo::kIsDeferredBaselineFrame)) {
           return;
         }
-        skipped_last_frame = true;
+        // Visibility (incl. security origin) is tracked by skipped_prev_frame_
+        // in AppendDeferredFrame; count this frame as appended so the caller's
+        // inlined construct stub can still flag it.
+        skipped_last_frame = false;
         break;
       case StackFrame::API_CALLBACK_EXIT:
       case StackFrame::API_CONSTRUCT_EXIT:
@@ -2529,7 +2529,7 @@ Tagged<Object> Isolate::StackOverflow() {
 #endif
 
   if (v8_flags.correctness_fuzzer_suppressions) {
-    FATAL("Aborting on stack overflow");
+    base::FatalNoSecurityImpact("Aborting on stack overflow");
   }
 
 #if USE_SIMULATOR
@@ -4637,8 +4637,7 @@ void Isolate::SwitchStacks(wasm::StackMemory* from, wasm::StackMemory* to,
   stack_guard()->SetStackLimitForStackSwitching(limit);
 
   // Update the central stack info.
-  if (!thread_local_top()->is_on_central_stack_flag_ &&
-      to->jmpbuf()->is_on_central_stack) {
+  if (to->jmpbuf()->is_on_central_stack) {
     DCHECK(is_suspend || is_return);
     DCHECK_EQ(expected_target_state, wasm::JumpBuffer::Inactive);
     thread_local_top()->is_on_central_stack_flag_ = true;
@@ -4648,8 +4647,7 @@ void Isolate::SwitchStacks(wasm::StackMemory* from, wasm::StackMemory* to,
 #endif
     thread_local_top()->central_stack_limit_ =
         reinterpret_cast<Address>(to->jmpbuf()->stack_limit);
-  } else if (thread_local_top()->is_on_central_stack_flag_ &&
-             !to->jmpbuf()->is_on_central_stack) {
+  } else if (thread_local_top()->is_on_central_stack_flag_) {
     thread_local_top()->is_on_central_stack_flag_ = false;
     if (is_resume) {
       // Record the current central stack SP, we will switch back to it for
@@ -5551,9 +5549,23 @@ void Isolate::NotifyExceptionPropagationCallback() {
     // "C++ -> JS" or "C++ -> Api callback" boundary.
     return;
   }
-  if (it.done() ||
-      (ext_callback_scope &&
-       ext_callback_scope->JSStackComparableAddress() < it.frame()->fp())) {
+  bool is_direct_api_throw = it.done();
+  if (!is_direct_api_throw && ext_callback_scope != nullptr) {
+    Address comparable_fp = it.frame()->fp();
+#if V8_ENABLE_WEBASSEMBLY
+    if (!IsOnCentralStack(comparable_fp)) {
+      // The topmost frame is on a Wasm secondary stack, whereas
+      // |ext_callback_scope| is always on the central stack. Compare against
+      // the central-stack SP saved when switching to the secondary stack.
+      comparable_fp = thread_local_top()->central_stack_sp_;
+      DCHECK_NE(comparable_fp, kNullAddress);
+      DCHECK(IsOnCentralStack(comparable_fp));
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
+    is_direct_api_throw =
+        ext_callback_scope->JSStackComparableAddress() < comparable_fp;
+  }
+  if (is_direct_api_throw) {
     // There were no crossings of "C++ -> JS" boundary at all or they happened
     // earlier than the last crossing of the  "C++ -> Api callback" boundary.
     // In this case all the data about Api callback is available in the
@@ -5664,6 +5676,9 @@ void Isolate::NotifyExceptionPropagationCallback() {
       // These frames are not created yet.
       UNREACHABLE();
     case StackFrame::TURBOFAN_JS:
+#if V8_ENABLE_WEBASSEMBLY
+    case StackFrame::WASM_TO_JS:
+#endif  // V8_ENABLE_WEBASSEMBLY
       // This must be a fast Api call.
       CHECK(it.frame()->InFastCCall());
       // TODO(ishell): support fast Api calls.
@@ -5674,6 +5689,7 @@ void Isolate::NotifyExceptionPropagationCallback() {
       return;
 #if V8_ENABLE_WEBASSEMBLY
     case StackFrame::WASM:
+    case StackFrame::WASM_EXIT:
       // No more info.
       return;
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -5964,7 +5980,7 @@ bool Isolate::InitWithSnapshot(SnapshotData* startup_snapshot_data,
 namespace {
 static std::string ToHexString(uintptr_t address) {
   std::stringstream stream_address;
-  stream_address << "0x" << std::hex << address;
+  stream_address << "0x" << std::hex << address << std::dec;
   return stream_address.str();
 }
 }  // namespace
@@ -6210,8 +6226,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   CHECK_IMPLIES(is_shared_space_isolate(), V8_CAN_CREATE_SHARED_HEAP_BOOL);
 
   force_slow_path_ = v8_flags.force_slow_path;
-
-  flush_denormals_ = base::FPU::GetFlushDenormals();
 
   has_fatal_error_ = false;
 
@@ -8041,6 +8055,9 @@ void Isolate::DetachGlobal(DirectHandle<NativeContext> env) {
   // Set security token back to default (unique) state making sure that only
   // accesses from the same native context are allowed.
   env->set_security_token(env->global_object());
+  // Invalidate LoadGlobalIC/StoreGlobalIC handlers to enforce access checks
+  // for the rewired global proxy from the detached context.
+  JSObject::InvalidatePrototypeValidityCell(env->global_object());
 }
 
 void Isolate::SetIsLoading(bool is_loading) {

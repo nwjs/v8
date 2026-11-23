@@ -131,7 +131,7 @@ class SnapshotByteSource final {
  *
  * Users must implement actual storage or i/o.
  */
-class SnapshotByteSink {
+class V8_EXPORT_PRIVATE SnapshotByteSink {
  public:
   SnapshotByteSink() = default;
   explicit SnapshotByteSink(int initial_size) : data_(initial_size) {}
@@ -153,6 +153,8 @@ class SnapshotByteSink {
   size_t Position() const { return data_.size(); }
 
   const std::vector<uint8_t>* data() const { return &data_; }
+  uint8_t* MutableData() { return data_.data(); }
+  void Resize(size_t size) { data_.resize(size); }
 
  private:
   std::vector<uint8_t> data_;

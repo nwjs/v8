@@ -39,7 +39,6 @@
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
-#include "src/objects/js-atomics-synchronization-inl.h"
 #include "src/objects/js-disposable-stack.h"
 #include "src/objects/js-proxy-inl.h"
 #include "src/objects/literal-objects.h"
@@ -329,9 +328,13 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
       Cast<HashSeedWrapper>(this)->HashSeedWrapperVerify(isolate);
       break;
 
-#define MAKE_VERIFY_CASE(Name, TYPE)                \
-  case TYPE:                                        \
-    TrustedCast<Name>(this)->Name##Verify(isolate); \
+#define MAKE_VERIFY_CASE(Name, TYPE)                   \
+  case TYPE:                                           \
+    if constexpr (is_subtype_v<Name, TrustedObject>) { \
+      TrustedCast<Name>(this)->Name##Verify(isolate);  \
+    } else {                                           \
+      Cast<Name>(this)->Name##Verify(isolate);         \
+    }                                                  \
     break;
       HEAP_OBJECT_DIAGNOSTIC_DISPATCH_LIST(MAKE_VERIFY_CASE)
 #undef MAKE_VERIFY_CASE
@@ -708,7 +711,8 @@ void Map::MapVerify(Isolate* isolate) {
   }
 
 #if V8_ENABLE_WEBASSEMBLY
-  bool is_wasm_struct = InstanceTypeChecker::IsWasmStruct(instance_type());
+  bool is_wasm_struct = InstanceTypeChecker::IsWasmStruct(instance_type()) ||
+                        InstanceTypeChecker::IsWasmCustomMap(instance_type());
 #else
   constexpr bool is_wasm_struct = false;
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -815,8 +819,9 @@ void Map::MapVerify(Isolate* isolate) {
     // Note: for each static type that has a descriptor, there is also a
     // canonical RTT that does not have one (and is not used by any actual
     // objects).
-    if (types->has_descriptor(index) && (IsWasmStruct(custom_descriptor()) ||
-                                         v8_flags.wasm_merged_descriptors)) {
+    if (types->has_descriptor(index) &&
+        ((IsWasmStructMap(this) && IsWasmStruct(custom_descriptor())) ||
+         map()->instance_type() == WASM_CUSTOM_MAP_TYPE)) {
       CHECK_GT(wasm_type_info()->supertypes_length(), subtyping_depth);
       CHECK_EQ(immediate_supertype_map(),
                wasm_type_info()->supertypes(subtyping_depth));
@@ -837,8 +842,7 @@ void Map::MapVerify(Isolate* isolate) {
                  JSObject::GetEmbedderFieldCount(this) * kEmbedderDataSlotSize,
              inobject_fields_start_offset);
 
-    if (IsJSSharedStructMap(this) || IsJSSharedArrayMap(this) ||
-        Is<JSAtomicsMutex>(this) || Is<JSAtomicsCondition>(this)) {
+    if (IsJSSharedStructMap(this) || IsJSSharedArrayMap(this)) {
       if (COMPRESS_POINTERS_IN_MULTIPLE_CAGES_BOOL) {
         // TODO(v8:14089): Verify what should be checked in this configuration
         // and again merge with the else-branch below.
@@ -1129,9 +1133,8 @@ void ScopeInfo::ScopeInfoVerify(Isolate* isolate) {
   CHECK(position_info_.start_.load().IsSmi());
   CHECK(position_info_.end_.load().IsSmi());
 
-  const uint32_t flags = Flags();
-  const bool is_module =
-      ScopeTypeBits::decode(flags) == ScopeType::MODULE_SCOPE;
+  const Flags flags = this->flags();
+  const bool is_module = flags.scope_type() == ScopeType::MODULE_SCOPE;
   const int local_count = context_local_count();
   const bool has_hashtable = local_count >= kScopeInfoMaxInlinedLocalNamesSize;
 
@@ -1156,23 +1159,23 @@ void ScopeInfo::ScopeInfoVerify(Isolate* isolate) {
     USE(context_local_infos(i));
   }
 
-  if (HasSavedClassVariableBit::decode(flags)) {
+  if (flags.has_saved_class_variable()) {
     Tagged<Union<Name, Smi>> v = saved_class_variable_info();
     CHECK(IsSmi(v) || IsName(v));
   }
 
-  if (FunctionVariableBits::decode(flags) != VariableAllocationInfo::NONE) {
+  if (flags.function_variable() != VariableAllocationInfo::NONE) {
     Tagged<Union<Smi, String>> name = function_variable_info_name();
     CHECK(IsString(name) || IsZero(name));
     USE(function_variable_info_context_or_stack_slot_index());
   }
 
-  if (HasInferredFunctionNameBit::decode(flags)) {
+  if (flags.has_inferred_function_name()) {
     Tagged<Union<String, Undefined>> n = inferred_function_name();
     CHECK(IsString(n) || IsUndefined(n));
   }
 
-  if (HasOuterScopeInfoBit::decode(flags)) {
+  if (flags.has_outer_scope_info()) {
     CHECK(IsScopeInfo(outer_scope_info()));
   }
 
@@ -1186,11 +1189,11 @@ void ScopeInfo::ScopeInfoVerify(Isolate* isolate) {
     }
   }
 
-  if (SloppyEvalCanExtendVarsBit::decode(flags)) {
+  if (flags.sloppy_eval_can_extend_vars()) {
     CHECK(IsDependentCode(dependent_code()));
   }
 
-  if (ScopeTypeBits::decode(flags) == ScopeType::FUNCTION_SCOPE) {
+  if (flags.scope_type() == ScopeType::FUNCTION_SCOPE) {
     USE(unused_parameter_bits());
   }
 }
@@ -1794,8 +1797,7 @@ void SharedFunctionInfo::SharedFunctionInfoVerify(LocalIsolate* isolate) {
   }
 
   if (ShouldVerifySharedFunctionInfoFunctionIndex(this)) {
-    int expected_map_index =
-        Context::FunctionMapIndex(language_mode(), kind(), HasSharedName());
+    int expected_map_index = Context::FunctionMapIndex(kind(), HasSharedName());
     CHECK_EQ(expected_map_index, function_map_index());
   }
 
@@ -1977,26 +1979,26 @@ void ExposedTrustedObject::ExposedTrustedObjectVerify(Isolate* isolate) {
 #if defined(V8_ENABLE_SANDBOX)
   // Check that the self indirect pointer is consistent, i.e. points back to
   // this object.
-  IndirectPointerTag tag;
+  TrustedPointerTag tag;
   if (IsPublished(isolate)) {
     InstanceType instance_type = map()->instance_type();
     SharedFlag shared = SharedFlag(HeapLayout::InAnySharedSpace(this));
-    tag = IndirectPointerTagFromInstanceType(instance_type, shared);
+    tag = TrustedPointerTagFromInstanceType(instance_type, shared);
   } else {
-    tag = kUnpublishedIndirectPointerTag;
+    tag = kUnpublishedTrustedPointerTag;
   }
-  // We can't use ReadIndirectPointerField here because the tag is not a
+  // We can't use ReadTrustedPointerField here because the tag is not a
   // compile-time constant.
-  IndirectPointerSlot slot = RawIndirectPointerField(
-      offsetof(ExposedTrustedObject, self_indirect_pointer_), tag);
+  TrustedPointerSlot slot = RawTrustedPointerField(
+      offsetof(ExposedTrustedObject, self_trusted_pointer_), tag);
   Tagged<Object> self = slot.load(isolate);
   CHECK_EQ(self, this);
   // If the object is in the read-only space, the self indirect pointer entry
   // must be in the read-only segment, and vice versa.
-  if (tag == kCodeIndirectPointerTag) {
+  if (tag == kCodeTrustedPointerTag) {
     TrustedPointerTable::Space* space =
         IsolateForSandbox(isolate).GetTrustedPointerTableSpaceFor(
-            kCodeIndirectPointerTag, slot.address());
+            kCodeTrustedPointerTag, slot.address());
     // During snapshot creation, the code pointer space of the read-only heap is
     // not marked as an internal read-only space.
     const bool is_space_read_only =
@@ -2244,8 +2246,7 @@ void JSPluralRules::JSPluralRulesVerify(Isolate* isolate) {
   JSObjectVerify(isolate);
   CHECK(IsString(locale()));
   CHECK(IsSmi(flags_.load()));
-  CHECK(IsForeign(icu_plural_rules_.load()));
-  CHECK(IsForeign(icu_number_formatter_.load()));
+  CHECK(IsCppGCManagedBase(internal_.load()));
 }
 
 void JSRelativeTimeFormat::JSRelativeTimeFormatVerify(Isolate* isolate) {
@@ -2340,18 +2341,6 @@ void JSSharedStruct::JSSharedStructVerify(Isolate* isolate) {
       VerifyElementIsShared(RawFastPropertyAt(field_index));
     }
   }
-}
-
-void JSAtomicsMutex::JSAtomicsMutexVerify(Isolate* isolate) {
-  CHECK(Is<JSAtomicsMutex>(this));
-  CHECK(HeapLayout::InWritableSharedSpace(Tagged<HeapObject>(this)));
-  JSObjectVerify(isolate);
-}
-
-void JSAtomicsCondition::JSAtomicsConditionVerify(Isolate* isolate) {
-  CHECK(Is<JSAtomicsCondition>(this));
-  CHECK(HeapLayout::InAnySharedSpace(Tagged<HeapObject>(this)));
-  JSObjectVerify(isolate);
 }
 
 void JSDisposableStackBase::JSDisposableStackBaseVerify(Isolate* isolate) {
@@ -2616,7 +2605,7 @@ void PromiseReaction::PromiseReactionVerify(Isolate* isolate) {
 
 void JSPromise::JSPromiseVerify(Isolate* isolate) {
   JSObjectVerify(isolate);
-  CHECK(flags_.load().IsSmi());
+  CHECK(flags_.IsSmi());
   if (status() == Promise::kPending) {
     CHECK(IsSmi(reactions()) || IsPromiseReaction(reactions()));
   }
@@ -2936,6 +2925,8 @@ void JSArrayBuffer::JSArrayBufferVerify(Isolate* isolate) {
           (v.IsWeak() && IsJSArrayBufferView(v.GetHeapObjectAssumeWeak())) ||
           v.IsCleared());
   }
+  CHECK_IMPLIES(is_resizable_by_js() && !was_detached(),
+                GetBackingStore() != nullptr);
 }
 
 void JSArrayBufferView::JSArrayBufferViewVerify(Isolate* isolate) {
@@ -3075,7 +3066,7 @@ void SourceTextModuleInfoEntry::SourceTextModuleInfoEntryVerify(
 }
 
 void Module::ModuleVerify(Isolate* isolate) {
-  CHECK_EQ(status() == Module::kErrored, !IsTheHole(exception()));
+  CHECK_EQ(status() == Module::kEvaluatedError, !IsTheHole(exception()));
 
   CHECK(IsUndefined(module_namespace()) || IsCell(module_namespace()));
   if (IsCell(module_namespace())) {
@@ -3089,7 +3080,7 @@ void Module::ModuleVerify(Isolate* isolate) {
     }
   }
 
-  if (!(status() == kErrored || status() == kEvaluating ||
+  if (!(status() == kEvaluatedError || status() == kEvaluating ||
         status() == kEvaluatingAsync || status() == kEvaluated)) {
     CHECK(IsUndefined(top_level_capability()));
   }
@@ -3127,16 +3118,20 @@ void JSDeferredModuleNamespace::JSDeferredModuleNamespaceVerify(
 }
 
 void SourceTextModule::SourceTextModuleVerify(Isolate* isolate) {
-  if (status() == kErrored) {
+  if (status() == kEvaluatedError) {
     CHECK(IsSharedFunctionInfo(code()));
-  } else if (status() == kEvaluating || status() == kEvaluatingAsync ||
-             status() == kEvaluated) {
+    CHECK_EQ(!IsTheHole(cycle_root()),
+             async_evaluation_ordinal() == kAsyncEvaluateDidFinish);
+  } else if (status() == kEvaluated) {
+    CHECK(IsJSGeneratorObject(code()));
+    CHECK(!HasAsyncEvaluationOrdinal());
+  } else if (status() == kEvaluating || status() == kEvaluatingAsync) {
     CHECK(IsJSGeneratorObject(code()));
   } else {
     if (status() == kLinked) {
       CHECK(IsJSGeneratorObject(code()));
     } else if (status() == kLinking) {
-      CHECK(IsJSFunction(code()) || IsJSGeneratorObject(code()));
+      CHECK(IsJSFunction(code()));
     } else if (status() == kPreLinking) {
       CHECK(IsSharedFunctionInfo(code()));
     } else if (status() == kUnlinked) {
@@ -3333,7 +3328,7 @@ void WasmTrustedInstanceData::WasmTrustedInstanceDataVerify(Isolate* isolate) {
     CHECK_EQ(size_or_address,
              reinterpret_cast<Address>(
                  TrustedCast<TrustedManaged<BackingStore>>(backing_store_obj)
-                     ->raw()
+                     ->raw(DisallowGarbageCollection{})
                      ->byte_length_address()));
   }
 }
@@ -3550,7 +3545,12 @@ void WasmStruct::WasmStructVerify(Isolate* isolate) {
   CHECK(Is<WasmStruct>(this));
 }
 
-void WasmCustomMap::WasmCustomMapVerify(Isolate* isolate) { UNIMPLEMENTED(); }
+void WasmCustomMap::WasmCustomMapVerify(Isolate* isolate) {
+  CHECK(Is<WasmCustomMap>(this));
+  Object::VerifyPointer(isolate, js_wrapper());
+  Object::VerifyPointer(isolate, native_context_for_wrapper());
+  MapVerify(isolate);
+}
 
 void WasmCustomMapWrapper::WasmCustomMapWrapperVerify(Isolate* isolate) {
   CHECK(Is<WasmCustomMapWrapper>(this));

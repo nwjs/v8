@@ -122,8 +122,6 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
   V<Object> ConvertWasmResultsToJS(base::Vector<OpIndex> returns,
                                    V<Context> js_context);
 
-  void CheckAndConvertSharedString(V<Object> ret, ScopedVar<Object>& result);
-
   // Overload for the inlined JS-to-Wasm wrapper.
   // Returns the result of the Wasm function converted to a JS value.
   V<Any> BuildJSToWasmWrapper(V<JSFunction> js_closure, V<Context> js_context,
@@ -267,22 +265,20 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
       } else {
         __ GotoIfNot(__ WordPtrEqual(page_flags, 0), type_error);
       }
-#ifdef DEBUG
 #if CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
       // Wasm GC objects (structs/arrays) are currently never allocated in
       // read-only space. Verify this invariant to guard against future changes
       // where constant Wasm objects might be placed in RO space.
-      V<Word32> lower32 = __ TruncateWordPtrToWord32(
-          __ BitcastTaggedToWordPtr(V<HeapObject>::Cast(input)));
       // TSA_DCHECK is only usable in isolate-dependent code.
       if (__ data()->isolate() != nullptr) {
-        TSA_DCHECK(this, __ Uint32LessThanOrEqual(
-                             __ Word32Constant(static_cast<uint32_t>(
-                                 kContiguousReadOnlyReservationSize)),
-                             lower32));
+        TSA_DCHECK(this,
+                   __ Uint32LessThanOrEqual(
+                       __ Word32Constant(static_cast<uint32_t>(
+                           kContiguousReadOnlyReservationSize)),
+                       __ TruncateWordPtrToWord32(__ BitcastTaggedToWordPtr(
+                           V<HeapObject>::Cast(input)))));
       }
 #endif  // CONTIGUOUS_COMPRESSED_READ_ONLY_SPACE_BOOL
-#endif  // DEBUG
     }
   }
 
@@ -928,8 +924,9 @@ class WasmWrapperTSGraphBuilder : public wasm::WasmGraphBuilderBase<Assembler> {
                             MemoryRepresentation::Int32(),
                             offsetof(SharedFunctionInfo, flags_));
     OpIndex strict_check = __ Word32BitwiseAnd(
-        flags, __ Word32Constant(SharedFunctionInfo::IsNativeBit::kMask |
-                                 SharedFunctionInfo::IsStrictBit::kMask));
+        flags,
+        __ Word32Constant(SharedFunctionInfo::Flags::IsNativeBit::kMask |
+                          SharedFunctionInfo::Flags::IsStrictBit::kMask));
 
     // Load global receiver if sloppy else use undefined.
     ScopedVar<Object> strict_d(this, OpIndex::Invalid());

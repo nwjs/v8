@@ -141,7 +141,7 @@ Local<String> GetDateDescription(Local<Date> date) {
   auto buffer = i::ToDateString(jsdate->value(), i_isolate->date_cache(),
                                 i::ToDateStringMode::kLocalDateAndTime);
   return Utils::ToLocal(i_isolate->factory()
-                            ->NewStringFromUtf8(base::VectorOf(buffer))
+                            ->NewStringFromUtf8({buffer.data(), buffer.size()})
                             .ToHandleChecked());
 }
 
@@ -433,6 +433,9 @@ void BreakRightNow(Isolate* v8_isolate,
   EnterV8BasicScope api_scope(isolate);
   isolate->debug()->HandleDebugBreak(i::kIgnoreIfAllFramesBlackboxed,
                                      break_reasons);
+  if (isolate->debug()->IsRestartFrameScheduled()) {
+    isolate->TerminateExecution();
+  }
 }
 
 void SetTerminateOnResume(Isolate* v8_isolate) {
@@ -1174,7 +1177,7 @@ Local<Function> GetBuiltin(Isolate* v8_isolate, Builtin requested_builtin) {
   info->set_language_mode(i::LanguageMode::kStrict);
   i::Handle<i::JSFunction> fun =
       i::Factory::JSFunctionBuilder{isolate, info, context}
-          .set_map(isolate->strict_function_without_prototype_map())
+          .set_map(isolate->function_without_prototype_map())
           .Build();
 
   return Utils::ToLocal(handle_scope.CloseAndEscape(fun));
@@ -1382,6 +1385,11 @@ SideEffectCheckScope::SideEffectCheckScope(v8::Isolate* isolate)
 
 SideEffectCheckScope::~SideEffectCheckScope() {
   isolate_->debug()->StopSideEffectCheckMode();
+}
+
+// static
+bool SideEffectCheckScope::IsActive(v8::Isolate* isolate) {
+  return reinterpret_cast<i::Isolate*>(isolate)->should_check_side_effects();
 }
 
 int Coverage::BlockData::StartOffset() const { return block_->start; }

@@ -1492,6 +1492,14 @@ DirectHandle<String> JSFunction::ToString(Isolate* isolate,
     }
   }
 
+  // Check if we have source code for the {function}. (NWJS: the
+  // !HasSourceCode() part of the original check moved to the top of this
+  // function; keep the upstream-added empty-source-range check so synthetic
+  // auto-accessor functions return "[native code]" instead of "".)
+  if (shared_info->StartPosition() == shared_info->EndPosition()) {
+    return NativeCodeFunctionSourceString(isolate, shared_info);
+  }
+
   if (shared_info->function_token_position() == kNoSourcePosition) {
     // If the function token position isn't valid, return [native code] to
     // ensure calling eval on the returned source code throws rather than

@@ -26,7 +26,7 @@
 #include "src/objects/js-generator.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/smi.h"
-#include "src/sandbox/indirect-pointer-tag.h"
+#include "src/sandbox/trusted-pointer-tag.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/baseline/liftoff-assembler-defs.h"
@@ -201,7 +201,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
       FieldOperand(rdi, offsetof(JSFunction, shared_function_info_)));
   __ movl(rbx, FieldOperand(shared_function_info,
                             offsetof(SharedFunctionInfo, flags_)));
-  __ DecodeField<SharedFunctionInfo::FunctionKindBits>(rbx);
+  __ DecodeField<SharedFunctionInfo::Flags::FunctionKindBits>(rbx);
   __ JumpIfIsInRange(
       rbx, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
       static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
@@ -1051,7 +1051,7 @@ void ResetFeedbackVectorOsrUrgency(MacroAssembler* masm,
                                    Register feedback_vector, Register scratch) {
   __ movb(scratch,
           FieldOperand(feedback_vector, offsetof(FeedbackVector, osr_state_)));
-  __ andb(scratch, Immediate(~FeedbackVector::OsrUrgencyBits::kMask));
+  __ andb(scratch, Immediate(~FeedbackVector::OsrState::OsrUrgencyBits::kMask));
   __ movb(FieldOperand(feedback_vector, offsetof(FeedbackVector, osr_state_)),
           scratch);
 }
@@ -1162,10 +1162,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(
     // Load frame size from the BytecodeArray object.
     __ movl(rcx, FieldOperand(kInterpreterBytecodeArrayRegister,
                               offsetof(BytecodeArray, frame_size_)));
+    if (V8_X64_16BYTE_STACK_ALIGNMENT_BOOL) {
+      // Round up the frame size to a multiple of 2 * kSystemPointerSize.
+      __ addl(rcx, Immediate(kSystemPointerSize));
+      __ andl(rcx, Immediate(~(2 * kSystemPointerSize - 1)));
+    }
+
+    __ movzxwl(r11, FieldOperand(kInterpreterBytecodeArrayRegister,
+                                 offsetof(BytecodeArray, max_arguments_)));
+    __ leaq(r11, Operand(rcx, r11, times_system_pointer_size, 0));
 
     // Do a stack check to ensure we don't go over the limit.
     __ movq(rax, rsp);
-    __ subq(rax, rcx);
+    __ subq(rax, r11);
     __ cmpq(rax, __ StackLimitAsOperand(StackLimitKind::kRealStackLimit));
     __ j(below, &stack_overflow);
 
@@ -1616,14 +1625,14 @@ void Builtins::Generate_InterpreterPushArgsThenFastConstructFunction(
       FieldOperand(rdi, offsetof(JSFunction, shared_function_info_)));
   __ testl(
       FieldOperand(shared_function_info, offsetof(SharedFunctionInfo, flags_)),
-      Immediate(SharedFunctionInfo::ConstructAsBuiltinBit::kMask));
+      Immediate(SharedFunctionInfo::Flags::ConstructAsBuiltinBit::kMask));
   __ j(not_zero, &builtin_call);
 
   // Check if we need to create an implicit receiver.
   Label not_create_implicit_receiver;
   __ movl(kScratchRegister, FieldOperand(shared_function_info,
                                          offsetof(SharedFunctionInfo, flags_)));
-  __ DecodeField<SharedFunctionInfo::FunctionKindBits>(kScratchRegister);
+  __ DecodeField<SharedFunctionInfo::Flags::FunctionKindBits>(kScratchRegister);
   __ JumpIfIsInRange(
       kScratchRegister,
       static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
@@ -2094,7 +2103,8 @@ void Builtins::Generate_NotifyDeoptimized(MacroAssembler* masm) {
 
   DCHECK_EQ(kInterpreterAccumulatorRegister.code(), rax.code());
   __ movq(rax, Operand(rsp, kPCOnStackSize));
-  __ ret(1 * kSystemPointerSize);  // Remove rax.
+  __ ret(AddArgumentPaddingSlots(1) *
+         kSystemPointerSize);  // Remove rax and padding.
 }
 
 static void GenerateCall(MacroAssembler* masm, Register argc, Register target,
@@ -2641,8 +2651,8 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   // We need to convert the receiver for non-native sloppy mode functions.
   Label done_convert;
   __ testl(FieldOperand(rdx, offsetof(SharedFunctionInfo, flags_)),
-           Immediate(SharedFunctionInfo::IsNativeBit::kMask |
-                     SharedFunctionInfo::IsStrictBit::kMask));
+           Immediate(SharedFunctionInfo::Flags::IsNativeBit::kMask |
+                     SharedFunctionInfo::Flags::IsStrictBit::kMask));
   __ j(not_zero, &done_convert);
   {
     // ----------- S t a t e -------------
@@ -2837,7 +2847,7 @@ void Builtins::Generate_ConstructFunction(MacroAssembler* masm) {
       FieldOperand(rdi, offsetof(JSFunction, shared_function_info_)));
   __ testl(
       FieldOperand(shared_function_info, offsetof(SharedFunctionInfo, flags_)),
-      Immediate(SharedFunctionInfo::ConstructAsBuiltinBit::kMask));
+      Immediate(SharedFunctionInfo::Flags::ConstructAsBuiltinBit::kMask));
   __ TailCallBuiltin(Builtin::kJSBuiltinsConstructStub, not_zero);
 
   __ TailCallBuiltin(Builtin::kJSConstructStubGeneric);
@@ -3252,11 +3262,12 @@ void RestoreWasmParams(MacroAssembler* masm, int offset) {
 // When this builtin is called, the topmost stack entry is the calling pc.
 // This is replaced with the following:
 //
-// [    calling pc      ]  <-- rsp; popped by {ret}.
-// [  feedback vector   ]
-// [ Wasm instance data ]
-// [ WASM frame marker  ]
-// [    saved rbp       ]  <-- rbp; this is where "calling pc" used to be.
+// [     calling pc      ]  <-- rsp; popped by {ret}.
+// [   alignment slot    ]  (only if V8_X64_16BYTE_STACK_ALIGNMENT_BOOL)
+// [   feedback vector   ]
+// [ Wasm instance data  ]
+// [  WASM frame marker  ]
+// [      saved rbp      ]  <-- rbp; this is where "calling pc" used to be.
 void Builtins::Generate_WasmLiftoffFrameSetup(MacroAssembler* masm) {
   Register func_index = wasm::kLiftoffFrameSetupFunctionReg;
   Register vector = r15;
@@ -3279,6 +3290,16 @@ void Builtins::Generate_WasmLiftoffFrameSetup(MacroAssembler* masm) {
                     Smi::FromInt(1));
   __ Push(kWasmImplicitArgRegister);
   __ Push(vector);
+  if (V8_X64_16BYTE_STACK_ALIGNMENT_BOOL) {
+    // Initialize the OSR target slot (at rbp - kOSRTargetOffset) to 0 so that
+    // the 4-slot static header leaves rsp 16-byte aligned (rbp - 32 instead of
+    // rbp - 24). Between this builtin's {ret} and the patched
+    // {sub rsp, frame_size}, the large-frame OOL stack check path may call
+    // {kWasmStackOverflow} or {kWasmHandleStackOverflow}, which requires {rsp}
+    // to be 16-byte aligned.
+    static_assert(wasm::kOSRTargetOffset == 4 * kSystemPointerSize);
+    __ Push(Immediate(0));
+  }
   __ Push(calling_pc);
   __ ret(0);
 
@@ -4032,7 +4053,7 @@ void Generate_WasmResumeHelper(MacroAssembler* masm, wasm::OnResume on_resume) {
   __ LoadTrustedPointerField(
       suspender,
       FieldOperand(resume_data, offsetof(WasmResumeData, trusted_suspender_)),
-      kWasmSuspenderIndirectPointerTag, kScratchRegister);
+      kWasmSuspenderTrustedPointerTag, kScratchRegister);
   closure = no_reg;
   sfi = no_reg;
 
@@ -4604,6 +4625,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
     __ PushReturnAddressFrom(rcx);
   }
   __ EnterSandbox();
+  __ AssertFPCRState();
   __ ret(0);
 
   // Handling of exception.
@@ -5657,7 +5679,7 @@ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
       code_obj,
       FieldOperand(shared_function_info,
                    offsetof(SharedFunctionInfo, trusted_function_data_)),
-      kCodeIndirectPointerTag, kScratchRegister);
+      kCodeTrustedPointerTag, kScratchRegister);
 
   // For OSR entry it is safe to assume we always have baseline code.
   if (v8_flags.debug_code) {
@@ -5710,6 +5732,9 @@ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
   // Get bytecode array from the stack frame.
   __ movq(kInterpreterBytecodeArrayRegister,
           MemOperand(rbp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+  if (V8_X64_16BYTE_STACK_ALIGNMENT_BOOL) {
+    __ pushq(kInterpreterAccumulatorRegister);
+  }
   __ pushq(kInterpreterAccumulatorRegister);
   {
     FrameScope scope(masm, StackFrame::INTERNAL);
@@ -5722,6 +5747,9 @@ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
   __ LoadCodeInstructionStart(code_obj, code_obj, kJSEntrypointTag);
   __ addq(code_obj, kReturnRegister0);
   __ popq(kInterpreterAccumulatorRegister);
+  if (V8_X64_16BYTE_STACK_ALIGNMENT_BOOL) {
+    __ popq(kInterpreterAccumulatorRegister);
+  }
 
   Generate_OSREntry(masm, code_obj);
   __ Trap();  // Unreachable.

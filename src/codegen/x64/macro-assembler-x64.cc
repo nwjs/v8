@@ -780,10 +780,13 @@ void MacroAssembler::LoadExternalPointerField(
 
 void MacroAssembler::LoadTrustedPointerField(Register destination,
                                              Operand field_operand,
-                                             IndirectPointerTagRange tag_range,
+                                             TrustedPointerTagRange tag_range,
                                              Register scratch) {
 #ifdef V8_ENABLE_SANDBOX
-  LoadIndirectPointerField(destination, field_operand, tag_range, scratch);
+  DCHECK(!AreAliased(destination, scratch));
+  Register handle = scratch;
+  movl(handle, field_operand);
+  ResolveTrustedPointerHandle(destination, handle, tag_range);
 #else
   LoadTaggedField(destination, field_operand);
 #endif  // V8_ENABLE_SANDBOX
@@ -807,11 +810,11 @@ void MacroAssembler::LoadTrustedUnknownPointerField(
     Register handle = scratch;
     movl(handle, field_operand);
 
-    static_assert(kNullIndirectPointerHandle == 0);
+    static_assert(kNullTrustedPointerHandle == 0);
     testl(handle, handle);
     j(zero, is_unavailable, Label::kNear);
 
-    ResolveIndirectPointerHandle(destination, handle, kAllIndirectPointerTags);
+    ResolveTrustedPointerHandle(destination, handle, kAllTrustedPointerTags);
   }
 #else
   LoadTaggedField(destination, field_operand);
@@ -842,40 +845,17 @@ void MacroAssembler::LoadTrustedUnknownPointerField(
 void MacroAssembler::StoreTrustedPointerField(Operand dst_field_operand,
                                               Register value) {
 #ifdef V8_ENABLE_SANDBOX
-  StoreIndirectPointerField(dst_field_operand, value);
+  movl(kScratchRegister, FieldOperand(value, offsetof(ExposedTrustedObject,
+                                                      self_trusted_pointer_)));
+  movl(dst_field_operand, kScratchRegister);
 #else
   StoreTaggedField(dst_field_operand, value);
 #endif  // V8_ENABLE_SANDBOX
 }
 
-void MacroAssembler::LoadIndirectPointerField(Register destination,
-                                              Operand field_operand,
-                                              IndirectPointerTagRange tag_range,
-                                              Register scratch) {
 #ifdef V8_ENABLE_SANDBOX
-  DCHECK(!AreAliased(destination, scratch));
-  Register handle = scratch;
-  movl(handle, field_operand);
-  ResolveIndirectPointerHandle(destination, handle, tag_range);
-#else
-  UNREACHABLE();
-#endif  // V8_ENABLE_SANDBOX
-}
-
-void MacroAssembler::StoreIndirectPointerField(Operand dst_field_operand,
-                                               Register value) {
-#ifdef V8_ENABLE_SANDBOX
-  movl(kScratchRegister, FieldOperand(value, offsetof(ExposedTrustedObject,
-                                                      self_indirect_pointer_)));
-  movl(dst_field_operand, kScratchRegister);
-#else
-  UNREACHABLE();
-#endif  // V8_ENABLE_SANDBOX
-}
-
-#ifdef V8_ENABLE_SANDBOX
-void MacroAssembler::ResolveIndirectPointerHandle(
-    Register destination, Register handle, IndirectPointerTagRange tag_range) {
+void MacroAssembler::ResolveTrustedPointerHandle(
+    Register destination, Register handle, TrustedPointerTagRange tag_range) {
   DCHECK(!AreAliased(handle, destination));
   shrl(handle, Immediate(kTrustedPointerHandleShift));
   static_assert(kTrustedPointerTableEntrySize == 8);
@@ -884,8 +864,8 @@ void MacroAssembler::ResolveIndirectPointerHandle(
        Operand{kRootRegister, IsolateData::trusted_pointer_table_offset()});
   movq(destination, Operand{destination, handle, times_8, 0});
 
-  if (IsFastIndirectPointerTagRange(tag_range)) {
-    uint64_t mask = ComputeUntaggingMaskForFastIndirectPointerTag(tag_range);
+  if (IsFastTrustedPointerTagRange(tag_range)) {
+    uint64_t mask = ComputeUntaggingMaskForFastTrustedPointerTag(tag_range);
     movq(kScratchRegister, Immediate64(mask));
     andq(destination, kScratchRegister);
   } else {
@@ -1016,10 +996,10 @@ void MacroAssembler::CallEphemeronKeyBarrier(Register object,
   PopAll(registers);
 }
 
-void MacroAssembler::CallIndirectPointerBarrier(Register object,
-                                                Register slot_address,
-                                                SaveFPRegsMode fp_mode,
-                                                IndirectPointerTag tag) {
+void MacroAssembler::CallTrustedPointerBarrier(Register object,
+                                               Register slot_address,
+                                               SaveFPRegsMode fp_mode,
+                                               TrustedPointerTag tag) {
   ASM_CODE_COMMENT(this);
   DCHECK(!AreAliased(object, slot_address));
   // TODO(saelo) if necessary, we could introduce a "SaveRegisters version of
@@ -1027,21 +1007,21 @@ void MacroAssembler::CallIndirectPointerBarrier(Register object,
   // probably not currently worth the effort though since stores to indirect
   // pointer fields are fairly rare.
   RegList registers =
-      IndirectPointerWriteBarrierDescriptor::ComputeSavedRegisters(
-          object, slot_address);
+      TrustedPointerWriteBarrierDescriptor::ComputeSavedRegisters(object,
+                                                                  slot_address);
   PushAll(registers);
 
   Register object_parameter =
-      IndirectPointerWriteBarrierDescriptor::ObjectRegister();
+      TrustedPointerWriteBarrierDescriptor::ObjectRegister();
   Register slot_address_parameter =
-      IndirectPointerWriteBarrierDescriptor::SlotAddressRegister();
+      TrustedPointerWriteBarrierDescriptor::SlotAddressRegister();
   MovePair(slot_address_parameter, slot_address, object_parameter, object);
 
   Register tag_parameter =
-      IndirectPointerWriteBarrierDescriptor::IndirectPointerTagRegister();
+      TrustedPointerWriteBarrierDescriptor::TrustedPointerTagRegister();
   Move(tag_parameter, tag);
 
-  CallBuiltin(Builtins::IndirectPointerBarrier(fp_mode));
+  CallBuiltin(Builtins::TrustedPointerBarrier(fp_mode));
   PopAll(registers);
 }
 
@@ -1106,20 +1086,20 @@ void MacroAssembler::CallVerifySkippedWriteBarrierStub(Register object,
   CallCFunction(ExternalReference::verify_skipped_write_barrier(), 2);
 }
 
-void MacroAssembler::CallVerifySkippedIndirectWriteBarrierStubSaveRegisters(
+void MacroAssembler::CallVerifySkippedTrustedWriteBarrierStubSaveRegisters(
     Register object, Register value, SaveFPRegsMode fp_mode) {
   ASM_CODE_COMMENT(this);
   PushCallerSaved(fp_mode);
-  CallVerifySkippedIndirectWriteBarrierStub(object, value);
+  CallVerifySkippedTrustedWriteBarrierStub(object, value);
   PopCallerSaved(fp_mode);
 }
 
-void MacroAssembler::CallVerifySkippedIndirectWriteBarrierStub(Register object,
-                                                               Register value) {
+void MacroAssembler::CallVerifySkippedTrustedWriteBarrierStub(Register object,
+                                                              Register value) {
   ASM_CODE_COMMENT(this);
   MovePair(kCArgRegs[0], object, kCArgRegs[1], value);
   PrepareCallCFunction(2);
-  CallCFunction(ExternalReference::verify_skipped_indirect_write_barrier(), 2);
+  CallCFunction(ExternalReference::verify_skipped_trusted_write_barrier(), 2);
 }
 
 #ifdef V8_IS_TSAN
@@ -1236,13 +1216,13 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
   if (v8_flags.slow_debug_code) {
     ASM_CODE_COMMENT_STRING(this, "Debug check slot_address");
     Label ok;
-    if (slot.contains_indirect_pointer()) {
+    if (slot.contains_trusted_pointer()) {
       Push(object);  // Use object register as scratch
       Register scratch = object;
       Push(slot_address);  // Use slot address register to load the value into
       Register value_in_slot = slot_address;
-      LoadIndirectPointerField(value_in_slot, Operand(slot_address, 0),
-                               slot.indirect_pointer_tag(), scratch);
+      LoadTrustedPointerField(value_in_slot, Operand(slot_address, 0),
+                              slot.trusted_pointer_tag(), scratch);
       cmp_tagged(value, value_in_slot);
       // These pops don't affect the flag registers, so we can do them before
       // the conditional jump below.
@@ -1270,7 +1250,7 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
     JumpIfSmi(value, &done);
   }
 
-  if (slot.contains_indirect_pointer()) {
+  if (slot.contains_trusted_pointer()) {
     // The indirect pointer write barrier is only enabled during marking.
     JumpIfNotMarking(&done);
   } else {
@@ -1310,9 +1290,9 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
     CallRecordWriteStub(object, slot_address, fp_mode,
                         StubCallMode::kCallBuiltinPointer);
   } else {
-    DCHECK(slot.contains_indirect_pointer());
-    CallIndirectPointerBarrier(object, slot_address, fp_mode,
-                               slot.indirect_pointer_tag());
+    DCHECK(slot.contains_trusted_pointer());
+    CallTrustedPointerBarrier(object, slot_address, fp_mode,
+                              slot.trusted_pointer_tag());
   }
 
   bind(&done);
@@ -4248,12 +4228,40 @@ Immediate MacroAssembler::ClearedValue() const {
   return Immediate(static_cast<int32_t>(i::kClearedWeakValue.ptr()));
 }
 
+void MacroAssembler::CanonicalizeNaN(const DoubleRegister dst,
+                                     const DoubleRegister src) {
+  AssertFPCRState();
+
+  // Subtracting 0.0 preserves all inputs except for signalling NaNs, which
+  // become quiet NaNs. We use subsd rather than addsd because subsd preserves
+  // -0.0 inputs: -0.0 + 0.0 = 0.0, but -0.0 - 0.0 = -0.0.
+  Xorpd(kScratchDoubleReg, kScratchDoubleReg);
+  Subsd(dst, src, kScratchDoubleReg);
+}
+
 #ifdef V8_ENABLE_DEBUG_CODE
 
 void MacroAssembler::AssertSpAlignedForCall() {
   if (V8_X64_16BYTE_STACK_ALIGNMENT_BOOL && v8_flags.debug_code) {
     CheckStackAlignment();
   }
+}
+
+void MacroAssembler::AssertFPCRState() {
+  if (!v8_flags.debug_code) return;
+  ASM_CODE_COMMENT(this);
+  // Settings left to their default values:
+  //   - Bit 6 (0x0040): DAZ (denormals-are-zeros) must not be set.
+  //   - Bits 13-14 (0x6000): RC (rounding control) must be 0
+  //     (round-to-nearest-even).
+  //   - Bit 15 (0x8000): FTZ (flush-to-zero) must not be set.
+  constexpr uint32_t kExpectedZeroMask = (1 << 6) | (3 << 13) | (1 << 15);
+  subq(rsp, Immediate(kSystemPointerSize));
+  stmxcsr(Operand(rsp, 0));
+  testl(Operand(rsp, 0), Immediate(kExpectedZeroMask));
+  // Restore rsp without modifying flags.
+  leaq(rsp, Operand(rsp, kSystemPointerSize));
+  Check(zero, AbortReason::kUnexpectedFPCRMode);
 }
 
 void MacroAssembler::AssertNotSmi(Register object) {
@@ -4576,16 +4584,18 @@ void MacroAssembler::InvokeFunctionCode(
   // call sites.
   static_assert(kJavaScriptCallCodeStartRegister == rcx, "ABI mismatch");
   LoadEntrypointFromJSDispatchTable(rcx, dispatch_handle);
+  Label done;
   switch (type) {
     case InvokeType::kCall:
       call(rcx);
+      jmp(&done, Label::kNear);
       break;
     case InvokeType::kJump:
+      // The tail jump does not return, so jumping to `done` here would be
+      // unreachable dead code.
       jmp(rcx);
       break;
   }
-  Label done;
-  jmp(&done, Label::kNear);
 
   // Deferred debug hook.
   bind(&debug_hook);

@@ -128,10 +128,27 @@ class ExpressionScope {
     AsExpressionParsingScope()->MarkIdentifierAsAssigned();
   }
 
-  void ValidateAsPattern(ExpressionT expression, int begin, int end) {
+  void RemoveAsyncKeyword() {
     if (!CanBeExpression()) return;
-    AsExpressionParsingScope()->ValidatePattern(expression, begin, end);
+    AsExpressionParsingScope()->RemoveAsyncKeyword();
+  }
+
+  void ValidateAsPattern(ExpressionT expression, int begin, int end,
+                         int variable_index) {
+    if (!CanBeExpression()) return;
+    AsExpressionParsingScope()->ValidatePattern(expression, begin, end,
+                                                variable_index);
     AsExpressionParsingScope()->ClearExpressionError();
+  }
+
+  int variable_list_length() {
+    if (!CanBeExpression()) return 0;
+    return AsExpressionParsingScope()->variable_list()->length();
+  }
+
+  void DiscardVariablesSince(int variable_index) {
+    if (!CanBeExpression()) return;
+    AsExpressionParsingScope()->DiscardVariablesSince(variable_index);
   }
 
   void ValidateAsExpression() {
@@ -157,7 +174,7 @@ class ExpressionScope {
                                        MessageTemplate message) {
     ExpressionScope* scope = this;
     while (!scope->IsCertainlyParameterDeclaration()) {
-      if (!has_possible_parameter_in_scope_chain_) return;
+      if (!scope->has_possible_parameter_in_scope_chain_) return;
       if (scope->CanBeParameterDeclaration()) {
         scope->AsArrowHeadParsingScope()->RecordDeclarationError(loc, message);
       }
@@ -199,7 +216,8 @@ class ExpressionScope {
       }
     } else if (is_strict(parser_->language_mode())) {
       AsArrowHeadParsingScope()->RecordDeclarationError(loc, message);
-    } else {
+    } else if (!parser_->next_arrow_function_info_
+                    .strict_parameter_error_location.IsValid()) {
       parser_->next_arrow_function_info_.strict_parameter_error_location = loc;
       parser_->next_arrow_function_info_.strict_parameter_error_message =
           message;
@@ -506,7 +524,10 @@ class ExpressionParsingScope : public ExpressionScope<Types> {
                                        MessageTemplate message) {
     for (ExpressionScopeT* scope = this; scope != nullptr;
          scope = scope->parent()) {
-      if (!has_async_arrow_in_scope_chain_) break;
+      if (!scope->CanBeExpression() ||
+          !scope->AsExpressionParsingScope()->has_async_arrow_in_scope_chain_) {
+        break;
+      }
       if (scope->type_ ==
           ExpressionScopeT::kMaybeAsyncArrowParameterDeclaration) {
         scope->AsArrowHeadParsingScope()->RecordDeclarationError(loc, message);
@@ -545,15 +566,25 @@ class ExpressionParsingScope : public ExpressionScope<Types> {
 
   void ValidateExpression() { Validate(kExpressionIndex); }
 
-  void ValidatePattern(ExpressionT expression, int begin, int end) {
+  void ValidatePattern(ExpressionT expression, int begin, int end,
+                       int variable_index = 0) {
     Validate(kPatternIndex);
     if (expression->is_parenthesized()) {
       ExpressionScopeT::Report(Scanner::Location(begin, end),
                                MessageTemplate::kInvalidDestructuringTarget);
     }
-    for (auto& variable_initializer_pair : variable_list_) {
-      variable_initializer_pair.first->set_is_assigned();
+    for (int i = variable_index; i < variable_list_.length(); ++i) {
+      variable_list_.at(i).first->set_is_assigned();
     }
+  }
+
+  void DiscardVariablesSince(int variable_index) {
+    if (this->CanBeDeclaration()) {
+      for (int i = variable_index; i < variable_list_.length(); ++i) {
+        this->parser()->scope()->AddUnresolved(variable_list_.at(i).first);
+      }
+    }
+    variable_list_.Rewind(variable_index);
   }
 
   void ClearExpressionError() {
@@ -577,6 +608,17 @@ class ExpressionParsingScope : public ExpressionScope<Types> {
       this->parser()->scope()->AddUnresolved(variable);
     }
     variable_list_.Add({variable, kNoSourcePosition});
+  }
+
+  void RemoveAsyncKeyword() {
+    DCHECK_GT(variable_list_.length(), 0);
+    VariableProxy* proxy = variable_list_.at(variable_list_.length() - 1).first;
+    DCHECK_EQ(proxy->raw_name(),
+              this->parser()->ast_value_factory()->async_string());
+    if (!this->CanBeDeclaration()) {
+      this->parser()->scope()->DeleteUnresolved(proxy);
+    }
+    variable_list_.DropLast();
   }
 
   void MarkIdentifierAsAssigned() {

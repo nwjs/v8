@@ -16,7 +16,6 @@
 #include "include/v8-profiler.h"
 #include "include/v8-script.h"
 #include "src/api/api-inl.h"
-#include "src/base/unique-array.h"
 #include "src/codegen/compilation-cache.h"
 #include "src/codegen/script-details.h"
 #include "src/heap/factory.h"
@@ -52,9 +51,8 @@ static void SetGlobalProperty(const char* name, Tagged<Object> value) {
 
 static DirectHandle<JSFunction> Compile(const char* source) {
   Isolate* isolate = reinterpret_cast<i::Isolate*>(v8::Isolate::GetCurrent());
-  Handle<String> source_code = isolate->factory()
-                                   ->NewStringFromUtf8(base::CStrVector(source))
-                                   .ToHandleChecked();
+  Handle<String> source_code =
+      isolate->factory()->NewStringFromUtf8(source).ToHandleChecked();
   ScriptCompiler::CompilationDetails compilation_details;
   DirectHandle<SharedFunctionInfo> shared =
       Compiler::GetSharedFunctionInfoForScript(
@@ -243,7 +241,7 @@ TEST_F(CompilerTestWithPrintExtension, C2JSFrames) {
   EXPECT_TRUE(IsJSFunction(*fun1));
 
   DirectHandle<Object> args[] = {
-      isolate->factory()->InternalizeString(base::StaticCharVector("hello"))};
+      isolate->factory()->InternalizeString("hello")};
   Execution::Call(isolate, Cast<JSFunction>(fun1), global, base::VectorOf(args))
       .Check();
 }
@@ -266,14 +264,14 @@ TEST_F(CompilerTest, GetScriptLineNumber) {
   const char function_f[] = "function f() {}";
   const int max_rows = 1000;
   const int buffer_size = max_rows + sizeof(function_f);
-  auto buffer = base::UniqueArray<char>::NewForOverwrite(buffer_size);
-  memset(buffer.begin(), '\n', buffer_size - 1);
+  std::array<char, buffer_size> buffer;
+  memset(buffer.data(), '\n', buffer_size - 1);
   buffer[buffer_size - 1] = '\0';
 
   for (int i = 0; i < max_rows; ++i) {
     if (i > 0) buffer[i - 1] = '\n';
     MemCopy(&buffer[i], function_f, sizeof(function_f) - 1);
-    v8::Local<v8::String> script_body = NewString(buffer.begin());
+    v8::Local<v8::String> script_body = NewString(buffer.data());
     v8::Script::Compile(context(), script_body, &origin)
         .ToLocalChecked()
         ->Run(context())
@@ -957,10 +955,7 @@ TEST_F(BackgroundMergeTest, GCDuringMerge) {
       "  }"
       "})";
   IndirectHandle<String> source_string =
-      isolate()
-          ->factory()
-          ->NewStringFromUtf8(base::CStrVector(source))
-          .ToHandleChecked();
+      isolate()->factory()->NewStringFromUtf8(source).ToHandleChecked();
 
   const int kTopLevelId = 0;
   const int kFId = 1;
@@ -1163,10 +1158,7 @@ TEST_F(BackgroundMergeTest, MergeWithEval) {
       "  return eval('1');"
       "};";
   IndirectHandle<String> source_string =
-      isolate()
-          ->factory()
-          ->NewStringFromUtf8(base::CStrVector(source))
-          .ToHandleChecked();
+      isolate()->factory()->NewStringFromUtf8(source).ToHandleChecked();
 
   ScriptCompiler::CompilationDetails compilation_details;
   DirectHandle<SharedFunctionInfo> top_level_sfi =

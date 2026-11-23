@@ -30,13 +30,15 @@ STORAGE_KINDS = frozenset({
     "tagged",
     "protected_tagged",
     # TrustedPointerMember<T, tag>: an indirect pointer handle; `tag`
-    # names the IndirectPointerTag constant.
+    # names the TrustedPointerTag constant.
     "trusted_pointer",
     "external_pointer",
     "cpp_heap_pointer",
     # A BitFieldGroup member: `name` is the C++ struct name and `bits`
     # contains the fields in bit order.
     "bitfield",
+    # A SmiBitFieldMember: a tagged slot containing at most 31 bits.
+    "smi_bitfield",
     # Integral storage: `width` bytes, `signed` flag, and
     # `pointer_width_alias` when the member was written through one
     # (uintptr_t, size_t, ...), which its width alone does not say.
@@ -68,6 +70,12 @@ def _check_identifier(s: str, what: str) -> None:
   _check(
       isinstance(s, str) and s.replace("_", "a").isalnum() and s != "",
       f"{what}: not an identifier: {s!r}")
+
+
+def _check_class_scoped_name(s: str, what: str) -> None:
+  _check(isinstance(s, str), f"{what} must be a string")
+  for part in s.split("::"):
+    _check_identifier(part, what)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -266,7 +274,7 @@ class BitFieldEntry:
 
   def __post_init__(self) -> None:
     _check_identifier(self.cpp_name, "bit field name")
-    _check_identifier(self.type, "bit field type")
+    _check_class_scoped_name(self.type, "bit field type")
     _check(self.num_bits > 0, f"bit field {self.cpp_name}: no bits")
     _check(self.offset >= 0, f"bit field {self.cpp_name}: negative offset")
 
@@ -307,8 +315,8 @@ class StorageType:
   pointer_width_alias: str | None = None
   # C++ type name without namespaces; includes enclosing classes for bitfields.
   name: str | None = None
-  # "bitfield": the group's fields, in declaration order, which is bit
-  # order.
+  # "bitfield" / "smi_bitfield": the group's fields, in declaration
+  # order. Fields may overlap.
   bits: tuple[BitFieldEntry, ...] = ()
 
   def __post_init__(self) -> None:
@@ -317,7 +325,7 @@ class StorageType:
       _check(self.arg is not None, f"{self.kind} storage without type arg")
     if self.kind == "trusted_pointer":
       # Both absent for an object's own pointer-table entry (the
-      # atomic IndirectPointerHandle member).
+      # atomic TrustedPointerHandle member).
       _check((self.arg is None) == (self.tag is None),
              "trusted_pointer storage needs pointee and tag together")
     if self.kind == "external_pointer":
@@ -330,24 +338,20 @@ class StorageType:
     if self.kind == "struct":
       _check(self.width is not None and self.width > 0,
              "struct storage needs a size")
-    if self.kind == "bitfield":
-      _check(
-          isinstance(self.name, str), "bitfield storage name must be a string")
-      for part in (self.name or "").split("::"):
-        _check_identifier(part, "bitfield storage name")
-      _check(self.width in (1, 2, 4, 8), "bitfield storage width invalid")
-      _check(bool(self.bits), "bitfield storage without fields")
-      # A base::BitField chain starts at bit 0 and has no holes; a gap
-      # means an alias is missing from the group.
-      next_bit = 0
+    if self.kind in ("bitfield", "smi_bitfield"):
+      _check_class_scoped_name(self.name, f"{self.kind} storage name")
+      if self.kind == "bitfield":
+        _check(self.width in (1, 2, 4, 8), "bitfield storage width invalid")
+        capacity = self.width * 8
+      else:
+        _check(self.width is None, "smi_bitfield storage with a width")
+        capacity = 31
+      _check(bool(self.bits), f"{self.kind} storage without fields")
       for bit in self.bits:
+        end = bit.offset + bit.num_bits
         _check(
-            bit.offset == next_bit,
-            f"bitfield {self.name}: {bit.cpp_name} starts at {bit.offset}, "
-            f"expected {next_bit}")
-        next_bit += bit.num_bits
-      _check(next_bit <= self.width * 8,
-             f"bitfield {self.name}: {next_bit} bits exceed the storage")
+            end <= capacity, f"bitfield {self.name}: {bit.cpp_name}: "
+            f"{end} bits exceed the storage")
     else:
       _check(not self.bits, f"{self.kind} storage with bit fields")
     if self.pointer_width_alias is not None:

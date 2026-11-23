@@ -33,8 +33,8 @@
 #include "src/objects/shared-function-info-inl.h"
 #include "src/objects/smi.h"
 #include "src/roots/roots-inl.h"
-#include "src/sandbox/indirect-pointer-tag.h"
 #include "src/sandbox/js-dispatch-table-inl.h"
+#include "src/sandbox/trusted-pointer-tag.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-linkage.h"
@@ -386,7 +386,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
       CodeGenerator* gen, Register object, Operand operand, Register value,
       Register scratch0, Register scratch1, RecordWriteMode mode,
       StubCallMode stub_mode,
-      IndirectPointerTag indirect_pointer_tag = kIndirectPointerNullTag)
+      TrustedPointerTag trusted_pointer_tag = kTrustedPointerNullTag)
       : OutOfLineCode(gen),
         object_(object),
         operand_(operand),
@@ -398,7 +398,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
         stub_mode_(stub_mode),
 #endif  // V8_ENABLE_WEBASSEMBLY
         zone_(gen->zone()),
-        indirect_pointer_tag_(indirect_pointer_tag) {
+        trusted_pointer_tag_(trusted_pointer_tag) {
     DCHECK(!AreAliased(object, scratch0, scratch1));
     DCHECK(!AreAliased(value, scratch0, scratch1));
   }
@@ -411,13 +411,13 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     // When storing an indirect pointer, the value will always be a
     // full/decompressed pointer.
     if (COMPRESS_POINTERS_BOOL &&
-        mode_ != RecordWriteMode::kValueIsIndirectPointer) {
+        mode_ != RecordWriteMode::kValueIsTrustedPointer) {
       __ DecompressTagged(value_, value_);
     }
 
     // No need to check value page flags with the indirect pointer write barrier
     // because the value is always an ExposedTrustedObject.
-    if (mode_ != RecordWriteMode::kValueIsIndirectPointer) {
+    if (mode_ != RecordWriteMode::kValueIsTrustedPointer) {
 #if V8_ENABLE_STICKY_MARK_BITS_BOOL
       // TODO(333906585): Optimize this path.
       Label stub_call_with_decompressed_value;
@@ -433,7 +433,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 
       __ bind(&stub_call_);
       if (COMPRESS_POINTERS_BOOL &&
-          mode_ != RecordWriteMode::kValueIsIndirectPointer) {
+          mode_ != RecordWriteMode::kValueIsTrustedPointer) {
         __ DecompressTagged(value_, value_);
       }
 
@@ -453,12 +453,12 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 
     if (mode_ == RecordWriteMode::kValueIsEphemeronKey) {
       __ CallEphemeronKeyBarrier(object_, scratch1_, save_fp_mode);
-    } else if (mode_ == RecordWriteMode::kValueIsIndirectPointer) {
-      // We must have a valid indirect pointer tag here. Otherwise, we risk not
+    } else if (mode_ == RecordWriteMode::kValueIsTrustedPointer) {
+      // We must have a valid trusted pointer tag here. Otherwise, we risk not
       // invoking the correct write barrier, which may lead to subtle issues.
-      CHECK(IsValidIndirectPointerTag(indirect_pointer_tag_));
-      __ CallIndirectPointerBarrier(object_, scratch1_, save_fp_mode,
-                                    indirect_pointer_tag_);
+      CHECK(IsValidTrustedPointerTag(trusted_pointer_tag_));
+      __ CallTrustedPointerBarrier(object_, scratch1_, save_fp_mode,
+                                   trusted_pointer_tag_);
 #if V8_ENABLE_WEBASSEMBLY
     } else if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
       // A direct call to a wasm runtime stub defined in this module.
@@ -483,7 +483,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
   StubCallMode const stub_mode_;
 #endif  // V8_ENABLE_WEBASSEMBLY
   Zone* zone_;
-  IndirectPointerTag indirect_pointer_tag_;
+  TrustedPointerTag trusted_pointer_tag_;
 #if V8_ENABLE_STICKY_MARK_BITS_BOOL
   Label stub_call_;
 #endif  // V8_ENABLE_STICKY_MARK_BITS_BOOL
@@ -521,10 +521,10 @@ class OutOfLineVerifySkippedWriteBarrier final : public OutOfLineCode {
   Zone* zone_;
 };
 
-class OutOfLineVerifySkippedIndirectWriteBarrier final : public OutOfLineCode {
+class OutOfLineVerifySkippedTrustedWriteBarrier final : public OutOfLineCode {
  public:
-  OutOfLineVerifySkippedIndirectWriteBarrier(CodeGenerator* gen,
-                                             Register object, Register value)
+  OutOfLineVerifySkippedTrustedWriteBarrier(CodeGenerator* gen, Register object,
+                                            Register value)
       : OutOfLineCode(gen),
         object_(object),
         value_(value),
@@ -535,8 +535,8 @@ class OutOfLineVerifySkippedIndirectWriteBarrier final : public OutOfLineCode {
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
 
-    __ CallVerifySkippedIndirectWriteBarrierStubSaveRegisters(object_, value_,
-                                                              save_fp_mode);
+    __ CallVerifySkippedTrustedWriteBarrierStubSaveRegisters(object_, value_,
+                                                             save_fp_mode);
   }
 
  private:
@@ -571,8 +571,8 @@ int EmitStore(MacroAssembler* masm, Operand operand, Register value,
       case MachineRepresentation::kSandboxedPointer:
         masm->StoreSandboxedPointerField(operand, value);
         break;
-      case MachineRepresentation::kIndirectPointer:
-        masm->StoreIndirectPointerField(operand, value);
+      case MachineRepresentation::kTrustedPointer:
+        masm->StoreTrustedPointerField(operand, value);
         break;
       default:
         UNREACHABLE();
@@ -813,13 +813,12 @@ Register GetTSANValueRegister(MacroAssembler* masm, Register value,
     masm->movq(value_reg, value);
     masm->EncodeSandboxedPointer(value_reg);
     return value_reg;
-  } else if (rep == MachineRepresentation::kIndirectPointer) {
+  } else if (rep == MachineRepresentation::kTrustedPointer) {
     // Indirect pointer fields contain an index to a pointer table entry, which
     // is obtained from the referenced object.
     Register value_reg = i.TempRegister(1);
-    masm->movl(value_reg,
-               FieldOperand(value, offsetof(ExposedTrustedObject,
-                                            self_indirect_pointer_)));
+    masm->movl(value_reg, FieldOperand(value, offsetof(ExposedTrustedObject,
+                                                       self_trusted_pointer_)));
     return value_reg;
   }
   return value;
@@ -839,12 +838,12 @@ Register GetTSANValueRegister<std::memory_order_relaxed>(
   if (rep == MachineRepresentation::kSandboxedPointer) {
     // SandboxedPointers need to be encoded.
     masm->EncodeSandboxedPointer(value_reg);
-  } else if (rep == MachineRepresentation::kIndirectPointer) {
+  } else if (rep == MachineRepresentation::kTrustedPointer) {
     // Indirect pointer fields contain an index to a pointer table entry, which
     // is obtained from the referenced object.
     masm->movl(value_reg,
                FieldOperand(value_reg, offsetof(ExposedTrustedObject,
-                                                self_indirect_pointer_)));
+                                                self_trusted_pointer_)));
   }
   return value_reg;
 }
@@ -2104,7 +2103,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // here.
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
       // Indirect pointer writes must use a different opcode.
-      DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
+      DCHECK_NE(mode, RecordWriteMode::kValueIsTrustedPointer);
       Register object = i.InputRegister(0);
       size_t index = 0;
       Operand operand = i.MemoryOperand(&index);
@@ -2180,16 +2179,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     }
-    case kArchStoreIndirectWithWriteBarrier: {
+    case kArchStoreTrustedWithWriteBarrier: {
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
-      DCHECK_EQ(mode, RecordWriteMode::kValueIsIndirectPointer);
+      DCHECK_EQ(mode, RecordWriteMode::kValueIsTrustedPointer);
       Register object = i.InputRegister(0);
       size_t index = 0;
       Operand operand = i.MemoryOperand(&index);
       Register value = i.InputRegister(index++);
-      IndirectPointerTag tag =
-          static_cast<IndirectPointerTag>(i.InputInt64(index));
-      DCHECK(IsValidIndirectPointerTag(tag));
+      TrustedPointerTag tag =
+          static_cast<TrustedPointerTag>(i.InputInt64(index));
+      DCHECK(IsValidTrustedPointerTag(tag));
       Register scratch0 = i.TempRegister(0);
       Register scratch1 = i.TempRegister(1);
 
@@ -2198,31 +2197,31 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           DetermineStubCallMode(), tag);
       EmitTSANAwareStore<std::memory_order_relaxed>(
           zone(), this, masm(), operand, value, i, DetermineStubCallMode(),
-          MachineRepresentation::kIndirectPointer, instr);
+          MachineRepresentation::kTrustedPointer, instr);
       __ JumpIfMarking(ool->entry());
       __ bind(ool->exit());
       break;
     }
-    case kArchStoreIndirectSkippedWriteBarrier: {
+    case kArchStoreTrustedSkippedWriteBarrier: {
       Register object = i.InputRegister(0);
       size_t index = 0;
       Operand operand = i.MemoryOperand(&index);
       Register value = i.InputRegister(index++);
 #if DEBUG
-      IndirectPointerTag tag =
-          static_cast<IndirectPointerTag>(i.InputInt64(index));
-      DCHECK(IsValidIndirectPointerTag(tag));
+      TrustedPointerTag tag =
+          static_cast<TrustedPointerTag>(i.InputInt64(index));
+      DCHECK(IsValidTrustedPointerTag(tag));
 #endif  // DEBUG
 
       DCHECK(v8_flags.verify_write_barriers);
-      auto ool = zone()->New<OutOfLineVerifySkippedIndirectWriteBarrier>(
+      auto ool = zone()->New<OutOfLineVerifySkippedTrustedWriteBarrier>(
           this, object, value);
       __ jmp(ool->entry());
       __ bind(ool->exit());
 
       EmitTSANAwareStore<std::memory_order_relaxed>(
           zone(), this, masm(), operand, value, i, DetermineStubCallMode(),
-          MachineRepresentation::kIndirectPointer, instr);
+          MachineRepresentation::kTrustedPointer, instr);
       break;
     }
     case kX64MFence:
@@ -2589,9 +2588,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kSSEFloat32Div:
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       ASSEMBLE_SSE_BINOP(divss);
-      // Don't delete this mov. It may improve performance on some CPUs,
-      // when there is a (v)mulss depending on the result.
-      __ movaps(i.OutputDoubleRegister(), i.OutputDoubleRegister());
       break;
     case kSSEFloat32Sqrt:
       ASSEMBLE_SSE_UNOP(sqrtss);
@@ -2639,9 +2635,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kSSEFloat64Div:
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       ASSEMBLE_SSE_BINOP(divsd);
-      // Don't delete this mov. It may improve performance on some CPUs,
-      // when there is a (v)mulsd depending on the result.
-      __ Movapd(i.OutputDoubleRegister(), i.OutputDoubleRegister());
       break;
     case kSSEFloat64Mod: {
       __ AllocateStackSpace(kDoubleSize);
@@ -3156,9 +3149,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kAVXFloat32Div:
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       ASSEMBLE_AVX_BINOP(vdivss);
-      // Don't delete this mov. It may improve performance on some CPUs,
-      // when there is a (v)mulss depending on the result.
-      __ Movaps(i.OutputDoubleRegister(), i.OutputDoubleRegister());
       break;
     case kAVXFloat64Cmp: {
       CpuFeatureScope avx_scope(masm(), AVX);
@@ -3184,9 +3174,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kAVXFloat64Div:
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       ASSEMBLE_AVX_BINOP(vdivsd);
-      // Don't delete this mov. It may improve performance on some CPUs,
-      // when there is a (v)mulsd depending on the result.
-      __ Movapd(i.OutputDoubleRegister(), i.OutputDoubleRegister());
       break;
     case kX64Float32Abs: {
       __ Absps(i.OutputDoubleRegister(), i.InputDoubleRegister(0),
@@ -3329,8 +3316,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kSSEFloat64SilenceNaN:
-      __ Xorpd(kScratchDoubleReg, kScratchDoubleReg);
-      __ Subsd(i.InputDoubleRegister(0), kScratchDoubleReg);
+      __ CanonicalizeNaN(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
       break;
     case kX64Movsxbl:
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
@@ -3446,11 +3432,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Register base = i.InputRegister(0);
       int32_t offset = i.InputInt32(1);
       Register table = i.InputRegister(2);
-      IndirectPointerTag first =
-          static_cast<IndirectPointerTag>(i.InputInt32(3));
-      IndirectPointerTag last =
-          static_cast<IndirectPointerTag>(i.InputInt32(4));
-      IndirectPointerTagRange tag_range(first, last);
+      TrustedPointerTag first = static_cast<TrustedPointerTag>(i.InputInt32(3));
+      TrustedPointerTag last = static_cast<TrustedPointerTag>(i.InputInt32(4));
+      TrustedPointerTagRange tag_range(first, last);
 
       Register destination = i.OutputRegister();
       Register handle = i.TempRegister(0);
@@ -3461,9 +3445,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       static_assert(kTrustedPointerTableEntrySizeLog2 == times_8);
       __ movq(destination, Operand{table, handle, times_8, 0});
 
-      if (IsFastIndirectPointerTagRange(tag_range)) {
-        uint64_t mask =
-            ComputeUntaggingMaskForFastIndirectPointerTag(tag_range);
+      if (IsFastTrustedPointerTagRange(tag_range)) {
+        uint64_t mask = ComputeUntaggingMaskForFastTrustedPointerTag(tag_range);
         __ movq(kScratchRegister, Immediate64(mask));
         __ andq(destination, kScratchRegister);
       } else {
@@ -3535,7 +3518,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                                      DetermineStubCallMode(), kTaggedSize);
       break;
     }
-    case kX64MovqStoreIndirectPointer: {
+    case kX64MovqStoreTrustedPointer: {
       CHECK(!instr->HasOutput());
       size_t index = 0;
       Operand operand = i.MemoryOperand(&index);
@@ -3543,7 +3526,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Register value(i.InputRegister(index));
       EmitTSANAwareStore<std::memory_order_relaxed>(
           zone(), this, masm(), operand, value, i, DetermineStubCallMode(),
-          MachineRepresentation::kIndirectPointer, instr);
+          MachineRepresentation::kTrustedPointer, instr);
       break;
     }
     case kX64MovqDecodeSandboxedPointer: {
@@ -4089,7 +4072,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         switch (lane_size) {
           case LaneSize::kL16:
             // F16x8Sub
-            ASSEMBLE_SIMD_F16x8_BINOP(vsubps);
+            if (UseAvx10_1()) {
+              CpuFeatureScope avx10_1_scope(masm(), AVX10_1);
+              __ vsubph(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                        i.InputSimd128Register(1));
+            } else {
+              ASSEMBLE_SIMD_F16x8_BINOP(vsubps);
+            }
             break;
           case LaneSize::kL32: {
             // F32x4Sub
@@ -4682,6 +4671,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kX64F16x8Qfma: {
+      if (UseAvx10_1()) {
+        CpuFeatureScope avx10_scope(masm(), AVX10_1);
+        DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
+        if (instr->InputAt(2)->IsSimd128Register()) {
+          __ vfmadd213ph(i.OutputSimd128Register(), i.InputSimd128Register(1),
+                         i.InputSimd128Register(2));
+        } else {
+          __ vfmadd213ph(i.OutputSimd128Register(), i.InputSimd128Register(1),
+                         i.InputOperand(2));
+        }
+        break;
+      }
       YMMRegister ydst =
           YMMRegister::from_code(i.OutputSimd128Register().code());
       __ F16x8Qfma(ydst, i.InputSimd128Register(0), i.InputSimd128Register(1),
@@ -4690,6 +4691,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kX64F16x8Qfms: {
+      if (UseAvx10_1()) {
+        CpuFeatureScope avx10_scope(masm(), AVX10_1);
+        DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
+        if (instr->InputAt(2)->IsSimd128Register()) {
+          __ vfnmadd213ph(i.OutputSimd128Register(), i.InputSimd128Register(1),
+                          i.InputSimd128Register(2));
+        } else {
+          __ vfnmadd213ph(i.OutputSimd128Register(), i.InputSimd128Register(1),
+                          i.InputOperand(2));
+        }
+        break;
+      }
       YMMRegister ydst =
           YMMRegister::from_code(i.OutputSimd128Register().code());
       __ F16x8Qfms(ydst, i.InputSimd128Register(0), i.InputSimd128Register(1),

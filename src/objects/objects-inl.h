@@ -60,9 +60,9 @@
 #include "src/objects/tagged-impl-inl.h"
 #include "src/objects/tagged-index.h"
 #include "src/objects/templates-inl.h"
-#include "src/objects/trusted-pointer-inl.h"
 #include "src/roots/roots.h"
 #include "src/sandbox/isolate-inl.h"
+#include "src/sandbox/trusted-pointer-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -116,8 +116,6 @@ DEF_CAST_TRAITS(JSArrayIterator)
 DEF_CAST_TRAITS(JSAsyncFromSyncIterator)
 DEF_CAST_TRAITS(JSAsyncFunctionObject)
 DEF_CAST_TRAITS(JSAsyncGeneratorObject)
-DEF_CAST_TRAITS(JSAtomicsCondition)
-DEF_CAST_TRAITS(JSAtomicsMutex)
 DEF_CAST_TRAITS(JSBoundFunction)
 DEF_CAST_TRAITS(JSCollection)
 DEF_CAST_TRAITS(JSCollectionIterator)
@@ -169,9 +167,9 @@ DEF_CAST_TRAITS(JSSharedArray)
 DEF_CAST_TRAITS(JSSharedStruct)
 DEF_CAST_TRAITS(JSSpecialObject)
 DEF_CAST_TRAITS(JSStringIterator)
-DEF_CAST_TRAITS(JSSynchronizationPrimitive)
 DEF_CAST_TRAITS(JSDetachedTypedArray)
 DEF_CAST_TRAITS(JSTypedArray)
+DEF_CAST_TRAITS(Uint8JSTypedArray)
 DEF_CAST_TRAITS(JSValidIteratorWrapper)
 DEF_CAST_TRAITS(JSWeakCollection)
 DEF_CAST_TRAITS(JSWeakRef)
@@ -518,6 +516,13 @@ DEF_HEAP_OBJECT_PREDICATE(IsSourceTextModuleInfo) {
 
 DEF_HEAP_OBJECT_PREDICATE(IsTemplateLiteralObject) { return IsJSArray(obj); }
 
+DEF_HEAP_OBJECT_PREDICATE(IsUint8JSTypedArray) {
+  if (!IsJSTypedArray(obj)) return false;
+  ElementsKind elements_kind = obj->map()->elements_kind();
+  return elements_kind == UINT8_ELEMENTS ||
+         elements_kind == RAB_GSAB_UINT8_ELEMENTS;
+}
+
 #if V8_INTL_SUPPORT
 DEF_HEAP_OBJECT_PREDICATE(IsJSSegmentDataObject) { return IsJSObject(obj); }
 DEF_HEAP_OBJECT_PREDICATE(IsJSSegmentDataObjectWithIsWordLike) {
@@ -676,27 +681,18 @@ bool Object::FilterKey(Tagged<Object> obj, PropertyFilter filter) {
 }
 
 // static
-std::pair<Representation, PropertyConstness> Object::OptimalRepresentation(
-    Tagged<Object> obj, PropertyConstness constness) {
+Representation Object::OptimalRepresentation(Tagged<Object> obj) {
   if (IsSmi(obj)) {
-    return {Representation::Smi(), constness};
+    return Representation::Smi();
   }
   Tagged<HeapObject> heap_object = Cast<HeapObject>(obj);
   if (IsUninitializedHole(heap_object)) {
-    return {Representation::None(), constness};
+    return Representation::None();
   }
   if (IsHeapNumber(heap_object)) {
-    if (constness == PropertyConstness::kConst &&
-        Cast<HeapNumber>(heap_object)->is_the_hole()) {
-      // Make sure that even an initializing store of a double value with
-      // the hole NaN pattern removes constness, otherwise it wouldn't be
-      // possible to distinguish whether subsequent stores to a double field
-      // is initializing or not.
-      constness = PropertyConstness::kMutable;
-    }
-    return {Representation::Double(), constness};
+    return Representation::Double();
   }
-  return {Representation::HeapObject(), constness};
+  return Representation::HeapObject();
 }
 
 // static
@@ -809,10 +805,7 @@ template <typename T, template <typename> typename HandleType>
   requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
 typename HandleType<Number>::MaybeType Object::ToUint32(Isolate* isolate,
                                                         HandleType<T> input) {
-  if (IsSmi(*input)) {
-    return typename HandleType<Number>::MaybeType(
-        Smi::ToUint32Smi(Cast<Smi>(*input)), isolate);
-  }
+  if (IsSmi(*input) && Smi::ToInt(*input) >= 0) return Cast<Smi>(input);
   return ConvertToUint32(isolate, Cast<Object>(input));
 }
 

@@ -278,6 +278,11 @@ v8_flag(
     default = True,
 )
 
+v8_flag(
+    name = "v8_enable_ecma402_icu4x",
+    default = False,
+)
+
 selects.config_setting_group(
     name = "enable_drumbrake_x64",
     match_all = [
@@ -327,6 +332,14 @@ selects.config_setting_group(
     ],
 )
 
+selects.config_setting_group(
+    name = "webassembly_on_arm64_simulator",
+    match_all = [
+        "@v8//bazel/config:v8_arm64_simulator",
+        ":is_v8_enable_webassembly",
+    ],
+)
+
 v8_flag(
     name = "v8_jitless",
     default = False,
@@ -335,6 +348,11 @@ v8_flag(
 v8_int(
     name = "v8_typed_array_max_size_in_heap",
     default = 64,
+)
+
+v8_int(
+    name = "v8_embedder_data_array_size",
+    default = 5,
 )
 
 # We use a string flag to create a 3 value-logic.
@@ -559,10 +577,12 @@ v8_config(
         "v8_use_host_cpu_arm_features": "V8_USE_HOST_CPU_ARM_FEATURES",
         "v8_x64_16byte_stack_alignment": "V8_X64_16BYTE_STACK_ALIGNMENT",
         "v8_support_la57": "V8_SUPPORT_LA57",
+        "v8_enable_ecma402_icu4x": "V8_ENABLE_ECMA402_ICU4X",
     },
     defines = [
         "GOOGLE3",
         "V8_ADVANCED_BIGINT_ALGORITHMS",
+        "V8_ALLOCATION_SITE_TRACKING",
         "V8_CONCURRENT_MARKING",
         "V8_ENABLE_SPARKPLUG",
         "V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT",
@@ -903,11 +923,10 @@ filegroup(
         "src/base/file-utils.h",
         "src/base/flags.h",
         "src/base/float16.h",
-        "src/base/fpu.cc",
-        "src/base/fpu.h",
         "src/base/functional/bind-internal.h",
         "src/base/functional/function-ref.h",
         "src/base/free_deleter.h",
+        "src/base/growing-circular-queue.h",
         "src/base/hashing.h",
         "src/base/hashmap.h",
         "src/base/hashmap-entry.h",
@@ -1293,7 +1312,6 @@ filegroup(
         "src/objects/heap-object.tq",
         "src/objects/js-array.tq",
         "src/objects/js-array-buffer.tq",
-        "src/objects/js-atomics-synchronization.tq",
         "src/objects/js-collection.tq",
         "src/objects/js-collection-iterator.tq",
         "src/objects/js-disposable-stack.tq",
@@ -1512,13 +1530,13 @@ filegroup(
         "src/builtins/builtins.cc",
         "src/builtins/builtins-inl.h",
         "src/builtins/builtins.h",
+        "src/builtins/bytecodes-builtins-list.h",
         "src/builtins/builtins-abstract-module-source.cc",
         "src/builtins/builtins-api.cc",
         "src/builtins/builtins-array.cc",
         "src/builtins/builtins-arraybuffer.cc",
         "src/builtins/builtins-async-disposable-stack.cc",
         "src/builtins/builtins-async-module.cc",
-        "src/builtins/builtins-atomics-synchronization.cc",
         "src/builtins/builtins-bigint.cc",
         "src/builtins/builtins-callsite.cc",
         "src/builtins/builtins-collections.cc",
@@ -2243,9 +2261,6 @@ filegroup(
         "src/objects/js-array-buffer.h",
         "src/objects/js-array-buffer-inl.h",
         "src/objects/js-array-inl.h",
-        "src/objects/js-atomics-synchronization.cc",
-        "src/objects/js-atomics-synchronization.h",
-        "src/objects/js-atomics-synchronization-inl.h",
         "src/objects/js-collection.h",
         "src/objects/js-collection-inl.h",
         "src/objects/js-collection-iterator.h",
@@ -2353,8 +2368,6 @@ filegroup(
         "src/objects/hole.h",
         "src/objects/trusted-object.h",
         "src/objects/trusted-object-inl.h",
-        "src/objects/trusted-pointer.h",
-        "src/objects/trusted-pointer-inl.h",
         "src/objects/option-utils.cc",
         "src/objects/option-utils.h",
         "src/objects/ordered-hash-table.cc",
@@ -2457,8 +2470,6 @@ filegroup(
         "src/objects/visitors.cc",
         "src/objects/visitors.h",
         "src/objects/visitors-inl.h",
-        "src/objects/waiter-queue-node.cc",
-        "src/objects/waiter-queue-node.h",
         "src/parsing/expression-scope.h",
         "src/parsing/func-name-inferrer.cc",
         "src/parsing/func-name-inferrer.h",
@@ -2586,10 +2597,10 @@ filegroup(
         "src/roots/roots.h",
         "src/roots/roots-inl.h",
         "src/roots/static-roots.h",
-        "src/roots/static-roots-intl-nowasm.h",
-        "src/roots/static-roots-intl-wasm.h",
-        "src/roots/static-roots-nointl-nowasm.h",
-        "src/roots/static-roots-nointl-wasm.h",
+        "src/gen/intl-nowasm/static-roots.h",
+        "src/gen/intl-wasm/static-roots.h",
+        "src/gen/nointl-nowasm/static-roots.h",
+        "src/gen/nointl-wasm/static-roots.h",
         "src/runtime/runtime.cc",
         "src/runtime/runtime.h",
         "src/runtime/runtime-array.cc",
@@ -2653,9 +2664,9 @@ filegroup(
         "src/sandbox/external-strings-cage.h",
         "src/sandbox/isolate.h",
         "src/sandbox/isolate-inl.h",
-        "src/sandbox/indirect-pointer.h",
-        "src/sandbox/indirect-pointer-tag.h",
-        "src/sandbox/indirect-pointer-inl.h",
+        "src/sandbox/trusted-pointer.h",
+        "src/sandbox/trusted-pointer-tag.h",
+        "src/sandbox/trusted-pointer-inl.h",
         "src/sandbox/code-entrypoint-tag.h",
         "src/sandbox/external-entity-table.h",
         "src/sandbox/external-entity-table-inl.h",
@@ -2666,6 +2677,7 @@ filegroup(
         "src/sandbox/sandboxable-thread.cc",
         "src/sandbox/sandboxable-thread.h",
         "src/sandbox/sandbox-malloc.h",
+        "src/sandbox/sandbox-zero-segment.h",
         "src/sandbox/sandboxed-pointer.h",
         "src/sandbox/sandboxed-pointer-inl.h",
         "src/sandbox/segmented-table.cc",
@@ -2724,6 +2736,8 @@ filegroup(
         "src/snapshot/startup-deserializer.h",
         "src/snapshot/startup-serializer.cc",
         "src/snapshot/startup-serializer.h",
+        "src/snapshot/trusted-section-serializer.cc",
+        "src/snapshot/trusted-section-serializer.h",
         "src/strings/char-predicates.h",
         "src/strings/char-predicates-inl.h",
         "src/strings/owning-external-string-resource.h",
@@ -3055,7 +3069,7 @@ filegroup(
         ],
         "//conditions:default": [],
     }) + select({
-        "@v8//bazel/config:v8_arm64_simulator": [
+        ":webassembly_on_arm64_simulator": [
             "src/trap-handler/handler-outside-simulator.cc",
             "src/trap-handler/trap-handler-simulator.h",
         ],
@@ -3093,6 +3107,7 @@ filegroup(
             "src/maglev/maglev-interpreter-frame-state.h",
             "src/maglev/maglev-ir-inl.h",
             "src/maglev/maglev-ir.h",
+            "src/maglev/maglev-kna-map.h",
             "src/maglev/maglev-kna-processor.h",
             "src/maglev/maglev-map-inference.h",
             "src/maglev/maglev-node-type.h",
@@ -3372,6 +3387,8 @@ filegroup(
         "src/objects/js-plural-rules.cc",
         "src/objects/js-plural-rules.h",
         "src/objects/js-plural-rules-inl.h",
+        "src/objects/js-plural-rules-internal.cc",
+        "src/objects/js-plural-rules-internal.h",
         "src/objects/js-relative-time-format.cc",
         "src/objects/js-relative-time-format.h",
         "src/objects/js-relative-time-format-inl.h",
@@ -3546,10 +3563,6 @@ filegroup(
         "src/compiler/machine-operator-reducer.h",
         "src/compiler/map-inference.cc",
         "src/compiler/map-inference.h",
-        "src/compiler/memory-lowering.cc",
-        "src/compiler/memory-lowering.h",
-        "src/compiler/memory-optimizer.cc",
-        "src/compiler/memory-optimizer.h",
         "src/compiler/node.cc",
         "src/compiler/node.h",
         "src/compiler/node-aux-data.h",
@@ -3872,8 +3885,6 @@ filegroup(
             "src/compiler/turboshaft/wasm-shuffle-reducer.h",
             "src/compiler/turboshaft/wasm-simd-phase.cc",
             "src/compiler/turboshaft/wasm-simd-phase.h",
-            "src/compiler/wasm-address-reassociation.cc",
-            "src/compiler/wasm-address-reassociation.h",
             "src/compiler/wasm-call-descriptors.cc",
             "src/compiler/wasm-call-descriptors.h",
             "src/compiler/wasm-compiler.cc",

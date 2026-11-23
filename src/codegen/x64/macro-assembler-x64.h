@@ -18,7 +18,7 @@
 #include "src/execution/isolate-data.h"
 #include "src/objects/contexts.h"
 #include "src/objects/tagged-index.h"
-#include "src/sandbox/indirect-pointer-tag.h"
+#include "src/sandbox/trusted-pointer-tag.h"
 
 namespace v8 {
 namespace internal {
@@ -731,6 +731,10 @@ class V8_EXPORT_PRIVATE MacroAssembler
   // by default.
   void AssertSpAlignedForCall() NOOP_UNLESS_DEBUG_CODE;
 
+  void AssertFPCRState() NOOP_UNLESS_DEBUG_CODE;
+  void CanonicalizeNaN(const DoubleRegister dst, const DoubleRegister src);
+  void CanonicalizeNaN(const DoubleRegister reg) { CanonicalizeNaN(reg, reg); }
+
   void AlignStackPointer();
 
   // Activation support.
@@ -770,9 +774,8 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void CallEphemeronKeyBarrier(Register object, Register slot_address,
                                SaveFPRegsMode fp_mode);
 
-  void CallIndirectPointerBarrier(Register object, Register slot_address,
-                                  SaveFPRegsMode fp_mode,
-                                  IndirectPointerTag tag);
+  void CallTrustedPointerBarrier(Register object, Register slot_address,
+                                 SaveFPRegsMode fp_mode, TrustedPointerTag tag);
 
   void CallRecordWriteStubSaveRegisters(
       Register object, Register slot_address, SaveFPRegsMode fp_mode,
@@ -786,10 +789,10 @@ class V8_EXPORT_PRIVATE MacroAssembler
                                                       SaveFPRegsMode fp_mode);
   void CallVerifySkippedWriteBarrierStub(Register object, Register value);
 
-  void CallVerifySkippedIndirectWriteBarrierStubSaveRegisters(
+  void CallVerifySkippedTrustedWriteBarrierStubSaveRegisters(
       Register object, Register value, SaveFPRegsMode fp_mode);
-  void CallVerifySkippedIndirectWriteBarrierStub(Register object,
-                                                 Register value);
+  void CallVerifySkippedTrustedWriteBarrierStub(Register object,
+                                                Register value);
 
 #ifdef V8_IS_TSAN
   void CallTSANStoreStub(Register address, Register value,
@@ -943,9 +946,9 @@ class V8_EXPORT_PRIVATE MacroAssembler
   // When the sandbox is enabled, these are indirect pointers using the trusted
   // pointer table. Otherwise they are regular tagged fields.
   void LoadTrustedPointerField(Register destination, Operand field_operand,
-                               IndirectPointerTagRange tag_range,
+                               TrustedPointerTagRange tag_range,
                                Register scratch);
-  // As above, but for kUnknownIndirectPointerTag. The type of the loaded object
+  // As above, but for kUnknownTrustedPointerTag. The type of the loaded object
   // is unknown, so this helper will check for a series of expected types and
   // jump to the given labels if the loaded object has a matching type. If the
   // field is null (with enabled sandbox) or a Smi (with disabled sandbox) and
@@ -964,10 +967,10 @@ class V8_EXPORT_PRIVATE MacroAssembler
 
   // Load a code pointer field.
   // These are special versions of trusted pointers that, when the sandbox is
-  // enabled, reference code objects through the code pointer table.
+  // enabled, reference code objects through the trusted pointer table.
   void LoadCodePointerField(Register destination, Operand field_operand,
                             Register scratch) {
-    LoadTrustedPointerField(destination, field_operand, kCodeIndirectPointerTag,
+    LoadTrustedPointerField(destination, field_operand, kCodeTrustedPointerTag,
                             scratch);
   }
   // Store a code pointer field.
@@ -975,22 +978,10 @@ class V8_EXPORT_PRIVATE MacroAssembler
     StoreTrustedPointerField(dst_field_operand, value);
   }
 
-  // Load an indirect pointer field.
-  // Only available when the sandbox is enabled, but always visible to avoid
-  // having to place the #ifdefs into the caller.
-  void LoadIndirectPointerField(Register destination, Operand field_operand,
-                                IndirectPointerTagRange tag_range,
-                                Register scratch);
-
-  // Store an indirect pointer field.
-  // Only available when the sandbox is enabled, but always visible to avoid
-  // having to place the #ifdefs into the caller.
-  void StoreIndirectPointerField(Operand dst_field_operand, Register value);
-
 #ifdef V8_ENABLE_SANDBOX
-  // Retrieve the heap object referenced by the given indirect pointer handle.
-  void ResolveIndirectPointerHandle(Register destination, Register handle,
-                                    IndirectPointerTagRange tag_range);
+  // Retrieve the heap object referenced by the given trusted pointer handle.
+  void ResolveTrustedPointerHandle(Register destination, Register handle,
+                                   TrustedPointerTagRange tag_range);
 #endif  // V8_ENABLE_SANDBOX
 
   void LoadEntrypointFromJSDispatchTable(Register destination,

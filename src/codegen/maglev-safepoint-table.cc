@@ -117,8 +117,8 @@ void MaglevSafepointTable::Print(std::ostream& os) const {
 
     if (entry.has_deoptimization_index()) {
       os << "  deopt " << std::setw(6) << entry.deoptimization_index()
-         << " trampoline: " << std::setw(6) << std::hex
-         << entry.trampoline_pc();
+         << " trampoline: " << std::setw(6) << std::hex << entry.trampoline_pc()
+         << std::dec;
     }
     os << "\n";
   }
@@ -126,8 +126,8 @@ void MaglevSafepointTable::Print(std::ostream& os) const {
 
 MaglevSafepointTableBuilder::Safepoint
 MaglevSafepointTableBuilder::DefineSafepoint(Assembler* assembler) {
-  entries_.push_back(EntryBuilder(assembler->pc_offset_for_safepoint()));
-  return MaglevSafepointTableBuilder::Safepoint(&entries_.back());
+  return MaglevSafepointTableBuilder::Safepoint(
+      assembler->pc_offset_for_safepoint(), this);
 }
 
 int MaglevSafepointTableBuilder::UpdateDeoptimizationInfo(int pc,

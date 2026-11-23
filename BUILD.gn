@@ -31,7 +31,7 @@ if (is_win && v8_use_metagen) {
   import("//build/toolchain/win/win_toolchain_data.gni")
 }
 
-if (v8_enable_temporal_support) {
+if (v8_enable_temporal_support || v8_enable_ecma402_icu4x) {
   import("//build/config/rust.gni")
 }
 
@@ -114,6 +114,16 @@ declare_args() {
 
   # Sets the number of internal fields on array buffer view objects.
   v8_array_buffer_view_internal_field_count = 0
+
+  # Sets the size of the EmbedderDataArray on context objects.
+  #
+  # NW.js hosts Node.js in the same isolate, and Node.js keeps its per-context
+  # data at high indexes (NODE_CONTEXT_EMBEDDER_DATA_INDEX = 32 ..
+  # NODE_CONTEXT_TAG = 39, see third_party/node-nw/src/node_context_data.h),
+  # while NW.js itself uses index 50 for its security token marker. The
+  # non-growing embedder data setters require every index to be below this
+  # value, so it must exceed the highest index used by any embedder.
+  v8_embedder_data_array_size = 51
 
   # Sets -DENABLE_VTUNE_JIT_INTERFACE.
   v8_enable_vtunejit = false
@@ -577,6 +587,18 @@ assert(v8_metagen_libclang_so == "" == (v8_metagen_libclang_bindings_dir == ""),
 assert(!v8_verify_torque_generation_invariance || !v8_use_metagen,
        "v8_verify_torque_generation_invariance requires " +
            "v8_use_metagen=false.")
+
+declare_args() {
+  # Checked-in headers let compilation start before the generators finish.
+  # Enable them only for the configuration they match; the build verifies
+  # their contents. See src/gen/README.md for configuration and regeneration.
+  v8_use_checked_in_generated_headers =
+      v8_enable_i18n_support && v8_enable_webassembly &&
+      v8_enable_temporal_support && !v8_enable_drumbrake &&
+      !v8_enable_experimental_tsa_builtins &&
+      !v8_enable_experimental_tq_to_tsa && v8_use_metagen &&
+      (v8_current_cpu == "x64" || v8_current_cpu == "arm64")
+}
 
 # Derived defaults.
 if (v8_logging_level == "") {
@@ -1116,6 +1138,7 @@ external_v8_defines = [
   "V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT=${v8_array_buffer_internal_field_count}",
   "V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT=${v8_array_buffer_view_internal_field_count}",
   "V8_PROMISE_INTERNAL_FIELD_COUNT=${v8_promise_internal_field_count}",
+  "V8_EMBEDDER_DATA_ARRAY_SIZE=${v8_embedder_data_array_size}",
   "V8_USE_DEFAULT_HASHER_SECRET=${v8_use_default_hasher_secret}",
   "V8_ENABLE_CHECKS",
   "V8_ENABLE_MEMORY_ACCOUNTING_CHECKS",
@@ -1153,6 +1176,7 @@ enabled_external_v8_defines = [
   "V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT=${v8_array_buffer_internal_field_count}",
   "V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT=${v8_array_buffer_view_internal_field_count}",
   "V8_PROMISE_INTERNAL_FIELD_COUNT=${v8_promise_internal_field_count}",
+  "V8_EMBEDDER_DATA_ARRAY_SIZE=${v8_embedder_data_array_size}",
   "V8_USE_DEFAULT_HASHER_SECRET=${v8_use_default_hasher_secret}",
 ]
 
@@ -1356,6 +1380,12 @@ config("features") {
     defines += [ "V8_USE_METAGEN=0" ]
   }
 
+  # Makes the hand-written headers listed in src/gen/README.md include
+  # the checked-in copies under src/gen/ instead of the generated headers.
+  if (v8_use_checked_in_generated_headers) {
+    defines += [ "V8_USE_CHECKED_IN_GENERATED_HEADERS" ]
+  }
+
   configs = [
     ":v8_header_features",
     ":cppgc_header_features",
@@ -1475,6 +1505,9 @@ config("features") {
   }
   if (v8_enable_temporal_systemicu) {
     defines += [ "V8_ENABLE_TEMPORAL_SYSTEMICU" ]
+  }
+  if (v8_enable_ecma402_icu4x) {
+    defines += [ "V8_ENABLE_ECMA402_ICU4X" ]
   }
   if (v8_enable_local_handle_zapping) {
     defines += [ "ENABLE_LOCAL_HANDLE_ZAPPING" ]
@@ -2392,7 +2425,6 @@ torque_files = [
   "src/objects/heap-object.tq",
   "src/objects/js-array-buffer.tq",
   "src/objects/js-array.tq",
-  "src/objects/js-atomics-synchronization.tq",
   "src/objects/js-collection-iterator.tq",
   "src/objects/js-collection.tq",
   "src/objects/js-disposable-stack.tq",
@@ -2891,6 +2923,12 @@ group("v8_maybe_temporal") {
   }
 }
 
+group("v8_maybe_ecma402_icu4x") {
+  if (v8_enable_ecma402_icu4x) {
+    public_deps = [ "//third_party/rust/icu_capi" ]
+  }
+}
+
 group("v8_abseil") {
   public_deps = [ "//third_party/abseil-cpp:absl" ]
 
@@ -2929,6 +2967,47 @@ v8_header_set("torque_runtime_support") {
   configs = [ ":internal_config" ]
 }
 
+if (v8_use_checked_in_generated_headers) {
+  # This target has no generator dependencies, so dependents can compile
+  # immediately. :verify_checked_in_generated_headers checks the copies.
+  v8_header_set("checked_in_generated_headers") {
+    visibility = [ ":generated_headers" ]
+
+    # For src/common/globals.h, included from the bytecodes list.
+    deps = [ ":v8_shared_internal_headers" ]
+
+    sources = [
+      "src/gen/intl-wasm/builtin-definitions.h",
+      "src/gen/intl-wasm/bytecodes-builtins-list.h",
+      "src/gen/intl-wasm/class-forward-declarations.h",
+      "src/gen/intl-wasm/instance-types.h",
+      "src/gen/intl-wasm/interface-descriptors.inc",
+    ]
+
+    configs = [ ":internal_config" ]
+  }
+}
+
+# Targets that need only the headers listed in src/gen/README.md depend on
+# this group. Other generator outputs still require their generator actions.
+group("generated_headers") {
+  visibility = [ ":*" ]
+
+  if (v8_use_checked_in_generated_headers) {
+    public_deps = [ ":checked_in_generated_headers" ]
+  } else {
+    public_deps = [
+      ":generate_bytecode_builtins_list",
+      ":run_torque",
+    ]
+
+    # :run_metagen only exists when metagen is enabled.
+    if (v8_use_metagen) {
+      public_deps += [ ":run_metagen" ]
+    }
+  }
+}
+
 # Build lists of torque-generated .cc and .h files for clustering
 torque_csa_cc_files = []
 torque_csa_h_files = []
@@ -2956,6 +3035,7 @@ v8_cluster_source_set("torque_generated_initializers") {
     ":run_torque",
     ":v8_base_without_compiler",
     ":v8_internal_headers",
+    ":v8_maybe_ecma402_icu4x",
     ":v8_maybe_temporal",
     ":v8_tracing",
   ]
@@ -3021,6 +3101,7 @@ v8_cluster_source_set("torque_generated_definitions") {
     ":run_torque",
     ":v8_internal_headers",
     ":v8_libbase",
+    ":v8_maybe_ecma402_icu4x",
     ":v8_maybe_temporal",
     ":v8_tracing",
   ]
@@ -3052,6 +3133,84 @@ action("generate_bytecode_builtins_list") {
     rebase_path("$target_gen_dir/builtins-generated/bytecodes-builtins-list.h",
                 root_build_dir),
   ]
+}
+
+# The checked-in generated headers, as [generated, checked-in] pairs.
+# Both actions below use this list. See src/gen/README.md.
+_checked_in_generated_headers = [
+  [
+    "$target_gen_dir/torque-generated/builtin-definitions.h",
+    "src/gen/intl-wasm/builtin-definitions.h",
+  ],
+  [
+    "$target_gen_dir/torque-generated/class-forward-declarations.h",
+    "src/gen/intl-wasm/class-forward-declarations.h",
+  ],
+  [
+    "$target_gen_dir/torque-generated/interface-descriptors.inc",
+    "src/gen/intl-wasm/interface-descriptors.inc",
+  ],
+  [
+    "$target_gen_dir/builtins-generated/bytecodes-builtins-list.h",
+    "src/gen/intl-wasm/bytecodes-builtins-list.h",
+  ],
+]
+if (v8_use_metagen) {
+  _checked_in_generated_headers += [ [
+        "$target_gen_dir/metagen/instance-types.h",
+        "src/gen/intl-wasm/instance-types.h",
+      ] ]
+}
+
+# The generators do not depend on checked-in headers, so verification and
+# regeneration can use the same build directory even when copies are stale.
+template("checked_in_generated_headers_action") {
+  action(target_name) {
+    visibility = [ ":*" ]
+    script = "tools/compare-checked-in-headers.py"
+    deps = [
+      ":generate_bytecode_builtins_list",
+      ":run_torque",
+    ]
+    if (v8_use_metagen) {
+      deps += [ ":run_metagen" ]
+    }
+    outputs = [ "$target_gen_dir/$target_name.stamp" ]
+    inputs = []
+    args = [
+      "--" + invoker.mode,
+      "--stamp",
+      rebase_path(outputs[0], root_build_dir),
+    ]
+    foreach(pair, _checked_in_generated_headers) {
+      inputs += [ pair[0] ]
+      if (invoker.mode == "verify") {
+        # So that the check re-runs when a checked-in copy is edited.
+        # Not in update mode, which must also run when a copy is missing.
+        inputs += [ pair[1] ]
+      }
+      args += [
+        "--pair",
+        rebase_path(pair[0], root_build_dir) + "=" +
+            rebase_path(pair[1], root_build_dir),
+      ]
+    }
+  }
+}
+
+if (v8_use_checked_in_generated_headers) {
+  # Verify before linking or running code compiled from checked-in headers.
+  # :v8_base covers library users; mksnapshot bypasses it and depends on this
+  # action explicitly. The CPU condition above excludes 32-bit toolchains.
+  checked_in_generated_headers_action("verify_checked_in_generated_headers") {
+    mode = "verify"
+  }
+
+  # Only the matching configuration may regenerate checked-in headers.
+  # Nothing depends on this target; gm.py gen-checked-in-headers builds it.
+  checked_in_generated_headers_action("regen_checked_in_generated_headers") {
+    mode = "update"
+  }
 }
 
 # Template to generate different V8 snapshots based on different runtime flags.
@@ -3481,6 +3640,7 @@ action("v8_dump_build_config") {
     "has_wasm_interpreter=$v8_enable_drumbrake",
     "i18n=$v8_enable_i18n_support",
     "temporal=$v8_enable_temporal_support",
+    "ecma402_icu4x=$v8_enable_ecma402_icu4x",
     "is_android=$is_android",
     "is_ios=$is_ios",
     "is_linux=$is_linux",
@@ -3545,6 +3705,7 @@ generated_file("v8_generate_features_json") {
     v8_enable_i18n_support = v8_enable_i18n_support
     v8_enable_temporal_support = v8_enable_temporal_support
     v8_enable_temporal_systemicu = v8_enable_temporal_systemicu
+    v8_enable_ecma402_icu4x = v8_enable_ecma402_icu4x
     v8_enable_javascript_promise_hooks = v8_enable_javascript_promise_hooks
     v8_enable_lite_mode = v8_enable_lite_mode
     v8_enable_map_packing = v8_enable_map_packing
@@ -3580,6 +3741,7 @@ v8_source_set("v8_snapshot") {
   deps = [
     ":v8_internal_headers",
     ":v8_libbase",
+    ":v8_maybe_ecma402_icu4x",
     ":v8_maybe_temporal",
     ":v8_tracing",
   ]
@@ -3820,6 +3982,7 @@ v8_source_set("v8_init") {
     ":v8_base_without_compiler",
     ":v8_initializers",
     ":v8_internal_headers",
+    ":v8_maybe_ecma402_icu4x",
     ":v8_maybe_temporal",
     ":v8_tracing",
   ]
@@ -4037,9 +4200,16 @@ v8_header_set("v8_internal_headers") {
 
   public_configs = [ "src/inspector:inspector_config" ]
 
-  sources = [
+  sources = []
+  if (!v8_use_checked_in_generated_headers) {
+    # With v8_use_checked_in_generated_headers the checked-in copy is
+    # listed by :checked_in_generated_headers instead.
+    sources +=
+        [ "$target_gen_dir/builtins-generated/bytecodes-builtins-list.h" ]
+  }
+
+  sources += [
     ### gcmole(all) ###
-    "$target_gen_dir/builtins-generated/bytecodes-builtins-list.h",
     "include/cppgc/common.h",
     "include/v8-inspector-protocol.h",
     "include/v8-inspector.h",
@@ -4076,6 +4246,7 @@ v8_header_set("v8_internal_headers") {
     "src/builtins/builtins-utils-inl.h",
     "src/builtins/builtins-utils.h",
     "src/builtins/builtins.h",
+    "src/builtins/bytecodes-builtins-list.h",
     "src/builtins/constants-table-builder.h",
     "src/builtins/data-view-ops.h",
     "src/builtins/profile-data-reader.h",
@@ -4230,8 +4401,6 @@ v8_header_set("v8_internal_headers") {
     "src/compiler/machine-operator-reducer.h",
     "src/compiler/machine-operator.h",
     "src/compiler/map-inference.h",
-    "src/compiler/memory-lowering.h",
-    "src/compiler/memory-optimizer.h",
     "src/compiler/node-aux-data.h",
     "src/compiler/node-cache.h",
     "src/compiler/node-marker.h",
@@ -4452,6 +4621,10 @@ v8_header_set("v8_internal_headers") {
     "src/extensions/statistics-extension.h",
     "src/extensions/trigger-failure-extension.h",
     "src/flags/save-flags.h",
+    "src/gen/intl-nowasm/static-roots.h",
+    "src/gen/intl-wasm/static-roots.h",
+    "src/gen/nointl-nowasm/static-roots.h",
+    "src/gen/nointl-wasm/static-roots.h",
     "src/handles/global-handles-inl.h",
     "src/handles/global-handles.h",
     "src/handles/handle-scope-implementer-inl.h",
@@ -4739,8 +4912,6 @@ v8_header_set("v8_internal_headers") {
     "src/objects/js-array-buffer.h",
     "src/objects/js-array-inl.h",
     "src/objects/js-array.h",
-    "src/objects/js-atomics-synchronization-inl.h",
-    "src/objects/js-atomics-synchronization.h",
     "src/objects/js-collection-inl.h",
     "src/objects/js-collection-iterator-inl.h",
     "src/objects/js-collection-iterator.h",
@@ -4891,8 +5062,6 @@ v8_header_set("v8_internal_headers") {
     "src/objects/transitions.h",
     "src/objects/trusted-object-inl.h",
     "src/objects/trusted-object.h",
-    "src/objects/trusted-pointer-inl.h",
-    "src/objects/trusted-pointer.h",
     "src/objects/turbofan-types-inl.h",
     "src/objects/turbofan-types.h",
     "src/objects/turboshaft-types-inl.h",
@@ -4902,7 +5071,6 @@ v8_header_set("v8_internal_headers") {
     "src/objects/value-serializer.h",
     "src/objects/visitors-inl.h",
     "src/objects/visitors.h",
-    "src/objects/waiter-queue-node.h",
     "src/parsing/expression-scope.h",
     "src/parsing/func-name-inferrer.h",
     "src/parsing/import-attributes.h",
@@ -4969,10 +5137,6 @@ v8_header_set("v8_internal_headers") {
     "src/regexp/special-case.h",
     "src/roots/roots-inl.h",
     "src/roots/roots.h",
-    "src/roots/static-roots-intl-nowasm.h",
-    "src/roots/static-roots-intl-wasm.h",
-    "src/roots/static-roots-nointl-nowasm.h",
-    "src/roots/static-roots-nointl-wasm.h",
     "src/roots/static-roots.h",
     "src/runtime/runtime-utils.h",
     "src/runtime/runtime.h",
@@ -4997,14 +5161,12 @@ v8_header_set("v8_internal_headers") {
     "src/sandbox/external-pointer.h",
     "src/sandbox/external-strings-cage.h",
     "src/sandbox/hardware-support.h",
-    "src/sandbox/indirect-pointer-inl.h",
-    "src/sandbox/indirect-pointer-tag.h",
-    "src/sandbox/indirect-pointer.h",
     "src/sandbox/isolate-inl.h",
     "src/sandbox/isolate.h",
     "src/sandbox/js-dispatch-table-inl.h",
     "src/sandbox/js-dispatch-table.h",
     "src/sandbox/sandbox-malloc.h",
+    "src/sandbox/sandbox-zero-segment.h",
     "src/sandbox/sandbox.h",
     "src/sandbox/sandboxable-thread.h",
     "src/sandbox/sandboxed-pointer-inl.h",
@@ -5013,9 +5175,12 @@ v8_header_set("v8_internal_headers") {
     "src/sandbox/segmented-table.h",
     "src/sandbox/tagged-payload.h",
     "src/sandbox/testing.h",
+    "src/sandbox/trusted-pointer-inl.h",
     "src/sandbox/trusted-pointer-scope.h",
     "src/sandbox/trusted-pointer-table-inl.h",
     "src/sandbox/trusted-pointer-table.h",
+    "src/sandbox/trusted-pointer-tag.h",
+    "src/sandbox/trusted-pointer.h",
     "src/snapshot/code-serializer.h",
     "src/snapshot/context-deserializer.h",
     "src/snapshot/context-serializer.h",
@@ -5041,6 +5206,7 @@ v8_header_set("v8_internal_headers") {
     "src/snapshot/sort-builtins.h",
     "src/snapshot/startup-deserializer.h",
     "src/snapshot/startup-serializer.h",
+    "src/snapshot/trusted-section-serializer.h",
     "src/strings/char-predicates-inl.h",
     "src/strings/char-predicates.h",
     "src/strings/owning-external-string-resource.h",
@@ -5170,6 +5336,7 @@ v8_header_set("v8_internal_headers") {
       "src/maglev/maglev-interpreter-frame-state.h",
       "src/maglev/maglev-ir-inl.h",
       "src/maglev/maglev-ir.h",
+      "src/maglev/maglev-kna-map.h",
       "src/maglev/maglev-kna-processor.h",
       "src/maglev/maglev-known-node-aspects.h",
       "src/maglev/maglev-loop-peeler.h",
@@ -5233,7 +5400,6 @@ v8_header_set("v8_internal_headers") {
       "src/compiler/turboshaft/wasm-turboshaft-compiler.h",
       "src/compiler/turboshaft/wasm-wrappers-inl.h",
       "src/compiler/turboshaft/wasm-wrappers.h",
-      "src/compiler/wasm-address-reassociation.h",
       "src/compiler/wasm-call-descriptors.h",
       "src/compiler/wasm-compiler-definitions.h",
       "src/compiler/wasm-compiler.h",
@@ -5374,6 +5540,7 @@ v8_header_set("v8_internal_headers") {
       "src/objects/js-number-format-inl.h",
       "src/objects/js-number-format.h",
       "src/objects/js-plural-rules-inl.h",
+      "src/objects/js-plural-rules-internal.h",
       "src/objects/js-plural-rules.h",
       "src/objects/js-relative-time-format-inl.h",
       "src/objects/js-relative-time-format.h",
@@ -5822,18 +5989,15 @@ v8_header_set("v8_internal_headers") {
 
   deps = [
     ":cppgc_headers",
-    ":generate_bytecode_builtins_list",
-    ":run_torque",
+    ":generated_headers",
     ":v8_abseil",
     ":v8_heap_base_headers",
     ":v8_libbase",
+    ":v8_maybe_ecma402_icu4x",
     ":v8_maybe_temporal",
   ]
   if (v8_enable_experimental_tq_to_tsa) {
     deps += [ ":run_torque_to_tsa" ]
-  }
-  if (v8_use_metagen) {
-    deps += [ ":run_metagen" ]
   }
 }
 
@@ -5908,8 +6072,6 @@ v8_compiler_sources = [
   "src/compiler/machine-operator-reducer.cc",
   "src/compiler/machine-operator.cc",
   "src/compiler/map-inference.cc",
-  "src/compiler/memory-lowering.cc",
-  "src/compiler/memory-optimizer.cc",
   "src/compiler/node-marker.cc",
   "src/compiler/node-matchers.cc",
   "src/compiler/node-observer.cc",
@@ -6117,7 +6279,6 @@ if (v8_enable_webassembly) {
     "src/compiler/turboshaft/wasm-simd-phase.cc",
     "src/compiler/turboshaft/wasm-turboshaft-compiler.cc",
     "src/compiler/turboshaft/wasm-wrappers.cc",
-    "src/compiler/wasm-address-reassociation.cc",
     "src/compiler/wasm-call-descriptors.cc",
     "src/compiler/wasm-compiler.cc",
     "src/compiler/wasm-escape-analysis.cc",
@@ -6164,8 +6325,7 @@ v8_cluster_source_set("v8_compiler_for_mksnapshot_source_set") {
   exclude_from_cluster = exclude_from_compiler_cluster
 
   public_deps = [
-    ":generate_bytecode_builtins_list",
-    ":run_torque",
+    ":generated_headers",
     ":v8_abseil",
     ":v8_maybe_icu",
     ":v8_tracing",
@@ -6178,6 +6338,7 @@ v8_cluster_source_set("v8_compiler_for_mksnapshot_source_set") {
     ":v8_base_without_compiler",
     ":v8_internal_headers",
     ":v8_libbase",
+    ":v8_maybe_ecma402_icu4x",
     ":v8_maybe_temporal",
     ":v8_shared_internal_headers",
   ]
@@ -6211,8 +6372,7 @@ v8_cluster_source_set("v8_compiler") {
   exclude_from_cluster = exclude_from_compiler_cluster
 
   public_deps = [
-    ":generate_bytecode_builtins_list",
-    ":run_torque",
+    ":generated_headers",
     ":v8_abseil",
     ":v8_internal_headers",
     ":v8_maybe_icu",
@@ -6225,6 +6385,7 @@ v8_cluster_source_set("v8_compiler") {
   deps = [
     ":v8_base_without_compiler",
     ":v8_libbase",
+    ":v8_maybe_ecma402_icu4x",
     ":v8_maybe_temporal",
     ":v8_shared_internal_headers",
   ]
@@ -6311,7 +6472,6 @@ v8_cluster_source_set("v8_base_without_compiler") {
     "src/builtins/builtins-arraybuffer.cc",
     "src/builtins/builtins-async-disposable-stack.cc",
     "src/builtins/builtins-async-module.cc",
-    "src/builtins/builtins-atomics-synchronization.cc",
     "src/builtins/builtins-bigint.cc",
     "src/builtins/builtins-callsite.cc",
     "src/builtins/builtins-collections.cc",
@@ -6578,7 +6738,6 @@ v8_cluster_source_set("v8_base_without_compiler") {
     "src/objects/instruction-stream.cc",
     "src/objects/intl-objects.cc",
     "src/objects/js-array-buffer.cc",
-    "src/objects/js-atomics-synchronization.cc",
     "src/objects/js-break-iterator.cc",
     "src/objects/js-collator.cc",
     "src/objects/js-data-object-builder.cc",
@@ -6591,6 +6750,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
     "src/objects/js-locale.cc",
     "src/objects/js-number-format.cc",
     "src/objects/js-objects.cc",
+    "src/objects/js-plural-rules-internal.cc",
     "src/objects/js-plural-rules.cc",
     "src/objects/js-raw-json.cc",
     "src/objects/js-regexp.cc",
@@ -6636,7 +6796,6 @@ v8_cluster_source_set("v8_base_without_compiler") {
     "src/objects/type-hints.cc",
     "src/objects/value-serializer.cc",
     "src/objects/visitors.cc",
-    "src/objects/waiter-queue-node.cc",
     "src/parsing/func-name-inferrer.cc",
     "src/parsing/import-attributes.cc",
     "src/parsing/literal-buffer.cc",
@@ -6749,6 +6908,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
     "src/snapshot/sort-builtins.cc",
     "src/snapshot/startup-deserializer.cc",
     "src/snapshot/startup-serializer.cc",
+    "src/snapshot/trusted-section-serializer.cc",
     "src/strings/char-predicates.cc",
     "src/strings/string-builder.cc",
     "src/strings/string-case.cc",
@@ -7254,11 +7414,11 @@ v8_cluster_source_set("v8_base_without_compiler") {
   ]
 
   deps = [
-    ":torque_generated_definitions",
     ":v8_bigint",
     ":v8_headers",
     ":v8_heap_base",
     ":v8_libbase",
+    ":v8_maybe_ecma402_icu4x",
     ":v8_maybe_temporal",
     ":v8_shared_internal_headers",
     ":v8_tracing",
@@ -7268,6 +7428,12 @@ v8_cluster_source_set("v8_base_without_compiler") {
     "//third_party/fast_float",
     "//third_party/highway:libhwy",
   ]
+
+  # With checked-in headers, link generated definitions through :v8_base.
+  # A dependency here would make every compile wait for run_torque.
+  if (!v8_use_checked_in_generated_headers) {
+    deps += [ ":torque_generated_definitions" ]
+  }
 
   if (v8_enable_generated_code_validator) {
     sources += [ "src/sandbox/generated-code-validator.cc" ]
@@ -7282,8 +7448,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
 
   public_deps = [
     ":cppgc_base",
-    ":generate_bytecode_builtins_list",
-    ":run_torque",
+    ":generated_headers",
     ":v8_abseil",
     ":v8_headers",
     ":v8_internal_headers",
@@ -7324,6 +7489,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
       "src/objects/js-list-format.cc",
       "src/objects/js-locale.cc",
       "src/objects/js-number-format.cc",
+      "src/objects/js-plural-rules-internal.cc",
       "src/objects/js-plural-rules.cc",
       "src/objects/js-relative-time-format.cc",
       "src/objects/js-segment-iterator.cc",
@@ -7378,6 +7544,12 @@ group("v8_base") {
     ":v8_base_without_compiler",
     ":v8_compiler",
   ]
+
+  # Keep generator dependencies out of v8_base_without_compiler's compiles.
+  if (v8_use_checked_in_generated_headers) {
+    public_deps += [ ":torque_generated_definitions" ]
+    deps = [ ":verify_checked_in_generated_headers" ]
+  }
 }
 
 v8_source_set("torque_base") {
@@ -7550,11 +7722,10 @@ v8_static_lib("v8_libbase") {
     "src/base/file-utils.h",
     "src/base/flags.h",
     "src/base/float16.h",
-    "src/base/fpu.cc",
-    "src/base/fpu.h",
     "src/base/free_deleter.h",
     "src/base/functional/bind-internal.h",
     "src/base/functional/function-ref.h",
+    "src/base/growing-circular-queue.h",
     "src/base/hashing.h",
     "src/base/hashmap-entry.h",
     "src/base/hashmap.h",
@@ -7970,7 +8141,10 @@ v8_source_set("fuzzer_support") {
     ":v8_libplatform",
     ":v8_maybe_icu",
   ]
-  deps = [ ":v8_maybe_temporal" ]
+  deps = [
+    ":v8_maybe_ecma402_icu4x",
+    ":v8_maybe_temporal",
+  ]
 
   # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
   # enable the diagnostic by removing this line.
@@ -8304,6 +8478,7 @@ if (v8_check_header_includes) {
       ":v8_initializers",
       ":v8_internal_headers",
       ":v8_libbase",
+      ":v8_maybe_ecma402_icu4x",
       ":v8_maybe_icu",
       ":v8_maybe_temporal",
       ":v8_version",
@@ -8446,18 +8621,26 @@ if (current_toolchain == v8_snapshot_toolchain) {
     ]
 
     deps = [
+      ":torque_generated_definitions",
       ":v8_base_without_compiler",
       ":v8_compiler_for_mksnapshot",
       ":v8_init",
       ":v8_internal_headers",
       ":v8_libbase",
       ":v8_libplatform",
+      ":v8_maybe_ecma402_icu4x",
       ":v8_maybe_icu",
       ":v8_maybe_temporal",
       ":v8_shared_internal_headers",
       ":v8_tracing",
       "//build/win:default_exe_manifest",
     ]
+
+    if (v8_use_checked_in_generated_headers) {
+      # mksnapshot runs during the build and does not go through :v8_base;
+      # see verify_checked_in_generated_headers.
+      deps += [ ":verify_checked_in_generated_headers" ]
+    }
   }
 
   # This config disables a link time optimization "ICF", which may merge
@@ -8595,6 +8778,12 @@ group("gn_all") {
     "test:gn_all",
     "tools:gn_all",
   ]
+
+  # Redline, an experimental coverage-guided JavaScript fuzzer, uses POSIX
+  # APIs. Only standalone V8 builds it: Chromium does not need it.
+  if (is_linux && !build_with_chromium) {
+    deps += [ "experimental/redline" ]
+  }
 
   if (v8_custom_deps != "") {
     # Custom dependency from directory under v8/custom_deps.
@@ -9263,10 +9452,10 @@ if (v8_enable_webassembly) {
 
     deps = [
       ":fuzzer_support",
-      ":generate_bytecode_builtins_list",
-      ":run_torque",
+      ":generated_headers",
       ":v8_internal_headers",
       ":v8_libbase",
+      ":v8_maybe_ecma402_icu4x",
       ":v8_maybe_temporal",
       ":v8_shared_internal_headers",
       ":v8_tracing",

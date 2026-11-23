@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cmath>
+#include <compare>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -3239,14 +3240,7 @@ struct LoadOp : OperationT<LoadOp> {
       return new_kind;
     }
 
-    bool operator==(const Kind& other) const {
-      return tagged_base == other.tagged_base &&
-             maybe_unaligned == other.maybe_unaligned &&
-             with_trap_handler == other.with_trap_handler &&
-             load_eliminable == other.load_eliminable &&
-             is_immutable == other.is_immutable &&
-             is_atomic == other.is_atomic && shared_base == other.shared_base;
-    }
+    auto operator<=>(const Kind& other) const = default;
   };
   Kind kind;
   MemoryRepresentation loaded_rep;
@@ -3258,7 +3252,12 @@ struct LoadOp : OperationT<LoadOp> {
     // Loads might depend on checks for pointer validity, object layout, bounds
     // checks, etc.
     // TODO(tebbi): Distinguish between on-heap and off-heap loads.
-    OpEffects effects = OpEffects().CanReadMemory().CanDependOnChecks();
+    OpEffects effects = OpEffects().CanDependOnChecks();
+    if (kind.is_immutable) {
+      effects = effects.CanReadImmutableMemory();
+    } else {
+      effects = effects.CanReadMemory();
+    }
     if (kind.with_trap_handler) effects = effects.CanLeaveCurrentFunction();
     if (kind.is_atomic) {
       // Atomic load should not be reordered with other loads.
@@ -3330,6 +3329,11 @@ struct LoadOp : OperationT<LoadOp> {
   auto options() const {
     return std::tuple{kind, loaded_rep, result_rep, offset, element_size_log2};
   }
+  bool operator<(const LoadOp& other) const {
+    return std::tuple{base(), index().value_or_invalid(), options()} <
+           std::tuple{other.base(), other.index().value_or_invalid(),
+                      other.options()};
+  }
 };
 
 V8_INLINE size_t hash_value(LoadOp::Kind kind) {
@@ -3342,7 +3346,7 @@ V8_INLINE size_t hash_value(LoadOp::Kind kind) {
 #if V8_ENABLE_SANDBOX
 struct LoadTrustedPointerOp : FixedArityOperationT<2, LoadTrustedPointerOp> {
   LoadOp::Kind kind;
-  IndirectPointerTagRange tag_range;
+  TrustedPointerTagRange tag_range;
   const int offset;
 
   OpEffects Effects() const {
@@ -3355,7 +3359,7 @@ struct LoadTrustedPointerOp : FixedArityOperationT<2, LoadTrustedPointerOp> {
 
   explicit LoadTrustedPointerOp(V<HeapObject> base, V<WordPtr> table,
                                 LoadOp::Kind kind,
-                                IndirectPointerTagRange tag_range, int offset)
+                                TrustedPointerTagRange tag_range, int offset)
       : Base(base, table), kind(kind), tag_range(tag_range), offset(offset) {
     DCHECK(kind.tagged_base);
     DCHECK(!kind.is_atomic);
@@ -3731,7 +3735,7 @@ struct StoreOp : OperationT<StoreOp> {
   AtomicMemoryOrder memory_order_;  // use the padding after prev field
 
  public:
-  uint16_t indirect_pointer_tag_;
+  uint16_t trusted_pointer_tag_;
 
   std::optional<AtomicMemoryOrder> memory_order() const {
     if (kind.is_atomic) return memory_order_;
@@ -3783,16 +3787,15 @@ struct StoreOp : OperationT<StoreOp> {
     return input_count == 3 ? input(2) : OpIndex::Invalid();
   }
 
-  IndirectPointerTag indirect_pointer_tag() const {
-    return static_cast<IndirectPointerTag>(indirect_pointer_tag_);
+  TrustedPointerTag trusted_pointer_tag() const {
+    return static_cast<TrustedPointerTag>(trusted_pointer_tag_);
   }
 
-  StoreOp(
-      OpIndex base, OptionalOpIndex index, OpIndex value, Kind kind,
-      MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
-      std::optional<AtomicMemoryOrder> memory_order, int32_t offset,
-      uint8_t element_size_log2, bool maybe_initializing_or_transitioning,
-      IndirectPointerTag maybe_indirect_pointer_tag = kIndirectPointerNullTag)
+  StoreOp(OpIndex base, OptionalOpIndex index, OpIndex value, Kind kind,
+          MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
+          std::optional<AtomicMemoryOrder> memory_order, int32_t offset,
+          uint8_t element_size_log2, bool maybe_initializing_or_transitioning,
+          TrustedPointerTag maybe_trusted_pointer_tag = kTrustedPointerNullTag)
       : Base(2 + index.valid()),
         kind(kind),
         stored_rep(stored_rep),
@@ -3802,9 +3805,8 @@ struct StoreOp : OperationT<StoreOp> {
         maybe_initializing_or_transitioning(
             maybe_initializing_or_transitioning),
         memory_order_(memory_order.value_or(AtomicMemoryOrder::kSeqCst)),
-        indirect_pointer_tag_(
-            static_cast<uint16_t>(maybe_indirect_pointer_tag)) {
-    DCHECK_EQ(indirect_pointer_tag(), maybe_indirect_pointer_tag);
+        trusted_pointer_tag_(static_cast<uint16_t>(maybe_trusted_pointer_tag)) {
+    DCHECK_EQ(trusted_pointer_tag(), maybe_trusted_pointer_tag);
     input(0) = base;
     input(1) = value;
     if (index.valid()) {
@@ -3817,7 +3819,7 @@ struct StoreOp : OperationT<StoreOp> {
     return fn(mapper.Map(base()), mapper.Map(index()), mapper.Map(value()),
               kind, stored_rep, write_barrier, memory_order(), offset,
               element_size_log2, maybe_initializing_or_transitioning,
-              indirect_pointer_tag());
+              trusted_pointer_tag());
   }
 
   void Validate(const Graph& graph) const {
@@ -3832,11 +3834,11 @@ struct StoreOp : OperationT<StoreOp> {
       WriteBarrierKind write_barrier,
       std::optional<AtomicMemoryOrder> memory_order, int32_t offset,
       uint8_t element_size_log2, bool maybe_initializing_or_transitioning,
-      IndirectPointerTag maybe_indirect_pointer_tag = kIndirectPointerNullTag) {
+      TrustedPointerTag maybe_trusted_pointer_tag = kTrustedPointerNullTag) {
     return Base::New(graph, 2 + index.valid(), base, index, value, kind,
                      stored_rep, write_barrier, memory_order, offset,
                      element_size_log2, maybe_initializing_or_transitioning,
-                     maybe_indirect_pointer_tag);
+                     maybe_trusted_pointer_tag);
   }
 
   void PrintInputs(std::ostream& os, const std::string& op_index_prefix) const;
@@ -3849,7 +3851,7 @@ struct StoreOp : OperationT<StoreOp> {
                       offset,
                       element_size_log2,
                       maybe_initializing_or_transitioning,
-                      indirect_pointer_tag()};
+                      trusted_pointer_tag()};
   }
 };
 
@@ -7444,8 +7446,22 @@ struct FindOrderedHashEntryOp
   };
   Kind kind;
 
-  static constexpr OpEffects effects =
-      OpEffects().CanDependOnChecks().CanReadMemory().CanAllocate();
+  OpEffects Effects() const {
+    switch (kind) {
+      case Kind::kFindOrderedHashMapEntry:
+      case Kind::kFindOrderedHashSetEntry:
+        // Looking up a string key can internalize it in place into a
+        // ThinString, overwriting its payload (e.g., ConsString::first_).
+        return OpEffects()
+            .CanDependOnChecks()
+            .CanReadMemory()
+            .CanWriteHeapMemory()
+            .CanAllocate();
+      case Kind::kFindOrderedHashMapEntryForInt32Key:
+        return OpEffects().CanDependOnChecks().CanReadMemory();
+    }
+    UNREACHABLE();
+  }
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     switch (kind) {
       case Kind::kFindOrderedHashMapEntry:
@@ -7766,7 +7782,8 @@ struct RttCanonOp : FixedArityOperationT<1, RttCanonOp> {
 struct WasmTypeCheckOp : OperationT<WasmTypeCheckOp> {
   WasmTypeCheckConfig config;
 
-  static constexpr OpEffects effects = OpEffects().AssumesConsistentHeap();
+  static constexpr OpEffects effects =
+      OpEffects().AssumesConsistentHeap().CanDependOnChecks();
 
   WasmTypeCheckOp(V<Object> object, OptionalV<Map> rtt,
                   WasmTypeCheckConfig config)
@@ -7973,7 +7990,10 @@ struct AnyConvertExternOp : FixedArityOperationT<1, AnyConvertExternOp> {
 struct ExternConvertAnyOp : FixedArityOperationT<1, ExternConvertAnyOp> {
   bool is_nullable;
 
-  static constexpr OpEffects effects = OpEffects();
+  // Cares about non-null values actually being non-null. We could eliminate
+  // the dependency on "checks" if we marked this as a trapping instruction
+  // when necessary.
+  static constexpr OpEffects effects = OpEffects().CanDependOnChecks();
 
   explicit ExternConvertAnyOp(V<Object> object, bool is_nullable)
       : Base(object), is_nullable(is_nullable) {}
@@ -11078,6 +11098,8 @@ inline OpEffects Operation::Effects() const {
       return Cast<StoreOp>().Effects();
     case Opcode::kCall:
       return Cast<CallOp>().Effects();
+    case Opcode::kFindOrderedHashEntry:
+      return Cast<FindOrderedHashEntryOp>().Effects();
     case Opcode::kDidntThrow:
       return Cast<DidntThrowOp>().Effects();
     case Opcode::kTaggedBitcast:
@@ -11233,7 +11255,7 @@ constexpr size_t input_count(MemoryRepresentation) { return 0; }
 constexpr size_t input_count(OpEffects) { return 0; }
 constexpr size_t input_count(ExternalPointerTagRange) { return 0; }
 #if V8_ENABLE_SANDBOX
-constexpr size_t input_count(IndirectPointerTagRange) { return 0; }
+constexpr size_t input_count(TrustedPointerTagRange) { return 0; }
 #endif
 inline size_t input_count(const ElementsTransition) { return 0; }
 inline size_t input_count(const ElementsTransitionWithMultipleSources) {

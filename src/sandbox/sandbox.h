@@ -9,6 +9,7 @@
 #include "include/v8-platform.h"
 #include "include/v8config.h"
 #include "src/base/bounds.h"
+#include "src/base/platform/platform.h"
 #include "src/common/globals.h"
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -74,13 +75,6 @@ class V8_EXPORT_PRIVATE Sandbox {
   // The name for the virtual address space reservation backing the sandbox.
   static constexpr const char* kSandboxAddressSpaceName = "v8-sandbox";
 
-  static constexpr size_t kSmiAddressRange = 4UL * GB;
-
-  // We assume that the Smi<->HeapObject corruption can lead to accesses of
-  // in-object properties. We add some padding to also catch these kinds of
-  // accesses.
-  static constexpr size_t kSmiAddressRangePadding = 4 * KB;
-
   // A heuristic used by the sandbox crash filter to identify crashes on
   // unaddressable accesses (e.g. on ARM64). Note that this is only a testing
   // heuristic and does not reflect the actual virtual address space size,
@@ -137,9 +131,7 @@ class V8_EXPORT_PRIVATE Sandbox {
    * address space. This is useful to mitigate Smi<->HeapObject confusion
    * issues, in which a (32-bit) Smi is treated as a pointer and dereferenced.
    */
-  bool smi_address_range_is_inaccessible() const {
-    return smi_address_range_reserved_;
-  }
+  bool has_zero_segment() const { return has_zero_segment_; }
 
   /**
    * The base address of the sandbox.
@@ -362,7 +354,7 @@ class V8_EXPORT_PRIVATE Sandbox {
   // platform/allocator as an inaccessible zero segment. This for example
   // mitigates Smi<->HeapObject confusion bugs in which we treat a Smi value as
   // a pointer and access it.
-  bool smi_address_range_reserved_ = false;
+  bool has_zero_segment_ = false;
 
 #ifdef V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
   thread_local static Sandbox* current_;
@@ -402,6 +394,13 @@ V8_INLINE void* EmptyBackingStoreBuffer() {
 #else
   return nullptr;
 #endif
+}
+
+// Hardware address tagging features on x64 (such as Intel LAM or AMD UAI)
+// mask out upper pointer bits during memory accesses. Returns true if the OS
+// untag mask does not clash with the given tagging mask.
+V8_INLINE bool IsTaggingMaskCompatible(uint64_t mask) {
+  return (base::OS::GetAddressUntagMask() & mask) == mask;
 }
 
 }  // namespace internal

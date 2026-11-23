@@ -58,6 +58,10 @@ function pauseInEvalCode() {
   }
 }
 
+function pauseInNestedEvalCode() {
+  eval("let y = 1; eval('debugger;')");
+}
+
 function sloppyDirectEval(param) {
   var fnVar = 'fnVar';
   try { throw 'err'; } catch (caught) {
@@ -73,6 +77,18 @@ function setVariableInCaller() {
     let blockVar = 'block';
     eval('(function setInner() { debugger; })();');
     return outerVar + ' ' + blockVar;
+  }
+}
+
+function directEvalInForLetInitializer() {
+  for (let x = 42, y = eval('debugger; x + 1'); ; ) {
+    return y;
+  }
+}
+
+function directEvalInForLetBody() {
+  for (let x = 7; x < 8; x++) {
+    eval('debugger;');
   }
 }
 //# sourceURL=test.js`);
@@ -222,6 +238,10 @@ InspectorTest.runAsyncTestSuite([
         'pauseInEvalCode()', ['outerLet', 'blockLet', 'evalLet']);
   },
 
+  async function testPauseInNestedDirectEvalCode() {
+    await pauseAndLogScopes('pauseInNestedEvalCode()', ['y']);
+  },
+
   async function testSloppyDirectEvalInCatchAndWith() {
     await pauseAndLogScopes(
         'sloppyDirectEval(42)',
@@ -244,5 +264,15 @@ InspectorTest.runAsyncTestSuite([
           }
         });
     InspectorTest.log(`Result: ${describe(result)}`);
+  },
+
+  async function testDirectEvalInForLetInitializer() {
+    const result =
+        await pauseAndLogScopes('directEvalInForLetInitializer()', ['x', 'y']);
+    InspectorTest.log(`Result: ${describe(result)}`);
+  },
+
+  async function testDirectEvalInForLetBody() {
+    await pauseAndLogScopes('directEvalInForLetBody()', ['x']);
   },
 ]);

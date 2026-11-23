@@ -16,8 +16,15 @@
 #define BUILTIN_LIST_FROM_TORQUE(CPP, TFJ_TSA, TFJ, TFC_TSA, TFC, TFS, TFH, ASM)
 #define TORQUE_FUNCTION_POINTER_TYPE_TO_BUILTIN_MAP(V)
 #else
-#include "builtins-generated/bytecodes-builtins-list.h"
-#include "torque-generated/builtin-definitions.h"
+#include "src/builtins/bytecodes-builtins-list.h"
+// Torque's builtin definitions: the checked-in copy under src/gen/ if
+// v8_use_checked_in_generated_headers, the generated header otherwise. See
+// src/gen/README.md.
+#ifdef V8_USE_CHECKED_IN_GENERATED_HEADERS
+#include "src/gen/intl-wasm/builtin-definitions.h"  // IWYU pragma: export
+#else
+#include "torque-generated/builtin-definitions.h"  // IWYU pragma: export, nogncheck
+#endif
 #endif
 #include "src/base/strong-alias.h"
 #include "src/common/globals.h"
@@ -227,8 +234,8 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
 #define BUILTIN_LIST_BASE_TIER1(CPP, TFJ_TSA, TFJ, TFC_TSA, TFC, TFS, TFH,     \
                                 ASM)                                           \
   /* GC write barriers */                                                      \
-  TFC(IndirectPointerBarrierSaveFP, IndirectPointerWriteBarrier)               \
-  TFC(IndirectPointerBarrierIgnoreFP, IndirectPointerWriteBarrier)             \
+  TFC(TrustedPointerBarrierSaveFP, TrustedPointerWriteBarrier)                 \
+  TFC(TrustedPointerBarrierIgnoreFP, TrustedPointerWriteBarrier)               \
                                                                                \
   /* Adaptors for CPP builtins with various formal parameter counts. */        \
   /* We split these versions for simplicity (not all architectures have */     \
@@ -565,6 +572,12 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
       ArrayNoArgumentConstructor)                                              \
   TFC(ArrayNoArgumentConstructor_HoleySmi_DontOverride,                        \
       ArrayNoArgumentConstructor)                                              \
+  TFC(ArrayNoArgumentConstructor_Packed_DontOverride,                          \
+      ArrayNoArgumentConstructor)                                              \
+  TFC(ArrayNoArgumentConstructor_PackedDouble_DontOverride,                    \
+      ArrayNoArgumentConstructor)                                              \
+  TFC(ArrayNoArgumentConstructor_HoleyDouble_DontOverride,                     \
+      ArrayNoArgumentConstructor)                                              \
   TFC(ArrayNoArgumentConstructor_PackedSmi_DisableAllocationSites,             \
       ArrayNoArgumentConstructor)                                              \
   TFC(ArrayNoArgumentConstructor_HoleySmi_DisableAllocationSites,              \
@@ -580,6 +593,12 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFC(ArraySingleArgumentConstructor_PackedSmi_DontOverride,                   \
       ArraySingleArgumentConstructor)                                          \
   TFC(ArraySingleArgumentConstructor_HoleySmi_DontOverride,                    \
+      ArraySingleArgumentConstructor)                                          \
+  TFC(ArraySingleArgumentConstructor_Packed_DontOverride,                      \
+      ArraySingleArgumentConstructor)                                          \
+  TFC(ArraySingleArgumentConstructor_PackedDouble_DontOverride,                \
+      ArraySingleArgumentConstructor)                                          \
+  TFC(ArraySingleArgumentConstructor_HoleyDouble_DontOverride,                 \
       ArraySingleArgumentConstructor)                                          \
   TFC(ArraySingleArgumentConstructor_PackedSmi_DisableAllocationSites,         \
       ArraySingleArgumentConstructor)                                          \
@@ -873,6 +892,9 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   TFH(DefineNamedOwnIC, StoreWithVector)                                       \
   TFH(DefineNamedOwnICTrampoline, Store)                                       \
   TFH(DefineNamedOwnICBaseline, StoreBaseline)                                 \
+  TFH(DefineNamedOwnInLiteralIC, StoreWithVector)                              \
+  TFH(DefineNamedOwnInLiteralICTrampoline, Store)                              \
+  TFH(DefineNamedOwnInLiteralICBaseline, StoreBaseline)                        \
   TFH(KeyedStoreIC, StoreWithVector)                                           \
   TFH(KeyedStoreICTrampoline, Store)                                           \
   TFH(KeyedStoreICTrampoline_Megamorphic, Store)                               \
@@ -1534,15 +1556,6 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
   CPP(SharedStructConstructor, JSParameterCount(0))                            \
   CPP(SharedArrayConstructor, JSParameterCount(0))                             \
   CPP(SharedArrayIsSharedArray, JSParameterCount(1))                           \
-  CPP(AtomicsMutexConstructor, JSParameterCount(0))                            \
-  CPP(AtomicsMutexIsMutex, JSParameterCount(1))                                \
-  CPP(AtomicsMutexLock, JSParameterCount(2))                                   \
-  CPP(AtomicsMutexLockWithTimeout, JSParameterCount(3))                        \
-  CPP(AtomicsMutexTryLock, JSParameterCount(2))                                \
-  CPP(AtomicsConditionConstructor, JSParameterCount(0))                        \
-  CPP(AtomicsConditionIsCondition, JSParameterCount(1))                        \
-  CPP(AtomicsConditionWait, kDontAdaptArgumentsSentinel)                       \
-  CPP(AtomicsConditionNotify, kDontAdaptArgumentsSentinel)                     \
                                                                                \
   /* AsyncGenerator */                                                         \
                                                                                \

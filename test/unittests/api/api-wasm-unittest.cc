@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
 #include <memory>
 #include <thread>  // NOLINT(build/c++11)
 
@@ -672,6 +673,73 @@ TEST_F(ApiWasmTest, WasmModuleCompilation_MultiThreaded) {
 
   // Join all background threads before finishing.
   for (auto& t : threads) t.join();
+}
+
+TEST_F(ApiWasmTest, WasmMemoryObjectGetBuffer) {
+  HandleScope scope(isolate());
+  Local<Context> context = Context::New(isolate());
+  Context::Scope context_scope(context);
+
+  Local<WasmMemoryObject> unshared_memory =
+      RunJS("new WebAssembly.Memory({initial: 1})").As<WasmMemoryObject>();
+  Local<ArrayBufferBase> unshared_buffer = unshared_memory->GetBuffer();
+  EXPECT_TRUE(unshared_buffer->IsArrayBufferBase());
+  EXPECT_TRUE(unshared_buffer->IsArrayBuffer());
+  EXPECT_FALSE(unshared_buffer->IsSharedArrayBuffer());
+  EXPECT_FALSE(unshared_buffer->IsShared());
+
+  Local<WasmMemoryObject> shared_memory =
+      RunJS("new WebAssembly.Memory({initial: 1, maximum: 1, shared: true})")
+          .As<WasmMemoryObject>();
+  Local<ArrayBufferBase> shared_buffer = shared_memory->GetBuffer();
+  EXPECT_TRUE(shared_buffer->IsArrayBufferBase());
+  EXPECT_FALSE(shared_buffer->IsArrayBuffer());
+  EXPECT_TRUE(shared_buffer->IsSharedArrayBuffer());
+  EXPECT_TRUE(shared_buffer->IsShared());
+
+  START_ALLOW_USE_DEPRECATED();
+  EXPECT_TRUE(unshared_memory->Buffer()->IsArrayBuffer());
+  EXPECT_TRUE(shared_memory->Buffer()->IsSharedArrayBuffer());
+  END_ALLOW_USE_DEPRECATED();
+}
+
+TEST_F(ApiWasmTest, OwnedBufferSpanAndMoveSemantics) {
+  OwnedBuffer empty_buffer;
+  EXPECT_TRUE(empty_buffer.empty());
+  EXPECT_TRUE(empty_buffer.as_span().empty());
+  EXPECT_EQ(nullptr, empty_buffer.as_span().data());
+
+  constexpr uint8_t kPayload[] = {10, 20, 30, 40};
+  std::unique_ptr<uint8_t[]> backing =
+      std::make_unique<uint8_t[]>(sizeof(kPayload));
+  std::copy(std::begin(kPayload), std::end(kPayload), backing.get());
+  const uint8_t* raw_ptr = backing.get();
+
+  START_ALLOW_USE_DEPRECATED()
+  OwnedBuffer owned(std::move(backing), sizeof(kPayload));
+  END_ALLOW_USE_DEPRECATED()
+
+  EXPECT_FALSE(owned.empty());
+  EXPECT_EQ(raw_ptr, owned.as_span().data());
+  EXPECT_EQ(sizeof(kPayload), owned.as_span().size());
+  EXPECT_TRUE(std::ranges::equal(kPayload, owned.as_span()));
+
+  // Move construction transfers ownership and leaves the source empty.
+  OwnedBuffer move_constructed(std::move(owned));
+  EXPECT_TRUE(owned.empty());
+  EXPECT_TRUE(owned.as_span().empty());
+  EXPECT_EQ(nullptr, owned.as_span().data());
+  EXPECT_EQ(raw_ptr, move_constructed.as_span().data());
+  EXPECT_EQ(sizeof(kPayload), move_constructed.as_span().size());
+
+  // Move assignment also leaves the source empty.
+  OwnedBuffer move_assigned;
+  move_assigned = std::move(move_constructed);
+  EXPECT_TRUE(move_constructed.empty());
+  EXPECT_TRUE(move_constructed.as_span().empty());
+  EXPECT_EQ(nullptr, move_constructed.as_span().data());
+  EXPECT_EQ(raw_ptr, move_assigned.as_span().data());
+  EXPECT_EQ(sizeof(kPayload), move_assigned.as_span().size());
 }
 
 }  // namespace v8

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -2369,8 +2370,6 @@ VisitResult ImplementationVisitor::Visit(StructExpression* expr) {
     return stack_scope.Yield(VisitResult(struct_type, struct_range));
   } else {
     const auto* bitfield_struct_type = BitFieldStructType::cast(type);
-    CheckInitializersWellformed(bitfield_struct_type->name(),
-                                bitfield_struct_type->fields(), initializers);
 
     // Create a zero and cast it to the desired bitfield struct type.
     VisitResult result{TypeOracle::GetConstInt32Type(), "0"};
@@ -2382,11 +2381,19 @@ VisitResult ImplementationVisitor::Visit(StructExpression* expr) {
     // Set each field in the result. If these fields are constexpr, then all of
     // this initialization will end up reduced to a single value during TurboFan
     // optimization.
-    auto& fields = bitfield_struct_type->fields();
+    uint64_t initialized_bits = 0;
     for (size_t i = 0; i < values.size(); i++) {
-      values[i] =
-          GenerateImplicitConvert(fields[i].name_and_type.type, values[i]);
-      result = GenerateSetBitField(bitfield_struct_type, fields[i], result,
+      CurrentSourcePosition::Scope position_scope(initializers[i].name->pos);
+      const BitField& field =
+          bitfield_struct_type->LookupField(initializers[i].name->value);
+      uint64_t mask = (~uint64_t{0} >> (64 - field.num_bits)) << field.offset;
+      if (initialized_bits & mask) {
+        ReportError("Overlapping bitfield initializer: ",
+                    initializers[i].name->value);
+      }
+      initialized_bits |= mask;
+      values[i] = GenerateImplicitConvert(field.name_and_type.type, values[i]);
+      result = GenerateSetBitField(bitfield_struct_type, field, result,
                                    values[i], /*starts_as_zero=*/true);
     }
 
@@ -4295,11 +4302,17 @@ void ImplementationVisitor::GenerateClassDefinitions(
     NamespaceScope forward_declarations_namespaces(forward_declarations,
                                                    {"v8", "internal"});
 
-    // Emit forward declarations.
+    // Emit forward declarations. Several class types can share a
+    // generated name, and the order TypeOracle creates them in follows
+    // type resolution, which is not stable across host platforms. Sort
+    // and deduplicate so the file only depends on the set of classes.
+    std::set<std::string> generated_names;
     for (const ClassType* type : TypeOracle::GetClasses()) {
       CurrentSourcePosition::Scope position_activator(type->GetPosition());
-      forward_declarations << "class " << type->GetGeneratedTNodeTypeName()
-                           << ";\n";
+      generated_names.insert(type->GetGeneratedTNodeTypeName());
+    }
+    for (const std::string& name : generated_names) {
+      forward_declarations << "class " << name << ";\n";
     }
 
     for (const ClassType* type : TypeOracle::GetClasses()) {

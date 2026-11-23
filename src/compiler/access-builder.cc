@@ -735,13 +735,13 @@ FieldAccess AccessBuilder::ForJSRegExpData() {
                         MaybeHandle<Name>(),
                         OptionalMapRef(),
                         Type::OtherInternal(),
-                        MachineType::IndirectPointer(),
-                        kIndirectPointerWriteBarrier,
+                        MachineType::TrustedPointer(),
+                        kTrustedPointerWriteBarrier,
                         "JSRegExpData",
                         ConstFieldInfo::None(),
                         false,
                         kExternalPointerNullTag,
-                        kRegExpDataIndirectPointerTag,
+                        kRegExpDataTrustedPointerTag,
                         false,
                         false};
   return access;

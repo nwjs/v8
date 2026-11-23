@@ -40,16 +40,8 @@ void BytecodeLoopAssignments::Add(interpreter::Register r) {
 }
 
 void BytecodeLoopAssignments::AddList(interpreter::Register r, uint32_t count) {
-  if (r.is_parameter()) {
-    DCHECK_IMPLIES(count > 0,
-                   interpreter::Register(r.index() + count - 1).is_parameter());
-    bit_vector_->Add(r.ToParameterIndex(), count);
-  } else {
-    DCHECK_IMPLIES(
-        count > 0,
-        !interpreter::Register(r.index() + count - 1).is_parameter());
-    bit_vector_->Add(parameter_count_ + r.index(), count);
-  }
+  DCHECK(!r.is_parameter());
+  bit_vector_->Add(parameter_count_ + r.index(), count);
 }
 
 void BytecodeLoopAssignments::Union(const BytecodeLoopAssignments& other) {
@@ -99,19 +91,16 @@ void UpdateInLivenessForOutOperand(
   } else if constexpr (operand_type == OperandType::kRegOutList) {
     Register r = iterator.GetRegisterOperand(i);
     uint32_t reg_count = iterator.GetRegisterCountOperand(i + 1);
-    if (!r.is_parameter()) {
-      in_liveness->MarkRegistersDead(r.index(), reg_count);
-    }
+    DCHECK(!r.is_parameter());
+    in_liveness->MarkRegistersDead(r.index(), reg_count);
   } else if constexpr (operand_type == OperandType::kRegOutPair) {
     Register r = iterator.GetRegisterOperand(i);
-    if (!r.is_parameter()) {
-      in_liveness->MarkRegistersDead(r.index(), 2);
-    }
+    DCHECK(!r.is_parameter());
+    in_liveness->MarkRegistersDead(r.index(), 2);
   } else if constexpr (operand_type == OperandType::kRegOutTriple) {
     Register r = iterator.GetRegisterOperand(i);
-    if (!r.is_parameter()) {
-      in_liveness->MarkRegistersDead(r.index(), 3);
-    }
+    DCHECK(!r.is_parameter());
+    in_liveness->MarkRegistersDead(r.index(), 3);
   } else {
     DCHECK(!Bytecodes::IsRegisterOutputOperandType(operand_type));
   }
@@ -129,14 +118,15 @@ void UpdateInLivenessForInOperand(
     }
   } else if constexpr (operand_type == OperandType::kRegPair) {
     Register r = iterator.GetRegisterOperand(i);
-    if (!r.is_parameter()) {
-      in_liveness->MarkRegistersLive(r.index(), 2);
-    }
+    DCHECK(!r.is_parameter());
+    in_liveness->MarkRegistersLive(r.index(), 2);
   } else if constexpr (operand_type == OperandType::kRegList) {
     Register r = iterator.GetRegisterOperand(i);
     uint32_t reg_count = iterator.GetRegisterCountOperand(i + 1);
     if (!r.is_parameter()) {
       in_liveness->MarkRegistersLive(r.index(), reg_count);
+    } else {
+      DCHECK_EQ(reg_count, 1);
     }
   } else {
     DCHECK(!Bytecodes::IsRegisterInputOperandType(operand_type));
@@ -151,14 +141,18 @@ void UpdateInLiveness(BytecodeLivenessState* in_liveness,
   // Special case Suspend and Resume to just pass through liveness.
   if constexpr (bytecode == Bytecode::kSuspendGenerator) {
     // The generator object has to be live.
-    in_liveness->MarkRegisterLive(iterator.GetRegisterOperand(0).index());
+    Register generator_reg = iterator.GetRegisterOperand(0);
+    DCHECK(!generator_reg.is_parameter());
+    in_liveness->MarkRegisterLive(generator_reg.index());
     // Suspend additionally reads and returns the accumulator
     DCHECK(Bytecodes::ReadsAccumulator(bytecode));
     in_liveness->MarkAccumulatorLive();
     return;
   } else if constexpr (bytecode == Bytecode::kResumeGenerator) {
     // The generator object has to be live.
-    in_liveness->MarkRegisterLive(iterator.GetRegisterOperand(0).index());
+    Register generator_reg = iterator.GetRegisterOperand(0);
+    DCHECK(!generator_reg.is_parameter());
+    in_liveness->MarkRegisterLive(generator_reg.index());
     return;
   }
 
@@ -256,11 +250,12 @@ void UpdateOutLiveness(BytecodeLiveness& liveness,
     if (IsFirstUpdate) {
       // The generator register won't be live in the fallthrough, so copy the
       // liveness and make it live here.
-      int generator_reg_index = iterator.GetRegisterOperand(0).index();
-      DCHECK(!next_bytecode_in_liveness->RegisterIsLive(generator_reg_index));
+      Register generator_reg = iterator.GetRegisterOperand(0);
+      DCHECK(!generator_reg.is_parameter());
+      DCHECK(!next_bytecode_in_liveness->RegisterIsLive(generator_reg.index()));
       liveness.out =
           zone->New<BytecodeLivenessState>(*next_bytecode_in_liveness, zone);
-      liveness.out->MarkRegisterLive(generator_reg_index);
+      liveness.out->MarkRegisterLive(generator_reg.index());
     } else {
       liveness.out->Union(*next_bytecode_in_liveness);
     }

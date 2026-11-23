@@ -37,6 +37,7 @@
 #include "src/objects/js-generator-inl.h"
 #include "src/objects/js-promise-inl.h"
 #include "src/objects/slots.h"
+#include "src/sandbox/check.h"
 #include "src/snapshot/embedded/embedded-data.h"
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -234,6 +235,7 @@ BreakLocation BreakLocation::FromFrame(Handle<DebugInfo> debug_info,
   DirectHandle<AbstractCode> abstract_code = summary.abstract_code();
   BreakIterator it(debug_info);
   it.SkipTo(BreakIndexFromCodeOffset(debug_info, abstract_code, offset));
+  if (it.Done()) return BreakLocation::Invalid();
   return it.GetBreakLocation();
 }
 
@@ -342,6 +344,7 @@ bool BreakLocation::HasBreakPoint(Isolate* isolate,
     DCHECK(IsBytecodeArray(*abstract_code_));
     BreakIterator it(debug_info);
     it.SkipToPosition(position_);
+    if (it.Done()) return false;
     return it.code_offset() == code_offset_;
   }
 }
@@ -370,9 +373,7 @@ BreakIterator::BreakIterator(Handle<DebugInfo> debug_info)
               ->SourcePositionTable()) {
   position_ = debug_info->shared()->StartPosition();
   statement_position_ = position_;
-  // There is at least one break location.
-  DCHECK(!Done());
-  Next();
+  if (!Done()) Next();
 }
 
 int BreakIterator::BreakIndexFromPosition(int source_position) {
@@ -468,6 +469,7 @@ void BreakIterator::ClearDebugBreak() {
 }
 
 BreakLocation BreakIterator::GetBreakLocation() {
+  DCHECK(!Done());
   Isolate* isolate = Isolate::Current();
   Handle<AbstractCode> code(
       Cast<AbstractCode>(debug_info_->DebugBytecodeArray(isolate)), isolate);
@@ -683,7 +685,7 @@ void Debug::Break(JavaScriptFrame* frame,
                   DirectHandle<JSFunction> break_target) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   // Just continue if breaks are disabled or debugger cannot be loaded.
-  if (break_disabled()) return;
+  if (break_disabled() || IsRestartFrameScheduled()) return;
 
   // Enter the debugger.
   DebugScope debug_scope(this);
@@ -704,6 +706,7 @@ void Debug::Break(JavaScriptFrame* frame,
   if (hitInstrumentationBreak) {
     debug::DebugDelegate::ActionAfterInstrumentation action =
         OnInstrumentationBreak();
+    if (IsRestartFrameScheduled()) return;
     switch (action) {
       case debug::DebugDelegate::ActionAfterInstrumentation::kPause:
         shouldPauseAfterInstrumentation = true;
@@ -1121,6 +1124,7 @@ void Debug::ApplyBreakPoints(Handle<DebugInfo> debug_info) {
       DCHECK(debug_info->HasInstrumentedBytecodeArray());
       BreakIterator it(debug_info);
       it.SkipToPosition(info->source_position());
+      if (it.Done()) continue;
       it.SetDebugBreak();
     }
   }
@@ -2213,7 +2217,12 @@ Handle<SharedFunctionInfo> Debug::FindClosestSharedFunctionInfoFromPosition(
   const int end_position = outer_shared->EndPosition();
   if (start_position == end_position) return outer_shared;
 
-  if (closest_position == 0) closest_position = end_position;
+  // If the outer function has no breakable position at or after the requested
+  // position, FindBreakablePosition() returns the last breakable position of
+  // the outer function (or its start position if it has no breakable positions
+  // at all), which comes before the requested position. In that case, search
+  // for nested functions until the end of the outer function instead.
+  if (closest_position < position) closest_position = end_position;
   std::vector<Handle<SharedFunctionInfo>> candidates;
   // Find all shared function infos of functions that are intersecting from
   // the requested position until the end of the enclosing function.
@@ -2569,14 +2578,17 @@ std::optional<Tagged<Object>> Debug::OnThrow(DirectHandle<Object> exception,
                     : v8::debug::kException,
                 is_stack_overflow);
   }
-  PrepareStepOnThrow();
-  // If the OnException handler requested termination, then indicated this to
-  // our caller Isolate::Throw so it can deal with it immediately instead of
-  // throwing the original exception.
+  // If the OnException handler requested frame restart or termination, then
+  // indicate this to our caller Isolate::Throw so it can deal with it
+  // immediately instead of throwing the original exception.
+  if (IsRestartFrameScheduled()) {
+    return isolate_->TerminateExecution();
+  }
   if (isolate_->stack_guard()->CheckTerminateExecution()) {
     isolate_->stack_guard()->ClearTerminateExecution();
     return isolate_->TerminateExecution();
   }
+  PrepareStepOnThrow();
   return {};
 }
 
@@ -2968,7 +2980,7 @@ void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode,
   // Ignore debug break during bootstrapping.
   if (isolate_->bootstrapper()->IsActive()) return;
   // Just continue if breaks are disabled.
-  if (break_disabled()) return;
+  if (break_disabled() || IsRestartFrameScheduled()) return;
   // Ignore debug break if debugger is not active.
   if (!is_active()) return;
 
@@ -3529,7 +3541,13 @@ bool Debug::PerformSideEffectCheckAtBytecode(InterpretedFrame* frame) {
 
   DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
   Tagged<SharedFunctionInfo> shared = frame->function()->shared();
-  Tagged<BytecodeArray> bytecode_array = shared->GetBytecodeArray(isolate_);
+  std::optional<Tagged<DebugInfo>> debug_info = TryGetDebugInfo(shared);
+  SBXCHECK(debug_info.has_value() &&
+           debug_info.value()->HasInstrumentedBytecodeArray());
+  SBXCHECK_EQ(debug_info.value()->DebugBytecodeArray(isolate_),
+              frame->GetBytecodeArray());
+  Tagged<BytecodeArray> bytecode_array =
+      debug_info.value()->OriginalBytecodeArray(isolate_);
   int offset = frame->GetBytecodeOffset();
   interpreter::BytecodeArrayIterator bytecode_iterator(
       handle(bytecode_array, isolate_), offset);

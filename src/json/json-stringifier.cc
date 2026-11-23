@@ -573,14 +573,19 @@ bool DoNotEscape(const SrcChar* chars, size_t length,
 }
 
 bool IsFastKey(Tagged<String> key, const DisallowGarbageCollection& no_gc) {
+  uint32_t length = key->length();
+  constexpr int kExtraLength = 4; /* optional comma + 2x double quote + colon */
+  if (V8_UNLIKELY(length + kExtraLength > String::kMaxLength)) {
+    return false;
+  };
   return key->DispatchToSpecificType(
       absl::Overload{[&](Tagged<SeqOneByteString> str) {
                        const uint8_t* chars = str->GetChars(no_gc);
-                       return DoNotEscape(chars, str->length(), no_gc);
+                       return DoNotEscape(chars, length, no_gc);
                      },
                      [&](Tagged<ExternalOneByteString> str) {
                        const uint8_t* chars = str->GetChars();
-                       return DoNotEscape(chars, str->length(), no_gc);
+                       return DoNotEscape(chars, length, no_gc);
                      },
                      [&](Tagged<String> str) { return false; }});
 }
@@ -2924,7 +2929,7 @@ FastJsonStringifierResult FastJsonStringifier<Char>::ResumeJSObject(
                     obj, descriptor_idx + 1, nof_descriptors,
                     in_object_properties, in_object_properties_start,
                     descriptors));
-            if (IsJSObject(property)) {
+            if (IsJSObjectExact(property)) {
               stack_.emplace_back(ContinuationRecord::ForJSObject(property));
             } else if (IsJSArray(property)) {
               stack_.emplace_back(ContinuationRecord::ForJSArray(property));
@@ -3136,6 +3141,22 @@ FastJsonStringifierResult FastJsonStringifier<Char>::SerializeFixedArrayElement(
         stack_.push_back(
             ContinuationRecord::ForJSArrayResume<kind, with_interrupt_checks>(
                 elements, i + 1, length));
+        if constexpr (!with_interrupt_checks) {
+          if (result == JS_OBJECT) {
+            DisallowGarbageCollection no_gc;
+            FastJsonStringifierResult obj_result =
+                SerializeJSObject(Cast<JSObject>(obj), no_gc);
+            if (V8_LIKELY(obj_result == SUCCESS)) {
+              DCHECK(
+                  ContinuationRecord::IsArrayResumeType(stack_.back().type()));
+              DCHECK_EQ(stack_.back().array_elements(), elements);
+              DCHECK_EQ(stack_.back().array_index(), i + 1);
+              DCHECK_EQ(stack_.back().array_length(), length);
+              stack_.pop_back();
+            }
+            return obj_result;
+          }
+        }
         stack_.push_back(ContinuationRecord::ForJSAny(obj, result));
         return result;
       case SUCCESS:
@@ -3471,9 +3492,30 @@ bool FastJsonStringifier<Char>::AppendStringSWAR(
   for (; i + (stride - 1) < length; i += stride) {
     PackedT packed =
         base::ReadUnalignedValue<PackedT>(reinterpret_cast<Address>(chars + i));
-    if (V8_UNLIKELY(NeedsEscape<SrcChar>(packed))) break;
+    if (V8_UNLIKELY(NeedsEscape<SrcChar>(packed))) {
+      return AppendStringScalar(chars, length, i, uncopied_src_index, no_gc);
+    }
   }
-  return AppendStringScalar(chars, length, i, uncopied_src_index, no_gc);
+  if (i < length) {
+    if (length - uncopied_src_index >= stride) {
+      PackedT tail = base::ReadUnalignedValue<PackedT>(
+          reinterpret_cast<Address>(chars + length - stride));
+      if (V8_UNLIKELY(NeedsEscape<SrcChar>(tail))) {
+        return AppendStringScalar(chars, length, i, uncopied_src_index, no_gc);
+      }
+    } else {
+      for (; i < length; i++) {
+        if (V8_UNLIKELY(!DoNotEscape(chars[i]))) {
+          return AppendStringScalar(chars, length, i, uncopied_src_index,
+                                    no_gc);
+        }
+      }
+    }
+  }
+  if (V8_LIKELY(uncopied_src_index < length)) {
+    buffer_.Append(chars + uncopied_src_index, length - uncopied_src_index);
+  }
+  return false;
 }
 
 template <typename Char>
@@ -3487,7 +3529,7 @@ bool FastJsonStringifier<Char>::AppendStringSIMD(
   size_t uncopied_src_index = 0;  // Index of first char not copied yet.
   const SrcChar* block = chars;
   const SrcChar* end = chars + length;
-  hw::FixedTag<SrcChar, 16 / sizeof(SrcChar)> tag;
+  hw::CappedTag<SrcChar, 16 / sizeof(SrcChar)> tag;
   static const size_t stride = hw::Lanes(tag);
 
   const auto mask_0x20 = hw::Set(tag, 0x20);

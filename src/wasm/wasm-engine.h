@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -197,7 +198,7 @@ class V8_EXPORT_PRIVATE WasmEngine {
       base::UniqueArray<const uint8_t> bytes,
       // Optional source URL; needed when recompiling on flags mismatch
       // to preserve the original URL.
-      base::Vector<const char> source_url = {});
+      std::string_view source_url = {});
 
   // Synchronously instantiate the given Wasm module with the given imports.
   MaybeDirectHandle<WasmInstanceObject> SyncInstantiate(
@@ -236,9 +237,9 @@ class V8_EXPORT_PRIVATE WasmEngine {
 
   // Imports the shared part of a module from a different Context/Isolate,
   // recreating a full module object in the given Isolate.
-  MaybeDirectHandle<WasmModuleObject> ImportNativeModule(
+  DirectHandle<WasmModuleObject> ImportNativeModule(
       Isolate* isolate, std::shared_ptr<NativeModule> shared_module,
-      base::Vector<const char> source_url);
+      std::string_view source_url);
 
   // Flushes all Liftoff code in all NativeModules.
   void FlushLiftoffCode();
@@ -402,7 +403,7 @@ class V8_EXPORT_PRIVATE WasmEngine {
 
   DirectHandle<Script> GetOrCreateScript(Isolate*,
                                          const std::shared_ptr<NativeModule>&,
-                                         base::Vector<const char> source_url);
+                                         std::string_view source_url);
 
   // Returns a barrier allowing background compile operations if valid and
   // preventing this object from being destroyed.
@@ -476,11 +477,6 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // calling this method.
   void PotentiallyFinishCurrentGC();
 
-  // Enable/disable code logging on the NativeModule, updating
-  // {num_modules_with_code_logging_} accordingly.
-  void EnableCodeLogging(NativeModule*);
-  void DisableCodeLogging(NativeModule*);
-
   // Remember in a global flag whether we saw nondeterminism during execution.
   // This is used in differential fuzzing.
   // Some runtime functions will update this flag, e.g. when growing memory
@@ -530,10 +526,9 @@ class V8_EXPORT_PRIVATE WasmEngine {
   std::shared_ptr<OperationsBarrier> operations_barrier_{
       std::make_shared<OperationsBarrier>()};
 
-  // Store the number of modules which have code logging enabled. This is then
-  // used for a fast-path to avoid taking the mutex and iterating Isolates or
-  // NativeModules.
-  std::atomic<size_t> num_modules_with_code_logging_{0};
+  // Store the number of isolates which have code logging enabled. This is then
+  // used for a fast-path to avoid taking the mutex and iterating Isolates.
+  std::atomic<size_t> num_isolates_with_code_logging_{0};
 
   // Size of code that became dead since the last GC. If this exceeds a certain
   // threshold, a new GC is triggered.

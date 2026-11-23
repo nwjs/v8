@@ -64,7 +64,6 @@
 #include "src/compiler/loop-variable-optimizer.h"
 #include "src/compiler/machine-graph-verifier.h"
 #include "src/compiler/machine-operator-reducer.h"
-#include "src/compiler/memory-optimizer.h"
 #include "src/compiler/node-observer.h"
 #include "src/compiler/node-origin-table.h"
 #include "src/compiler/osr.h"
@@ -1319,36 +1318,6 @@ struct LoadEliminationPhase {
   }
 };
 
-struct MemoryOptimizationPhase {
-  DECL_PIPELINE_PHASE_CONSTANTS(MemoryOptimization)
-
-  void Run(TFPipelineData* data, Zone* temp_zone) {
-    // The memory optimizer requires the graphs to be trimmed, so trim now.
-    GraphTrimmer trimmer(temp_zone, data->graph());
-    NodeVector roots(temp_zone);
-    data->jsgraph()->GetCachedNodes(&roots);
-    {
-      UnparkedScopeIfNeeded scope(data->broker(),
-                                  v8_flags.trace_turbo_trimming);
-      trimmer.TrimGraph(roots.begin(), roots.end());
-    }
-
-    // Optimize allocations and load/store operations.
-#if V8_ENABLE_WEBASSEMBLY
-    bool is_wasm = data->info()->IsWasm() || data->info()->IsWasmBuiltin();
-#else
-    bool is_wasm = false;
-#endif
-    MemoryOptimizer optimizer(
-        data->broker(), data->jsgraph(), temp_zone,
-        data->info()->allocation_folding()
-            ? MemoryLowering::AllocationFolding::kDoAllocationFolding
-            : MemoryLowering::AllocationFolding::kDontAllocationFolding,
-        data->debug_name(), &data->info()->tick_counter(), is_wasm);
-    optimizer.Optimize();
-  }
-};
-
 #if V8_ENABLE_WEBASSEMBLY
 struct WasmTypingPhase {
   DECL_PIPELINE_PHASE_CONSTANTS(WasmTyping)
@@ -1380,24 +1349,6 @@ struct WasmGCOptimizationPhase {
                                               data->common(), temp_zone);
     AddReducer(data, &graph_reducer, &load_elimination);
     AddReducer(data, &graph_reducer, &wasm_gc);
-    AddReducer(data, &graph_reducer, &dead_code_elimination);
-    graph_reducer.ReduceGraph();
-  }
-};
-
-struct WasmGCLoweringPhase {
-  DECL_PIPELINE_PHASE_CONSTANTS(WasmGCLowering)
-
-  void Run(TFPipelineData* data, Zone* temp_zone,
-           const wasm::WasmModule* module) {
-    GraphReducer graph_reducer(
-        temp_zone, data->graph(), &data->info()->tick_counter(), data->broker(),
-        data->jsgraph()->Dead(), data->observe_node_manager());
-    WasmGCLowering lowering(&graph_reducer, data->mcgraph(), module, false,
-                            data->source_positions());
-    DeadCodeElimination dead_code_elimination(&graph_reducer, data->graph(),
-                                              data->common(), temp_zone);
-    AddReducer(data, &graph_reducer, &lowering);
     AddReducer(data, &graph_reducer, &dead_code_elimination);
     graph_reducer.ReduceGraph();
   }
@@ -1563,8 +1514,7 @@ class WasmTurboshaftWrapperCompilationJob final
                                  CompilationJob::State::kReadyToExecute),
         zone_(wasm::GetWasmEngine()->allocator(), ZONE_NAME),
         debug_name_(std::move(debug_name)),
-        info_(base::CStrVector(debug_name_.get()), &zone_,
-              wrapper_info.code_kind),
+        info_(debug_name_.get(), &zone_, wrapper_info.code_kind),
         sig_(sig),
         wrapper_info_(wrapper_info),
         call_descriptor_(
@@ -2082,7 +2032,7 @@ int ComputeInitialGraphHash(Builtin builtin,
       std::ofstream out(v8_flags.dump_builtins_hashes_to_file,
                         std::ios_base::app);
       out << "Builtin: " << Builtins::name(builtin) << ", hash: 0x" << std::hex
-          << initial_graph_hash << std::endl;
+          << initial_graph_hash << std::dec << std::endl;
     }
   }
   return initial_graph_hash;
@@ -2166,7 +2116,7 @@ CodeAssemblerCompilationJob::CodeAssemblerCompilationJob(
       code_assembler_state_(isolate, &zone_, get_call_descriptor(&zone_),
                             code_kind, name, builtin),
       assembler_options_(assembler_options),
-      compilation_info_(base::CStrVector(name), &zone_, code_kind),
+      compilation_info_(name, &zone_, code_kind),
       jump_opt_(ShouldOptimizeJumps(isolate) ? new JumpOptimizationInfo()
                                              : nullptr),
       finalize_order_(finalize_order) {
@@ -2330,7 +2280,7 @@ TurboshaftAssemblerBuiltinCompilationJob::
       name_(name),
       zone_stats_(isolate->allocator()),
       zone_(&zone_stats_, kBuiltinCompilationZoneName),
-      compilation_info_(base::CStrVector(name), zone_, code_kind),
+      compilation_info_(name, zone_, code_kind),
       data_(&zone_stats_, turboshaft::TurboshaftPipelineKind::kTSABuiltin,
             isolate, &compilation_info_, assembler_options),
       jump_opt_(ShouldOptimizeJumps(isolate) ? new JumpOptimizationInfo()
@@ -2555,7 +2505,7 @@ Pipeline::NewJSLinkageCodeStubBuiltinCompilationJob(
     int finalize_order) {
   auto get_call_descriptor = [argc](Zone* zone) {
     return Linkage::GetJSCallDescriptor(zone, false, argc,
-                                        CallDescriptor::kCanUseRoots);
+                                        CallDescriptor::kNoFlags);
   };
   return std::make_unique<CodeAssemblerTurboshaftCompilationJob>(
       isolate, builtin, generator, installer, assembler_options,
@@ -2785,8 +2735,7 @@ Pipeline::GenerateCodeForWasmNativeStubFromTurboshaft(
     call_descriptor = GetI32WasmCallDescriptor(&zone, call_descriptor);
   }
   Linkage linkage(call_descriptor);
-  OptimizedCompilationInfo info(base::CStrVector(debug_name), &zone,
-                                wrapper_info.code_kind);
+  OptimizedCompilationInfo info(debug_name, &zone, wrapper_info.code_kind);
   ZoneStats zone_stats(wasm_engine->allocator());
   TFPipelineData data(&zone_stats, &info, nullptr,
                       wasm::GetWasmEngine()->allocator(), nullptr, nullptr,
@@ -3002,7 +2951,8 @@ wasm::WasmCompilationResult Pipeline::GenerateWasmCode(
       &turboshaft_data, env, detected, turboshaft_data.graph(),
       compilation_data.func_body, compilation_data.wire_bytes_storage,
       compilation_data.validate_callees, &compilation_data.assumptions,
-      &inlining_positions, compilation_data.func_index, function_coverage_data);
+      &inlining_positions, compilation_data.func_index, function_coverage_data,
+      counter_updates);
   CodeTracer* code_tracer = nullptr;
   if (turboshaft_data.info()->trace_turbo_graph()) {
     // NOTE: We must not call `GetCodeTracer` if tracing is not enabled,

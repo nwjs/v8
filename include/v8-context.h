@@ -26,6 +26,11 @@ class ObjectTemplate;
 class Value;
 class String;
 
+#ifndef V8_EMBEDDER_DATA_ARRAY_SIZE
+// Defined using gn arg `v8_embedder_data_array_size`.
+#define V8_EMBEDDER_DATA_ARRAY_SIZE 5
+#endif
+
 /**
  * A container for extension names.
  */
@@ -291,7 +296,14 @@ class V8_EXPORT Context : public Data {
    * needed. Note that index 0 currently has a special meaning for Chrome's
    * debugger.
    */
+  V8_DEPRECATE_SOON("Use SetEmbedderDataV3 instead")
   void SetEmbedderDataV2(int index, Local<Data> value);
+
+  /**
+   * Sets the embedder data with the given index. The index must be in the
+   * range of [0, V8_EMBEDDER_DATA_ARRAY_SIZE).
+   */
+  void SetEmbedderDataV3(int index, Local<Data> value);
 
   /**
    * Gets the embedder data with the given index, which must have been set by a
@@ -313,7 +325,7 @@ class V8_EXPORT Context : public Data {
    * needed. Note that index 0 currently has a special meaning for Chrome's
    * debugger.
    */
-  V8_DEPRECATE_SOON("Use SetEmbedderDataV2 instead")
+  V8_DEPRECATE_SOON("Use SetEmbedderDataV3 instead")
   void SetEmbedderData(int index, Local<Value> value);
 
   /**
@@ -331,15 +343,28 @@ class V8_EXPORT Context : public Data {
   V8_INLINE T* GetAlignedPointerFromEmbedderData(Isolate* isolate, int index,
                                                  CppHeapPointerTag tag);
 
+  V8_DEPRECATE_SOON("Use SetAlignedPointerInEmbedderDataV2 instead")
   void SetAlignedPointerInEmbedderData(int index, void* value,
                                        EmbedderDataTypeTag tag);
 
   template <typename T>
     requires(!std::is_void_v<T>) && cppgc::IsGarbageCollectedTypeV<T>
+  V8_DEPRECATE_SOON("Use SetAlignedPointerInEmbedderDataV2 instead")
   void SetAlignedPointerInEmbedderData(int index, T* value,
                                        CppHeapPointerTag tag) {
     SetAlignedPointerInEmbedderDataInternal(index, static_cast<void*>(value),
                                             tag);
+  }
+
+  void SetAlignedPointerInEmbedderDataV2(int index, void* value,
+                                         EmbedderDataTypeTag tag);
+
+  template <typename T>
+    requires(!std::is_void_v<T>) && cppgc::IsGarbageCollectedTypeV<T>
+  void SetAlignedPointerInEmbedderDataV2(int index, T* value,
+                                         CppHeapPointerTag tag) {
+    SetAlignedPointerInEmbedderDataInternalV2(index, static_cast<void*>(value),
+                                              tag);
   }
 
   /**
@@ -471,6 +496,8 @@ class V8_EXPORT Context : public Data {
   void* SlowGetAlignedPointerFromEmbedderData(int index, CppHeapPointerTag tag);
   void SetAlignedPointerInEmbedderDataInternal(int index, void* value,
                                                CppHeapPointerTag tag);
+  void SetAlignedPointerInEmbedderDataInternalV2(int index, void* value,
+                                                 CppHeapPointerTag tag);
 };
 
 // --- Implementation ---

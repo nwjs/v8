@@ -36,7 +36,7 @@ import correctness_fuzzer
 import grammar
 import harness
 import run
-from grammar import registry
+from grammar import menus, registry
 
 # Set from the command line; None means the d8-dependent tests are skipped.
 D8 = None
@@ -53,7 +53,10 @@ def run_cases(cases):
   try:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
       f.write(harness.emit_js(cases))
-    p = subprocess.run([D8, path], capture_output=True, text=True, timeout=300)
+    p = subprocess.run([D8, *grammar.D8_FLAGS, path],
+                       capture_output=True,
+                       text=True,
+                       timeout=300)
   finally:
     os.unlink(path)
   return correctness_fuzzer.Runner._results(p.stdout)
@@ -77,6 +80,20 @@ def _in_class(pattern, pos):
       depth = max(0, depth - 1)
     i += 1
   return depth > 0
+
+
+def _escapes(pattern):
+  r"""Yield (position, escaped character) for each `\x` in |pattern|.
+
+  Consume each escape as a pair, so `\\A` yields only the escaped backslash.
+  """
+  i = 0
+  while i < len(pattern) - 1:
+    if pattern[i] == "\\":
+      yield i, pattern[i + 1]
+      i += 2
+    else:
+      i += 1
 
 
 class GrammarStructureTest(unittest.TestCase):
@@ -138,6 +155,69 @@ class GrammarStructureTest(unittest.TestCase):
         self.assertNotIn(r"\p{", pattern)
         self.assertNotIn(r"\P{", pattern)
         self.assertNotIn(r"\u{", pattern)
+
+  def test_buffer_boundary_assertions_stay_in_unicode_mode(self):
+    # Check the production: pattern text cannot distinguish assertions from
+    # identically spelled legacy identity escapes.
+    rng = random.Random(1)
+    without = {
+        grammar.expand(grammar.Context(rng, False, False, 5), "Assertion")
+        for _ in range(2000)
+    }
+    self.assertFalse(without & {r"\A", r"\z", r"\Z"}, without)
+    with_mode = {
+        grammar.expand(grammar.Context(rng, True, False, 5), "Assertion")
+        for _ in range(2000)
+    }
+    self.assertTrue({r"\A", r"\z", r"\Z"} <= with_mode, with_mode)
+
+  def test_boundary_letters_are_identity_escapes_outside_unicode_mode(self):
+    # Compare whole escapes so `\cA` does not count as the identity escape A.
+    rng = random.Random(1)
+    letters = {"A", "z", "Z"}
+    without = {
+        grammar.expand(
+            grammar.Context(rng, False, False, 5), "CharacterEscape")
+        for _ in range(2000)
+    }
+    self.assertEqual(letters, without & letters)
+    with_mode = {
+        grammar.expand(grammar.Context(rng, True, False, 5), "CharacterEscape")
+        for _ in range(2000)
+    }
+    self.assertFalse(with_mode & letters, with_mode & letters)
+
+  def test_buffer_boundary_escapes_stay_out_of_unicode_classes(self):
+    for pattern, flags, _, _ in generate(4000):
+      if "u" not in flags and "v" not in flags:
+        continue
+      for pos, escaped in _escapes(pattern):
+        if escaped in "AzZ":
+          self.assertFalse(_in_class(pattern, pos), pattern)
+
+  def test_end_of_buffer_subjects_end_in_a_line_terminator(self):
+    # Compare with patterns that request no tails to distinguish requested
+    # suffixes from terminators drawn from SUBJECT_NOISE.
+    terminators = tuple(menus.LINE_TERMINATORS)
+    asked, asked_tail, asked_crlf, asked_mid = 0, 0, 0, 0
+    other, other_tail = 0, 0
+    for pattern, flags, subject, _ in generate(6000):
+      unicode = "u" in flags or "v" in flags
+      asks = unicode and any(c in "zZ" for _, c in _escapes(pattern))
+      ends = subject.endswith(terminators)
+      if asks:
+        asked += 1
+        asked_tail += ends
+        asked_crlf += subject.endswith("\r\n")
+        asked_mid += any(c in terminators for c in subject[:-1]) and not ends
+      else:
+        other += 1
+        other_tail += ends
+    self.assertGreater(asked, 100, "too few cases to measure")
+    self.assertGreater(asked_tail / asked, 0.3)
+    self.assertGreater(asked_crlf, 0)
+    self.assertGreater(asked_mid, 0)
+    self.assertGreater(asked_tail / asked, 2 * other_tail / other)
 
   def test_digit_terminated_escapes_are_separated(self):
     # `\1` and `\0` are terminated by lookahead, so a digit right after either
@@ -327,6 +407,20 @@ class GrammarStructureTest(unittest.TestCase):
     self.assertEqual(targets, seen)
 
 
+class ResultParsingTest(unittest.TestCase):
+  """How harness output is cut into per-case results."""
+
+  def test_unicode_line_separators_do_not_split_a_result(self):
+    out = ('banner\n'
+           '0\t{"cold":{"r":["a\u2028"]},"warm":{"r":["a\u2028"]}}\n'
+           '1\t{"cold":{"r":["\u2029"]},"warm":{"r":["\u2029"]}}\n'
+           'DONE\n')
+    results = correctness_fuzzer.Runner._results(out)
+    self.assertEqual([0, 1], sorted(results))
+    self.assertEqual(["a\u2028"], json.loads(results[0])["warm"]["r"])
+    self.assertEqual(["\u2029"], json.loads(results[1])["warm"]["r"])
+
+
 class ClassificationTest(unittest.TestCase):
   """How a pair of harness results is turned into a finding.
 
@@ -494,6 +588,25 @@ class TestcaseFormatTest(unittest.TestCase):
     self.assertEqual(len(self.CASES), len(body))
     self.assertTrue(all(l.endswith(",") for l in body))
 
+  def test_emitted_cases_are_compact(self):
+    # ClusterFuzz writes thousands of these files to a small partition, so the
+    # per-case encoding is pinned: no whitespace and no stored tag.
+    lines = harness.emit_js(self.CASES).splitlines()
+    start = lines.index("const cases = [")
+    self.assertEqual('["a|b","gi","ab",1],', lines[start + 1])
+    self.assertEqual('["(?<n>x)\\\\k<n>","d","xx",0],', lines[start + 3])
+
+  def test_embedded_harness_has_no_comments(self):
+    text = harness.emit_js(self.CASES)
+    _, _, tail = text.partition("\n];\n")
+    self.assertTrue(tail)
+    for line in tail.splitlines():
+      self.assertFalse(line.lstrip().startswith("//"), line)
+      self.assertTrue(line.strip(), "blank line in embedded harness")
+    # The stripped copy is still the whole harness.
+    self.assertIn("function execOnce(", tail)
+    self.assertIn("function sourceTag(", tail)
+
   def test_cases_round_trip(self):
     text = harness.emit_js(self.CASES)
     self.assertEqual(self.CASES, harness.parse_testcase(text))
@@ -509,14 +622,6 @@ class TestcaseFormatTest(unittest.TestCase):
   def test_parser_rejects_a_foreign_file(self):
     with self.assertRaises(ValueError):
       harness.parse_testcase("print('not a fuzzer testcase');\n")
-
-  def test_tag_keeps_shape_and_drops_literals(self):
-    self.assertEqual(
-        harness.source_tag("(ab|cd)+\\d", "gi"),
-        harness.source_tag("(xy|zw)+\\d", "ig"))
-    self.assertEqual(harness.source_tag("\\.", ""), "/")
-    self.assertEqual(harness.source_tag("\\w\\1", ""), "/\\w\\1")
-    self.assertLessEqual(len(harness.source_tag("(" * 500, "")), 41)
 
 
 class FlagsFileTest(unittest.TestCase):
@@ -562,6 +667,55 @@ class GeneratedPatternTest(unittest.TestCase):
     # after this module is imported, so a decorator would capture None.
     if D8 is None:
       self.skipTest("needs --d8")
+
+  def test_source_tag_keeps_shape_and_drops_literals(self):
+    # The foozzie clustering tag is computed by harness.js so that it is not
+    # stored per case; check it through d8, which is the only place it exists.
+    cases = [
+        ["(ab|cd)+\\d", "gi", "", 0],
+        ["(xy|zw)+\\d", "ig", "", 0],
+        ["\\.", "", "", 0],
+        ["\\w\\1", "", "", 0],
+        ["(" * 500, "", "", 0],
+        [r"\d" * 41, "", "", 0],
+        ["(" * 39 + r"\d+", "", "", 0],
+        ["\\", "", "", 0],
+    ]
+    fd, path = tempfile.mkstemp(prefix="grammar_test_", suffix=".js")
+    try:
+      with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(harness.emit_js(cases))
+      p = subprocess.run([D8, path], capture_output=True, text=True, timeout=60)
+    finally:
+      os.unlink(path)
+    self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+    prefix = "v8-foozzie source: regexp-fuzzer:"
+    tags = [
+        l[len(prefix):] for l in p.stdout.splitlines() if l.startswith(prefix)
+    ]
+    self.assertEqual(len(cases), len(tags), p.stdout)
+    self.assertEqual("gi/(|)+\\d", tags[0])
+    self.assertEqual(tags[0], tags[1])
+    self.assertEqual("/", tags[2])
+    self.assertEqual("/\\w\\1", tags[3])
+    self.assertLessEqual(len(tags[4]), 41)
+    self.assertEqual("/" + r"\d" * 40, tags[5])
+    self.assertEqual("/" + "(" * 39 + r"\d", tags[6])
+    self.assertEqual("/", tags[7])
+
+  def test_source_tag_does_not_execute_regexp(self):
+    script = harness.emit_js([]) + r'''
+      RegExp.prototype.exec = RegExp.prototype.test = function() {
+        throw new Error("sourceTag executed a regexp");
+      };
+      print(sourceTag("\\0\\9\\A\\Z\\a\\z\\/\\:\\@\\[\\`\\{\\é", "ig"));
+    '''
+    p = subprocess.run([D8, "-e", script],
+                       capture_output=True,
+                       text=True,
+                       timeout=60)
+    self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+    self.assertEqual(["DONE", r"gi/\0\9\A\Z\a\z"], p.stdout.splitlines())
 
   def test_printed_literals_preserve_matches(self):
     atoms = ("0", "d", "\\", "/", "[", "]", '"', "\n", "\r", "\t", "\u2028",
@@ -680,19 +834,41 @@ class GeneratedPatternTest(unittest.TestCase):
     # Absent without the flag or the construct, rather than reported as null.
     self.assertNotIn("di", json.loads(results[1])["warm"])
 
+  def test_runner_runs_with_staged_syntax_enabled(self):
+    # Legacy `\A` matches a letter; a trailing CRLF distinguishes `\Z` and `\z`.
+    runner = correctness_fuzzer.Runner(D8, D8)
+    cases = [
+        (r"\Ax", "u", "x", ["x"]),
+        (r"\A", "", "A", ["A"]),
+        (r"x\Z", "u", "x\r\n", ["x"]),
+        (r"x\z", "u", "x\r\n", None),
+    ]
+    for pattern, flags, subject, expected in cases:
+      with self.subTest(pattern=pattern, flags=flags):
+        rc, result = runner.run_one(runner.ref, pattern, flags, subject)
+        self.assertEqual(0, rc)
+        parsed = json.loads(result)
+        self.assertIsInstance(parsed, dict, result)
+        for state in ("cold", "warm"):
+          match = parsed[state]
+          self.assertEqual(expected, match["r"] if match else None)
+
   def test_generated_testcase_runs_standalone(self):
     with tempfile.TemporaryDirectory() as out:
-      run.main(
-          ["--output_dir", out, "--no_of_files", "1", "--cases-per-file", "50"])
       path = os.path.join(out, "fuzz-0.js")
-      p = subprocess.run([D8, path],
+      with open(path, "w", encoding="utf-8") as f:
+        f.write(run.generate_file(1, "buffer_boundaries", 5, 50))
+      p = subprocess.run([D8, *grammar.D8_FLAGS, path],
                          capture_output=True,
                          text=True,
                          timeout=300)
     self.assertEqual(0, p.returncode, p.stderr)
-    lines = p.stdout.splitlines()
+    lines = p.stdout.split("\n")
+    self.assertEqual("", lines.pop())
     self.assertEqual("DONE", lines[-1])
-    self.assertEqual(50, len(correctness_fuzzer.Runner._results(p.stdout)))
+    results = correctness_fuzzer.Runner._results(p.stdout)
+    self.assertEqual(50, len(results))
+    self.assertNotIn('"ERR_CTOR"', results.values())
     self.assertEqual(
         50,
         sum(1 for l in lines

@@ -10,7 +10,7 @@
 #endif  // !V8_ENABLE_WEBASSEMBLY
 
 #include "src/compiler/graph-assembler.h"
-#include "src/sandbox/indirect-pointer-tag.h"
+#include "src/sandbox/trusted-pointer-tag.h"
 #include "src/wasm/wasm-code-manager.h"
 
 namespace v8 {
@@ -179,7 +179,7 @@ class WasmGraphAssembler : public GraphAssembler {
                                            Node* isolate_root);
 
   Node* LoadTrustedPointerFromObject(Node* object, int offset,
-                                     IndirectPointerTagRange tag);
+                                     TrustedPointerTagRange tag);
 
   Node* IsSmi(Node* object);
 
@@ -246,8 +246,6 @@ class WasmGraphAssembler : public GraphAssembler {
   Node* LoadContextNoCellFromJSFunction(Node* js_function);
 
   Node* LoadFunctionDataFromJSFunction(Node* js_function);
-
-  Node* LoadExportedFunctionInstanceData(Node* exported_function_data);
 
   // JavaScript objects.
 

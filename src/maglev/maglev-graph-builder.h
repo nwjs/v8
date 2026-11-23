@@ -178,7 +178,7 @@ class MaglevGraphBuilder {
     return graph()->GetConstant(ref);
   }
   ValueNode* GetTrustedConstant(compiler::HeapObjectRef ref,
-                                IndirectPointerTag tag) {
+                                TrustedPointerTag tag) {
     return graph()->GetTrustedConstant(ref, tag);
   }
 
@@ -309,7 +309,7 @@ class MaglevGraphBuilder {
     using Label = Base::Label;
     using LabelForTrackingInterpreterFrameState =
         Base::LabelForTrackingInterpreterFrameState;
-    class LoopLabel;
+    class V8_NODISCARD LoopLabel;
 
     MaglevSubGraphBuilder(MaglevGraphBuilder* builder, int variable_count);
     LoopLabel BeginLoop(std::initializer_list<Variable*> loop_vars);
@@ -1068,7 +1068,7 @@ class MaglevGraphBuilder {
       compiler::OptionalSharedFunctionInfoRef maybe_shared,
       CallArguments& args);
   MaybeReduceResult TryReduceFunctionPrototypeApplyCallWithReceiver(
-      compiler::OptionalHeapObjectRef maybe_receiver, CallArguments& args,
+      compiler::OptionalJSFunctionRef maybe_receiver, CallArguments& args,
       const compiler::FeedbackSource& feedback_source);
 
   template <typename CallNode, typename... Args>
@@ -1164,14 +1164,20 @@ class MaglevGraphBuilder {
   MaybeReduceResult TryBuildScriptContextStore(
       const compiler::GlobalAccessFeedback& global_access_feedback);
   MaybeReduceResult TryBuildPropertyCellStore(
-      const compiler::GlobalAccessFeedback& global_access_feedback);
+      compiler::PropertyCellRef property_cell,
+      base::FunctionRef<ReduceResult()> check_maps = []() {
+        return ReduceResult::Done();
+      });
   MaybeReduceResult TryBuildGlobalStore(
       const compiler::GlobalAccessFeedback& global_access_feedback);
 
   MaybeReduceResult TryBuildScriptContextLoad(
       const compiler::GlobalAccessFeedback& global_access_feedback);
   MaybeReduceResult TryBuildPropertyCellLoad(
-      const compiler::GlobalAccessFeedback& global_access_feedback);
+      compiler::PropertyCellRef property_cell,
+      base::FunctionRef<ReduceResult()> check_maps = []() {
+        return ReduceResult::Done();
+      });
   MaybeReduceResult TryBuildGlobalLoad(
       const compiler::GlobalAccessFeedback& global_access_feedback);
 
@@ -1264,10 +1270,11 @@ class MaglevGraphBuilder {
 
   ReduceResult BuildLoadTaggedField(
       ValueNode* object, uint32_t offset, NodeType type = NodeType::kUnknown,
-      bool is_const = false, PropertyKey key = PropertyKey::None(),
+      PropertyConstness constness = PropertyConstness::kMutable,
+      PropertyKey key = PropertyKey::None(),
       IsArrayLength is_array_length = IsArrayLength::kNo,
       compiler::OptionalMapRef stable_field_map = {}) {
-    return reducer_.BuildLoadTaggedField(object, offset, type, is_const, key,
+    return reducer_.BuildLoadTaggedField(object, offset, type, constness, key,
                                          is_array_length, stable_field_map);
   }
 

@@ -597,7 +597,7 @@ class LocationOperand : public InstructionOperand {
       case MachineRepresentation::kNone:
         return false;
       case MachineRepresentation::kMapWord:
-      case MachineRepresentation::kIndirectPointer:
+      case MachineRepresentation::kTrustedPointer:
       case MachineRepresentation::kFloat16RawBits:
         UNREACHABLE();
     }
@@ -1094,13 +1094,7 @@ class V8_EXPORT_PRIVATE Instruction final {
   }
   bool HasCallDescriptorFlag(CallDescriptor::Flag flag) const {
     DCHECK(IsCallWithDescriptorFlags());
-    static_assert(CallDescriptor::kFlagsBitsEncodedInInstructionCode ==
-                  MiscField::kSize);
-#ifdef DEBUG
-    static constexpr int kInstructionCodeFlagsMask =
-        ((1 << CallDescriptor::kFlagsBitsEncodedInInstructionCode) - 1);
-    DCHECK_EQ(static_cast<int>(flag) & kInstructionCodeFlagsMask, flag);
-#endif
+    DCHECK(MiscField::is_valid(flag));
     return MiscField::decode(opcode()) & flag;
   }
 

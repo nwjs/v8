@@ -10,7 +10,7 @@
 #include "src/base/bit-field.h"
 #include "src/objects/objects-body-descriptors.h"
 #include "src/objects/struct.h"
-#include "src/objects/trusted-pointer.h"
+#include "src/sandbox/trusted-pointer.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -173,9 +173,9 @@ V8_OBJECT class CallSiteInfo : public Struct {
   friend class TorqueGeneratedCallSiteInfoAsserts;
   friend struct ObjectTraits<CallSiteInfo>;
 
-  static constexpr IndirectPointerTagRange kCodeObjectTagRange =
-      IndirectPointerTagRange(kBytecodeArrayIndirectPointerTag,
-                              kCodeIndirectPointerTag);
+  static constexpr TrustedPointerTagRange kCodeObjectTagRange =
+      TrustedPointerTagRange(kBytecodeArrayTrustedPointerTag,
+                             kCodeTrustedPointerTag);
   static_assert(kCodeObjectTagRange.Size() == 2);
 
   const TrustedPointerMember<Union<Code, BytecodeArray>, kCodeObjectTagRange>

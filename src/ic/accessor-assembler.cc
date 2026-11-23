@@ -88,8 +88,8 @@ TNode<HeapObjectReference> AccessorAssembler::TryMonomorphicCase(
 
   // Try to quickly handle the monomorphic case without knowing for sure
   // if we have a weak reference in feedback.
-  CSA_DCHECK(this,
-             IsMap(GetHeapObjectAssumeWeak(weak_lookup_start_object_map)));
+  CSA_DCHECK(this, IsMapOrCustomMap(
+                       GetHeapObjectAssumeWeak(weak_lookup_start_object_map)));
   GotoIfNot(TaggedEqual(feedback, weak_lookup_start_object_map), if_miss);
 
   TNode<MaybeObject> handler = UncheckedCast<MaybeObject>(
@@ -126,8 +126,8 @@ void AccessorAssembler::HandlePolymorphicCase(
     TNode<IntPtrT> index = ChangePositiveInt32ToIntPtr(var_index.value());
     TNode<MaybeObject> maybe_cached_map =
         LoadWeakFixedArrayElement(feedback, index);
-    CSA_DCHECK(this,
-               IsMap(GetHeapObjectAssumeWeak(weak_lookup_start_object_map)));
+    CSA_DCHECK(this, IsMapOrCustomMap(GetHeapObjectAssumeWeak(
+                         weak_lookup_start_object_map)));
     GotoIfNot(TaggedEqual(maybe_cached_map, weak_lookup_start_object_map),
               &loop_next);
 
@@ -563,7 +563,7 @@ TNode<Code> AccessorAssembler::CastToCode(TNode<MaybeObject> code_candidate) {
   // TaggedMember<UnionOf<Smi,Code>> requires manual validation of the Code
   // object here.
   code = LoadCodePointerFromObject(
-      code, offsetof(ExposedTrustedObject, self_indirect_pointer_));
+      code, offsetof(ExposedTrustedObject, self_trusted_pointer_));
 #endif
   return code;
 }
@@ -1556,7 +1556,7 @@ void AccessorAssembler::HandleStoreICHandlerCase(
     ICMode ic_mode, ElementSupport support_elements) {
   Label if_smi_handler(this), if_nonsmi_handler(this);
   Label if_proto_handler(this), call_handler(this),
-      store_transition_or_global_or_accessor(this);
+      store_transition_or_accessor(this);
 
   Branch(TaggedIsSmi(handler), &if_smi_handler, &if_nonsmi_handler);
 
@@ -1665,7 +1665,7 @@ void AccessorAssembler::HandleStoreICHandlerCase(
                         p->slot(), p->vector(), p->receiver(), p->name());
       } else {
         Runtime::FunctionId id;
-        if (p->IsDefineNamedOwn()) {
+        if (p->IsAnyDefineNamedOwn()) {
           id = Runtime::kDefineNamedOwnIC_Slow;
         } else if (p->IsDefineKeyedOwn()) {
           id = Runtime::kDefineKeyedOwnIC_Slow;
@@ -1688,8 +1688,7 @@ void AccessorAssembler::HandleStoreICHandlerCase(
   BIND(&if_nonsmi_handler);
   {
     TNode<HeapObjectReference> ref_handler = CAST(handler);
-    GotoIf(IsWeakOrCleared(ref_handler),
-           &store_transition_or_global_or_accessor);
+    GotoIf(IsWeakOrCleared(ref_handler), &store_transition_or_accessor);
     TNode<HeapObject> strong_handler = CAST(handler);
     TNode<Map> handler_map = LoadMap(strong_handler);
     Branch(IsCodeMap(handler_map), &call_handler, &if_proto_handler);
@@ -1714,39 +1713,17 @@ void AccessorAssembler::HandleStoreICHandlerCase(
     }
   }
 
-  BIND(&store_transition_or_global_or_accessor);
+  BIND(&store_transition_or_accessor);
   {
     // Load value or miss if the {handler} weak cell is cleared.
     CSA_DCHECK(this, IsWeakOrCleared(handler));
     TNode<HeapObject> strong_handler = GetHeapObjectAssumeWeak(handler, miss);
 
-    Label store_global(this), store_transition(this), store_accessor(this);
+    Label store_transition(this), store_accessor(this);
     TNode<Map> strong_handler_map = LoadMap(strong_handler);
-    GotoIf(IsPropertyCellMap(strong_handler_map), &store_global);
     Branch(IsAccessorPairMap(strong_handler_map), &store_accessor,
            &store_transition);
 
-    BIND(&store_global);
-    {
-      if (p->IsDefineNamedOwn()) {
-        // The global proxy has its attributes set in the global object,
-        // which can't be handled by StoreGlobalIC_PropertyCellCase when
-        // defining public fields. Handle it in runtime.
-        GotoIf(IsJSGlobalProxy(CAST(p->receiver())), &if_slow);
-      } else if (p->IsDefineKeyedOwn()) {
-        Label proceed_defining(this);
-        // StoreGlobalIC_PropertyCellCase doesn't support definition
-        // of private fields, so handle them in runtime.
-        GotoIfNot(IsSymbol(CAST(p->name())), &proceed_defining);
-        Branch(IsAnyPrivateName(CAST(p->name())), &if_slow, &proceed_defining);
-        BIND(&proceed_defining);
-      }
-
-      TNode<PropertyCell> property_cell = CAST(strong_handler);
-      ExitPoint direct_exit(this);
-      StoreGlobalIC_PropertyCellCase(property_cell, p->value(), &direct_exit,
-                                     miss);
-    }
     BIND(&store_accessor);
     {
       TNode<AccessorPair> pair = CAST(strong_handler);
@@ -1958,9 +1935,8 @@ void AccessorAssembler::OverwriteExistingFastDataProperty(
       {
         TNode<Float64T> double_value = ChangeNumberToFloat64(CAST(value));
         if (do_transitioning_store) {
-          TNode<Float64T> silenced_value = Float64SilenceNaN(double_value);
           TNode<HeapNumber> heap_number =
-              AllocateHeapNumberWithValue(silenced_value);
+              AllocateHeapNumberWithValue(double_value);
           StoreMap(object, object_map);
           StoreObjectField(object, field_offset, heap_number);
         } else {
@@ -1968,10 +1944,8 @@ void AccessorAssembler::OverwriteExistingFastDataProperty(
           TNode<UnionOf<HeapNumber, UninitializedHeapNumber>> heap_number =
               CAST(LoadObjectField(object, field_offset));
           StoreHeapNumberValue(heap_number, double_value);
-          // The map store must follow the value write and use release semantics
-          // so background threads (e.g. concurrent compiler) see a consistent
-          // initialized state upon observing the HeapNumber map.
-          StoreMapReleaseNoWriteBarrier(heap_number, RootIndex::kHeapNumberMap);
+          // Migrate UninitializedHeapNumber to mutable HeapNumber.
+          StoreMapNoWriteBarrier(heap_number, RootIndex::kHeapNumberMap);
         }
         Goto(&done);
       }
@@ -2009,8 +1983,7 @@ void AccessorAssembler::OverwriteExistingFastDataProperty(
                  &cont);
           {
             TNode<Float64T> double_value = ChangeNumberToFloat64(CAST(value));
-            TNode<Float64T> silenced = Float64SilenceNaN(double_value);
-            var_value = AllocateHeapNumberWithValue(silenced);
+            var_value = AllocateHeapNumberWithValue(double_value);
             Goto(&cont);
           }
           BIND(&cont);
@@ -2037,10 +2010,8 @@ void AccessorAssembler::OverwriteExistingFastDataProperty(
               CAST(LoadPropertyArrayElement(properties, backing_store_index));
           TNode<Float64T> double_value = ChangeNumberToFloat64(CAST(value));
           StoreHeapNumberValue(heap_number, double_value);
-          // The map store must follow the value write and use release semantics
-          // so background threads (e.g. concurrent compiler) see a consistent
-          // initialized state upon observing the HeapNumber map.
-          StoreMapReleaseNoWriteBarrier(heap_number, RootIndex::kHeapNumberMap);
+          // Migrate UninitializedHeapNumber to mutable HeapNumber.
+          StoreMapNoWriteBarrier(heap_number, RootIndex::kHeapNumberMap);
           Goto(&done);
         }
         BIND(&tagged_rep);
@@ -2401,7 +2372,8 @@ void AccessorAssembler::HandleStoreICSmiHandlerCase(TNode<Word32T> handler_word,
   BIND(&if_heap_object_field);
   {
     Comment("heap object field checks");
-    CheckHeapObjectTypeMatchesDescriptor(handler_word, holder, value, miss);
+    CheckHeapObjectTypeMatchesDescriptor(handler_word, holder, value, mode,
+                                         miss);
 
     Comment("store heap object field");
     HandleStoreFieldAndReturn(handler_word, holder, value, std::nullopt,
@@ -2438,15 +2410,19 @@ void AccessorAssembler::HandleStoreICSmiHandlerCase(TNode<Word32T> handler_word,
 
 void AccessorAssembler::CheckHeapObjectTypeMatchesDescriptor(
     TNode<Word32T> handler_word, TNode<JSObject> holder, TNode<Object> value,
-    Label* bailout) {
+    StoreICMode mode, Label* bailout) {
   GotoIf(TaggedIsSmi(value), bailout);
 
   Label done(this);
   // Skip field type check in favor of constant value check when storing
   // to constant field.
-  GotoIf(Word32Equal(DecodeWord32<StoreHandler::KindBits>(handler_word),
-                     STORE_KIND(kConstField)),
-         &done);
+  if (mode != StoreICMode::kDefineNamedOwnInLiteral) {
+    // DefineNamedOwnInLiteral skips the constant value check
+    // when storing, so we need to do this field type check here.
+    GotoIf(Word32Equal(DecodeWord32<StoreHandler::KindBits>(handler_word),
+                       STORE_KIND(kConstField)),
+           &done);
+  }
   TNode<IntPtrT> descriptor =
       Signed(DecodeWordFromWord32<StoreHandler::DescriptorBits>(handler_word));
   TNode<MaybeObject> field_type =
@@ -2529,16 +2505,15 @@ void AccessorAssembler::HandleStoreFieldAndReturn(
   bool maybe_initializing_store;
   switch (mode) {
     case StoreICMode::kDefineNamedOwn:
+    // This might or might not be an initializing store; but this direction
+    // (setting maybe_initializing_store to true) is fine.
+    case StoreICMode::kDefineNamedOwnInLiteral:
     case StoreICMode::kDefineKeyedOwn:
       maybe_initializing_store = true;
       break;
     case StoreICMode::kDefault:
       maybe_initializing_store = false;
       break;
-  }
-
-  if (store_value_as_double) {
-    double_value = Float64SilenceNaN(*double_value);
   }
 
   TNode<BoolT> is_inobject =
@@ -2577,13 +2552,18 @@ void AccessorAssembler::HandleStoreFieldAndReturn(
     offset = actual_offset.value();
   }
 
-  // Do constant value check if necessary.
+  // Do constant value check if necessary. In
+  // StoreICMode::kDefineNamedOwnInLiteral, we can store to const fields without
+  // invalidating the constness.
   Label do_store(this);
-  GotoIfNot(Word32Equal(DecodeWord32<StoreHandler::KindBits>(handler_word),
-                        STORE_KIND(kConstField)),
-            &do_store);
-  {
+  if (mode == StoreICMode::kDefineNamedOwnInLiteral) {
+    Goto(&do_store);
+  } else {
+    GotoIfNot(Word32Equal(DecodeWord32<StoreHandler::KindBits>(handler_word),
+                          STORE_KIND(kConstField)),
+              &do_store);
     if (store_value_as_double) {
+      CSA_DCHECK(this, IsHeapNumber(property_storage));
       TNode<Float64T> current_value =
           LoadObjectField<Float64T>(property_storage, offset);
       GotoIfNotSameNumberBitPattern(current_value, *double_value, miss);
@@ -2600,11 +2580,8 @@ void AccessorAssembler::HandleStoreFieldAndReturn(
   if (store_value_as_double) {
     StoreObjectFieldNoWriteBarrier(property_storage, offset, *double_value);
     if (maybe_initializing_store) {
-      // The map store must follow the value write and use release semantics so
-      // background threads (e.g. concurrent compiler) see a consistent
-      // initialized state upon observing the HeapNumber map.
-      StoreMapReleaseNoWriteBarrier(property_storage,
-                                    RootIndex::kHeapNumberMap);
+      // Migrate UninitializedHeapNumber to mutable HeapNumber.
+      StoreMapNoWriteBarrier(property_storage, RootIndex::kHeapNumberMap);
     }
   } else if (representation.IsSmi()) {
     TNode<Smi> value_smi = CAST(value);
@@ -4302,16 +4279,17 @@ void AccessorAssembler::StoreIC(const StoreICParameters* p) {
   {
     // TODO(v8:12548): refactor SetNamedIC as a subclass of StoreIC, which can
     // be called here and below when !p->IsDefineNamedOwn().
-    auto builtin = p->IsDefineNamedOwn() ? Builtin::kDefineNamedOwnIC_NoFeedback
-                                         : Builtin::kStoreIC_NoFeedback;
+    auto builtin = p->IsAnyDefineNamedOwn()
+                       ? Builtin::kDefineNamedOwnIC_NoFeedback
+                       : Builtin::kStoreIC_NoFeedback;
     TailCallBuiltin(builtin, p->context(), p->receiver(), p->name(),
                     p->value());
   }
 
   BIND(&miss);
   {
-    auto runtime = p->IsDefineNamedOwn() ? Runtime::kDefineNamedOwnIC_Miss
-                                         : Runtime::kStoreIC_Miss;
+    auto runtime = p->IsAnyDefineNamedOwn() ? Runtime::kDefineNamedOwnIC_Miss
+                                            : Runtime::kStoreIC_Miss;
     TailCallRuntime(runtime, p->context(), p->value(), p->slot(), p->vector(),
                     p->receiver(), p->name());
   }
@@ -5585,7 +5563,7 @@ void AccessorAssembler::GenerateStoreICBaseline() {
                   vector);
 }
 
-void AccessorAssembler::GenerateDefineNamedOwnIC() {
+void AccessorAssembler::GenerateDefineNamedOwnIC(bool in_literal) {
   using Descriptor = StoreWithVectorDescriptor;
 
   auto receiver = Parameter<JSAny>(Descriptor::kReceiver);
@@ -5598,13 +5576,14 @@ void AccessorAssembler::GenerateDefineNamedOwnIC() {
 
   StoreICParameters p =
       MakeStoreICParameters(context, receiver, name, value, flags, slot, vector,
-                            StoreICMode::kDefineNamedOwn);
+                            in_literal ? StoreICMode::kDefineNamedOwnInLiteral
+                                       : StoreICMode::kDefineNamedOwn);
   // StoreIC is a generic helper than handle both set and define own
   // named stores.
   StoreIC(&p);
 }
 
-void AccessorAssembler::GenerateDefineNamedOwnICTrampoline() {
+void AccessorAssembler::GenerateDefineNamedOwnICTrampoline(bool in_literal) {
   using Descriptor = StoreDescriptor;
 
   auto receiver = Parameter<JSAny>(Descriptor::kReceiver);
@@ -5614,11 +5593,12 @@ void AccessorAssembler::GenerateDefineNamedOwnICTrampoline() {
   auto context = Parameter<Context>(Descriptor::kContext);
   TNode<FeedbackVector> vector = LoadFeedbackVectorForStub();
 
-  TailCallBuiltin(Builtin::kDefineNamedOwnIC, context, receiver, name, value,
-                  slot, vector);
+  Builtin builtin = in_literal ? Builtin::kDefineNamedOwnInLiteralIC
+                               : Builtin::kDefineNamedOwnIC;
+  TailCallBuiltin(builtin, context, receiver, name, value, slot, vector);
 }
 
-void AccessorAssembler::GenerateDefineNamedOwnICBaseline() {
+void AccessorAssembler::GenerateDefineNamedOwnICBaseline(bool in_literal) {
   using Descriptor = StoreWithVectorDescriptor;
 
   auto receiver = Parameter<JSAny>(Descriptor::kReceiver);
@@ -5628,8 +5608,9 @@ void AccessorAssembler::GenerateDefineNamedOwnICBaseline() {
   TNode<FeedbackVector> vector = LoadFeedbackVectorFromBaseline();
   TNode<Context> context = LoadContextFromBaseline();
 
-  TailCallBuiltin(Builtin::kDefineNamedOwnIC, context, receiver, name, value,
-                  slot, vector);
+  Builtin builtin = in_literal ? Builtin::kDefineNamedOwnInLiteralIC
+                               : Builtin::kDefineNamedOwnIC;
+  TailCallBuiltin(builtin, context, receiver, name, value, slot, vector);
 }
 
 void AccessorAssembler::GenerateKeyedStoreIC() {

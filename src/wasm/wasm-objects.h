@@ -338,10 +338,10 @@ V8_OBJECT class WasmTableObject : public JSObject {
   TaggedMember<Smi> current_length_;
   TaggedMember<UnionOf<Smi, HeapNumber, BigInt, Undefined>> maximum_length_;
   TaggedMember<Smi> raw_type_;
-  TrustedPointerMember<WasmDispatchTable, kWasmDispatchTableIndirectPointerTag>
+  TrustedPointerMember<WasmDispatchTable, kWasmDispatchTableTrustedPointerTag>
       trusted_dispatch_table_;
   TrustedPointerMember<WasmTrustedInstanceData,
-                       kWasmTrustedInstanceDataIndirectPointerTag>
+                       kWasmTrustedInstanceDataTrustedPointerTag>
       trusted_data_;
   uint8_t address_type_ V8_TQ_TYPE(AddressType);
   uint8_t padding_for_address_type_0_;
@@ -549,7 +549,7 @@ V8_OBJECT class WasmGlobalObject : public JSObject {
   static const int kHeaderSize;
 
   TrustedPointerMember<WasmTrustedInstanceData,
-                       kWasmTrustedInstanceDataIndirectPointerTag>
+                       kWasmTrustedInstanceDataTrustedPointerTag>
       trusted_data_;
   TaggedMember<BufferType> buffer_;
   TaggedMember<Smi> offset_;
@@ -872,7 +872,7 @@ V8_OBJECT class WasmInstanceObject : public JSObject {
   static const int kHeaderSize;
 
   TrustedPointerMember<WasmTrustedInstanceData,
-                       kWasmTrustedInstanceDataIndirectPointerTag>
+                       kWasmTrustedInstanceDataTrustedPointerTag>
       trusted_data_;
   TaggedMember<WasmModuleObject> module_object_;
   TaggedMember<JSObject> exports_object_;
@@ -921,7 +921,7 @@ V8_OBJECT class WasmTagObject : public JSObject {
   TaggedMember<HeapObject> tag_;
   TaggedMember<Smi> canonical_type_index_;
   TrustedPointerMember<WasmTrustedInstanceData,
-                       kWasmTrustedInstanceDataIndirectPointerTag>
+                       kWasmTrustedInstanceDataTrustedPointerTag>
       trusted_data_;
 } V8_OBJECT_END;
 
@@ -1534,7 +1534,7 @@ V8_OBJECT class WasmFuncRef : public HeapObject {
   static const int kSize;
 
   TrustedPointerMember<WasmInternalFunction,
-                       kWasmInternalFunctionIndirectPointerTag>
+                       kWasmInternalFunctionTrustedPointerTag>
       trusted_internal_;
 } V8_OBJECT_END;
 
@@ -1589,7 +1589,7 @@ V8_OBJECT class WasmResumeData : public HeapObject {
   static const int kHeaderSize;
   static const int kSize;
 
-  TrustedPointerMember<WasmSuspenderObject, kWasmSuspenderIndirectPointerTag>
+  TrustedPointerMember<WasmSuspenderObject, kWasmSuspenderTrustedPointerTag>
       trusted_suspender_;
   TaggedMember<Smi> on_resume_;
 } V8_OBJECT_END;
@@ -1720,7 +1720,6 @@ V8_OBJECT class WasmTypeInfo : public HeapObject {
   uint32_t canonical_type_;
   uint32_t canonical_element_type_;
   V8_TQ_CONST TaggedMember<Smi> supertypes_length_;
-  V8_TQ_TAIL_NAME(supertypes);
   V8_TQ_TAIL_LENGTH(supertypes_length);
   FLEXIBLE_ARRAY_MEMBER(TaggedMember<Object>, supertypes);
 } V8_OBJECT_END;
@@ -1793,9 +1792,13 @@ V8_OBJECT class WasmStruct : public WasmObject {
   class BodyDescriptor;
 
   static const int kHeaderSize;
+  static const int kMaxInstanceSize;
 } V8_OBJECT_END;
 
 inline constexpr int WasmStruct::kHeaderSize = sizeof(WasmStruct);
+inline constexpr int WasmStruct::kMaxInstanceSize =
+    WasmStruct::kHeaderSize +
+    wasm::kMaxValueTypeSize * wasm::kV8MaxWasmStructFields;
 
 int WasmStruct::Size(const wasm::StructType* type) {
   // Object size must fit into a Smi (because of runtime functions), and its
@@ -1854,15 +1857,28 @@ V8_OBJECT class WasmCustomMap : public Map {
   class BodyDescriptor;
 
   static const int kHeaderSize;
+  static const int kMaxInstanceSize;
 
   TaggedMember<Union<WasmCustomMapWrapper, Null>> js_wrapper_;
   // To save memory, we could store the NativeContext in the {js_wrapper} field
   // before allocating the wrapper, but that would make checking for the
   // wrapper's presence more expensive.
+  // We currently also need the NC for prototype chain validity cells.
+  // TODO(jkummerow): Find a more elegant solution.
   TaggedMember<NativeContext> native_context_for_wrapper_;
 } V8_OBJECT_END;
 
 inline constexpr int WasmCustomMap::kHeaderSize = sizeof(WasmCustomMap);
+inline constexpr int WasmCustomMap::kMaxInstanceSize =
+    WasmCustomMap::kHeaderSize +
+    wasm::kMaxValueTypeSize * wasm::kV8MaxWasmStructFields;
+
+int WasmStruct::FieldOffset(const wasm::StructType* type, int field_index) {
+  int header_size = type->is_descriptor() && v8_flags.wasm_merged_descriptors
+                        ? WasmCustomMap::kHeaderSize
+                        : WasmStruct::kHeaderSize;
+  return header_size + type->field_offset(field_index);
+}
 
 int WasmCustomMap::Size(const wasm::StructType* type) {
   // Object size must fit into a Smi (because of runtime functions), and its
@@ -2168,7 +2184,7 @@ V8_OBJECT class WasmNull : public HeapObject {
 // If {opt_native_context} is not null, creates a contextful map bound to
 // that context; otherwise creates a context-independent map (which must then
 // not point to any context-specific objects!).
-DirectHandle<Map> CreateStructMap(
+V8_EXPORT_PRIVATE DirectHandle<Map> CreateStructMap(
     Isolate* isolate, wasm::CanonicalTypeIndex type,
     DirectHandle<Map> opt_rtt_parent, int num_supertypes,
     DirectHandle<NativeContext> opt_native_context);
@@ -2202,11 +2218,16 @@ MaybeDirectHandle<Object> JSToWasmObject(Isolate* isolate,
                                          ValueType expected,
                                          const char** error_message);
 
+enum UnshareStringsMode : bool {
+  kKeepSharedStrings = false,
+  kUnshareStrings = true
+};
 // Takes a {value} in the Wasm representation and transforms it to the
 // respective JS representation. The caller is responsible for not providing an
 // object which cannot be transformed to JS.
 DirectHandle<Object> WasmToJSObject(Isolate* isolate,
-                                    DirectHandle<Object> value);
+                                    DirectHandle<Object> value,
+                                    UnshareStringsMode unshare_strings);
 
 }  // namespace wasm
 }  // namespace internal

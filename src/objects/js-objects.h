@@ -302,6 +302,8 @@ V8_OBJECT class JSReceiver : public HeapObject {
   GetCreationContext() const;
   V8_EXPORT_PRIVATE inline MaybeDirectHandle<NativeContext> GetCreationContext(
       Isolate* isolate) const;
+  V8_EXPORT_PRIVATE static Tagged<NativeContext> GetCreationContext_Slow(
+      Tagged<Map> map);
 
   V8_WARN_UNUSED_RESULT static inline Maybe<PropertyAttributes>
   GetPropertyAttributes(Isolate* isolate, DirectHandle<JSReceiver> object,
@@ -336,6 +338,12 @@ V8_OBJECT class JSReceiver : public HeapObject {
   V8_EXPORT_PRIVATE static Handle<Object> GetDataProperty(
       LookupIterator* it,
       AllowAllocation allow_allocation = AllowAllocation{true});
+
+  // Like GetDataProperty, but returns an empty handle (without throwing) if
+  // the lookup doesn't end at a data property, or if completing it would
+  // require calling an interceptor, a proxy trap or any getter other than a
+  // side-effect free AccessorInfo getter.
+  static MaybeHandle<Object> TryGetDataProperty(LookupIterator* it);
 
   // Retrieves a permanent object identity hash code. The undefined value might
   // be returned in case no hash was created yet.
@@ -832,8 +840,7 @@ V8_OBJECT class JSObject : public JSReceiver {
                                            Tagged<Object> value,
                                            SeqCstAccessTag tag);
   inline void WriteToField(InternalIndex descriptor, PropertyDetails details,
-                           Tagged<Object> value,
-                           bool initializing_store = false);
+                           Tagged<Object> value);
 
   inline Tagged<Object> RawFastInobjectPropertyAtSwap(FieldIndex index,
                                                       Tagged<Object> value,
@@ -1059,6 +1066,14 @@ static_assert(JSObject::kMaxInObjectProperties <= kMaxNumberOfDescriptors);
 static_assert(JSObject::kHeaderSize + JSObject::kMaxEmbedderFields *
                                           kEmbedderDataSlotSizeInTaggedSlots <=
               JSObject::kMaxInstanceSize);
+
+// JSObject alias added only because of IsJSObjectExact() predicate, which
+// checks for the exact instance type JS_OBJECT_TYPE instead of a range check:
+// [FIRST_JS_OBJECT_TYPE, LAST_JS_OBJECT_TYPE].
+V8_OBJECT
+class JSObjectExact final : public JSObject {
+  V8_IT_NO_AUTO_CHECKER;
+} V8_OBJECT_END;
 
 // An abstract superclass for JSObjects that may contain EmbedderDataSlots.
 // Carries no fields itself; the in-instance tail ([embedder fields] followed

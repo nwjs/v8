@@ -140,7 +140,8 @@ DirectHandle<String> WasmModuleObject::ExtractUtf8StringFromModuleBytes(
   DCHECK_IMPLIES(shared, !internalize);
   return internalize
              ? factory->InternalizeUtf8String(
-                   base::Vector<const char>::cast(name_vec))
+                   {reinterpret_cast<const char*>(name_vec.begin()),
+                    name_vec.size()})
              : factory
                    ->NewStringFromUtf8(
                        name_vec, UnicodeConfig(unibrow::Utf8Variant::kLossyUtf8,
@@ -1108,7 +1109,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
     // There are different limits per platform, thus crash if the correctness
     // fuzzer is running.
     if (v8_flags.correctness_fuzzer_suppressions) {
-      FATAL("could not grow wasm memory");
+      base::FatalNoSecurityImpact("could not grow wasm memory");
     }
     return -1;
   }
@@ -1182,7 +1183,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
   if (!new_backing_store) {
     // Crash on out-of-memory if the correctness fuzzer is running.
     if (v8_flags.correctness_fuzzer_suppressions) {
-      FATAL("could not grow wasm memory");
+      base::FatalNoSecurityImpact("could not grow wasm memory");
     }
     // Set the non-determinism flag in the WasmEngine.
     wasm::WasmEngine::set_had_nondeterminism();
@@ -1400,7 +1401,7 @@ Tagged<Object> ImportedFunctionEntry::maybe_callable() {
 }
 
 Tagged<JSReceiver> ImportedFunctionEntry::callable() {
-  return TrustedCast<JSReceiver>(
+  return Cast<JSReceiver>(
       TrustedCast<WasmImportData>(implicit_arg())->callable());
 }
 
@@ -1451,7 +1452,7 @@ void WasmTrustedInstanceData::SetRawMemory(uint32_t memory_index,
     CHECK_EQ(size_or_address,
              reinterpret_cast<Address>(
                  TrustedCast<TrustedManaged<BackingStore>>(backing_store_obj)
-                     ->raw()
+                     ->raw(DisallowGarbageCollection{})
                      ->byte_length_address()));
   }
   // All memory bases and sizes (or addresses of atomic sizes for shared
@@ -1612,17 +1613,6 @@ DirectHandle<WasmTrustedInstanceData> WasmTrustedInstanceData::New(
   instance_object->set_trusted_data(*trusted_data);
   instance_object->set_module_object(*module_object);
   trusted_data->set_instance_object(*instance_object);
-
-  // Insert the new instance into the script's weak list of instances. This
-  // list is used for breakpoints affecting all instances belonging to the
-  // script.
-  DCHECK_EQ(module_object->script()->type(), Script::Type::kWasm);
-  DirectHandle<WeakArrayList> weak_instance_list(
-      module_object->script()->wasm_weak_instance_list(), isolate);
-  weak_instance_list =
-      WeakArrayList::Append(isolate, weak_instance_list,
-                            MaybeObjectDirectHandle::Weak(instance_object));
-  module_object->script()->set_wasm_weak_instance_list(*weak_instance_list);
 
   return trusted_data;
 }
@@ -2986,7 +2976,7 @@ std::unique_ptr<char[]> WasmExportedFunction::GetDebugName(
   size_t len = strlen(kPrefix) + sig->all().size() + 2;
   auto buffer = base::UniqueArray<char>::New(len);
   memcpy(buffer.begin(), kPrefix, strlen(kPrefix));
-  PrintSignature(buffer.as_vector() + strlen(kPrefix), sig);
+  PrintSignature(buffer.subspan(strlen(kPrefix)), sig);
   return buffer.ReleaseData();
 }
 
@@ -3472,7 +3462,8 @@ MaybeDirectHandle<Object> JSToWasmObject(Isolate* isolate,
 }
 
 DirectHandle<Object> WasmToJSObject(Isolate* isolate,
-                                    DirectHandle<Object> value) {
+                                    DirectHandle<Object> value,
+                                    UnshareStringsMode unshare_strings) {
   if (IsWasmNull(*value)) {
     return direct_handle(ReadOnlyRoots(isolate).null_value(), isolate);
   }
@@ -3493,9 +3484,11 @@ DirectHandle<Object> WasmToJSObject(Isolate* isolate,
     return WasmInternalFunction::GetOrCreateExternal(internal);
   }
   if (IsString(*value)) {
-    DirectHandle<String> string = Cast<String>(value);
-    if (HeapLayout::InWritableSharedSpace(*string)) {
-      return String::Unshare(isolate, string);
+    if (unshare_strings) {
+      DirectHandle<String> string = Cast<String>(value);
+      if (HeapLayout::InWritableSharedSpace(*string)) {
+        return String::Unshare(isolate, string);
+      }
     }
   } else if (IsWasmCustomMap(*value)) {
     DirectHandle<WasmCustomMap> map = Cast<WasmCustomMap>(value);

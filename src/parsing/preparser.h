@@ -90,7 +90,8 @@ class PreParserExpression {
   }
 
   static PreParserExpression Default() {
-    return PreParserExpression(TypeField::encode(kExpression));
+    return PreParserExpression(TypeField::encode(kExpression) |
+                               ExpressionTypeField::encode(kDefaultExpression));
   }
 
   static PreParserExpression FromIdentifier(const PreParserIdentifier& id) {
@@ -288,6 +289,7 @@ class PreParserExpression {
   };
 
   enum ExpressionType {
+    kDefaultExpression,
     kThisExpression,
     kThisPropertyExpression,
     kThisPrivateReferenceExpression,
@@ -1207,7 +1209,7 @@ class PreParser : public ParserBase<PreParser> {
     bool has_default_constructor = !class_info->has_seen_constructor;
     // Account for the default constructor.
     if (has_default_constructor) {
-      bool has_extends = class_info->extends.IsNull();
+      bool has_extends = !class_info->extends.IsNull();
       FunctionKind kind = has_extends ? FunctionKind::kDefaultDerivedConstructor
                                       : FunctionKind::kDefaultBaseConstructor;
       AddSyntheticFunctionDeclaration(kind, pos);
@@ -1306,9 +1308,6 @@ class PreParser : public ParserBase<PreParser> {
       const PreParserExpression& expression) {}
   V8_INLINE static void InferFunctionName() {}
 
-  V8_INLINE static void CheckAssigningFunctionLiteralToProperty(
-      const PreParserExpression& left, const PreParserExpression& right) {}
-
   V8_INLINE bool ShortcutLiteralBinaryExpression(PreParserExpression* x,
                                                  const PreParserExpression& y,
                                                  Token::Value op, int pos) {
@@ -1365,15 +1364,16 @@ class PreParser : public ParserBase<PreParser> {
     return init_block;
   }
 
-  V8_INLINE StatementT DesugarLexicalBindingsInForStatement(
+  V8_INLINE StatementT DesugarLetBindingsInForStatement(
       PreParserStatement loop, PreParserStatement init,
       const PreParserExpression& cond, PreParserStatement next,
       PreParserStatement body, Scope* inner_scope, const ForInfo& for_info) {
-    // See Parser::DesugarLexicalBindingsInForStatement.
+    // See Parser::DesugarLetBindingsInForStatement.
+    DCHECK_GT(for_info.bound_names.length(), 0);
+    DCHECK_EQ(for_info.parsing_result.descriptor.mode, VariableMode::kLet);
     for (auto name : for_info.bound_names) {
       bool was_added;
-      DeclareVariableName(name, for_info.parsing_result.descriptor.mode,
-                          inner_scope, &was_added);
+      DeclareVariableName(name, VariableMode::kLet, inner_scope, &was_added);
     }
     return loop;
   }
@@ -1556,11 +1556,11 @@ class PreParser : public ParserBase<PreParser> {
                                  class_info->autoaccessor_count++),
         VariableMode::kConst, scope, &was_added);
     DCHECK(was_added);
-    FunctionKind kind = is_static ? FunctionKind::kGetterFunction
-                                  : FunctionKind::kStaticGetterFunction;
+    FunctionKind kind = is_static ? FunctionKind::kStaticGetterFunction
+                                  : FunctionKind::kGetterFunction;
     AddSyntheticFunctionDeclaration(kind, pos + 1);
-    kind = is_static ? FunctionKind::kSetterFunction
-                     : FunctionKind::kStaticSetterFunction;
+    kind = is_static ? FunctionKind::kStaticSetterFunction
+                     : FunctionKind::kSetterFunction;
     AddSyntheticFunctionDeclaration(kind, pos + 2);
     return factory()->NewClassLiteralProperty(
         key, value, ClassLiteralProperty::Kind::AUTO_ACCESSOR, is_static,

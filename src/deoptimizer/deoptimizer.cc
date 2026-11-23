@@ -4,12 +4,12 @@
 
 #include "src/deoptimizer/deoptimizer.h"
 
+#include <array>
 #include <optional>
 
 #include "src/base/logging.h"
 #include "src/base/memory.h"
 #include "src/base/numerics/safe_conversions.h"
-#include "src/base/unique-array.h"
 #include "src/builtins/builtins-inl.h"
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/register-configuration.h"
@@ -613,10 +613,6 @@ Address Deoptimizer::EnsureValidReturnAddress(Isolate* isolate,
 
 void Deoptimizer::ComputeOutputFrames(Deoptimizer* deoptimizer) {
   deoptimizer->DoComputeOutputFrames();
-  // TODO(mliedtke,415707239): Ideally we'd only reset this when destroying this
-  // object, however when calling the WasmLiftoffDeoptFinish builtin, we read
-  // from the heap (probably in DEBUG-only code).
-  deoptimizer->disallow_sandbox_access_.reset();
 }
 
 const char* Deoptimizer::MessageFor(DeoptimizeKind kind) {
@@ -801,6 +797,7 @@ Deoptimizer::~Deoptimizer() {
   DCHECK_NULL(shadow_stack_);
 #endif
   DCHECK_NULL(disallow_garbage_collection_);
+  DCHECK(!disallow_sandbox_access_.has_value());
   delete trace_scope_;
 }
 
@@ -824,6 +821,7 @@ void Deoptimizer::DeleteFrameDescriptions() {
   delete disallow_garbage_collection_;
   disallow_garbage_collection_ = nullptr;
 #endif  // DEBUG
+  disallow_sandbox_access_.reset();
 }
 
 Builtin Deoptimizer::GetDeoptimizationEntry(DeoptimizeKind kind) {
@@ -1021,6 +1019,7 @@ CompileWithLiftoffAndGetDeoptInfo(wasm::NativeModule* native_module,
   // WasmCodeManager as a deopt was reached.
   wasm::UnpublishedWasmCode compiled_code =
       native_module->AddCompiledCode(result);
+  compiled_code.for_deopt = true;
   wasm::WasmCodeRefScope code_ref_scope;
   // TODO(mliedtke): This might unoptimize functions because they were inlined
   // into a function that now needs to deopt them while the optimized function
@@ -1235,19 +1234,10 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
           output_frame->SetSimd128Register(liftoff_iter->reg().simd128().code(),
                                            value.simd_value());
         } else if (!Is64() && liftoff_iter->is_gp_reg_pair()) {
-          intptr_t reg_value = kZapValue;
-          switch (value.kind()) {
-            case TranslatedValue::Kind::kInt32:
-              CHECK_EQ(liftoff_iter->kind(), wasm::ValueKind::kI64);
-              // Ensure that the upper half is zeroed out.
-              reg_value = static_cast<uint32_t>(value.int32_value());
-              break;
-            case TranslatedValue::Kind::kTagged:
-              reg_value = value.raw_literal().ptr();
-              break;
-            default:
-              UNREACHABLE();
-          }
+          CHECK_EQ(liftoff_iter->kind(), wasm::ValueKind::kI64);
+          CHECK_EQ(value.kind(), TranslatedValue::Kind::kInt32);
+          // Ensure that the upper half is zeroed out.
+          intptr_t reg_value = static_cast<uint32_t>(value.int32_value());
           int8_t reg = int64_lowering_is_low
                            ? liftoff_iter->reg().low_gp().code()
                            : liftoff_iter->reg().high_gp().code();
@@ -2066,18 +2056,9 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
   {
     AllowSandboxAccess sandbox_access(
         "Fetching DebugBytecodeArray via SFI. This is safe because we verify "
-        "below that the DebugInfo's OriginalBytecodeArray matches the frame's "
+        "below that the SFI's original BytecodeArray matches the frame's "
         "trusted BytecodeArray.");
-    std::optional<Tagged<DebugInfo>> debug_info =
-        translated_frame->raw_shared_info()->TryGetDebugInfo(isolate());
-    if (debug_info.has_value() && debug_info.value()->HasBreakInfo()) {
-      // Ensure the DebugInfo belongs to this frame's trusted BytecodeArray in
-      // case the untrusted SFI reference in the DeoptimizationLiteralArray was
-      // swapped.
-      SBXCHECK_EQ(debug_info.value()->OriginalBytecodeArray(isolate()),
-                  bytecode_array);
-      bytecode_array = debug_info.value()->DebugBytecodeArray(isolate());
-    }
+    bytecode_array = translated_frame->GetActiveBytecodeArray(isolate());
   }
 
   // Allocate and store the output frame description.
@@ -3079,21 +3060,21 @@ void Deoptimizer::DoComputeBuiltinContinuation(
       config->num_allocatable_general_registers();
   for (int i = 0; i < allocatable_register_count; ++i) {
     int code = config->GetAllocatableGeneralCode(i);
-    auto str = base::UniqueArray<char>::NewForOverwrite(128);
+    std::array<char, 128> str;
     if (verbose_tracing_enabled()) {
       if (BuiltinContinuationModeIsJavaScript(mode) &&
           code == kJavaScriptCallArgCountRegister.code()) {
-        SNPrintF(
-            str.as_vector(),
+        base::SNPrintF(
+            str,
             "tagged argument count %s (will be untagged by continuation)\n",
             RegisterName(Register::from_code(code)));
       } else {
-        SNPrintF(str.as_vector(), "builtin register argument %s\n",
-                 RegisterName(Register::from_code(code)));
+        base::SNPrintF(str, "builtin register argument %s\n",
+                       RegisterName(Register::from_code(code)));
       }
     }
     frame_writer.PushTranslatedValue(
-        register_values[code], verbose_tracing_enabled() ? str.begin() : "");
+        register_values[code], verbose_tracing_enabled() ? str.data() : "");
   }
 
   // Some architectures must pad the stack frame with extra stack slots

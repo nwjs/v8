@@ -107,13 +107,18 @@ class LiftoffAssembler : public MacroAssembler {
   // A tagged value known to be a Smi can be treated like a ptr-sized int.
   static constexpr ValueKind kSmiKind = kTaggedSize == kInt32Size ? kI32 : kI64;
 
-  // Whether {StoreConst} is implemented, i.e. whether integer constants can be
-  // stored to memory as immediates.
+  // Whether {StoreConst} is supported for the given store type and constant
+  // value.
+  static constexpr bool CanStoreConst(StoreType type, int32_t value) {
+    if (type.value() == StoreType::kF32StoreF16) return false;
 #if V8_TARGET_ARCH_X64
-  static constexpr bool kSupportsStoreConst = true;
+    return true;
+#elif V8_TARGET_ARCH_ARM64
+    return value == 0;
 #else
-  static constexpr bool kSupportsStoreConst = false;
+    return false;
 #endif
+  }
 
   using ValueKindSig = Signature<ValueKind>;
 
@@ -718,7 +723,7 @@ class LiftoffAssembler : public MacroAssembler {
                                      Register mem_start, bool reload_mem_start,
                                      int mem_index);
   inline void LoadTrustedPointer(Register dst, Register src_addr, int offset,
-                                 IndirectPointerTag tag);
+                                 TrustedPointerTag tag);
   inline void LoadFromInstance(Register dst, Register instance, int offset,
                                int size);
   inline void LoadTaggedPointerFromInstance(Register dst, Register instance,
@@ -777,10 +782,10 @@ class LiftoffAssembler : public MacroAssembler {
                     LiftoffRegList pinned,
                     uint32_t* trapping_store_pc = nullptr,
                     bool is_store_mem = false, bool i64_offset = false);
-  // Store the integer constant {value} (sign-extended for i64 stores) as an
-  // immediate. Only implemented on architectures with an immediate store form;
-  // see {kSupportsStoreConst}.
-#if V8_TARGET_ARCH_X64
+  // Store the integer or float constant {value} (sign-extended for 64-bit
+  // stores) as an immediate. Only implemented on architectures where
+  // {CanStoreConst} can return true.
+#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64
   inline void StoreConst(Register dst_addr, Register offset_reg,
                          uintptr_t offset_imm, int32_t value, StoreType type,
                          uint32_t* trapping_store_pc, bool i64_offset);
@@ -1683,7 +1688,7 @@ class LiftoffAssembler : public MacroAssembler {
   void set_num_locals(uint32_t num_locals);
 
   int GetTotalFrameSlotCountForGC() const;
-  int OolSpillCount() const;
+  V8_EXPORT_PRIVATE int OolSpillCount() const;
 
   int GetTotalFrameSize() const { return max_used_spill_offset_; }
 

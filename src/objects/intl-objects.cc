@@ -2116,7 +2116,7 @@ std::string BestFitMatcher(Isolate* isolate,
                            const std::vector<std::string>& requested_locales) {
   UErrorCode status = U_ZERO_ERROR;
   std::vector<icu::Locale> locales;
-  for (std::string locale_str : requested_locales) {
+  for (const std::string& locale_str : requested_locales) {
     icu::Locale locale = icu::Locale::forLanguageTag(locale_str, status);
     if (U_SUCCESS(status)) {
       locales.push_back(locale);
@@ -2179,8 +2179,7 @@ MaybeDirectHandle<JSArray> CreateArrayFromList(
     // a. Let status be CreateDataProperty(array, ! ToString(n), e).
     const std::string& part = elements[i];
     DirectHandle<String> value =
-        factory->NewStringFromUtf8(base::CStrVector(part.c_str()))
-            .ToHandleChecked();
+        factory->NewStringFromUtf8(part).ToHandleChecked();
     MAYBE_RETURN(JSObject::AddDataElement(isolate, array, i, value, attr), {});
   }
   // 5. Return array.

@@ -282,7 +282,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
         FieldMemOperand(a1, offsetof(JSFunction, shared_function_info_)));
     __ Load32U(func_info, FieldMemOperand(
                               func_info, offsetof(SharedFunctionInfo, flags_)));
-    __ DecodeField<SharedFunctionInfo::FunctionKindBits>(func_info);
+    __ DecodeField<SharedFunctionInfo::Flags::FunctionKindBits>(func_info);
     __ JumpIfIsInRange(
         func_info,
         static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
@@ -1110,7 +1110,8 @@ void ResetFeedbackVectorOsrUrgency(MacroAssembler* masm,
   DCHECK(!AreAliased(feedback_vector, scratch));
   __ Lbu(scratch, FieldMemOperand(feedback_vector,
                                   offsetof(FeedbackVector, osr_state_)));
-  __ And(scratch, scratch, Operand(~FeedbackVector::OsrUrgencyBits::kMask));
+  __ And(scratch, scratch,
+         Operand(~FeedbackVector::OsrState::OsrUrgencyBits::kMask));
   __ Sb(scratch,
         FieldMemOperand(feedback_vector, offsetof(FeedbackVector, osr_state_)));
 }
@@ -1378,9 +1379,16 @@ void Builtins::Generate_InterpreterEntryTrampoline(
     __ Lw(scratch, FieldMemOperand(bytecode_array,
                                    offsetof(BytecodeArray, frame_size_)));
 
-    // Do a stack check to ensure we don't go over the limit.
+    // Do a stack check to ensure we don't go over the limit. Include the
+    // arguments, which are also stored in the register file, in the frame size,
+    // to match BaselineCompiler::Prologue.
     DEFINE_REG(stack_addr);
-    __ SubWord(stack_addr, sp, Operand(scratch));
+    __ Lhu(stack_addr,
+           FieldMemOperand(bytecode_array,
+                           offsetof(BytecodeArray, max_arguments_)));
+    __ CalcScaledAddress(stack_addr, scratch, stack_addr,
+                         kSystemPointerSizeLog2);
+    __ SubWord(stack_addr, sp, Operand(stack_addr));
     DEFINE_REG(stack_limit);
     __ LoadStackLimit(stack_limit, StackLimitKind::kRealStackLimit);
     __ Branch(&stack_overflow, Uless, stack_addr, Operand(stack_limit));
@@ -1799,12 +1807,13 @@ void Builtins::Generate_InterpreterPushArgsThenFastConstructFunction(
   __ LoadTaggedField(
       a2, FieldMemOperand(a1, offsetof(JSFunction, shared_function_info_)));
   __ Load32U(a2, FieldMemOperand(a2, offsetof(SharedFunctionInfo, flags_)));
-  __ And(a5, a2, Operand(SharedFunctionInfo::ConstructAsBuiltinBit::kMask));
+  __ And(a5, a2,
+         Operand(SharedFunctionInfo::Flags::ConstructAsBuiltinBit::kMask));
   __ Branch(&builtin_call, ne, a5, Operand(zero_reg));
 
   // Check if we need to create an implicit receiver.
   Label not_create_implicit_receiver;
-  __ DecodeField<SharedFunctionInfo::FunctionKindBits>(a2);
+  __ DecodeField<SharedFunctionInfo::Flags::FunctionKindBits>(a2);
   __ JumpIfIsInRange(
       a2, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
       static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
@@ -2827,8 +2836,8 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   Label done_convert;
   __ Load32U(a3, FieldMemOperand(a2, offsetof(SharedFunctionInfo, flags_)));
   __ And(kScratchReg, a3,
-         Operand(SharedFunctionInfo::IsNativeBit::kMask |
-                 SharedFunctionInfo::IsStrictBit::kMask));
+         Operand(SharedFunctionInfo::Flags::IsNativeBit::kMask |
+                 SharedFunctionInfo::Flags::IsStrictBit::kMask));
   __ Branch(&done_convert, ne, kScratchReg, Operand(zero_reg));
   {
     // ----------- S t a t e -------------
@@ -3026,7 +3035,8 @@ void Builtins::Generate_ConstructFunction(MacroAssembler* masm) {
   __ LoadTaggedField(
       a4, FieldMemOperand(a1, offsetof(JSFunction, shared_function_info_)));
   __ Load32U(a4, FieldMemOperand(a4, offsetof(SharedFunctionInfo, flags_)));
-  __ And(a4, a4, Operand(SharedFunctionInfo::ConstructAsBuiltinBit::kMask));
+  __ And(a4, a4,
+         Operand(SharedFunctionInfo::Flags::ConstructAsBuiltinBit::kMask));
   __ Branch(&call_generic_stub, eq, a4, Operand(zero_reg),
             Label::Distance::kNear);
 
@@ -3688,11 +3698,11 @@ void Builtins::Generate_WasmReturnFromSegment(MacroAssembler* masm) {
   __ RestoreVectorRegisters(simd_saves);
   __ PopAll(gp_saves);
 
+  SwitchSimulatorStackLimit(masm);
   __ Move(sp, fp);
   __ LoadWord(ra, MemOperand(fp, CommonFrameConstants::kCallerPCOffset));
   __ LoadWord(fp, MemOperand(fp, CommonFrameConstants::kCallerFPOffset));
   __ AddWord(sp, sp, Operand(CommonFrameConstants::kFixedFrameSizeAboveFp));
-  SwitchSimulatorStackLimit(masm);
   __ Ret();
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -4085,7 +4095,7 @@ void Generate_WasmResumeHelper(MacroAssembler* masm, wasm::OnResume on_resume) {
       suspender,
       FieldMemOperand(resume_data,
                       offsetof(WasmResumeData, trusted_suspender_)),
-      kWasmSuspenderIndirectPointerTag);
+      kWasmSuspenderTrustedPointerTag);
   regs.ResetExcept(suspender);
 
   // -------------------------------------------
@@ -5529,7 +5539,7 @@ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
       code_obj,
       FieldMemOperand(code_obj,
                       offsetof(SharedFunctionInfo, trusted_function_data_)),
-      kCodeIndirectPointerTag);
+      kCodeTrustedPointerTag);
 
   // For OSR entry it is safe to assume we always have baseline code.
   if (v8_flags.debug_code) {

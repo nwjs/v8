@@ -18,10 +18,10 @@ namespace v8::internal {
 //   class Map {
 //     struct Bits1 : BitFieldGroup<Bits1, uint8_t> {
 //       using BitFieldGroup::BitFieldGroup;
-//       using IsCallableBit = base::BitField<bool, 0, 1, uint8_t>;
+//       using IsCallableBit = First<bool, 1>;
 //       using IsUndetectableBit = IsCallableBit::Next<bool, 1>;
-//       BIT_FIELD_GETTER(is_callable, IsCallableBit)
-//       BIT_FIELD_GETTER(is_undetectable, IsUndetectableBit)
+//       BIT_FIELD_GROUP_ACCESSORS(is_callable, IsCallableBit)
+//       BIT_FIELD_GROUP_ACCESSORS(is_undetectable, IsUndetectableBit)
 //     };
 //     std::atomic<Bits1> bit_field_;
 //   };
@@ -30,7 +30,7 @@ namespace v8::internal {
 // layout JSON, from which Torque derives (or verifies) the corresponding
 // bitfield struct. Naming and layout requirements:
 //  - Every type alias in the struct must be a base::BitField; they are read in
-//    declaration order, which must be bit order without gaps.
+//    declaration order. Fields may overlap, but must fit the storage.
 //  - The Torque field name is the alias name without its Bit/Bits suffix, in
 //    snake_case (IsCallableBit -> is_callable). The getter names follow the
 //    same convention.
@@ -40,18 +40,25 @@ namespace v8::internal {
 // Implicit conversions to and from U support Bit::decode(bit_field()) and
 // set_bit_field(Bit::update(bit_field(), v)). get<Bit>() reads a field;
 // with<Bit>(v) returns a copy with that field updated. The caller must store
-// the updated copy back to the member.
+// the updated copy back to the member. value() returns the underlying integer.
+//
+// Use SmiBitFieldMember<Group> for groups stored as Smis.
 template <typename Derived, typename U>
 class BitFieldGroup {
  public:
   static_assert(std::is_unsigned_v<U>);
 
+  using GroupType = Derived;
   using UnderlyingType = U;
+
+  template <typename T, int size>
+  using First = base::BitField<T, 0, size, U>;
 
   constexpr BitFieldGroup() = default;
   // NOLINTNEXTLINE(runtime/explicit)
   constexpr BitFieldGroup(U value) : value_(value) {}
   constexpr operator U() const { return value_; }
+  constexpr U value() const { return value_; }
 
   template <typename Bit>
   constexpr typename Bit::FieldType get() const {

@@ -75,7 +75,7 @@ _STRUCT_TYPES = frozenset({
 
 _POINTER_TAG_TYPES = frozenset({
     "v8::internal::ExternalPointerTag",
-    "v8::internal::IndirectPointerTag",
+    "v8::internal::TrustedPointerTag",
 })
 
 
@@ -148,12 +148,13 @@ def _bit_field_group_base(decl: cindex.Cursor) -> cindex.Type | None:
   return None
 
 
-def _cpp_bit_field_struct_name(decl: cindex.Cursor) -> str:
-  """The C++ name of a BitFieldGroup, including enclosing classes."""
+def _cpp_class_scoped_name(decl: cindex.Cursor) -> str:
+  """The C++ name of `decl`, qualified by its enclosing classes."""
   parts = []
   while decl is not None and decl.kind in (cindex.CursorKind.CLASS_DECL,
                                            cindex.CursorKind.STRUCT_DECL,
-                                           cindex.CursorKind.CLASS_TEMPLATE):
+                                           cindex.CursorKind.CLASS_TEMPLATE,
+                                           cindex.CursorKind.ENUM_DECL):
     parts.append(decl.spelling)
     decl = decl.semantic_parent
   return "::".join(reversed(parts))
@@ -181,7 +182,7 @@ def _template_args(t: cindex.Type) -> list[cindex.Type]:
 
 def _pointer_tag_names(field: cindex.Cursor) -> list[str]:
   """Names of the pointer-tag constants referenced in the field's
-  declared type (e.g. kFooIndirectPointerTag, or a kFoo...TagRange
+  declared type (e.g. kFooTrustedPointerTag, or a kFoo...TagRange
   constant). The reference can sit below an implicit conversion, so
   walk the whole subtree; the filter keeps unrelated references (array
   extents, defaults) out."""
@@ -327,11 +328,16 @@ class _Extractor:
     parts = args[0].get_canonical().spelling.split("::")
     return named_type(parts[-1], namespaces=tuple(parts[:-1]))
 
-  def _bitfield_storage(self, field: cindex.Cursor, name: str,
-                        group: cindex.Cursor, base: cindex.Type) -> StorageType:
-    """The bit layout of a BitFieldGroup member: every type alias of
-    the group is a base::BitField, read in declaration order (which is
-    bit order) for its name, field type, shift and width."""
+  def _bitfield_storage(self,
+                        field: cindex.Cursor,
+                        name: str,
+                        group: cindex.Cursor,
+                        base: cindex.Type,
+                        smi: bool = False) -> StorageType:
+    """Read direct base::BitField aliases in declaration order.
+
+    Smi storage uses a tagged slot instead of the group's integer width.
+    """
     bits = []
     for alias in group.get_children():
       if alias.kind != cindex.CursorKind.TYPE_ALIAS_DECL:
@@ -352,6 +358,8 @@ class _Extractor:
     if not bits:
       raise LayoutError(f"{_where(field)}: bit field group "
                         f"{group.spelling!r} declares no bit fields")
+    if smi:
+      return StorageType(kind="smi_bitfield", name=name, bits=tuple(bits))
     return StorageType(
         kind="bitfield",
         name=name,
@@ -359,14 +367,26 @@ class _Extractor:
         bits=tuple(bits))
 
   def _bit_field_type(self, t: cindex.Type) -> str:
-    """The C++ name of one bit field's value type."""
+    """The C++ name of one bit field's value type. A base::StrongAlias
+    (SharedFlag, ResizableFlag, ...) is its underlying type; Torque
+    declares such fields as that type."""
     canonical = t.get_canonical()
     if canonical.kind == cindex.TypeKind.BOOL:
       return "bool"
     if canonical.kind == cindex.TypeKind.ENUM:
       decl = canonical.get_declaration()
       mark_visited(self.parsed, decl)
-      return decl.spelling
+      return _cpp_class_scoped_name(decl)
+    if canonical.kind == cindex.TypeKind.RECORD:
+      decl = _decl_of(canonical)
+      if decl is not None and decl.spelling == "StrongAlias":
+        mark_visited(self.parsed, decl)
+        args = _template_args(canonical)
+        if len(args) == 2:
+          return self._bit_field_type(args[1])
+      raise LayoutError(f"unsupported bit field type {t.spelling!r}; only "
+                        f"bool, enums, integers and base::StrongAlias of "
+                        f"those are supported")
     return self._cpp_int_type_of(t).name
 
   def _is_trusted_space_scheme(self, field: cindex.Cursor,
@@ -444,14 +464,14 @@ class _Extractor:
     canonical = elem_type.get_canonical()
     decl = _decl_of(canonical)
 
-    # A bare IndirectPointerHandle member (always atomic-wrapped in
+    # A bare TrustedPointerHandle member (always atomic-wrapped in
     # practice) is an object's own pointer-table entry -- physically
     # the same slot a TrustedPointerMember holds, minus pointee and
     # tag.
-    handle_alias = self.parsed.aliases.get("IndirectPointerHandle")
+    handle_alias = self.parsed.aliases.get("TrustedPointerHandle")
     if handle_alias is None:
       raise LayoutError(
-          f"{_where(field)}: missing IndirectPointerHandle declaration; "
+          f"{_where(field)}: missing TrustedPointerHandle declaration; "
           "update trusted-pointer storage classification")
     written = _decl_of(elem_type)
     if written == handle_alias:
@@ -462,8 +482,8 @@ class _Extractor:
       base = _bit_field_group_base(decl)
       if base is not None:
         mark_visited(self.parsed, decl)
-        return self._bitfield_storage(field, _cpp_bit_field_struct_name(decl),
-                                      decl, base)
+        return self._bitfield_storage(field, _cpp_class_scoped_name(decl), decl,
+                                      base)
 
     if decl is not None and decl.kind in (cindex.CursorKind.CLASS_DECL,
                                           cindex.CursorKind.STRUCT_DECL):
@@ -472,7 +492,7 @@ class _Extractor:
       if name == "atomic":
         # std::atomic<T> has T's size and alignment; the atomicity is
         # accessor semantics, not layout. Prefer the sugared argument
-        # so aliases like IndirectPointerHandle stay recognizable.
+        # so aliases like TrustedPointerHandle stay recognizable.
         args = _template_args(elem_type) or _template_args(canonical)
         if len(args) != 1:
           raise LayoutError(f"{_where(field)}: atomic member without one "
@@ -492,6 +512,16 @@ class _Extractor:
         if self._is_trusted_space_scheme(field, args[1]):
           return StorageType(kind="protected_tagged", arg=arg_type)
         return StorageType(kind="tagged", arg=arg_type)
+      if name == "SmiBitFieldMember":
+        args = _template_args(elem_type) or _template_args(canonical)
+        group = _decl_of(args[0].get_canonical()) if args else None
+        base = _bit_field_group_base(group) if group is not None else None
+        if base is None:
+          raise LayoutError(f"{_where(field)}: SmiBitFieldMember argument "
+                            f"is not a BitFieldGroup")
+        mark_visited(self.parsed, group)
+        return self._bitfield_storage(
+            field, _cpp_class_scoped_name(group), group, base, smi=True)
       if name == "TrustedPointerMember":
         args = _template_args(elem_type) or _template_args(canonical)
         if not args:

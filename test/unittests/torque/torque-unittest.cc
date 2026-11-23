@@ -157,6 +157,9 @@ extern macro SmiUntag(Smi): intptr;
 Convert<intptr, Smi>(s: Smi): intptr {
   return SmiUntag(s);
 }
+Convert<intptr, intptr>(i: intptr): intptr {
+  return i;
+}
 Convert<intptr, constexpr int31>(i: constexpr int31): intptr {
   return %FromConstexpr<intptr>(i);
 }
@@ -914,6 +917,22 @@ TEST(Torque, CatchFirstHandler) {
           "catch handler always has to be first, before any label handler"));
 }
 
+TEST(Torque, OverlappingBitFieldInitializers) {
+  const std::string source = R"(
+    extern macro Unsigned(int32): uint32;
+    bitfield struct S extends uint32 {
+      a: uint32: 3 bit;
+      b: uint32: 3 bit at 2;
+    }
+    @export
+    macro Test(a: uint32, b: uint32): S {
+      return S{a: a, b: b};
+    }
+  )";
+  ExpectFailingCompilation(source,
+                           HasSubstr("Overlapping bitfield initializer: b"));
+}
+
 TEST(Torque, BitFieldLogicalAnd) {
   std::string prelude = R"(
     bitfield struct S extends uint32 {
@@ -1319,7 +1338,8 @@ constexpr const char* kTestLayoutTailBodyLessClass = R"(
   extern class TestBlob extends HeapObject;
 )";
 
-std::string TestTailJson(const char* length_field = "length") {
+std::string TestTailJson(const char* length_field = "length",
+                         bool no_tail = false) {
   size_t t = kTaggedSize;
   std::stringstream s;
   s << R"({"schema_version": 1, )" << TestConfig() << R"("classes": [{)"
@@ -1334,10 +1354,17 @@ std::string TestTailJson(const char* length_field = "length") {
     << R"("tail": {"cpp_name": "flexible_array_member_data_", )"
     << R"("cpp_element_type": "uint8_t", )"
     << R"("offset": )" << 2 * t << R"(, "element_size": 1, )"
-    << R"("element_storage": {"kind": "int", "width": 1, "signed": false}}, )"
-    << R"("annotations": [{"name": "V8_TQ_TAIL_NAME", "arg": "bytes"}, )"
-    << R"({"name": "V8_TQ_TAIL_LENGTH", "arg": ")" << length_field
-    << R"("}]}]})";
+    << R"("element_storage": {"kind": "int", "width": 1, "signed": false}, )"
+    << R"("annotations": [{"name": "V8_TQ_NAME", "arg": "bytes"}]}, )"
+    << R"("annotations": [)";
+  if (length_field != nullptr) {
+    s << R"({"name": "V8_TQ_TAIL_LENGTH", "arg": ")" << length_field << R"("})";
+  }
+  if (no_tail) {
+    if (length_field != nullptr) s << ", ";
+    s << R"({"name": "V8_TQ_NO_TAIL"})";
+  }
+  s << "]}]}";
   return s.str();
 }
 
@@ -1429,19 +1456,10 @@ constexpr const char* kTestLayoutPositions = R"({"schema_version": 1,
 }  // namespace
 
 // The same layout, with the class omitting its tail (V8_TQ_NO_TAIL)
-// instead of naming it: only the fixed header becomes Torque fields.
-std::string TestNoTailJson(bool also_name_the_tail = false) {
-  std::string document = TestTailJson();
-  size_t annotations =
-      document.find(R"("annotations": [{"name": "V8_TQ_TAIL_NAME")");
-  CHECK_NE(annotations, std::string::npos);
-  std::string replacement = R"("annotations": [{"name": "V8_TQ_NO_TAIL"})";
-  if (also_name_the_tail) {
-    replacement += R"(, {"name": "V8_TQ_TAIL_NAME", "arg": "bytes"})"
-                   R"(, {"name": "V8_TQ_TAIL_LENGTH", "arg": "length"})";
-  }
-  replacement += "]}]}";
-  return document.substr(0, annotations) + replacement;
+// instead of indexing it: only the fixed header becomes Torque fields.
+std::string TestNoTailJson(bool also_index_the_tail = false) {
+  return TestTailJson(also_index_the_tail ? "length" : nullptr,
+                      /*no_tail=*/true);
 }
 
 constexpr const char* kTestLayoutNoTailClass = R"(
@@ -1451,82 +1469,47 @@ constexpr const char* kTestLayoutNoTailClass = R"(
   }
 )";
 
-// A tail Torque splits into two indexed sections: the section
-// declarations are on the class as Torque source, because their extents
-// are expressions over Torque fields that C++ does not encode. Optional
-// sections (`name?[cond]`) take the same path; the test prelude has no
-// Smi comparison to write a condition with, so ScopeInfo covers them in
-// the real build.
-std::string TestSectionedJson(const char* sections, bool also_no_tail) {
-  std::string document = TestTailJson();
-  size_t annotations =
-      document.find(R"("annotations": [{"name": "V8_TQ_TAIL_NAME")");
-  CHECK_NE(annotations, std::string::npos);
-  std::string replacement =
-      std::string(
-          R"("annotations": [{"name": "V8_TQ_TAIL_SECTIONS", "arg": ")") +
-      sections + R"("})";
-  if (also_no_tail) replacement += R"(, {"name": "V8_TQ_NO_TAIL"})";
-  return document.substr(0, annotations) + replacement + "]}]}";
-}
-
-constexpr const char* kTestLayoutSectionedClass = R"(
+// Tail lengths can be expressions over preceding fields.
+constexpr const char* kTestLayoutExpressionTailClass = R"(
   @cppObjectLayoutDefinition
   extern class TestBlob extends HeapObject {
     const length: Smi;
-    head[length]: uint8;
-    rest[length]: uint8;
+    bytes[Convert<intptr>(length) * 2]: uint8;
   }
 )";
 
-TEST(TorqueLayoutLoader, ImportsASectionedTail) {
-  ExpectSuccessfulLayoutCompilation(
-      kTestLayoutSectionedClass,
-      TestSectionedJson("head[length]: uint8; rest[length]: uint8;",
-                        /*also_no_tail=*/false),
-      /*use_cpp_layouts=*/true);
+TEST(TorqueLayoutLoader, ImportsATailWithAnExpressionLength) {
+  ExpectSuccessfulLayoutCompilation(kTestLayoutExpressionTailClass,
+                                    TestTailJson("Convert<intptr>(length) * 2"),
+                                    /*use_cpp_layouts=*/true);
+}
+
+TEST(TorqueLayoutLoader, ImportsABodyLessTailWithAnExpressionLength) {
+  ExpectSuccessfulLayoutCompilation(kTestLayoutTailBodyLessClass,
+                                    TestTailJson("Convert<intptr>(length) * 2"),
+                                    /*use_cpp_layouts=*/true);
 }
 
 TEST(TorqueLayoutLoader, RejectsAComplexExtentThatDiffers) {
   // A compound extent must compare on its structure. Mapping every
   // unsupported expression to one placeholder would let these two match.
-  ExpectFailingLayoutCompilation(
-      R"(
-  @cppObjectLayoutDefinition
-  extern class TestBlob extends HeapObject {
-    const length: Smi;
-    head[Convert<intptr>(length) * 2]: uint8;
-    rest[length]: uint8;
-  }
-)",
-      TestSectionedJson(
-          "head[Convert<intptr>(length) * 4]: uint8; rest[length]: uint8;",
-          /*also_no_tail=*/false),
-      /*use_cpp_layouts=*/true, "(Convert<intptr>(length) * 4)");
+  ExpectFailingLayoutCompilation(kTestLayoutExpressionTailClass,
+                                 TestTailJson("Convert<intptr>(length) * 4"),
+                                 /*use_cpp_layouts=*/true,
+                                 "(Convert<intptr>(length) * 4)");
 }
 
-TEST(TorqueLayoutLoader, RejectsSectionsThatDifferFromTheTqFieldBlock) {
-  ExpectFailingLayoutCompilation(
-      kTestLayoutSectionedClass,
-      TestSectionedJson("head[length]: uint8; rest[capacity]: uint8;",
-                        /*also_no_tail=*/false),
-      /*use_cpp_layouts=*/true, "differs from C++ field");
+TEST(TorqueLayoutLoader, VerifierRejectsAComplexExtentThatDiffers) {
+  ExpectFailingLayoutCompilation(kTestLayoutExpressionTailClass,
+                                 TestTailJson("Convert<intptr>(length) * 4"),
+                                 /*use_cpp_layouts=*/false,
+                                 "Torque uses a different index expression");
 }
 
-TEST(TorqueLayoutLoader, RejectsMalformedTailSections) {
-  ExpectFailingLayoutCompilation(kTestLayoutSectionedClass,
-                                 TestSectionedJson("head[length] uint8;",
-                                                   /*also_no_tail=*/false),
-                                 /*use_cpp_layouts=*/true, "unexpected token");
-}
-
-TEST(TorqueLayoutLoader, RejectsSectionsCombinedWithNoTail) {
-  ExpectFailingLayoutCompilation(
-      kTestLayoutSectionedClass,
-      TestSectionedJson("head[length]: uint8; rest[length]: uint8;",
-                        /*also_no_tail=*/true),
-      /*use_cpp_layouts=*/true,
-      "V8_TQ_TAIL_NAME, V8_TQ_NO_TAIL and V8_TQ_TAIL_SECTIONS are exclusive");
+TEST(TorqueLayoutLoader, RejectsAMalformedTailLength) {
+  ExpectFailingLayoutCompilation(kTestLayoutTailClass, TestTailJson("length +"),
+                                 /*use_cpp_layouts=*/true,
+                                 "unexpected end of input");
 }
 
 TEST(TorqueLayoutLoader, ImportsFixedHeaderWithNoTail) {
@@ -1536,12 +1519,11 @@ TEST(TorqueLayoutLoader, ImportsFixedHeaderWithNoTail) {
                                     /*use_cpp_layouts=*/true);
 }
 
-TEST(TorqueLayoutLoader, RejectsATailThatIsBothNamedAndOmitted) {
-  ExpectFailingLayoutCompilation(kTestLayoutNoTailClass,
-                                 TestNoTailJson(/*also_name_the_tail=*/true),
-                                 /*use_cpp_layouts=*/true,
-                                 "V8_TQ_TAIL_NAME, V8_TQ_NO_TAIL and "
-                                 "V8_TQ_TAIL_SECTIONS are exclusive");
+TEST(TorqueLayoutLoader, RejectsATailThatIsBothIndexedAndOmitted) {
+  ExpectFailingLayoutCompilation(
+      kTestLayoutNoTailClass, TestNoTailJson(/*also_index_the_tail=*/true),
+      /*use_cpp_layouts=*/true,
+      "V8_TQ_TAIL_LENGTH and V8_TQ_NO_TAIL are exclusive");
 }
 
 TEST(TorqueLayoutLoader, OmittedTailStillRejectsAnIndexedField) {
@@ -1697,8 +1679,8 @@ TEST(TorqueLayoutLoader, ImporterRejectsMismatchedBitFieldStruct) {
           TestScalarClass("TestBitFields"),
       TestScalarJson(TestBitFieldStorage(), 1),
       /*use_cpp_layouts=*/true,
-      ".tq field \"bar: uint8: 2 bit\" differs from C++ field "
-      "\"bar: uint8: 3 bit\"");
+      ".tq field \"bar: uint8: 2 bit at 1\" differs from C++ field "
+      "\"bar: uint8: 3 bit at 1\"");
 }
 
 TEST(TorqueLayoutLoader, VerifierAcceptsMatchingBitFieldStruct) {
@@ -1752,6 +1734,60 @@ TEST(TorqueLayoutLoader, VerifierRejectsBitFieldStructNameMismatch) {
       "the C++ bit field group is Test::BitFields, Torque uses OtherBits");
 }
 
+// The class-scoped enum TestScalar::Mode, named in Torque by dropping the
+// "::".
+std::string TestModeEnum(const std::string& name = "TestScalarMode") {
+  return "extern enum " + name +
+         " extends uint8 constexpr 'TestScalar::Mode' { kA, kB }\n";
+}
+
+// TestBitFieldStorage() with a bit of type TestScalar::Mode in place of bar.
+std::string TestModeBitFieldStorage() {
+  return TestBitFieldStorage(
+      R"({"cpp_name": "IsFooBit", "type": "bool", )"
+      R"("offset": 0, "num_bits": 1}, )"
+      R"({"cpp_name": "ModeBit", "type": "TestScalar::Mode", )"
+      R"("offset": 1, "num_bits": 1})");
+}
+
+TEST(TorqueLayoutLoader, ImporterDerivesClassScopedEnumBitFieldType) {
+  ExpectSuccessfulLayoutCompilation(
+      TestModeEnum() + TestScalarClass("TestBitFields"),
+      TestScalarJson(TestModeBitFieldStorage(), 1),
+      /*use_cpp_layouts=*/true);
+}
+
+TEST(TorqueLayoutLoader, ImporterReplacesBitFieldStructWithClassScopedEnum) {
+  ExpectSuccessfulLayoutCompilation(
+      TestModeEnum() + TestBitFieldStruct("mode: TestScalarMode: 1 bit;") +
+          TestScalarClass("TestBitFields"),
+      TestScalarJson(TestModeBitFieldStorage(), 1),
+      /*use_cpp_layouts=*/true);
+}
+
+TEST(TorqueLayoutLoader, ImporterRejectsEnumNotNamedAfterCppType) {
+  ExpectFailingLayoutCompilation(
+      TestModeEnum("TestMode") + TestScalarClass("TestBitFields"),
+      TestScalarJson(TestModeBitFieldStorage(), 1),
+      /*use_cpp_layouts=*/true, "cannot find \"TestScalarMode\"");
+}
+
+TEST(TorqueLayoutLoader, AcceptsBitFieldNamedType) {
+  for (bool use_cpp_layouts : {true, false}) {
+    ExpectSuccessfulLayoutCompilation(
+        TestBitFieldStruct("type: uint8: 3 bit;") +
+            TestScalarClass("TestBitFields"),
+        TestScalarJson(
+            TestBitFieldStorage(R"({"cpp_name": "IsFooBit", "type": "bool", )"
+                                R"("offset": 0, "num_bits": 1}, )"
+                                R"({"cpp_name": "TypeBits", )"
+                                R"("type": "uint8_t", )"
+                                R"("offset": 1, "num_bits": 3})"),
+            1),
+        use_cpp_layouts);
+  }
+}
+
 TEST(TorqueLayoutLoader, ImporterDeclaresBitFieldStructFromCppOnlyBase) {
   // TestBase has no Torque declaration. Import its fields into TestScalar,
   // including the bitfield struct used by value_.
@@ -1780,10 +1816,76 @@ TEST(TorqueLayoutLoader, ImporterDeclaresBitFieldStructFromCppOnlyBase) {
       json.str(), /*use_cpp_layouts=*/true);
 }
 
-TEST(TorqueLayoutLoader, RejectsBitFieldGap) {
-  // Torque derives offsets from declaration order, so a hole in the record
-  // would shift every following field instead of being preserved.
+std::string TestSmiBitFieldStorage() {
+  return R"({"kind": "smi_bitfield", "name": "TestFlags", "bits": [)"
+         R"({"cpp_name": "IsFooBit", "type": "bool", )"
+         R"("offset": 0, "num_bits": 1}, )"
+         R"({"cpp_name": "CountBits", "type": "uint32_t", )"
+         R"("offset": 1, "num_bits": 30}]})";
+}
+
+std::string TestSmiBitFieldStruct(
+    const std::string& count = "count: uint32: 30 bit;") {
+  return R"(
+  @cppScope('TestScalar::Flags')
+  bitfield struct TestFlags extends uint31 {
+    is_foo: bool: 1 bit;
+    )" + count +
+         R"(
+  }
+)";
+}
+
+TEST(TorqueLayoutLoader, ImporterDeclaresSmiBitFieldStructFromRecord) {
+  ExpectSuccessfulLayoutCompilation(
+      TestScalarClass("SmiTagged<TestFlags>"),
+      TestScalarJson(TestSmiBitFieldStorage(), kTaggedSize),
+      /*use_cpp_layouts=*/true);
+}
+
+TEST(TorqueLayoutLoader, ImporterReplacesMatchingSmiBitFieldStruct) {
+  ExpectSuccessfulLayoutCompilation(
+      TestSmiBitFieldStruct() + TestScalarClass("SmiTagged<TestFlags>"),
+      TestScalarJson(TestSmiBitFieldStorage(), kTaggedSize),
+      /*use_cpp_layouts=*/true);
+}
+
+TEST(TorqueLayoutLoader, ImporterRejectsSmiBitFieldStructWithWrongParent) {
+  std::string source = TestSmiBitFieldStruct();
+  size_t pos = source.find("uint31");
+  CHECK_NE(pos, std::string::npos);
+  source.replace(pos, 6, "uint32");
   ExpectFailingLayoutCompilation(
+      source + TestScalarClass("SmiTagged<TestFlags>"),
+      TestScalarJson(TestSmiBitFieldStorage(), kTaggedSize),
+      /*use_cpp_layouts=*/true, ".tq extends uint32, C++ uint31");
+}
+
+TEST(TorqueLayoutLoader, VerifierAcceptsMatchingSmiBitFieldStruct) {
+  ExpectSuccessfulLayoutCompilation(
+      TestSmiBitFieldStruct() + TestScalarClass("SmiTagged<TestFlags>"),
+      TestScalarJson(TestSmiBitFieldStorage(), kTaggedSize),
+      /*use_cpp_layouts=*/false);
+}
+
+TEST(TorqueLayoutLoader, VerifierRejectsSmiBitFieldWidthMismatch) {
+  ExpectFailingLayoutCompilation(
+      TestSmiBitFieldStruct("count: uint32: 29 bit;") +
+          TestScalarClass("SmiTagged<TestFlags>"),
+      TestScalarJson(TestSmiBitFieldStorage(), kTaggedSize),
+      /*use_cpp_layouts=*/false, "30 bit(s) at 1 in C++, 29 at 1 in Torque");
+}
+
+TEST(TorqueLayoutLoader, VerifierRejectsSmiBitFieldWithoutSmiTagged) {
+  ExpectFailingLayoutCompilation(
+      TestSmiBitFieldStruct() + TestScalarClass("Smi"),
+      TestScalarJson(TestSmiBitFieldStorage(), kTaggedSize),
+      /*use_cpp_layouts=*/false,
+      "a bit field group in a Smi in C++, Smi in Torque");
+}
+
+TEST(TorqueLayoutLoader, AcceptsBitFieldGap) {
+  ExpectSuccessfulLayoutCompilation(
       TestScalarClass("TestBitFields"),
       TestScalarJson(
           TestBitFieldStorage(R"({"cpp_name": "IsFooBit", "type": "bool", )"
@@ -1791,7 +1893,7 @@ TEST(TorqueLayoutLoader, RejectsBitFieldGap) {
                               R"({"cpp_name": "BarBits", "type": "uint8_t", )"
                               R"("offset": 2, "num_bits": 3})"),
           1),
-      /*use_cpp_layouts=*/true, "starts at bit 2, expected 1");
+      /*use_cpp_layouts=*/true);
 }
 
 TEST(TorqueLayoutLoader, RejectsBitFieldNameThatDoesNotRoundTrip) {
@@ -1852,12 +1954,12 @@ TEST(TorqueLayoutLoader, RejectsAnnotationWithWrongArity) {
 }
 
 TEST(TorqueLayoutLoader, RejectsAnnotationOnTheWrongDeclaration) {
-  // Tail annotations belong on the class, not on a field.
+  // Tail length annotations belong on the class, not on a field.
   ExpectFailingLayoutCompilation(
       TestScalarClass("uint32"),
       TestScalarJson(R"({"kind": "int", "width": 4, "signed": false})", 4,
-                     R"([{"name": "V8_TQ_TAIL_NAME", "arg": "bytes"}])"),
-      /*use_cpp_layouts=*/true, "V8_TQ_TAIL_NAME is not allowed here");
+                     R"([{"name": "V8_TQ_TAIL_LENGTH", "arg": "length"}])"),
+      /*use_cpp_layouts=*/true, "V8_TQ_TAIL_LENGTH is not allowed here");
 }
 
 TEST(TorqueLayoutLoader, RejectsConflictingSynchronizationAnnotations) {

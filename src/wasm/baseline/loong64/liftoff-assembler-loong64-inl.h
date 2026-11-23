@@ -465,7 +465,7 @@ void LiftoffAssembler::LoadInstanceDataFromFrame(Register dst) {
 }
 
 void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
-                                          int offset, IndirectPointerTag tag) {
+                                          int offset, TrustedPointerTag tag) {
   MemOperand src{src_addr, offset};
   LoadTrustedPointerField(dst, src, tag);
 }
@@ -1402,26 +1402,41 @@ void LiftoffAssembler::Spill(int offset, LiftoffRegister reg, ValueKind kind) {
 void LiftoffAssembler::Spill(int offset, WasmValue value) {
   RecordUsedSpillOffset(offset);
   MemOperand dst = liftoff::GetStackSlot(offset);
-  switch (value.type().kind()) {
-    case kI32: {
+  ValueKind kind = value.type().kind();
+  switch (kind) {
+    case kI32:
+    case kF32: {
+      int32_t bits32 =
+          kind == kF32 ? static_cast<int32_t>(value.to_f32_boxed().get_bits())
+                       : value.to_i32();
+      if (bits32 == 0) {
+        St_w(zero_reg, dst);
+        break;
+      }
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      MacroAssembler::li(scratch, Operand(value.to_i32()));
+      MacroAssembler::li(scratch, bits32);
       St_w(scratch, dst);
       break;
     }
     case kI64:
+    case kF64:
     case kRef:
     case kRefNull: {
+      int64_t bits64 =
+          kind == kF64 ? static_cast<int64_t>(value.to_f64_boxed().get_bits())
+                       : value.to_i64();
+      if (bits64 == 0) {
+        St_d(zero_reg, dst);
+        break;
+      }
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      MacroAssembler::li(scratch, value.to_i64());
+      MacroAssembler::li(scratch, bits64);
       St_d(scratch, dst);
       break;
     }
     default:
-      // kWasmF32 and kWasmF64 are unreachable, since those
-      // constants are not tracked.
       UNREACHABLE();
   }
 }
@@ -2654,15 +2669,15 @@ void LiftoffAssembler::emit_i64x2_splat(LiftoffRegister dst,
 void LiftoffAssembler::emit_f32x4_splat(LiftoffRegister dst,
                                         LiftoffRegister src) {
   VRegister dstReg = dst.fp().toV();
-  MacroAssembler::FmoveLow(kScratchReg, src.fp());
-  vreplgr2vr_w(dstReg, kScratchReg);
+  VRegister srcReg = src.fp().toV();
+  vreplve_w(dstReg, srcReg, zero_reg);
 }
 
 void LiftoffAssembler::emit_f64x2_splat(LiftoffRegister dst,
                                         LiftoffRegister src) {
   VRegister dstReg = dst.fp().toV();
-  MacroAssembler::Move(kScratchReg, src.fp());
-  vreplgr2vr_d(dstReg, kScratchReg);
+  VRegister srcReg = src.fp().toV();
+  vreplve_d(dstReg, srcReg, zero_reg);
 }
 
 #define SIMD_BINOP(name1, name2, type)                                   \
@@ -3973,15 +3988,13 @@ void LiftoffAssembler::emit_i64x2_extract_lane(LiftoffRegister dst,
 void LiftoffAssembler::emit_f32x4_extract_lane(LiftoffRegister dst,
                                                LiftoffRegister lhs,
                                                uint8_t imm_lane_idx) {
-  vpickve2gr_wu(kScratchReg, lhs.fp().toV(), imm_lane_idx);
-  MacroAssembler::FmoveLow(dst.fp(), kScratchReg);
+  vreplvei_w(dst.fp().toV(), lhs.fp().toV(), imm_lane_idx);
 }
 
 void LiftoffAssembler::emit_f64x2_extract_lane(LiftoffRegister dst,
                                                LiftoffRegister lhs,
                                                uint8_t imm_lane_idx) {
-  vpickve2gr_d(kScratchReg, lhs.fp().toV(), imm_lane_idx);
-  MacroAssembler::Move(dst.fp(), kScratchReg);
+  vreplvei_d(dst.fp().toV(), lhs.fp().toV(), imm_lane_idx);
 }
 
 void LiftoffAssembler::emit_i8x16_replace_lane(LiftoffRegister dst,
@@ -4028,22 +4041,26 @@ void LiftoffAssembler::emit_f32x4_replace_lane(LiftoffRegister dst,
                                                LiftoffRegister src1,
                                                LiftoffRegister src2,
                                                uint8_t imm_lane_idx) {
-  MacroAssembler::FmoveLow(kScratchReg, src2.fp());
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.Acquire();
+  movfr2gr_s(temp, src2.fp());
   if (dst != src1) {
     vaddi_wu(dst.fp().toV(), src1.fp().toV(), 0);
   }
-  vinsgr2vr_w(dst.fp().toV(), kScratchReg, imm_lane_idx);
+  vinsgr2vr_w(dst.fp().toV(), temp, imm_lane_idx);
 }
 
 void LiftoffAssembler::emit_f64x2_replace_lane(LiftoffRegister dst,
                                                LiftoffRegister src1,
                                                LiftoffRegister src2,
                                                uint8_t imm_lane_idx) {
-  MacroAssembler::Move(kScratchReg, src2.fp());
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.Acquire();
+  MacroAssembler::Move(temp, src2.fp());
   if (dst != src1) {
     vaddi_du(dst.fp().toV(), src1.fp().toV(), 0);
   }
-  vinsgr2vr_d(dst.fp().toV(), kScratchReg, imm_lane_idx);
+  vinsgr2vr_d(dst.fp().toV(), temp, imm_lane_idx);
 }
 
 void LiftoffAssembler::emit_f32x4_qfma(LiftoffRegister dst,
@@ -4495,8 +4512,12 @@ void LiftoffStackSlots::Construct(int param_slots) {
       }
       case LiftoffAssembler::VarState::kIntConst: {
         asm_->AllocateStackSpace(stack_decrement - kSystemPointerSize);
-        asm_->li(kScratchReg, Operand(src.i32_const()));
-        asm_->Push(kScratchReg);
+        if (src.i32_const() == 0) {
+          asm_->Push(zero_reg);
+        } else {
+          asm_->li(kScratchReg, Operand(src.i32_const()));
+          asm_->Push(kScratchReg);
+        }
         break;
       }
     }

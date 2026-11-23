@@ -134,6 +134,18 @@ enum FunctionMode {
       kWithReadonlyPrototypeBit | kWithNameBit,
 };
 
+inline bool IsFunctionModeWithPrototype(FunctionMode function_mode) {
+  return (function_mode & kWithPrototypeBits) != 0;
+}
+
+inline bool IsFunctionModeWithWritablePrototype(FunctionMode function_mode) {
+  return (function_mode & kWithWritablePrototypeBit) != 0;
+}
+
+inline bool IsFunctionModeWithName(FunctionMode function_mode) {
+  return (function_mode & kWithNameBit) != 0;
+}
+
 enum class ArrayStorageAllocationMode {
   DONT_INITIALIZE_ARRAY_ELEMENTS,
   INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE
@@ -263,24 +275,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   // Finds the internalized copy for string in the string table.
   // If not found, a new string is added to the table and returned.
-  Handle<String> InternalizeUtf8String(base::Vector<const char> str);
-  Handle<String> InternalizeUtf8String(const char* str) {
-    return InternalizeUtf8String(base::CStrVector(str));
-  }
+  Handle<String> InternalizeUtf8String(std::string_view str);
 
   // Import InternalizeString overloads from base class.
   using FactoryBase::InternalizeString;
-
-  Handle<InternalizedString> InternalizeString(base::Vector<const char> str,
-                                               bool convert_encoding = false) {
-    return InternalizeString(base::Vector<const uint8_t>::cast(str),
-                             convert_encoding);
-  }
-
-  Handle<InternalizedString> InternalizeString(const char* str,
-                                               bool convert_encoding = false) {
-    return InternalizeString(base::OneByteVector(str), convert_encoding);
-  }
 
   template <typename SeqString, template <typename> typename HandleType>
     requires(
@@ -341,14 +339,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // UTF8 strings are pretenured when used for regexp literal patterns and
   // flags in the parser.
   V8_WARN_UNUSED_RESULT MaybeHandle<String> NewStringFromUtf8(
-      base::Vector<const char> str,
-      AllocationType allocation = AllocationType::kYoung);
-
-  V8_WARN_UNUSED_RESULT MaybeHandle<String> NewStringFromUtf8(
-      std::string_view str,
-      AllocationType allocation = AllocationType::kYoung) {
-    return NewStringFromUtf8(base::StrVector(str), allocation);
-  }
+      std::string_view str, AllocationType allocation = AllocationType::kYoung);
 
   V8_WARN_UNUSED_RESULT MaybeHandle<String> NewStringFromUtf8(
       base::Vector<const uint8_t> str, UnicodeConfig config,
@@ -1131,24 +1122,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   DirectHandle<InterpreterData> NewInterpreterData(
       DirectHandle<BytecodeArray> bytecode_array, DirectHandle<Code> code);
 
-  static bool IsFunctionModeWithPrototype(FunctionMode function_mode) {
-    return (function_mode & kWithPrototypeBits) != 0;
-  }
-
-  static bool IsFunctionModeWithWritablePrototype(FunctionMode function_mode) {
-    return (function_mode & kWithWritablePrototypeBit) != 0;
-  }
-
-  static bool IsFunctionModeWithName(FunctionMode function_mode) {
-    return (function_mode & kWithNameBit) != 0;
-  }
-
-  DirectHandle<Map> CreateSloppyFunctionMap(
+  DirectHandle<Map> CreateFunctionMap(
       FunctionMode function_mode,
-      MaybeDirectHandle<JSFunction> maybe_empty_function);
-
-  DirectHandle<Map> CreateStrictFunctionMap(
-      FunctionMode function_mode, DirectHandle<JSFunction> empty_function);
+      MaybeDirectHandle<JSFunction> maybe_empty_function = {});
 
   DirectHandle<Map> CreateClassFunctionMap(
       DirectHandle<JSFunction> empty_function);
@@ -1246,10 +1222,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   DirectHandle<JSSharedArray> NewJSSharedArray(
       DirectHandle<JSFunction> constructor, int length);
-
-  Handle<JSAtomicsMutex> NewJSAtomicsMutex();
-
-  Handle<JSAtomicsCondition> NewJSAtomicsCondition();
 
   DirectHandle<FunctionTemplateInfo> NewFunctionTemplateInfo(int length,
                                                              bool do_not_cache);

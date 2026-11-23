@@ -7,7 +7,7 @@
 
 #include "src/objects/struct.h"
 #include "src/objects/trusted-object.h"
-#include "src/objects/trusted-pointer.h"
+#include "src/sandbox/trusted-pointer.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -158,7 +158,6 @@ V8_OBJECT class BytecodeArray : public ExposedTrustedObject {
 #if TAGGED_SIZE_8_BYTES
   uint32_t optional_padding_;
 #endif
-  V8_TQ_TAIL_NAME(bytes);
   V8_TQ_TAIL_LENGTH(length);
   FLEXIBLE_ARRAY_MEMBER(uint8_t, bytes);
 } V8_OBJECT_END;
@@ -185,7 +184,7 @@ V8_OBJECT class BytecodeWrapper : public Struct {
   class BodyDescriptor;
 
  public:
-  TrustedPointerMember<BytecodeArray, kBytecodeArrayIndirectPointerTag>
+  TrustedPointerMember<BytecodeArray, kBytecodeArrayTrustedPointerTag>
       bytecode_;
 } V8_OBJECT_END;
 

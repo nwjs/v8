@@ -1010,6 +1010,13 @@ void TranslatedFrame::Handlify(Isolate* isolate) {
   handle_state_ = kHandles;
 }
 
+Tagged<BytecodeArray> TranslatedFrame::GetActiveBytecodeArray(
+    Isolate* isolate) const {
+  auto bytecodes = raw_shared_info()->GetBytecodeArrays(isolate);
+  SBXCHECK_EQ(bytecodes.original, raw_bytecode_array());
+  return bytecodes.active;
+}
+
 DeoptimizationLiteralProvider::DeoptimizationLiteralProvider(
     Tagged<DeoptimizationLiteralArray> literal_array)
     : literals_on_heap_(literal_array) {}
@@ -2720,10 +2727,10 @@ void TranslatedState::InitializeJSObjectAt(
         value = CheckedCast<RegExpData>(*field_value);
       }
       object_storage
-          ->RawIndirectPointerField(offset, kRegExpDataIndirectPointerTag)
-          .Relaxed_Store(value);
-      INDIRECT_POINTER_WRITE_BARRIER(*object_storage, offset,
-                                     kRegExpDataIndirectPointerTag, value);
+          ->RawTrustedPointerField(offset, kRegExpDataTrustedPointerTag)
+          .Release_Store(value);
+      TRUSTED_POINTER_WRITE_BARRIER(*object_storage, offset,
+                                    kRegExpDataTrustedPointerTag, value);
       continue;
     }
 #endif  // V8_ENABLE_SANDBOX

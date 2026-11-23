@@ -751,21 +751,6 @@
 ####
 # Roll-watcher patch
 [ALWAYS, {
-  'language/expressions/assignmenttargettype/direct-callexpression': [SKIP],
-  'language/expressions/assignmenttargettype/direct-callexpression-as-for-in-lhs': [SKIP],
-  'language/expressions/assignmenttargettype/direct-callexpression-as-for-of-lhs': [SKIP],
-  'language/expressions/assignmenttargettype/direct-callexpression-in-compound-assignment': [SKIP],
-  'language/expressions/assignmenttargettype/direct-callexpression-in-postfix-update': [SKIP],
-  'language/expressions/assignmenttargettype/direct-callexpression-in-prefix-update': [SKIP],
-  'language/expressions/assignmenttargettype/parenthesized-callexpression': [SKIP],
-  'language/expressions/assignmenttargettype/parenthesized-callexpression-in-compound-assignment': [SKIP],
-}],
-# End roll-watcher patch
-####
-
-####
-# Roll-watcher patch
-[ALWAYS, {
   'intl402/String/prototype/toLocaleLowerCase/validates-all-locale-identifiers': [SKIP],
   'intl402/String/prototype/toLocaleUpperCase/validates-all-locale-identifiers': [SKIP],
   'staging/sm/DataView/get-set-index-range': [SKIP],
@@ -1128,6 +1113,20 @@
   'intl402/Locale/prototype/firstDayOfWeek/valid-id': [SKIP],
   'intl402/Locale/prototype/firstDayOfWeek/valid-options': [SKIP],
   'intl402/Locale/prototype/numberingSystem/canonicalize-case': [SKIP],
+}],
+# End roll-watcher patch
+####
+
+####
+# Roll-watcher patch
+[ALWAYS, {
+  'intl402/Locale/prototype/getCollations/preferred-from-unicode-extension-true-empty': [SKIP],
+  'intl402/Locale/prototype/getNumberingSystems/preferred-from-unicode-extension-true-empty': [SKIP],
+  'intl402/Locale/prototype/getTextInfo/language-subtag-with-more-than-three-letters': [SKIP],
+  'intl402/Locale/prototype/getTextInfo/script-metadata-rtl-is-unknown': [SKIP],
+  'intl402/Locale/prototype/getTextInfo/script-metadata-unlisted-language-script-is-rtl': [SKIP],
+  'intl402/Locale/prototype/getTextInfo/script-subtag-missing': [SKIP],
+  'intl402/Locale/prototype/getTextInfo/script-unregistered-or-privateuse': [SKIP],
 }],
 # End roll-watcher patch
 ####

@@ -10,7 +10,6 @@
 #include <limits.h>
 #include <pthread.h>
 
-#include "src/base/fpu.h"
 #include "src/base/logging.h"
 #if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <pthread_np.h>  // for pthread_set_name_np
@@ -82,7 +81,19 @@
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 
-#if defined(V8_OS_SOLARIS)
+/*
+ * NOTE: illumos starting with illumos#14418 (pushed April 20th, 2022)
+ * prototypes madvise(3C) properly with a `void *` first argument.
+ * The only way to detect this outside of configure-time checking is to
+ * check for the existence of MEMCNTL_SHARED, which gets defined for the first
+ * time in illumos#14418 under the same circumstances save _STRICT_POSIX, which
+ * thankfully neither Solaris nor illumos builds of Node or V8 do.
+ *
+ * If some future illumos push changes the MEMCNTL_SHARED assumptions made
+ * above, the illumos check below will have to be revisited.  This check
+ * will work on both pre-and-post illumos#14418 illumos environments.
+ */
+#if defined(V8_OS_SOLARIS) && !(defined(__illumos__) && defined(MEMCNTL_SHARED))
 #if (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE > 2) || defined(__EXTENSIONS__)
 extern "C" int madvise(caddr_t, size_t, int);
 #else
@@ -1089,8 +1100,7 @@ void OS::VPrintError(const char* format, va_list args) {
 #endif
 }
 
-
-int OS::SNPrintF(char* str, int length, const char* format, ...) {
+int OS::SNPrintF(char* str, size_t length, const char* format, ...) {
   va_list args;
   va_start(args, format);
   int result = VSNPrintF(str, length, format, args);
@@ -1098,13 +1108,9 @@ int OS::SNPrintF(char* str, int length, const char* format, ...) {
   return result;
 }
 
-
-int OS::VSNPrintF(char* str,
-                  int length,
-                  const char* format,
-                  va_list args) {
+int OS::VSNPrintF(char* str, size_t length, const char* format, va_list args) {
   int n = vsnprintf(str, length, format, args);
-  if (n < 0 || n >= length) {
+  if (n < 0 || static_cast<size_t>(n) >= length) {
     // If the length is zero, the assignment fails.
     if (length > 0) {
       str[length - 1] = '\0';
@@ -1115,12 +1121,11 @@ int OS::VSNPrintF(char* str,
   }
 }
 
-
 // ----------------------------------------------------------------------------
 // POSIX string support.
 //
 
-void OS::StrNCpy(char* dest, int length, const char* src, size_t n) {
+void OS::StrNCpy(char* dest, size_t length, const char* src, size_t n) {
   strncpy(dest, src, n);
 }
 
@@ -1265,9 +1270,7 @@ static void SetThreadName(const char* name) {
 }
 
 static void* ThreadEntry(void* arg) {
-  // Reset denormals state to default, in case we picked up a non-default one
-  // with the posix clone() call.
-  base::FPU::SetFlushDenormals(false);
+  Stack::SetCurrentThreadStackStart();
 
   Thread* thread = reinterpret_cast<Thread*>(arg);
   // We take the lock here to make sure that pthread_create finished first since

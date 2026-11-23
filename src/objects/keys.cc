@@ -197,11 +197,10 @@ ExceptionStatus KeyAccumulator::AddKeys(DirectHandle<FixedArray> array,
   return ExceptionStatus::kSuccess;
 }
 
-ExceptionStatus KeyAccumulator::AddKeys(DirectHandle<JSObject> array_like,
+ExceptionStatus KeyAccumulator::AddKeys(DirectHandle<JSArray> array,
                                         AddKeyConversion convert) {
-  DCHECK(IsJSArray(*array_like) || array_like->HasSloppyArgumentsElements());
-  ElementsAccessor* accessor = array_like->GetElementsAccessor();
-  return accessor->AddElementsToKeyAccumulator(array_like, this, convert);
+  ElementsAccessor* accessor = array->GetElementsAccessor();
+  return accessor->AddElementsToKeyAccumulator(array, this, convert);
 }
 
 MaybeDirectHandle<FixedArray> FilterProxyKeys(KeyAccumulator* accumulator,
@@ -470,11 +469,11 @@ MaybeHandle<FixedArray> GetOwnKeysWithElements(Isolate* isolate,
     is_from_enum_cache = false;
   }
 
-  if (v8_flags.trace_for_in_enumerate) {
-    PrintF(
-        "| strings=%d symbols=0 elements=%u || prototypes>=1 ||\n",
-        keys->ulength().value(),
-        result.ToHandleChecked()->ulength().value() - keys->ulength().value());
+  Handle<FixedArray> result_array;
+  if (v8_flags.trace_for_in_enumerate && result.ToHandle(&result_array)) {
+    PrintF("| strings=%d symbols=0 elements=%u || prototypes>=1 ||\n",
+           keys->ulength().value(),
+           result_array->ulength().value() - keys->ulength().value());
   }
   return result;
 }
@@ -766,8 +765,7 @@ bool FastKeyAccumulator::TryPrototypeInfoCache(
 V8_WARN_UNUSED_RESULT ExceptionStatus
 KeyAccumulator::FilterForEnumerableProperties(
     PropertyCallbackArguments& args, DirectHandle<InterceptorInfo> interceptor,
-    DirectHandle<JSObject> result, IndexedOrNamed type) {
-  DCHECK(IsJSArray(*result) || result->HasSloppyArgumentsElements());
+    DirectHandle<JSArray> result, IndexedOrNamed type) {
   ElementsAccessor* accessor = result->GetElementsAccessor();
 
   size_t length = accessor->GetCapacity(*result, result->elements());
@@ -810,7 +808,7 @@ Maybe<bool> KeyAccumulator::CollectInterceptorKeysInternal(
   if (!interceptor->has_enumerator()) {
     return Just(true);
   }
-  DirectHandle<JSObject> result;
+  DirectHandle<JSArray> result;
   {
     DirectHandle<JSObjectOrUndefined> maybe_result;
     if (type == kIndexed) {
@@ -822,8 +820,7 @@ Maybe<bool> KeyAccumulator::CollectInterceptorKeysInternal(
     // An exception was thrown in the interceptor. Propagate.
     RETURN_VALUE_IF_EXCEPTION_DETECTOR(isolate_, args, Nothing<bool>());
     if (IsUndefined(*maybe_result)) return Just(true);
-    DCHECK(IsJSObject(*maybe_result));
-    result = Cast<JSObject>(maybe_result);
+    result = Cast<JSArray>(maybe_result);
   }
   // Request was successfully intercepted, so accept potential side effects
   // happened up to this point.
@@ -832,7 +829,7 @@ Maybe<bool> KeyAccumulator::CollectInterceptorKeysInternal(
   if ((filter_ & ONLY_ENUMERABLE) && interceptor->has_query()) {
     // Create a new handle for the result object, since we are going to reuse
     // |args| object where |result| handle is currently located.
-    result = direct_handle(Cast<JSObject>(*result), isolate_);
+    result = direct_handle(*result, isolate_);
     RETURN_NOTHING_IF_NOT_SUCCESSFUL(
         FilterForEnumerableProperties(args, interceptor, result, type));
   } else {

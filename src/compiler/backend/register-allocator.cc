@@ -159,15 +159,6 @@ void UsePosition::ResolveHint(UsePosition* use_pos) {
   flags_ = HintTypeField::update(flags_, UsePositionHintType::kUsePos);
 }
 
-void UsePosition::set_type(UsePositionType type, bool register_beneficial) {
-  DCHECK_IMPLIES(type == UsePositionType::kRequiresSlot, !register_beneficial);
-  DCHECK_EQ(kUnassignedRegister, AssignedRegisterField::decode(flags_));
-  flags_ = TypeField::encode(type) |
-           RegisterBeneficialField::encode(register_beneficial) |
-           HintTypeField::encode(HintTypeField::decode(flags_)) |
-           AssignedRegisterField::encode(kUnassignedRegister);
-}
-
 void LifetimePosition::Print() const { StdoutStream{} << *this << std::endl; }
 
 LiveRange::LiveRange(int relative_id, MachineRepresentation rep,
@@ -298,12 +289,9 @@ bool LiveRange::RegisterFromFirstHint(int* register_index) {
     current_hint_position_index_ =
         std::distance(positions_span_.begin(), pos_it);
   }
-#ifdef DEBUG
-  UsePosition** pos_check_it =
-      std::find_if(positions_span_.begin(), positions_span_.end(),
-                   [](UsePosition* pos) { return pos->HasHint(); });
-  CHECK_EQ(pos_it, pos_check_it);
-#endif
+  SLOW_DCHECK(pos_it ==
+              std::find_if(positions_span_.begin(), positions_span_.end(),
+                           [](UsePosition* pos) { return pos->HasHint(); }));
   return pos_it != positions_span_.end();
 }
 
@@ -468,9 +456,11 @@ LiveRange* LiveRange::SplitAt(LifetimePosition position, Zone* zone) {
   current_interval_ = intervals_.begin();
   result->current_interval_ = result->intervals_.begin();
 
-#ifdef DEBUG
-  VerifyChildStructure();
-  result->VerifyChildStructure();
+#ifdef ENABLE_SLOW_DCHECKS
+  if (v8_flags.enable_slow_asserts) {
+    VerifyChildStructure();
+    result->VerifyChildStructure();
+  }
 #endif
 
   result->top_level_ = TopLevel();
@@ -681,11 +671,10 @@ TopLevelLiveRange::TopLevelLiveRange(int vreg, MachineRepresentation rep,
     : LiveRange(0, rep, this),
       vreg_(vreg),
       last_child_id_(0),
+      spill_start_index_(kMaxInt),
       spill_operand_(nullptr),
       spill_move_insertion_locations_(nullptr),
-      children_({this}, zone),
-      has_preassigned_slot_(false),
-      spill_start_index_(kMaxInt) {
+      children_({this}, zone) {
   bits_ |= SpillTypeField::encode(SpillType::kNoSpillType);
 }
 
@@ -776,14 +765,19 @@ AllocatedOperand TopLevelLiveRange::GetSpillRangeOperand() const {
 }
 
 LiveRange* TopLevelLiveRange::GetChildCovers(LifetimePosition pos) {
-#ifdef DEBUG
-  // Make sure the cache contains the correct, actual children.
-  LiveRange* child = this;
-  for (LiveRange* cached_child : children_) {
-    DCHECK_EQ(cached_child, child);
-    child = child->next();
+  DCHECK(!children_.empty());
+  DCHECK_EQ(children_.front(), this);
+  DCHECK_NULL(children_.back()->next());
+#ifdef ENABLE_SLOW_DCHECKS
+  if (v8_flags.enable_slow_asserts) {
+    // Make sure the cache contains the correct, actual children.
+    LiveRange* child = this;
+    for (LiveRange* cached_child : children_) {
+      DCHECK_EQ(cached_child, child);
+      child = child->next();
+    }
+    DCHECK_NULL(child);
   }
-  DCHECK_NULL(child);
 #endif
 
   auto child_it =
@@ -799,7 +793,7 @@ LiveRange* TopLevelLiveRange::GetChildCovers(LifetimePosition pos) {
 void TopLevelLiveRange::Verify() const {
   VerifyChildrenInOrder();
   for (const LiveRange* child = this; child != nullptr; child = child->next()) {
-    VerifyChildStructure();
+    child->VerifyChildStructure();
   }
 }
 
@@ -1242,7 +1236,7 @@ MachineRepresentation RegisterAllocationData::RepresentationFor(
 TopLevelLiveRange* RegisterAllocationData::GetLiveRangeFor(int index) {
   TopLevelLiveRange* result = live_ranges()[index];
   DCHECK_NOT_NULL(result);
-  DCHECK_EQ(live_ranges()[index]->vreg(), index);
+  DCHECK_EQ(result->vreg(), index);
   return result;
 }
 
@@ -2445,7 +2439,7 @@ void LiveRangeBuilder::BuildLiveRanges() {
         if (!pos->pos().IsGapPosition()) {
           new_type = UsePositionType::kRequiresRegister;
         }
-        pos->set_type(new_type, true);
+        pos->set_register_beneficial(new_type);
       }
     }
   }
@@ -2728,9 +2722,8 @@ RegisterAllocator::RegisterAllocator(RegisterAllocationData* data,
 
 LifetimePosition RegisterAllocator::GetSplitPositionForInstruction(
     const LiveRange* range, int instruction_index) {
-  LifetimePosition ret = LifetimePosition::Invalid();
-
-  ret = LifetimePosition::GapFromInstructionIndex(instruction_index);
+  LifetimePosition ret =
+      LifetimePosition::GapFromInstructionIndex(instruction_index);
   if (range->Start() >= ret || ret >= range->End()) {
     return LifetimePosition::Invalid();
   }
@@ -2985,7 +2978,7 @@ void LinearScanAllocator::MaybeSpillPreviousRanges(LiveRange* begin_range,
   }
 }
 
-void LinearScanAllocator::MaybeUndoPreviousSplit(LiveRange* range, Zone* zone) {
+void LinearScanAllocator::MaybeUndoPreviousSplit(LiveRange* range) {
   if (range->next() != nullptr && range->next()->ShouldRecombine()) {
     LiveRange* to_remove = range->next();
     TRACE("Recombining %d:%d with %d\n", range->TopLevel()->vreg(),
@@ -2997,7 +2990,7 @@ void LinearScanAllocator::MaybeUndoPreviousSplit(LiveRange* range, Zone* zone) {
     DCHECK_EQ(removed_cnt, 1);
     USE(removed_cnt);
 
-    range->AttachToNext(zone);
+    range->AttachToNext(allocation_zone());
   } else if (range->next() != nullptr) {
     TRACE("No recombine for %d:%d to %d\n", range->TopLevel()->vreg(),
           range->relative_id(), range->next()->relative_id());
@@ -3028,7 +3021,7 @@ void LinearScanAllocator::SpillNotLiveRanges(RangeRegisterSmallMap& to_be_live,
         // When spilling a previously spilled/reloaded range, we add back the
         // tail that we might have split off when we reloaded/spilled it
         // previously. Otherwise we might keep generating small split-offs.
-        MaybeUndoPreviousSplit(active_range, allocation_zone());
+        MaybeUndoPreviousSplit(active_range);
         TRACE("Putting back %d:%d\n", toplevel->vreg(),
               active_range->relative_id());
         LiveRange* split = SplitRangeAt(active_range, position);
@@ -3158,7 +3151,7 @@ void LinearScanAllocator::ReloadLiveRanges(
       // in the middle of blocks.
       // If there is a gap between this range and the next, we can just keep
       // it as a register change won't hurt.
-      MaybeUndoPreviousSplit(to_resurrect, allocation_zone());
+      MaybeUndoPreviousSplit(to_resurrect);
       if (to_resurrect->Start() == position) {
         // This range already starts at this block. It might have been spilled,
         // so we have to unspill it. Otherwise, it is already in the unhandled
@@ -4382,8 +4375,9 @@ void LinearScanAllocator::AllocateBlockedReg(LiveRange* current,
     InstructionBlock* deferred_block =
         code()->GetInstructionBlock(current->Start().ToInstructionIndex());
     new_end =
-        std::min(new_end, LifetimePosition::GapFromInstructionIndex(
-                              LastDeferredInstructionIndex(deferred_block)));
+        std::min(new_end, LifetimePosition::InstructionFromInstructionIndex(
+                              LastDeferredInstructionIndex(deferred_block))
+                              .NextFullStart());
   }
 
   // We couldn't spill until the next register use. Split before the register

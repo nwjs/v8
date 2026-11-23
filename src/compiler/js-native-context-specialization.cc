@@ -2349,7 +2349,7 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
         if ((IsHoleyOrDictionaryElementsKind(receiver_map.elements_kind()) ||
              StoreModeCanGrow(feedback.keyed_mode().store_mode())) &&
 #if V8_ENABLE_WEBASSEMBLY
-            !(receiver_map.IsWasmObjectMap() &&
+            !(receiver_map.IsAnyWasmObjectMap() &&
               access_info.is_proxy_on_prototype()) &&
 #endif  // V8_ENABLE_WEBASSEMBLY
             !receiver_map.PrototypesElementsDoNotHaveAccessorsOrThrow(
@@ -3298,10 +3298,6 @@ JSNativeContextSpecialization::BuildPropertyStore(
         value = effect =
             graph()->NewNode(simplified()->CheckNumber(FeedbackSource()), value,
                              effect, control);
-        if (access_info.IsFastDataConstant()) {
-          value = graph()->NewNode(jsgraph()->simplified()->NumberSilenceNaN(),
-                                   value);
-        }
         if (access_info.HasTransitionMap()) {
           // Allocate a HeapNumber for the new property.
           AllocationBuilder a(jsgraph(), broker(), effect, control);
@@ -3373,7 +3369,7 @@ JSNativeContextSpecialization::BuildPropertyStore(
       case MachineRepresentation::kCompressedPointer:
       case MachineRepresentation::kCompressed:
       case MachineRepresentation::kProtectedPointer:
-      case MachineRepresentation::kIndirectPointer:
+      case MachineRepresentation::kTrustedPointer:
       case MachineRepresentation::kSandboxedPointer:
       case MachineRepresentation::kWord8:
       case MachineRepresentation::kWord16:
@@ -3447,12 +3443,6 @@ JSNativeContextSpecialization::BuildPropertyStore(
                                 value, effect, control);
       if (maybe_initializing_store &&
           access_info.field_representation().IsDouble()) {
-        // The map store must follow the value write and use release semantics
-        // so background threads (e.g. concurrent compiler) see a consistent
-        // initialized state upon observing the HeapNumber map.
-        effect = graph()->NewNode(
-            jsgraph()->machine()->MemoryBarrier(AtomicMemoryOrder::kAcqRel),
-            effect, control);
         effect = graph()->NewNode(
             simplified()->StoreField(AccessBuilder::ForMap()), storage,
             jsgraph()->ConstantNoHole(broker()->heap_number_map(), broker()),
@@ -3611,7 +3601,7 @@ JSNativeContextSpecialization::BuildElementAccess(
   }
 
 #if V8_ENABLE_WEBASSEMBLY
-  if (receiver_maps.size() == 1 && receiver_maps.front().IsWasmObjectMap() &&
+  if (receiver_maps.size() == 1 && receiver_maps.front().IsAnyWasmObjectMap() &&
       access_info.is_proxy_on_prototype()) {
     return BuildPrototypeProxyElementAccess(
         receiver, index, value, effect, control, context, access_info,

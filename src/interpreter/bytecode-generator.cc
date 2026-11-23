@@ -1618,6 +1618,7 @@ void BytecodeGenerator::AllocateDeferredConstants(IsolateT* isolate,
   }
 
   for (std::pair<Call*, Scope*> call : eval_calls_) {
+    DCHECK_EQ(call.second->GetClosureScope(), closure_scope());
     Tagged<ScopeInfo> current;
     int index = call.first->eval_scope_info_index();
     if (script->infos()
@@ -3500,8 +3501,8 @@ void BytecodeGenerator::VisitFunctionLiteral(FunctionLiteral* expr) {
   CHECK_LT(info_->literal()->function_literal_id(),
            expr->function_literal_id());
   CHECK_EQ(expr->scope()->outer_scope(), current_scope());
-  uint8_t flags = CreateClosureFlags::Encode(
-      expr->pretenure(), closure_scope()->is_function_scope());
+  uint8_t flags =
+      CreateClosureFlags::Encode(closure_scope()->is_function_scope());
   size_t entry = builder()->AllocateDeferredConstantPoolEntry();
   builder()->CreateClosure(entry, GetNewClosureSlot(expr), flags);
   function_literals_.push_back(std::make_pair(expr, entry));
@@ -3693,7 +3694,10 @@ void BytecodeGenerator::BuildClassLiteral(ClassLiteral* expr, Register name) {
     DCHECK_EQ(ClassBoilerplate::kFirstDynamicArgumentIndex,
               args.register_count());
 
-    VisitForAccumulatorValueOrTheHole(expr->extends());
+    {
+      ClassScope::HeritageParsingScope heritage(expr->scope());
+      VisitForAccumulatorValueOrTheHole(expr->extends());
+    }
     builder()->StoreAccumulatorInRegister(super_class);
 
     VisitFunctionLiteral(expr->constructor());
@@ -4060,7 +4064,7 @@ void BytecodeGenerator::VisitNativeFunctionLiteral(
   // kDontAdaptArgumentsSentinel as their parameter count.
   int index = feedback_spec()->AddCreateClosureParameterCount(
       kDontAdaptArgumentsSentinel);
-  uint8_t flags = CreateClosureFlags::Encode(false, false);
+  uint8_t flags = CreateClosureFlags::Encode(false);
   builder()->CreateClosure(entry, index, flags);
   native_function_literals_.push_back(std::make_pair(expr, entry));
 }
@@ -4288,13 +4292,8 @@ void BytecodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
           VisitForAccumulatorValue(property->value());
           if (key->IsStringLiteral()) {
             FeedbackSlot slot = feedback_spec()->AddDefineNamedOwnICSlot();
-            if (clone_object_spread) {
-              builder()->DefineNamedOwnProperty(
-                  literal, key->AsRawPropertyName(), feedback_index(slot));
-            } else {
-              builder()->DefineNamedOwnPropertyInLiteral(
-                  literal, key->AsRawPropertyName(), feedback_index(slot));
-            }
+            builder()->DefineNamedOwnPropertyInLiteral(
+                literal, key->AsRawPropertyName(), feedback_index(slot));
           } else {
             FeedbackSlot slot = feedback_spec()->AddDefineKeyedOwnICSlot();
             builder()->DefineKeyedOwnProperty(
@@ -4813,8 +4812,8 @@ void BytecodeGenerator::BuildVariableLoad(Variable* variable,
         default: {
           // Normally, private names should not be looked up dynamically,
           // but we make an exception in debug-evaluate, in that case the
-          // lookup will be done in %SetPrivateMember() and %GetPrivateMember()
-          // calls, not here.
+          // lookup will be done in %HasPrivateMember(), %SetPrivateMember(),
+          // and %GetPrivateMember() calls, not here.
           DCHECK(!variable->raw_name()->IsPrivateName());
           builder()->LoadLookupSlot(variable->raw_name(), typeof_mode);
           break;
@@ -5108,6 +5107,14 @@ void BytecodeGenerator::BuildVariableAssignment(
         BuildHoleCheckForVariableAssignment(variable, op);
         builder()->LoadAccumulatorWithRegister(value_temp);
       }
+      if (op == Token::kInit) {
+        if (variable->HasHoleCheckUseInSameClosureScope()) {
+          // After initializing a variable it won't be the hole anymore, so
+          // elide subsequent checks.
+          RememberHoleCheckInCurrentBlock(variable);
+        }
+        AddDisposableValue(mode);
+      }
       builder()->StoreModuleVariable(variable->index(), depth);
       break;
     }
@@ -5135,6 +5142,10 @@ void BytecodeGenerator::BuildVariableAssignment(
       } else {
         if (mode == VariableMode::kConst) {
           builder()->CallRuntime(Runtime::kThrowConstAssignError);
+        } else if (mode == VariableMode::kUsing) {
+          builder()->CallRuntime(Runtime::kThrowUsingAssignError);
+        } else if (mode == VariableMode::kAwaitUsing) {
+          builder()->CallRuntime(Runtime::kThrowAwaitUsingAssignError);
         } else {
           BuildStoreGlobal(variable);
         }
@@ -6171,11 +6182,16 @@ void BytecodeGenerator::VisitYield(Yield* expr) {
   builder()->StoreAccumulatorInRegister(input).CallRuntime(
       Runtime::kInlineGeneratorGetResumeMode, generator_object());
 
-  // Now dispatch on resume mode.
-  static_assert(JSGeneratorObject::kNext + 1 == JSGeneratorObject::kReturn);
+  // Now dispatch on resume mode. kNextAllocSkipped is never observed here;
+  // every resume path overwrites resume_mode_ first.
+  static_assert(JSGeneratorObject::kNext + 1 ==
+                JSGeneratorObject::kNextTrySkipAlloc);
+  static_assert(JSGeneratorObject::kNextTrySkipAlloc + 1 ==
+                JSGeneratorObject::kReturn);
   static_assert(JSGeneratorObject::kReturn + 1 == JSGeneratorObject::kThrow);
+  static_assert(JSGeneratorObject::kThrow + 1 == JSGeneratorObject::kRethrow);
   BytecodeJumpTable* jump_table =
-      builder()->AllocateJumpTable(is_async ? 3 : 2, JSGeneratorObject::kNext);
+      builder()->AllocateJumpTable(is_async ? 4 : 3, JSGeneratorObject::kNext);
 
   builder()->SwitchOnSmiNoFeedback(jump_table);
 
@@ -6213,6 +6229,7 @@ void BytecodeGenerator::VisitYield(Yield* expr) {
   {
     // Resume with next.
     builder()->Bind(jump_table, JSGeneratorObject::kNext);
+    builder()->Bind(jump_table, JSGeneratorObject::kNextTrySkipAlloc);
     BuildIncrementBlockCoverageCounterIfEnabled(expr,
                                                 SourceRangeKind::kContinuation);
     builder()->LoadAccumulatorWithRegister(input);
@@ -6323,8 +6340,10 @@ void BytecodeGenerator::VisitYieldStar(YieldStar* expr) {
 
       {
         BytecodeLabels after_switch(zone());
+        // The table is based at kReturn, so every mode below it (the whole
+        // kNext family) falls through to the default case below.
         BytecodeJumpTable* switch_jump_table =
-            builder()->AllocateJumpTable(2, 1);
+            builder()->AllocateJumpTable(2, JSGeneratorObject::kReturn);
 
         builder()
             ->LoadAccumulatorWithRegister(resume_mode)
@@ -6332,8 +6351,11 @@ void BytecodeGenerator::VisitYieldStar(YieldStar* expr) {
 
         // Fallthrough to default case.
         // TODO(ignition): Add debug code to check that {resume_mode} really is
-        // {JSGeneratorObject::kNext} in this case.
-        static_assert(JSGeneratorObject::kNext == 0);
+        // {JSGeneratorObject::kNext} or
+        // {JSGeneratorObject::kNextTrySkipAlloc} in this case.
+        static_assert(JSGeneratorObject::kNext < JSGeneratorObject::kReturn);
+        static_assert(JSGeneratorObject::kNextTrySkipAlloc <
+                      JSGeneratorObject::kReturn);
         {
           FeedbackSlot slot = feedback_spec()->AddCallICSlot();
           builder()->CallProperty(iterator.next(), iterator_and_input,
@@ -6341,7 +6363,8 @@ void BytecodeGenerator::VisitYieldStar(YieldStar* expr) {
           builder()->Jump(after_switch.New());
         }
 
-        static_assert(JSGeneratorObject::kReturn == 1);
+        static_assert(JSGeneratorObject::kReturn + 1 ==
+                      JSGeneratorObject::kThrow);
         builder()->Bind(switch_jump_table, JSGeneratorObject::kReturn);
         {
           const AstRawString* return_string =
@@ -6362,7 +6385,6 @@ void BytecodeGenerator::VisitYieldStar(YieldStar* expr) {
           }
         }
 
-        static_assert(JSGeneratorObject::kThrow == 2);
         builder()->Bind(switch_jump_table, JSGeneratorObject::kThrow);
         {
           const AstRawString* throw_string =
@@ -6492,7 +6514,8 @@ void BytecodeGenerator::BuildAwait(int position) {
   Register input = register_allocator()->NewRegister();
   Register resume_mode = register_allocator()->NewRegister();
 
-  // Now dispatch on resume mode.
+  // Now dispatch on resume mode. The skip-allocation handshake is only set on
+  // JS_GENERATOR_OBJECT_TYPE receivers, which never await.
   BytecodeLabel resume_next;
   builder()
       ->StoreAccumulatorInRegister(input)
@@ -6587,6 +6610,7 @@ void BytecodeGenerator::VisitPropertyLoad(Register obj, Property* property) {
     }
     case PRIVATE_GETTER_ONLY:
     case PRIVATE_GETTER_AND_SETTER: {
+      RegisterAllocationScope register_scope(this);
       Register key = VisitForRegisterValue(property->key());
       BuildPrivateBrandCheck(property, obj);
       BuildPrivateGetterAccess(obj, key);
@@ -6632,6 +6656,22 @@ void BytecodeGenerator::BuildPrivateDebugDynamicSet(Property* property,
       .StoreAccumulatorInRegister(args[1])
       .MoveRegister(value, args[2])
       .CallRuntime(Runtime::kSetPrivateMember, args);
+}
+
+void BytecodeGenerator::BuildPrivateDebugDynamicIn(
+    Variable* private_name, Expression* object_expression) {
+  DCHECK_EQ(private_name->mode(), VariableMode::kDynamic);
+  VisitForAccumulatorValue(object_expression);
+
+  RegisterAllocationScope scope(this);
+  RegisterList args = register_allocator()->NewRegisterList(2);
+  builder()->SetExpressionPosition(object_expression);
+  builder()
+      ->StoreAccumulatorInRegister(args[0])
+      .LoadLiteral(private_name->raw_name())
+      .StoreAccumulatorInRegister(args[1])
+      .CallRuntime(Runtime::kHasPrivateMember, args);
+  execution_result()->SetResultIsBoolean();
 }
 
 void BytecodeGenerator::BuildPrivateGetterAccess(Register object,
@@ -6873,7 +6913,7 @@ void BytecodeGenerator::VisitProperty(Property* expr) {
 void BytecodeGenerator::VisitArguments(const ZonePtrList<Expression>* args,
                                        RegisterList* arg_regs) {
   // Visit arguments.
-  builder()->UpdateMaxArguments(static_cast<uint16_t>(args->length()));
+  builder()->UpdateMaxArguments(args->length());
   for (int i = 0; i < static_cast<int>(args->length()); i++) {
     VisitAndPushIntoRegisterList(args->at(i), arg_regs);
   }
@@ -7065,16 +7105,25 @@ void BytecodeGenerator::VisitCall(Call* expr) {
       builder()->MoveRegister(args[receiver_arg_count], runtime_call_args[1]);
     }
     Scope* scope_with_context = current_scope();
+    bool private_name_lookup_skips_outer_class = false;
     if (!scope_with_context->NeedsContext()) {
+      private_name_lookup_skips_outer_class =
+          scope_with_context->private_name_lookup_skips_outer_class();
       scope_with_context = scope_with_context->GetOuterScopeWithContext();
+    } else if (scope_with_context->is_class_scope()) {
+      private_name_lookup_skips_outer_class =
+          scope_with_context->AsClassScope()->IsParsingHeritage();
     }
-    if (scope_with_context) {
+    if (scope_with_context &&
+        scope_with_context->IsOuterScopeUpToClosureScopeOf(current_scope())) {
       eval_calls_.emplace_back(expr, scope_with_context);
     }
+    int eval_flags = ResolveEvalFlags::Encode(
+        language_mode(), private_name_lookup_skips_outer_class);
     builder()
         ->MoveRegister(callee, runtime_call_args[0])
         .MoveRegister(Register::function_closure(), runtime_call_args[2])
-        .LoadLiteral(Smi::FromEnum(language_mode()))
+        .LoadLiteral(Smi::FromInt(eval_flags))
         .StoreAccumulatorInRegister(runtime_call_args[3])
         .LoadLiteral(Smi::FromInt(expr->eval_scope_info_index()))
         .StoreAccumulatorInRegister(runtime_call_args[4])
@@ -7973,6 +8022,10 @@ void BytecodeGenerator::VisitCompareOperation(CompareOperation* expr) {
       Variable* var = expr->left()->AsVariableProxy()->var();
       if (IsPrivateMethodOrAccessorVariableMode(var->mode())) {
         BuildPrivateMethodIn(var, expr->right());
+        return;
+      }
+      if (var->mode() == VariableMode::kDynamic) {
+        BuildPrivateDebugDynamicIn(var, expr->right());
         return;
       }
       // For private fields, the code below does the right thing.

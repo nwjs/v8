@@ -308,33 +308,6 @@ ExternalReference ExternalReference::empty_backing_store_buffer() {
       Sandbox::current()->constants().empty_backing_store_buffer_address());
 }
 
-ExternalReference ExternalReference::external_pointer_table_address(
-    Isolate* isolate) {
-  return ExternalReference(isolate->external_pointer_table_address());
-}
-
-ExternalReference
-ExternalReference::shared_external_pointer_table_address_address(
-    Isolate* isolate) {
-  return ExternalReference(
-      isolate->shared_external_pointer_table_address_address());
-}
-
-ExternalReference ExternalReference::trusted_pointer_table_base_address(
-    Isolate* isolate) {
-  // TODO(saelo): maybe the external pointer table external references should
-  // also directly return the table base address?
-  return ExternalReference(isolate->trusted_pointer_table_base_address());
-}
-
-ExternalReference ExternalReference::shared_trusted_pointer_table_base_address(
-    Isolate* isolate) {
-  // TODO(saelo): maybe the external pointer table external references should
-  // also directly return the table base address?
-  return ExternalReference(
-      isolate->shared_trusted_pointer_table_base_address());
-}
-
 ExternalReference ExternalReference::memory_chunk_metadata_table_address() {
   return ExternalReference(
       reinterpret_cast<Address>(MemoryChunk::MetadataTableAddress()));
@@ -465,8 +438,8 @@ FUNCTION_REFERENCE(ieee754_fp16_raw_bits_to_fp32_raw_bits,
 FUNCTION_REFERENCE(write_barrier_marking_from_code_function,
                    WriteBarrier::MarkingFromCode)
 
-FUNCTION_REFERENCE(write_barrier_indirect_pointer_marking_from_code_function,
-                   WriteBarrier::IndirectPointerMarkingFromCode)
+FUNCTION_REFERENCE(write_barrier_trusted_pointer_marking_from_code_function,
+                   WriteBarrier::TrustedPointerMarkingFromCode)
 
 FUNCTION_REFERENCE(write_barrier_shared_marking_from_code_function,
                    WriteBarrier::SharedMarkingFromCode)
@@ -480,8 +453,8 @@ FUNCTION_REFERENCE(insert_remembered_set_function,
 FUNCTION_REFERENCE(verify_skipped_write_barrier,
                    Heap::VerifySkippedWriteBarrier)
 
-FUNCTION_REFERENCE(verify_skipped_indirect_write_barrier,
-                   Heap::VerifySkippedIndirectWriteBarrier)
+FUNCTION_REFERENCE(verify_skipped_trusted_write_barrier,
+                   Heap::VerifySkippedTrustedWriteBarrier)
 
 namespace {
 
@@ -713,7 +686,7 @@ class GCedBuffer final : public cppgc::GarbageCollected<GCedBuffer> {
   void Trace(cppgc::Visitor* visitor) const {}
 };
 
-void* allocate_buffer_impl(Isolate* isolate, size_t size) {
+void* allocate_buffer_impl(Isolate* isolate, uint32_t size) {
   void* result = cppgc::MakeGarbageCollected<GCedBuffer>(
       isolate->heap()->cpp_heap()->GetAllocationHandle(),
       cppgc::AdditionalBytes(size));
@@ -851,10 +824,6 @@ ExternalReference ExternalReference::address_of_js_pr_3883_flag() {
 
 ExternalReference ExternalReference::address_of_runtime_stats_flag() {
   return ExternalReference(&TracingFlags::runtime_stats);
-}
-
-ExternalReference ExternalReference::address_of_shared_string_table_flag() {
-  return ExternalReference(&v8_flags.shared_string_table);
 }
 
 ExternalReference

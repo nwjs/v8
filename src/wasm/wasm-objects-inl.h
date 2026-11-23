@@ -31,10 +31,10 @@
 #include "src/objects/slots-inl.h"
 #include "src/objects/tagged-field-inl.h"
 #include "src/objects/trusted-object-inl.h"
-#include "src/objects/trusted-pointer-inl.h"
 #include "src/roots/roots.h"
 #include "src/sandbox/check.h"
 #include "src/sandbox/isolate-inl.h"
+#include "src/sandbox/trusted-pointer-inl.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-module.h"
 #include "third_party/fp16/src/include/fp16.h"
@@ -175,7 +175,7 @@ bool WasmGlobalObject::has_trusted_data_unpublished(
     IsolateForSandbox isolate) const {
   return TrustedPointerField::IsTrustedPointerFieldUnpublished(
       Tagged<HeapObject>(this), offsetof(WasmGlobalObject, trusted_data_),
-      kWasmTrustedInstanceDataIndirectPointerTag, isolate);
+      kWasmTrustedInstanceDataTrustedPointerTag, isolate);
 }
 void WasmGlobalObject::clear_trusted_data() { trusted_data_.clear(this); }
 
@@ -438,7 +438,7 @@ size_t WasmTrustedInstanceData::memory_size(uint32_t memory_index) const {
 }
 
 wasm::NativeModule* WasmTrustedInstanceData::native_module() const {
-  return managed_native_module()->raw();
+  return managed_native_module()->unsafe_raw();
 }
 
 Tagged<WasmModuleObject> WasmTrustedInstanceData::module_object() const {
@@ -480,7 +480,7 @@ bool WasmInstanceObject::has_trusted_data_unpublished(
     IsolateForSandbox isolate) const {
   return TrustedPointerField::IsTrustedPointerFieldUnpublished(
       Tagged<HeapObject>(this), offsetof(WasmInstanceObject, trusted_data_),
-      kWasmTrustedInstanceDataIndirectPointerTag, isolate);
+      kWasmTrustedInstanceDataTrustedPointerTag, isolate);
 }
 void WasmInstanceObject::clear_trusted_data() { trusted_data_.clear(this); }
 
@@ -489,8 +489,8 @@ WasmInstanceObject::trusted_data_allow_unpublished(
     IsolateForSandbox isolate) const {
 #ifdef V8_ENABLE_SANDBOX
   Tagged<Object> obj =
-      RawIndirectPointerField(offsetof(WasmInstanceObject, trusted_data_),
-                              kWasmTrustedInstanceDataIndirectPointerTag)
+      RawTrustedPointerField(offsetof(WasmInstanceObject, trusted_data_),
+                             kWasmTrustedInstanceDataTrustedPointerTag)
           .Relaxed_Load_AllowUnpublished(isolate);
   return TrustedCast<WasmTrustedInstanceData>(obj);
 #else
@@ -574,11 +574,11 @@ void WasmDispatchTableForImports::clear_protected_offheap_data() {
 
 WasmDispatchTableData* WasmDispatchTable::offheap_data() const {
   if (!has_protected_offheap_data()) return nullptr;
-  return protected_offheap_data()->get().get();
+  return protected_offheap_data()->unsafe_raw();
 }
 WasmDispatchTableData* WasmDispatchTableForImports::offheap_data() const {
   if (!has_protected_offheap_data()) return nullptr;
-  return protected_offheap_data()->get().get();
+  return protected_offheap_data()->unsafe_raw();
 }
 
 Tagged<ProtectedWeakFixedArray> WasmDispatchTable::protected_uses() const {
@@ -1070,7 +1070,7 @@ bool WasmTableObject::has_trusted_data_unpublished(
     IsolateForSandbox isolate) const {
   return TrustedPointerField::IsTrustedPointerFieldUnpublished(
       Tagged<HeapObject>(this), offsetof(WasmTableObject, trusted_data_),
-      kWasmTrustedInstanceDataIndirectPointerTag, isolate);
+      kWasmTrustedInstanceDataTrustedPointerTag, isolate);
 }
 void WasmTableObject::clear_trusted_data() { trusted_data_.clear(this); }
 
@@ -1098,7 +1098,7 @@ bool WasmTableObject::has_trusted_dispatch_table_unpublished(
   return TrustedPointerField::IsTrustedPointerFieldUnpublished(
       Tagged<HeapObject>(this),
       offsetof(WasmTableObject, trusted_dispatch_table_),
-      kWasmDispatchTableIndirectPointerTag, isolate);
+      kWasmDispatchTableTrustedPointerTag, isolate);
 }
 void WasmTableObject::clear_trusted_dispatch_table() {
   trusted_dispatch_table_.clear(this);
@@ -1294,13 +1294,10 @@ void WasmStruct::EncodeInstanceSizeInMap(int instance_size, Tagged<Map> map) {
   // map so that the GC can read it without relying on any other objects
   // still being around. To solve this problem, we store the instance size
   // in two other fields that are otherwise unused for WasmStructs.
-  static_assert(0xFFFF > ((kHeaderSize + wasm::kMaxValueTypeSize *
-                                             wasm::kV8MaxWasmStructFields) >>
-                          kObjectAlignmentBits));
   static_assert(0xFFFF >
-                ((WasmCustomMap::kHeaderSize +
-                  wasm::kMaxValueTypeSize * wasm::kV8MaxWasmStructFields) >>
-                 kObjectAlignmentBits));
+                (WasmStruct::kMaxInstanceSize >> kObjectAlignmentBits));
+  static_assert(0xFFFF >
+                (WasmCustomMap::kMaxInstanceSize >> kObjectAlignmentBits));
   map->SetWasmByte1((instance_size >> kObjectAlignmentBits) & 0xff);
   map->SetWasmByte2(instance_size >> (8 + kObjectAlignmentBits));
 }
@@ -1313,12 +1310,6 @@ int WasmStruct::DecodeInstanceSizeFromMap(Tagged<Map> map) {
 
 int WasmStruct::GcSafeSize(Tagged<Map> map) {
   return DecodeInstanceSizeFromMap(map);
-}
-
-int WasmStruct::FieldOffset(const wasm::StructType* type, int field_index) {
-  int header_size = type->is_descriptor() ? WasmCustomMap::kHeaderSize
-                                          : WasmStruct::kHeaderSize;
-  return header_size + type->field_offset(field_index);
 }
 
 Address WasmStruct::RawFieldAddress(int raw_offset) {
@@ -1524,7 +1515,7 @@ bool WasmTagObject::has_trusted_data_unpublished(
     IsolateForSandbox isolate) const {
   return TrustedPointerField::IsTrustedPointerFieldUnpublished(
       Tagged<HeapObject>(this), offsetof(WasmTagObject, trusted_data_),
-      kWasmTrustedInstanceDataIndirectPointerTag, isolate);
+      kWasmTrustedInstanceDataTrustedPointerTag, isolate);
 }
 void WasmTagObject::clear_trusted_data() { trusted_data_.clear(this); }
 

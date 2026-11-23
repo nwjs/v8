@@ -8,6 +8,8 @@ member wrappers using the bundled libclang. The tests use the production
 code for class discovery, base resolution, and layout extraction.
 """
 
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -42,8 +44,6 @@ _PRELUDE = r"""
 #define V8_TQ_ANNOTATE(P) [[clang::annotate(P)]]
 #define V8_TQ_MARK(NAME, PAYLOAD) \
   using V8TQ_##NAME V8_TQ_ANNOTATE(PAYLOAD) = void
-#define V8_TQ_TAIL_NAME(N) \
-  V8_TQ_MARK(TqTailName, "V8_TQ_TAIL_NAME(" #N ")")
 #define V8_TQ_TAIL_LENGTH(F) \
   V8_TQ_MARK(TqTailLength, "V8_TQ_TAIL_LENGTH(" #F ")")
 #define V8_TQ_CONST V8_TQ_ANNOTATE("V8_TQ_CONST")
@@ -69,7 +69,7 @@ class atomic {
 namespace v8 {
 namespace internal {
 
-using IndirectPointerHandle = uint32_t;
+using TrustedPointerHandle = uint32_t;
 
 class Map;
 class Smi;
@@ -93,7 +93,7 @@ class TaggedMember {
 template <typename T>
 using ProtectedTaggedMember = TaggedMember<T, TrustedSpaceCompressionScheme>;
 
-enum IndirectPointerTag { kTestBytecodeTag, kTestCodeTag };
+enum TrustedPointerTag { kTestBytecodeTag, kTestCodeTag };
 enum ExternalPointerTag { kTestCallbackTag };
 template <typename Tag>
 struct TagRange {
@@ -103,8 +103,8 @@ struct TagRange {
   Tag last;
 };
 using ExternalPointerTagRange = TagRange<ExternalPointerTag>;
-using IndirectPointerTagRange = TagRange<IndirectPointerTag>;
-template <typename T, IndirectPointerTagRange tag>
+using TrustedPointerTagRange = TagRange<TrustedPointerTag>;
+template <typename T, TrustedPointerTagRange tag>
 class TrustedPointerMember {
   uint32_t handle_;
 };
@@ -478,7 +478,7 @@ class SimpleClassTest(unittest.TestCase):
   def test_pointer_tag_ranges(self):
     layouts = extract_layouts("""
       constexpr ExternalPointerTagRange kCallbackRange(kTestCallbackTag);
-      constexpr IndirectPointerTagRange kCodeRange(kTestBytecodeTag,
+      constexpr TrustedPointerTagRange kCodeRange(kTestBytecodeTag,
                                                   kTestCodeTag);
       class Callback : public HeapObject {
        public:
@@ -533,7 +533,7 @@ class ConfigTest(unittest.TestCase):
   """extract_config reads each size from the alias V8 itself takes it
   from, so Config tracks the build configuration. Reading a type
   that merely resembles one is how trusted_pointer_size went wrong:
-  IndirectPointerHandle is uint32_t in every configuration, while a
+  TrustedPointerHandle is uint32_t in every configuration, while a
   trusted pointer slot is tagged when the sandbox is off."""
 
   _ALIASES = """
@@ -620,9 +620,9 @@ class BaseChainTest(unittest.TestCase):
     layouts = extract_layouts(self._ARRAY_BASE + """
       class FakeArray
           : public TaggedArrayBase<FakeArray, Map, FakeArrayBase> {
-        V8_TQ_TAIL_NAME(objects);
-        V8_TQ_TAIL_LENGTH(length);
        public:
+        V8_TQ_TAIL_LENGTH(length);
+        V8_TQ_NAME(objects)
         TaggedMember<Map> objects_[0];
       };
     """)
@@ -655,18 +655,19 @@ class TailTest(unittest.TestCase):
   def test_tail(self):
     layouts = extract_layouts("""
       class Blob : public HeapObject {
-        V8_TQ_TAIL_NAME(bytes);
-        V8_TQ_TAIL_LENGTH(length);
        public:
         V8_TQ_CONST TaggedMember<Smi> length_;
+        V8_TQ_TAIL_LENGTH(length);
+        V8_TQ_NAME(bytes)
         uint8_t flexible_array_member_data_[0];
       };
     """)
     blob = layouts["Blob"]
     self.assertEqual(blob.size, 8)
     self.assertEqual([(a.name, a.arg) for a in blob.annotations],
-                     [("V8_TQ_TAIL_LENGTH", "length"),
-                      ("V8_TQ_TAIL_NAME", "bytes")])
+                     [("V8_TQ_TAIL_LENGTH", "length")])
+    self.assertEqual([(a.name, a.arg) for a in blob.tail.annotations],
+                     [("V8_TQ_NAME", "bytes")])
     tail = blob.tail
     self.assertEqual(tail.element_size, 1)
     self.assertEqual(tail.element_storage.kind, "int")
@@ -701,8 +702,14 @@ class BitFieldGroupTest(unittest.TestCase):
     }  // namespace base
     template <typename Derived, typename U>
     class BitFieldGroup {
+     public:
+      template <typename T, int size>
+      using First = base::BitField<T, 0, size, U>;
+     private:
       U value_;
     };
+    template <typename Group>
+    class SmiBitFieldMember : TaggedMember<Smi> {};
     enum class Kind : uint8_t { kA, kB, kC };
   """
 
@@ -714,9 +721,10 @@ class BitFieldGroupTest(unittest.TestCase):
       class Foo : public HeapObject {
        public:
         struct Bits : BitFieldGroup<Bits, uint32_t> {
-          using IsFooBit = base::BitField<bool, 0, 1, uint32_t>;
+          using IsFooBit = First<bool, 1>;
           using KindBits = IsFooBit::Next<Kind, 2>;
           using CountBits = KindBits::Next<int32_t, 5>;
+          using AlternativeBits = IsFooBit::Next<uint32_t, 31>;
         };
         Bits bits_;
       };
@@ -730,6 +738,7 @@ class BitFieldGroupTest(unittest.TestCase):
         ("IsFooBit", "bool", 0, 1),
         ("KindBits", "Kind", 1, 2),
         ("CountBits", "int32_t", 3, 5),
+        ("AlternativeBits", "uint32_t", 1, 31),
     ])
 
   def test_enclosing_classes_name_the_group(self):
@@ -738,7 +747,7 @@ class BitFieldGroupTest(unittest.TestCase):
       class Foo : public HeapObject {
        public:
         struct Bits : BitFieldGroup<Bits, uint8_t> {
-          using IsFooBit = base::BitField<bool, 0, 1, uint8_t>;
+          using IsFooBit = First<bool, 1>;
         };
         using FooBitFields = Bits;
         std::atomic<FooBitFields> aliased_;
@@ -767,6 +776,66 @@ class BitFieldGroupTest(unittest.TestCase):
     """)["Foo"].fields
     self.assertEqual(field.storage.name, "Foo::Holder::Bits")
 
+  def test_class_scoped_enum_bit_field_type_is_qualified(self):
+    (field,) = self._layouts("""
+      namespace v8::internal {
+      class Foo : public HeapObject {
+       public:
+        enum class Mode : uint8_t { kA, kB };
+        struct Bits : BitFieldGroup<Bits, uint32_t> {
+          using ModeBits = First<Mode, 1>;
+          using KindBits = ModeBits::Next<Kind, 2>;
+        };
+        Bits bits_;
+      };
+      }
+    """)["Foo"].fields
+    self.assertEqual([(b.cpp_name, b.type) for b in field.storage.bits],
+                     [("ModeBits", "Foo::Mode"), ("KindBits", "Kind")])
+
+  def test_smi_member_records_the_group_as_a_tagged_slot(self):
+    (field,) = self._layouts("""
+      class Foo : public HeapObject {
+       public:
+        struct Flags : BitFieldGroup<Flags, uint32_t> {
+          using IsFooBit = base::BitField<bool, 0, 1, uint32_t>;
+          using CountBits = IsFooBit::Next<uint32_t, 30>;
+        };
+        SmiBitFieldMember<Flags> flags_;
+      };
+    """)["Foo"].fields
+    self.assertEqual(field.storage.kind, "smi_bitfield")
+    self.assertEqual(field.storage.name, "Foo::Flags")
+    self.assertIsNone(field.storage.width)
+    self.assertEqual(
+        [(b.cpp_name, b.offset, b.num_bits) for b in field.storage.bits],
+        [("IsFooBit", 0, 1), ("CountBits", 1, 30)])
+
+  def test_smi_member_bits_must_fit_31(self):
+    with self.assertRaisesRegex(LayoutError, "32 bits exceed the storage"):
+      self._layouts("""
+        class Foo : public HeapObject {
+         public:
+          struct Flags : BitFieldGroup<Flags, uint32_t> {
+            using IsFooBit = base::BitField<bool, 0, 1, uint32_t>;
+            using CountBits = IsFooBit::Next<uint32_t, 31>;
+          };
+          SmiBitFieldMember<Flags> flags_;
+        };
+      """)
+
+  def test_smi_member_argument_must_be_a_group(self):
+    with self.assertRaisesRegex(LayoutError, "is not a BitFieldGroup"):
+      self._layouts("""
+        class Foo : public HeapObject {
+         public:
+          struct Flags {
+            using IsFooBit = base::BitField<bool, 0, 1, uint32_t>;
+          };
+          SmiBitFieldMember<Flags> flags_;
+        };
+      """)
+
   def test_non_bit_field_alias_is_fatal(self):
     with self.assertRaisesRegex(LayoutError, "is not a base::BitField"):
       self._layouts("""
@@ -775,6 +844,42 @@ class BitFieldGroupTest(unittest.TestCase):
           struct Bits : BitFieldGroup<Bits, uint8_t> {
             using IsFooBit = base::BitField<bool, 0, 1, uint8_t>;
             using Underlying = uint8_t;
+          };
+          Bits bits_;
+        };
+      """)
+
+  _STRONG_ALIAS = """
+    namespace base {
+    template <typename Tag, typename T>
+    class StrongAlias { T value_; };
+    }  // namespace base
+    using SharedFlag = base::StrongAlias<struct SharedFlagTag, bool>;
+    using Count = base::StrongAlias<struct CountTag, uint16_t>;
+  """
+
+  def test_strong_alias_bit_field_has_its_underlying_type(self):
+    (field,) = self._layouts(self._STRONG_ALIAS + """
+      class Foo : public HeapObject {
+       public:
+        struct Bits : BitFieldGroup<Bits, uint32_t> {
+          using IsSharedBit = base::BitField<SharedFlag, 0, 1, uint32_t>;
+          using CountBits = IsSharedBit::Next<Count, 4>;
+        };
+        Bits bits_;
+      };
+    """)["Foo"].fields
+    self.assertEqual([(b.cpp_name, b.type) for b in field.storage.bits],
+                     [("IsSharedBit", "bool"), ("CountBits", "uint16_t")])
+
+  def test_other_class_bit_field_type_is_fatal(self):
+    with self.assertRaisesRegex(LayoutError, "unsupported bit field type"):
+      self._layouts("""
+        struct Opaque { uint8_t v; };
+        class Foo : public HeapObject {
+         public:
+          struct Bits : BitFieldGroup<Bits, uint32_t> {
+            using OpaqueBits = base::BitField<Opaque, 0, 8, uint32_t>;
           };
           Bits bits_;
         };
@@ -791,21 +896,48 @@ class BitFieldGroupTest(unittest.TestCase):
       """)
 
 
+class ParseDiagnosticsTest(unittest.TestCase):
+
+  def test_error_and_note(self):
+    tu = _INDEX.parse(
+        "diagnostics.cc",
+        args=["-std=c++20"],
+        unsaved_files=[("diagnostics.cc", "void f(int);\nvoid g() { f(); }\n")])
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr), self.assertRaises(
+        SystemExit) as ctx:
+      cpp_hier._reject_recovery_ast(tu)
+    self.assertEqual(ctx.exception.code, 1)
+    output = stderr.getvalue()
+    self.assertIn("diagnostics.cc:2:12: error:", output)
+    self.assertIn("diagnostics.cc:1:6: note:", output)
+    self.assertNotIn("[metagen]", output)
+    self.assertNotIn("SourceLocation", output)
+
+  def test_valid_translation_unit(self):
+    tu = _INDEX.parse(
+        "diagnostics.cc", unsaved_files=[("diagnostics.cc", "int field;\n")])
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+      cpp_hier._reject_recovery_ast(tu)
+    self.assertEqual(stderr.getvalue(), "")
+
+
 class FailureModeTest(unittest.TestCase):
 
-  def test_missing_indirect_pointer_handle_alias_is_fatal(self):
+  def test_missing_trusted_pointer_handle_alias_is_fatal(self):
     h = parse(
         """
       class Holder : public HeapObject {
        public:
-        std::atomic<RenamedIndirectPointerHandle> handle_;
+        std::atomic<RenamedTrustedPointerHandle> handle_;
       };
     """,
-        prelude=_PRELUDE.replace("IndirectPointerHandle",
-                                 "RenamedIndirectPointerHandle"))
+        prelude=_PRELUDE.replace("TrustedPointerHandle",
+                                 "RenamedTrustedPointerHandle"))
     field = next(_find_class(h, "Holder").type.get_fields())
     with self.assertRaisesRegex(LayoutError,
-                                "missing IndirectPointerHandle declaration"):
+                                "missing TrustedPointerHandle declaration"):
       layout_extract._Extractor(h, _V8_ROOT)._storage_type_of(field, field.type)
 
   def test_torque_generated_base_is_fatal(self):

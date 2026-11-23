@@ -124,7 +124,8 @@ void ResetFeedbackVectorOsrUrgency(MacroAssembler* masm,
   DCHECK(!AreAliased(feedback_vector, scratch));
   __ LoadU8(scratch, FieldMemOperand(feedback_vector,
                                      offsetof(FeedbackVector, osr_state_)));
-  __ AndP(scratch, scratch, Operand(~FeedbackVector::OsrUrgencyBits::kMask));
+  __ AndP(scratch, scratch,
+          Operand(~FeedbackVector::OsrState::OsrUrgencyBits::kMask));
   __ StoreU8(scratch, FieldMemOperand(feedback_vector,
                                       offsetof(FeedbackVector, osr_state_)));
 }
@@ -496,7 +497,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   __ LoadTaggedField(
       r6, FieldMemOperand(r3, offsetof(JSFunction, shared_function_info_)));
   __ LoadU32(r6, FieldMemOperand(r6, offsetof(SharedFunctionInfo, flags_)));
-  __ DecodeField<SharedFunctionInfo::FunctionKindBits>(r6);
+  __ DecodeField<SharedFunctionInfo::Flags::FunctionKindBits>(r6);
   __ JumpIfIsInRange(
       r6, r6, static_cast<uint8_t>(FunctionKind::kDefaultDerivedConstructor),
       static_cast<uint8_t>(FunctionKind::kDerivedConstructor),
@@ -1479,9 +1480,13 @@ void Builtins::Generate_InterpreterEntryTrampoline(
     // Load frame size (word) from the BytecodeArray object.
     __ LoadU32(r4, FieldMemOperand(kInterpreterBytecodeArrayRegister,
                                    offsetof(BytecodeArray, frame_size_)));
+    __ LoadU16(r8, FieldMemOperand(kInterpreterBytecodeArrayRegister,
+                                   offsetof(BytecodeArray, max_arguments_)));
+    __ ShiftLeftU64(r8, r8, Operand(kSystemPointerSizeLog2));
+    __ AddS64(r8, r4, r8);
 
     // Do a stack check to ensure we don't go over the limit.
-    __ SubS64(r8, sp, r4);
+    __ SubS64(r8, sp, r8);
     __ CmpU64(r8, __ StackLimitAsMemOperand(StackLimitKind::kRealStackLimit));
     __ blt(&stack_overflow);
 
@@ -1903,12 +1908,13 @@ void Builtins::Generate_InterpreterPushArgsThenFastConstructFunction(
   __ LoadTaggedField(
       r4, FieldMemOperand(r3, offsetof(JSFunction, shared_function_info_)));
   __ LoadU32(r4, FieldMemOperand(r4, offsetof(SharedFunctionInfo, flags_)));
-  __ AndP(r0, r4, Operand(SharedFunctionInfo::ConstructAsBuiltinBit::kMask));
+  __ AndP(r0, r4,
+          Operand(SharedFunctionInfo::Flags::ConstructAsBuiltinBit::kMask));
   __ bne(&builtin_call);
 
   // Check if we need to create an implicit receiver.
   Label not_create_implicit_receiver;
-  __ DecodeField<SharedFunctionInfo::FunctionKindBits>(r4);
+  __ DecodeField<SharedFunctionInfo::Flags::FunctionKindBits>(r4);
   __ JumpIfIsInRange(
       r4, r4, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
       static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
@@ -2706,8 +2712,8 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   Label done_convert;
   __ LoadU32(r5, FieldMemOperand(r4, offsetof(SharedFunctionInfo, flags_)));
   __ AndP(r0, r5,
-          Operand(SharedFunctionInfo::IsStrictBit::kMask |
-                  SharedFunctionInfo::IsNativeBit::kMask));
+          Operand(SharedFunctionInfo::Flags::IsStrictBit::kMask |
+                  SharedFunctionInfo::Flags::IsNativeBit::kMask));
   __ bne(&done_convert);
   {
     // ----------- S t a t e -------------
@@ -2899,7 +2905,7 @@ void Builtins::Generate_ConstructFunction(MacroAssembler* masm) {
   __ LoadTaggedField(
       r6, FieldMemOperand(r3, offsetof(JSFunction, shared_function_info_)));
   __ LoadU32(r6, FieldMemOperand(r6, offsetof(SharedFunctionInfo, flags_)));
-  __ AndP(r6, Operand(SharedFunctionInfo::ConstructAsBuiltinBit::kMask));
+  __ AndP(r6, Operand(SharedFunctionInfo::Flags::ConstructAsBuiltinBit::kMask));
   __ beq(&call_generic_stub);
 
   __ TailCallBuiltin(Builtin::kJSBuiltinsConstructStub);
